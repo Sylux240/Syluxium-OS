@@ -1,0 +1,691 @@
+#include <arch/x86_64/cpu.hpp>
+#include <arch/x86_64/percpu.hpp>
+#include <fs/genfs.hpp>
+#include <fs/procfs.hpp>
+#include <fs/ramfs.hpp>
+#include <lib/format.hpp>
+#include <lib/string.hpp>
+#include <mm/heap.hpp>
+#include <mm/pmm.hpp>
+#include <proc/process.hpp>
+#include <sched/sched.hpp>
+#include <time/clock.hpp>
+#include <time/rtc.hpp>
+
+namespace procfs {
+
+namespace {
+
+using genfs::GeneratedFile;
+using genfs::GeneratedLink;
+using genfs::TextBuffer;
+using proc::Process;
+
+constexpr u64 USER_HZ = 100;               // clock ticks as user space sees them
+constexpr u64 TICKS_PER_USER_HZ = sched::TICK_HZ / USER_HZ;
+
+bool parse_number(const char* name, usize len, int* out) {
+    if (len == 0 || len > 9)
+        return false;
+    int v = 0;
+    for (usize i = 0; i < len; i++) {
+        if (name[i] < '0' || name[i] > '9')
+            return false;
+        v = v * 10 + (name[i] - '0');
+    }
+    *out = v;
+    return true;
+}
+
+bool name_is(const char* name, usize len, const char* want) {
+    return strlen(want) == len && memcmp(name, want, len) == 0;
+}
+
+void fill_entry(vfs::DirEntry* out, u64 ino, u8 type, const char* name) {
+    out->ino = ino;
+    out->type = type;
+    snprintf(out->name, sizeof(out->name), "%s", name);
+}
+
+// ---- snapshot of a process, taken under the table lock ----
+
+struct Snapshot {
+    int pid, ppid, pgid, sid, threads;
+    char state;
+    char name[64];
+    char exe[256];
+    char cwd[512];
+    u64 utime, stime, start_ticks, vsize, rss;
+    u64 sig_pending, sig_blocked;
+    proc::Memory* mem; // referenced (put() when done) or null
+    int cpu;
+};
+
+// Find `pid` (and, if tid != 0, check that thread belongs to it).
+bool snapshot(int pid, int tid, Snapshot* s, bool want_memory) {
+    LockGuard guard(proc::table_lock());
+    Process* p = proc::find(pid);
+    if (!p)
+        return false;
+    s->pid = p->pid;
+    s->ppid = p->parent ? p->parent->pid : (p->kernel_waited ? 0 : 1);
+    s->pgid = p->pgid;
+    s->sid = p->sid;
+    memcpy(s->name, p->name, sizeof(s->name));
+    memcpy(s->exe, p->exe_path, sizeof(s->exe));
+    memcpy(s->cwd, p->cwd_path, sizeof(s->cwd));
+    s->start_ticks = p->start_ns / (1'000'000'000 / USER_HZ);
+    s->sig_pending = p->sig_pending;
+    s->sig_blocked = 0;
+    s->cpu = 0;
+
+    bool found_tid = tid == 0;
+    bool running = false;
+    u64 ut = p->dead_utime, st = p->dead_stime;
+    {
+        LockGuard tguard(p->thread_lock);
+        s->threads = static_cast<int>(p->live_threads);
+        for (sched::Thread* t : p->threads) {
+            if (tid && t->user_tid != tid)
+                continue;
+            found_tid = true;
+            if (tid) { ut = st = 0; }
+            ut += t->utime_ticks;
+            st += t->stime_ticks;
+            if (t->state == sched::ThreadState::Running || t->state == sched::ThreadState::Ready)
+                running = true;
+            if (t->cpu)
+                s->cpu = static_cast<int>(t->cpu->index);
+            if (tid || t == p->main_thread)
+                s->sig_blocked = t->sigmask;
+        }
+    }
+    if (!found_tid)
+        return false;
+    s->utime = ut / TICKS_PER_USER_HZ;
+    s->stime = st / TICKS_PER_USER_HZ;
+    s->state = p->state == proc::State::Zombie ? 'Z' : (running ? 'R' : 'S');
+    s->mem = nullptr;
+    if (want_memory && p->mem) {
+        s->mem = p->mem;
+        s->mem->get();
+    }
+    s->vsize = s->rss = 0;
+    if (p->mem)
+        s->rss = p->mem->rss_pages();
+    return true;
+}
+
+void release(Snapshot& s) {
+    if (s.mem)
+        s.mem->put();
+}
+
+const char* state_name(char c) {
+    switch (c) {
+    case 'R': return "R (running)";
+    case 'Z': return "Z (zombie)";
+    default:  return "S (sleeping)";
+    }
+}
+
+// ---- per-process directory ----
+
+class FdDir;
+class TaskDir;
+
+class PidDir : public vfs::Inode {
+public:
+    PidDir(int pid, int tid);
+    vfs::Inode* lookup(const char* name, usize len) override;
+    long readdir(u64 index, vfs::DirEntry* out) override;
+    isize read(u64, void*, usize) override { return -err::ISDIR; }
+
+    int pid, tid; // tid != 0: /proc/<pid>/task/<tid>
+    PidDir* next_cached = nullptr;
+
+private:
+    struct Entry {
+        const char* name;
+        vfs::Inode* inode;
+    };
+    Entry m_entries[12];
+    int m_count = 0;
+    void add(const char* name, vfs::Inode* node) { m_entries[m_count++] = {name, node}; }
+};
+
+PidDir* g_pid_dirs = nullptr; // cache, never freed (one small object per pid ever looked at)
+IrqSpinlock g_cache_lock;
+
+PidDir* pid_dir(int pid, int tid) {
+    {
+        LockGuard guard(g_cache_lock);
+        for (PidDir* d = g_pid_dirs; d; d = d->next_cached)
+            if (d->pid == pid && d->tid == tid)
+                return d;
+    }
+    auto* d = new PidDir(pid, tid);
+    LockGuard guard(g_cache_lock);
+    d->next_cached = g_pid_dirs;
+    g_pid_dirs = d;
+    return d;
+}
+
+bool exists(int pid, int tid) {
+    Snapshot s;
+    if (!snapshot(pid, tid, &s, false))
+        return false;
+    return true;
+}
+
+// stat: the single line ps/top parse.
+bool gen_stat(TextBuffer& out, const void* ctx) {
+    auto* d = static_cast<const PidDir*>(ctx);
+    Snapshot s;
+    if (!snapshot(d->pid, d->tid, &s, true))
+        return false;
+    if (s.mem)
+        s.vsize = s.mem->virtual_size();
+    out.printf("%d (%s) %c %d %d %d %d %d %u %lu %lu %lu %lu %lu %lu %ld %ld %ld %ld %d %ld %lu %lu %lu "
+               "%lu %lu %lu %lu %lu %lu %lu %lu %lu %lu %lu %lu %lu %d %d %u %u %lu %lu %ld %lu %lu %lu "
+               "%lu %lu %lu %lu %d\n",
+               d->tid ? d->tid : s.pid, s.name, s.state, s.ppid, s.pgid, s.sid, 0x0501 /* tty: console */, -1,
+               0u, 0ul, 0ul, 0ul, 0ul, s.utime, s.stime, 0l, 0l, 20l, 0l, s.threads, 0l, s.start_ticks, s.vsize,
+               s.rss, ~0ul, 0ul, 0ul, 0ul, 0ul, 0ul, s.sig_pending, s.sig_blocked, 0ul, 0ul, 0ul, 0ul, 0ul, 17,
+               s.cpu, 0u, 0u, 0ul, 0ul, 0l, 0ul, 0ul, 0ul, s.mem ? s.mem->arg_start : 0, s.mem ? s.mem->arg_end : 0,
+               s.mem ? s.mem->env_start : 0, s.mem ? s.mem->env_end : 0, 0);
+    release(s);
+    return true;
+}
+
+bool gen_status(TextBuffer& out, const void* ctx) {
+    auto* d = static_cast<const PidDir*>(ctx);
+    Snapshot s;
+    if (!snapshot(d->pid, d->tid, &s, true))
+        return false;
+    if (s.mem)
+        s.vsize = s.mem->virtual_size();
+    out.printf("Name:\t%s\nUmask:\t0022\nState:\t%s\nTgid:\t%d\nNgid:\t0\nPid:\t%d\nPPid:\t%d\nTracerPid:\t0\n"
+               "Uid:\t0\t0\t0\t0\nGid:\t0\t0\t0\t0\nFDSize:\t%d\nVmSize:\t%8lu kB\nVmRSS:\t%8lu kB\n"
+               "Threads:\t%d\nSigPnd:\t%016lx\nSigBlk:\t%016lx\nCpus_allowed_list:\t0-%u\n",
+               s.name, state_name(s.state), s.pid, d->tid ? d->tid : s.pid, s.ppid, proc::MAX_FDS,
+               s.vsize / 1024, s.rss * 4, s.threads, s.sig_pending, s.sig_blocked, percpu::online_count() - 1);
+    release(s);
+    return true;
+}
+
+bool gen_statm(TextBuffer& out, const void* ctx) {
+    auto* d = static_cast<const PidDir*>(ctx);
+    Snapshot s;
+    if (!snapshot(d->pid, d->tid, &s, true))
+        return false;
+    u64 size = s.mem ? s.mem->virtual_size() / 4096 : 0;
+    out.printf("%lu %lu 0 0 0 0 0\n", size, s.rss);
+    release(s);
+    return true;
+}
+
+bool gen_comm(TextBuffer& out, const void* ctx) {
+    auto* d = static_cast<const PidDir*>(ctx);
+    Snapshot s;
+    if (!snapshot(d->pid, d->tid, &s, false))
+        return false;
+    out.printf("%s\n", s.name);
+    return true;
+}
+
+// cmdline / environ: NUL-separated strings straight from the process's memory.
+bool gen_strings(TextBuffer& out, const void* ctx, bool environment) {
+    auto* d = static_cast<const PidDir*>(ctx);
+    Snapshot s;
+    if (!snapshot(d->pid, d->tid, &s, true))
+        return false;
+    if (s.mem) {
+        uptr start = environment ? s.mem->env_start : s.mem->arg_start;
+        uptr end = environment ? s.mem->env_end : s.mem->arg_end;
+        usize len = end > start ? min<usize>(end - start, 64 * KiB) : 0;
+        if (len) {
+            auto* buf = static_cast<char*>(kmalloc(len));
+            if (buf) {
+                usize got = s.mem->read_remote(start, buf, len);
+                out.append(buf, got);
+                kfree(buf);
+            }
+        }
+    }
+    release(s);
+    return true;
+}
+bool gen_cmdline(TextBuffer& out, const void* ctx) { return gen_strings(out, ctx, false); }
+bool gen_environ(TextBuffer& out, const void* ctx) { return gen_strings(out, ctx, true); }
+
+bool gen_maps(TextBuffer& out, const void* ctx) {
+    auto* d = static_cast<const PidDir*>(ctx);
+    Snapshot s;
+    if (!snapshot(d->pid, d->tid, &s, true))
+        return false;
+    if (s.mem) {
+        s.mem->for_each_vma([](const proc::Vma& v, void* arg) {
+            auto* o = static_cast<TextBuffer*>(arg);
+            o->printf("%012lx-%012lx %c%c%cp %08lx 00:00 %lu", v.start, v.end,
+                      v.prot & proc::PROT_READ ? 'r' : '-', v.prot & proc::PROT_WRITE ? 'w' : '-',
+                      v.prot & proc::PROT_EXEC ? 'x' : '-', v.file ? v.file_offset : 0,
+                      v.file ? v.file->ino : 0);
+            if (v.kind == proc::VMA_STACK) o->append("                  [stack]");
+            else if (v.kind == proc::VMA_HEAP) o->append("                  [heap]");
+            o->append("\n");
+        }, &out);
+    }
+    release(s);
+    return true;
+}
+
+bool link_exe(char* out, usize size, const void* ctx) {
+    auto* d = static_cast<const PidDir*>(ctx);
+    Snapshot s;
+    if (!snapshot(d->pid, d->tid, &s, false))
+        return false;
+    snprintf(out, size, "%s", s.exe);
+    return true;
+}
+
+bool link_cwd(char* out, usize size, const void* ctx) {
+    auto* d = static_cast<const PidDir*>(ctx);
+    Snapshot s;
+    if (!snapshot(d->pid, d->tid, &s, false))
+        return false;
+    snprintf(out, size, "%s", s.cwd);
+    return true;
+}
+
+// /proc/<pid>/fd: one symlink per open descriptor.
+class FdDir : public vfs::Inode {
+public:
+    explicit FdDir(int pid) : m_pid(pid) {
+        ino = vfs::next_ino();
+        mode = vfs::S_IFDIR | 0500;
+        nlink = 2;
+    }
+    isize read(u64, void*, usize) override { return -err::ISDIR; }
+
+    vfs::Inode* lookup(const char* name, usize len) override {
+        int fd;
+        if (!parse_number(name, len, &fd) || fd >= proc::MAX_FDS || !fd_open(fd))
+            return nullptr;
+        LockGuard guard(m_lock);
+        if (!m_links[fd]) {
+            auto* ctx = new LinkCtx{m_pid, fd};
+            m_links[fd] = new GeneratedLink(fd_target, ctx);
+        }
+        return m_links[fd];
+    }
+
+    long readdir(u64 index, vfs::DirEntry* out) override {
+        if (index < 2) {
+            fill_entry(out, ino, vfs::DT_DIR, index == 0 ? "." : "..");
+            return 1;
+        }
+        u64 seen = 2;
+        for (int fd = 0; fd < proc::MAX_FDS; fd++) {
+            if (!fd_open(fd))
+                continue;
+            if (seen++ == index) {
+                char name[16];
+                snprintf(name, sizeof(name), "%d", fd);
+                fill_entry(out, ino + 1 + static_cast<u64>(fd), vfs::DT_LNK, name);
+                return 1;
+            }
+        }
+        return 0;
+    }
+
+private:
+    struct LinkCtx {
+        int pid, fd;
+    };
+
+    bool fd_open(int fd) {
+        LockGuard guard(proc::table_lock());
+        Process* p = proc::find(m_pid);
+        return p && p->fds[fd];
+    }
+
+    static bool fd_target(char* out, usize size, const void* ctx) {
+        auto* c = static_cast<const LinkCtx*>(ctx);
+        LockGuard guard(proc::table_lock());
+        Process* p = proc::find(c->pid);
+        if (!p || !p->fds[c->fd])
+            return false;
+        vfs::File* f = p->fds[c->fd];
+        snprintf(out, size, "%s", f->path ? f->path : "anon_inode:[unknown]");
+        return true;
+    }
+
+    int m_pid;
+    vfs::Inode* m_links[proc::MAX_FDS] = {};
+    IrqSpinlock m_lock;
+};
+
+// /proc/<pid>/task: one directory per thread.
+class TaskDir : public vfs::Inode {
+public:
+    explicit TaskDir(int pid) : m_pid(pid) {
+        ino = vfs::next_ino();
+        mode = vfs::S_IFDIR | 0555;
+        nlink = 2;
+    }
+    isize read(u64, void*, usize) override { return -err::ISDIR; }
+
+    vfs::Inode* lookup(const char* name, usize len) override {
+        int tid;
+        if (!parse_number(name, len, &tid) || !exists(m_pid, tid))
+            return nullptr;
+        return pid_dir(m_pid, tid);
+    }
+
+    long readdir(u64 index, vfs::DirEntry* out) override {
+        if (index < 2) {
+            fill_entry(out, ino, vfs::DT_DIR, index == 0 ? "." : "..");
+            return 1;
+        }
+        LockGuard guard(proc::table_lock());
+        Process* p = proc::find(m_pid);
+        if (!p)
+            return 0;
+        LockGuard tguard(p->thread_lock);
+        u64 i = 2;
+        for (sched::Thread* t : p->threads) {
+            if (i++ == index) {
+                char name[16];
+                snprintf(name, sizeof(name), "%d", t->user_tid);
+                fill_entry(out, ino + static_cast<u64>(t->user_tid), vfs::DT_DIR, name);
+                return 1;
+            }
+        }
+        return 0;
+    }
+
+private:
+    int m_pid;
+};
+
+PidDir::PidDir(int p, int t) : pid(p), tid(t) {
+    ino = vfs::next_ino();
+    mode = vfs::S_IFDIR | 0555;
+    nlink = 2;
+    add("stat", new GeneratedFile(gen_stat, this));
+    add("status", new GeneratedFile(gen_status, this));
+    add("statm", new GeneratedFile(gen_statm, this));
+    add("comm", new GeneratedFile(gen_comm, this, 0644));
+    add("cmdline", new GeneratedFile(gen_cmdline, this));
+    add("environ", new GeneratedFile(gen_environ, this, 0400));
+    add("maps", new GeneratedFile(gen_maps, this));
+    add("exe", new GeneratedLink(link_exe, this));
+    add("cwd", new GeneratedLink(link_cwd, this));
+    add("fd", new FdDir(pid));
+    if (!tid)
+        add("task", new TaskDir(pid));
+}
+
+vfs::Inode* PidDir::lookup(const char* name, usize len) {
+    if (!exists(pid, tid))
+        return nullptr;
+    for (int i = 0; i < m_count; i++)
+        if (name_is(name, len, m_entries[i].name))
+            return m_entries[i].inode;
+    return nullptr;
+}
+
+long PidDir::readdir(u64 index, vfs::DirEntry* out) {
+    if (index < 2) {
+        fill_entry(out, ino, vfs::DT_DIR, index == 0 ? "." : "..");
+        return 1;
+    }
+    u64 i = index - 2;
+    if (i >= static_cast<u64>(m_count))
+        return 0;
+    vfs::Inode* n = m_entries[i].inode;
+    u8 type = vfs::is_dir(n->mode) ? vfs::DT_DIR : vfs::is_lnk(n->mode) ? vfs::DT_LNK : vfs::DT_REG;
+    fill_entry(out, n->ino, type, m_entries[i].name);
+    return 1;
+}
+
+// ---- /proc itself: static entries plus one directory per process ----
+
+class ProcRoot : public ramfs::Dir {
+public:
+    vfs::Inode* lookup(const char* name, usize len) override {
+        int pid;
+        if (parse_number(name, len, &pid))
+            return exists(pid, 0) ? pid_dir(pid, 0) : nullptr;
+        return Dir::lookup(name, len);
+    }
+
+    long readdir(u64 index, vfs::DirEntry* out) override {
+        u64 statics = 2 + child_count();
+        if (index < statics)
+            return Dir::readdir(index, out);
+        struct Search {
+            u64 want, seen;
+            int found;
+        } search{index - statics, 0, -1};
+        proc::for_each([](Process* p, void* arg) {
+            auto* st = static_cast<Search*>(arg);
+            if (st->seen++ == st->want)
+                st->found = p->pid;
+        }, &search);
+        if (search.found < 0)
+            return 0;
+        char name[16];
+        snprintf(name, sizeof(name), "%d", search.found);
+        fill_entry(out, 0x10000000ull + static_cast<u64>(search.found), vfs::DT_DIR, name);
+        return 1;
+    }
+};
+
+// ---- system-wide files ----
+
+bool gen_meminfo(TextBuffer& out, const void*) {
+    auto st = pmm::stats();
+    u64 total = st.total_pages * 4, free = st.free_pages * 4;
+    out.printf("MemTotal:       %8lu kB\nMemFree:        %8lu kB\nMemAvailable:   %8lu kB\n"
+               "Buffers:               0 kB\nCached:                0 kB\nSwapCached:            0 kB\n"
+               "Active:         %8lu kB\nInactive:              0 kB\nSwapTotal:             0 kB\n"
+               "SwapFree:              0 kB\nShmem:                 0 kB\nSlab:                  0 kB\n",
+               total, free, free, total - free);
+    return true;
+}
+
+bool gen_uptime(TextBuffer& out, const void*) {
+    u64 up = clock::now_ns() / 10'000'000; // hundredths of a second
+    u64 idle = 0;
+    for (u32 i = 0; i < percpu::count(); i++)
+        if (Cpu* c = percpu::get(i))
+            idle += c->idle_ticks;
+    idle /= TICKS_PER_USER_HZ;
+    out.printf("%lu.%02lu %lu.%02lu\n", up / 100, up % 100, idle / 100, idle % 100);
+    return true;
+}
+
+bool gen_stat_global(TextBuffer& out, const void*) {
+    u64 user = 0, sys = 0, idle = 0, ctxt = 0;
+    u32 n = percpu::count();
+    for (u32 i = 0; i < n; i++) {
+        if (Cpu* c = percpu::get(i)) {
+            user += c->user_ticks;
+            sys += c->system_ticks;
+            idle += c->idle_ticks;
+            ctxt += c->context_switches;
+        }
+    }
+    out.printf("cpu  %lu 0 %lu %lu 0 0 0 0 0 0\n", user / TICKS_PER_USER_HZ, sys / TICKS_PER_USER_HZ,
+               idle / TICKS_PER_USER_HZ);
+    for (u32 i = 0; i < n; i++)
+        if (Cpu* c = percpu::get(i))
+            out.printf("cpu%u %lu 0 %lu %lu 0 0 0 0 0 0\n", c->index, c->user_ticks / TICKS_PER_USER_HZ,
+                       c->system_ticks / TICKS_PER_USER_HZ, c->idle_ticks / TICKS_PER_USER_HZ);
+    out.printf("intr 0\nctxt %lu\nbtime %lu\nprocesses %u\nprocs_running 1\nprocs_blocked 0\n", ctxt,
+               rtc::boot_epoch_seconds(), proc::count());
+    return true;
+}
+
+bool gen_loadavg(TextBuffer& out, const void*) {
+    out.printf("0.00 0.00 0.00 1/%u %u\n", proc::count(), proc::count());
+    return true;
+}
+
+void cpu_brand(char* brand) {
+    memset(brand, 0, 49);
+    if (arch::cpuid(0x80000000).eax < 0x80000004)
+        return;
+    for (u32 i = 0; i < 3; i++) {
+        auto r = arch::cpuid(0x80000002 + i);
+        memcpy(brand + i * 16 + 0, &r.eax, 4);
+        memcpy(brand + i * 16 + 4, &r.ebx, 4);
+        memcpy(brand + i * 16 + 8, &r.ecx, 4);
+        memcpy(brand + i * 16 + 12, &r.edx, 4);
+    }
+}
+
+bool gen_cpuinfo(TextBuffer& out, const void*) {
+    auto l0 = arch::cpuid(0);
+    char vendor[13];
+    memcpy(vendor, &l0.ebx, 4);
+    memcpy(vendor + 4, &l0.edx, 4);
+    memcpy(vendor + 8, &l0.ecx, 4);
+    vendor[12] = 0;
+    char brand[49];
+    cpu_brand(brand);
+    const char* model_name = brand;
+    while (*model_name == ' ') model_name++;
+
+    auto l1 = arch::cpuid(1);
+    u32 family = (l1.eax >> 8) & 0xF, model = (l1.eax >> 4) & 0xF, stepping = l1.eax & 0xF;
+    if (family == 0xF) family += (l1.eax >> 20) & 0xFF;
+    if (family >= 6) model |= ((l1.eax >> 16) & 0xF) << 4;
+    auto l7 = arch::cpuid(7, 0);
+    auto le = arch::cpuid(0x80000001);
+
+    // A readable subset of the feature flags, Linux spelling.
+    struct Flag { u32 reg, bit; const char* name; };
+    static const Flag flags[] = {
+        {0, 0, "fpu"}, {0, 4, "tsc"}, {0, 5, "msr"}, {0, 6, "pae"}, {0, 8, "cx8"}, {0, 9, "apic"},
+        {0, 15, "cmov"}, {0, 16, "pat"}, {0, 19, "clflush"}, {0, 23, "mmx"}, {0, 24, "fxsr"},
+        {0, 25, "sse"}, {0, 26, "sse2"}, {0, 28, "ht"}, {1, 0, "pni"}, {1, 1, "pclmulqdq"},
+        {1, 9, "ssse3"}, {1, 12, "fma"}, {1, 13, "cx16"}, {1, 19, "sse4_1"}, {1, 20, "sse4_2"},
+        {1, 21, "x2apic"}, {1, 22, "movbe"}, {1, 23, "popcnt"}, {1, 25, "aes"}, {1, 26, "xsave"},
+        {1, 28, "avx"}, {1, 29, "f16c"}, {1, 30, "rdrand"}, {2, 11, "syscall"}, {2, 20, "nx"},
+        {2, 26, "pdpe1gb"}, {2, 27, "rdtscp"}, {2, 29, "lm"}, {3, 3, "bmi1"}, {3, 5, "avx2"},
+        {3, 8, "bmi2"}, {3, 9, "erms"}, {3, 16, "avx512f"}, {3, 18, "rdseed"}, {3, 19, "adx"},
+        {3, 29, "sha_ni"},
+    };
+    u32 regs[4] = {l1.edx, l1.ecx, le.edx, l7.ebx};
+
+    u32 n = percpu::count();
+    for (u32 i = 0; i < n; i++) {
+        Cpu* c = percpu::get(i);
+        if (!c)
+            continue;
+        out.printf("processor\t: %u\nvendor_id\t: %s\ncpu family\t: %u\nmodel\t\t: %u\nmodel name\t: %s\n"
+                   "stepping\t: %u\ncpu MHz\t\t: %lu.000\nphysical id\t: 0\nsiblings\t: %u\ncore id\t\t: %u\n"
+                   "cpu cores\t: %u\napicid\t\t: %u\nfpu\t\t: yes\nflags\t\t:",
+                   c->index, vendor, family, model, model_name, stepping, clock::tsc_frequency_hz() / 1'000'000,
+                   n, c->index, n, c->lapic_id);
+        for (const Flag& f : flags)
+            if (regs[f.reg] & (1u << f.bit))
+                out.printf(" %s", f.name);
+        out.printf("\nbogomips\t: %lu.00\naddress sizes\t: 48 bits physical, 48 bits virtual\n\n",
+                   clock::tsc_frequency_hz() / 500'000);
+    }
+    return true;
+}
+
+bool link_self(char* out, usize size, const void*) {
+    Process* p = proc::current();
+    if (!p)
+        return false;
+    snprintf(out, size, "%d", p->pid);
+    return true;
+}
+
+bool link_thread_self(char* out, usize size, const void*) {
+    Process* p = proc::current();
+    if (!p)
+        return false;
+    snprintf(out, size, "%d/task/%d", p->pid, sched::current()->user_tid);
+    return true;
+}
+
+} // namespace
+
+void init() {
+    // Replace the (empty) /proc directory from the root filesystem.
+    vfs::Inode* root = vfs::root();
+    root->unlink("proc", 4, true);
+    auto* procroot = new ProcRoot;
+    procroot->mode = vfs::S_IFDIR | 0555;
+    static_cast<ramfs::Dir*>(root)->attach("proc", 4, procroot);
+
+    auto add = [&](const char* name, vfs::Inode* node) { procroot->attach(name, strlen(name), node); };
+    add("meminfo", new GeneratedFile(gen_meminfo, nullptr));
+    add("uptime", new GeneratedFile(gen_uptime, nullptr));
+    add("stat", new GeneratedFile(gen_stat_global, nullptr));
+    add("loadavg", new GeneratedFile(gen_loadavg, nullptr));
+    add("cpuinfo", new GeneratedFile(gen_cpuinfo, nullptr));
+    add("self", new GeneratedLink(link_self, nullptr));
+    add("thread-self", new GeneratedLink(link_thread_self, nullptr));
+
+    genfs::static_file("/proc/version",
+                       "Linux version 6.12.0-syluxium (syluxium@build) (clang) #1 SMP Syluxium " __DATE__ "\n");
+    genfs::static_file("/proc/cmdline", "\n");
+    genfs::static_file("/proc/filesystems", "nodev\tramfs\nnodev\tproc\nnodev\tsysfs\nnodev\tdevtmpfs\n");
+    genfs::static_file("/proc/mounts",
+                       "rootfs / ramfs rw 0 0\nproc /proc proc rw,nosuid,nodev,noexec 0 0\n"
+                       "sysfs /sys sysfs rw,nosuid,nodev,noexec 0 0\ndevtmpfs /dev devtmpfs rw 0 0\n");
+    vfs::mkdir_p("/proc/sys/kernel");
+    genfs::static_file("/proc/sys/kernel/hostname", "syluxium\n");
+    genfs::static_file("/proc/sys/kernel/ostype", "Linux\n");
+    genfs::static_file("/proc/sys/kernel/osrelease", "6.12.0-syluxium\n");
+    genfs::static_file("/proc/sys/kernel/pid_max", "4194304\n");
+    vfs::mkdir_p("/etc");
+    // Many tools read /etc/mtab; on Linux it's a link to /proc/self/mounts.
+    vfs::Inode* etc;
+    if (vfs::resolve("/etc", nullptr, true, &etc) == 0 && !etc->lookup("mtab", 4))
+        etc->create("mtab", 4, vfs::S_IFLNK | 0777, "/proc/mounts", nullptr);
+}
+
+} // namespace procfs
+
+// ---------------------------------------------------------------------------
+
+namespace sysfs {
+
+void init() {
+    vfs::Inode* root = vfs::root();
+    root->unlink("sys", 3, true);
+    vfs::mkdir_p("/sys/devices/system/cpu", 0755);
+    vfs::mkdir_p("/sys/kernel", 0755);
+    vfs::mkdir_p("/sys/class", 0755);
+    vfs::mkdir_p("/sys/bus", 0755);
+    vfs::mkdir_p("/sys/block", 0755);
+    vfs::mkdir_p("/sys/firmware", 0755);
+
+    u32 cpus = percpu::online_count();
+    char range[32];
+    snprintf(range, sizeof(range), cpus > 1 ? "0-%u\n" : "0\n", cpus - 1);
+    genfs::static_file("/sys/devices/system/cpu/online", range);
+    genfs::static_file("/sys/devices/system/cpu/possible", range);
+    genfs::static_file("/sys/devices/system/cpu/present", range);
+    char path[96];
+    for (u32 i = 0; i < cpus; i++) {
+        snprintf(path, sizeof(path), "/sys/devices/system/cpu/cpu%u/online", i);
+        vfs::mkdir_p("/sys/devices/system/cpu", 0755);
+        char dir[96];
+        snprintf(dir, sizeof(dir), "/sys/devices/system/cpu/cpu%u", i);
+        vfs::mkdir_p(dir, 0755);
+        genfs::static_file(path, "1\n");
+    }
+    genfs::static_file("/sys/kernel/hostname", "syluxium\n");
+}
+
+} // namespace sysfs

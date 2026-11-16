@@ -44,7 +44,13 @@ struct Thread {
     void* fpu_state = nullptr;           // FPU/SSE/AVX registers, saved on switch
     u64 fs_base = 0;                     // TLS pointer (arch_prctl ARCH_SET_FS)
     u64 gs_base = 0;                     // user GS base (swapped out while in the kernel)
-    u64 clear_child_tid = 0;             // set_tid_address
+    u64 clear_child_tid = 0;             // set_tid_address / CLONE_CHILD_CLEARTID
+    int user_tid = 0;                    // Linux thread id (shares the pid number space)
+    u64 sig_pending = 0;                 // signals sent to this thread only (tgkill)
+    u64 sigmask = 0;                     // blocked signals (per thread, as on Linux)
+    u64 futex_key_a = 0, futex_key_b = 0;// futex this thread sleeps on
+    u32 futex_bitset = 0;
+    u64 utime_ticks = 0, stime_ticks = 0;// CPU time (scheduler ticks) in user / kernel mode
 
     u64 kernel_stack_top() const { return reinterpret_cast<u64>(stack) + stack_size; }
 
@@ -56,6 +62,7 @@ struct Thread {
     ListNode wait_node;    // a WaitList while blocked
     ListNode sleep_node;   // the CPU's timeout list
     ListNode all_node;     // global list of all threads
+    ListNode proc_node;    // the owning process's thread list
 
     // Threads blocked in join() on this thread (linked through their wait_node).
     IntrusiveList<Thread, &Thread::wait_node> join_waiters;

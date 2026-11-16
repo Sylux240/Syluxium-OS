@@ -49,7 +49,7 @@ bool block_on(WaitList& list, IrqSpinlock& lock, u64 deadline_ns = 0);
 void init();                                 // reaper + idle thread for the boot CPU
 void prepare_cpu(Cpu* cpu);                  // create the idle thread for another CPU
 [[noreturn]] void enter();                   // leave the boot stack, start scheduling here
-void timer_tick();                           // called from the APIC timer interrupt
+void timer_tick(bool from_user);             // called from the APIC timer interrupt
 
 bool running();
 u64 thread_count();

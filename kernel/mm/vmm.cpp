@@ -392,32 +392,44 @@ void init_ap() {
     g_kernel_space.activate();
 }
 
-void shootdown(uptr start, usize pages) {
+void shootdown(uptr start, usize pages, const AddressSpace* user) {
     if (pages == 0 || percpu::online_count() <= 1)
         return;
     if (!arch::interrupts_enabled())
         panic("vmm::shootdown() with interrupts disabled would deadlock");
 
+    // Our page-table changes must be visible before we look at what other
+    // CPUs are running (they publish `current` before loading its CR3).
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    Cpu* me = this_cpu();
+    auto wanted = [&](Cpu* c) {
+        if (!c || c == me || !__atomic_load_n(&c->online, __ATOMIC_ACQUIRE))
+            return false;
+        if (!user)
+            return true;
+        sched::Thread* t = __atomic_load_n(&c->current, __ATOMIC_ACQUIRE);
+        return t && t->aspace == user;
+    };
+
     // Spinlock (not IrqSpinlock): while waiting for the lock we keep
     // servicing other CPUs' shootdown requests.
     g_shoot_lock.lock();
-    Cpu* me = this_cpu();
     u32 targets = 0;
-    for (u32 i = 0; i < percpu::count(); i++) {
+    Cpu* chosen[256];
+    for (u32 i = 0; i < percpu::count() && targets < 256; i++) {
         Cpu* c = percpu::get(i);
-        if (c && c != me && __atomic_load_n(&c->online, __ATOMIC_ACQUIRE))
-            targets++;
+        if (wanted(c))
+            chosen[targets++] = c;
     }
-    g_shoot_pages = pages;
-    __atomic_store_n(&g_shoot_start, start, __ATOMIC_RELEASE);
-    __atomic_store_n(&g_shoot_pending, targets, __ATOMIC_RELEASE);
-    for (u32 i = 0; i < percpu::count(); i++) {
-        Cpu* c = percpu::get(i);
-        if (c && c != me && __atomic_load_n(&c->online, __ATOMIC_ACQUIRE))
-            apic::send_ipi(c->lapic_id, interrupts::VEC_TLB_SHOOTDOWN);
+    if (targets) {
+        g_shoot_pages = pages;
+        __atomic_store_n(&g_shoot_start, start, __ATOMIC_RELEASE);
+        __atomic_store_n(&g_shoot_pending, targets, __ATOMIC_RELEASE);
+        for (u32 i = 0; i < targets; i++)
+            apic::send_ipi(chosen[i]->lapic_id, interrupts::VEC_TLB_SHOOTDOWN);
+        while (__atomic_load_n(&g_shoot_pending, __ATOMIC_ACQUIRE))
+            arch::pause();
     }
-    while (__atomic_load_n(&g_shoot_pending, __ATOMIC_ACQUIRE))
-        arch::pause();
     g_shoot_lock.unlock();
 }
 

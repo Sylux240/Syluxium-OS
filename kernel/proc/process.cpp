@@ -11,10 +11,12 @@
 #include <mm/heap.hpp>
 #include <mm/layout.hpp>
 #include <proc/elf.hpp>
+#include <proc/futex.hpp>
 #include <proc/process.hpp>
 #include <proc/signal.hpp>
 #include <proc/uaccess.hpp>
 #include <sched/sched.hpp>
+#include <time/clock.hpp>
 
 extern "C" [[noreturn]] void return_to_user(interrupts::Frame* frame);
 
@@ -89,13 +91,20 @@ void close_all_files(Process* p, bool only_cloexec) {
 int allocate_pid() { return __atomic_fetch_add(&g_next_pid, 1, __ATOMIC_RELAXED); }
 
 // Create the thread that runs a process's user code.
-sched::Thread* make_user_thread(Process* p, const interrupts::Frame& frame) {
+sched::Thread* make_user_thread(Process* p, const interrupts::Frame& frame, int tid) {
     auto* start = new UserStart{frame};
     sched::Thread* t = sched::create(p->name, user_thread_entry, start, true);
     t->process = p;
     t->aspace = p->mem->aspace();
     t->fpu_state = fpu::alloc_state();
-    p->main_thread = t;
+    t->user_tid = tid;
+    {
+        LockGuard guard(p->thread_lock);
+        p->threads.push_back(t);
+        p->live_threads++;
+    }
+    if (!p->main_thread)
+        p->main_thread = t;
     return t;
 }
 
@@ -278,6 +287,7 @@ long spawn(const char* path, const char* const* argv, const char* const* envp, P
     vfs::Inode* console;
     if (vfs::resolve("/dev/console", nullptr, true, &console) == 0) {
         vfs::File* f = vfs::open_inode(console, vfs::O_RDWR);
+        vfs::file_set_path(f, "/dev/console");
         fd_install(p, f);
         fd_dup2(p, 0, 1, false);
         fd_dup2(p, 0, 2, false);
@@ -290,7 +300,8 @@ long spawn(const char* path, const char* const* argv, const char* const* envp, P
         g_processes.push_back(p);
     }
 
-    sched::Thread* t = make_user_thread(p, initial_frame(loaded.entry, loaded.stack_ptr));
+    p->start_ns = clock::now_ns();
+    sched::Thread* t = make_user_thread(p, initial_frame(loaded.entry, loaded.stack_ptr), p->pid);
     sched::start(t);
     *out = p;
     return 0;
@@ -309,9 +320,47 @@ int wait(Process* p) {
 
 // ---- fork / clone ----------------------------------------------------------
 
+namespace {
+
+// clone(CLONE_THREAD): a new thread in the calling process (pthread_create).
+long clone_thread(interrupts::Frame* frame, u64 flags, u64 new_sp, u64 parent_tid, u64 child_tid, u64 tls) {
+    if (!(flags & CLONE_VM) || !(flags & CLONE_SIGHAND))
+        return -err::INVAL; // Linux requires both for threads
+    Process* p = current();
+    sched::Thread* me = sched::current();
+    if (p->group_exiting)
+        return -err::AGAIN;
+
+    int tid = allocate_pid();
+    interrupts::Frame cf = *frame;
+    cf.rax = 0;
+    if (new_sp)
+        cf.rsp = new_sp;
+    sched::Thread* t = make_user_thread(p, cf, tid);
+    fpu::save(me->fpu_state);
+    memcpy(t->fpu_state, me->fpu_state, fpu::state_size());
+    t->fs_base = (flags & CLONE_SETTLS) ? tls : me->fs_base;
+    t->gs_base = arch::rdmsr(MSR_KERNEL_GS_BASE);
+    t->sigmask = me->sigmask;
+    snprintf(t->name, sizeof(t->name), "%s", p->name);
+
+    // Shared memory: the tid words are written directly in our address space.
+    if (flags & CLONE_PARENT_SETTID)
+        uaccess::put(reinterpret_cast<i32*>(parent_tid), tid);
+    if (flags & CLONE_CHILD_SETTID)
+        uaccess::put(reinterpret_cast<i32*>(child_tid), tid);
+    if (flags & CLONE_CHILD_CLEARTID)
+        t->clear_child_tid = child_tid;
+
+    sched::start(t);
+    return tid;
+}
+
+} // namespace
+
 long do_clone(interrupts::Frame* frame, u64 flags, u64 new_sp, u64 parent_tid, u64 child_tid, u64 tls) {
-    if (flags & (CLONE_THREAD | CLONE_SIGHAND))
-        return -err::NOSYS; // threads arrive in phase 4c (glibc then reports EAGAIN-ish failure)
+    if (flags & CLONE_THREAD)
+        return clone_thread(frame, flags, new_sp, parent_tid, child_tid, tls);
     Process* parent = current();
     sched::Thread* parent_thread = sched::current();
 
@@ -332,7 +381,6 @@ long do_clone(interrupts::Frame* frame, u64 flags, u64 new_sp, u64 parent_tid, u
     memcpy(child->cwd_path, parent->cwd_path, sizeof(child->cwd_path));
     child->cwd = parent->cwd;
     child->umask = parent->umask;
-    child->sigmask = parent->sigmask;
     for (int i = 0; i <= MAX_SIGNALS; i++)
         child->sigactions[i] = parent->sigactions[i];
     child->exit_signal = static_cast<int>(flags & 0xFF);
@@ -365,7 +413,9 @@ long do_clone(interrupts::Frame* frame, u64 flags, u64 new_sp, u64 parent_tid, u
     cf.rax = 0;
     if (new_sp)
         cf.rsp = new_sp;
-    sched::Thread* t = make_user_thread(child, cf);
+    child->start_ns = clock::now_ns();
+    sched::Thread* t = make_user_thread(child, cf, pid);
+    t->sigmask = parent_thread->sigmask;
     fpu::save(parent_thread->fpu_state);
     memcpy(t->fpu_state, parent_thread->fpu_state, fpu::state_size());
     t->fs_base = (flags & CLONE_SETTLS) ? tls : parent_thread->fs_base;
@@ -453,6 +503,16 @@ long exec_impl(interrupts::Frame* frame, const char* path, const char* const* ar
     }
 
     // ---- Point of no return: the old program is gone after this. ----
+
+    // The new program starts with only the calling thread: stop all others
+    // and wait until they've left (they exit on their way back to user mode).
+    sched::Thread* self = sched::current();
+    if (p->live_threads > 1) {
+        p->zap_except = self;
+        signal::wake_all_threads(p);
+        p->thread_exit_wait.wait_until([&] { return p->live_threads == 1; });
+        p->zap_except = nullptr;
+    }
     close_all_files(p, true);
     for (int sig = 1; sig <= MAX_SIGNALS; sig++) {
         if (p->sigactions[sig].handler > 1) // handlers live in the old image; SIG_IGN survives exec
@@ -545,11 +605,10 @@ long do_wait4(int pid, int* status_out, int options) {
 
 // ---- exit ------------------------------------------------------------------
 
-void exit_current(int wait_status) {
-    Process* p = current();
-    KASSERT(p != nullptr);
-    sched::Thread* me = sched::current();
+namespace {
 
+// Last thread gone: tear the process down and become a zombie.
+[[noreturn]] void finish_process(Process* p, sched::Thread* me, int wait_status) {
     close_all_files(p, false);
 
     // Leave the address space before dropping it.
@@ -602,6 +661,68 @@ void exit_current(int wait_status) {
     else if (p->kernel_waited)
         p->exit_done.complete_all(); // after this, `p` may be freed at any moment
     sched::exit(wait_status);
+}
+
+} // namespace
+
+void exit_thread(int code) {
+    Process* p = current();
+    KASSERT(p != nullptr);
+    sched::Thread* me = sched::current();
+
+    // pthread_join waits on this word: clear it and wake the joiner.
+    if (me->clear_child_tid && p->mem) {
+        i32 zero = 0;
+        if (uaccess::put(reinterpret_cast<i32*>(me->clear_child_tid), zero) == 0)
+            futex::wake(me->clear_child_tid, 1, ~0u, false); // shared, as on Linux (glibc waits that way)
+        me->clear_child_tid = 0;
+    }
+
+    u32 remaining;
+    {
+        LockGuard guard(p->thread_lock);
+        p->threads.remove(me);
+        remaining = --p->live_threads;
+        p->dead_utime += me->utime_ticks;
+        p->dead_stime += me->stime_ticks;
+        if (p->main_thread == me)
+            p->main_thread = p->threads.front();
+    }
+    p->thread_exit_wait.wake_all();
+
+    if (remaining > 0) {
+        // Other threads carry on: just leave.
+        {
+            InterruptGuard guard;
+            me->aspace = nullptr;
+            vmm::AddressSpace::kernel().activate();
+        }
+        me->process = nullptr;
+        sched::exit(code);
+    }
+    int status = p->group_exiting ? p->group_exit_status : (code & 0xFF) << 8;
+    finish_process(p, me, status);
+}
+
+void exit_group(int wait_status) {
+    Process* p = current();
+    KASSERT(p != nullptr);
+    if (!__atomic_exchange_n(&p->group_exiting, true, __ATOMIC_ACQ_REL))
+        p->group_exit_status = wait_status;
+    signal::wake_all_threads(p); // the others exit on their way back to user mode
+    exit_thread(0);
+}
+
+void exit_current(int wait_status) { exit_group(wait_status); }
+
+sched::Thread* find_thread(int tid) {
+    for (Process* p : g_processes) {
+        LockGuard guard(p->thread_lock);
+        for (sched::Thread* t : p->threads)
+            if (t->user_tid == tid)
+                return t;
+    }
+    return nullptr;
 }
 
 void kill_current_on_fault(const char* what, u64 address, u64 ip, int sig) {

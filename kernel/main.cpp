@@ -16,6 +16,7 @@
 #include <drivers/tty.hpp>
 #include <fs/devices.hpp>
 #include <fs/initramfs.hpp>
+#include <fs/procfs.hpp>
 #include <fs/vfs.hpp>
 #include <lib/random.hpp>
 #include <lib/format.hpp>
@@ -156,7 +157,8 @@ void run_userspace_tests() {
     static const char* const hello[] = {"/opt/syluxium/tests/hello", nullptr};
     static const char* const systest[] = {"/opt/syluxium/tests/systest", "arg-one", "arg two", nullptr};
     static const char* const crash[] = {"/opt/syluxium/tests/crashtest", nullptr};
-    const Test sequential[] = {{hello, 0}, {systest, 0}, {crash, 11 /* SIGSEGV */}};
+    static const char* const threads[] = {"/opt/syluxium/tests/threadtest", nullptr};
+    const Test sequential[] = {{hello, 0}, {systest, 0}, {crash, 11 /* SIGSEGV */}, {threads, 0}};
 
     for (const Test& t : sequential) {
         int status = run_program(t.argv);
@@ -235,6 +237,7 @@ void kernel_main_thread(void*) {
     klog::ok("SMP: %u CPU(s) online, scheduler running on all of them", cpus);
 
     // Every CPU is now off the bootloader's stacks and page tables.
+    sysfs::init(); // needs the final CPU count
     u64 reclaimed = pmm::reclaim_bootloader_memory();
     klog::ok("Reclaimed %lu KiB of bootloader memory", reclaimed / KiB);
 
@@ -345,6 +348,7 @@ extern "C" [[noreturn]] void kmain() {
     devices::init();
     proc::init();
     mount_initramfs(); // before bootloader memory is reclaimed (the module list lives there)
+    procfs::init();
     klog::ok("Files, devices and processes ready (keyboard: %s)", keyboard ? "PS/2" : "none, serial only");
 
     sched::init();

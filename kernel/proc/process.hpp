@@ -37,7 +37,20 @@ struct Process {
     char cwd_path[512] = "/";
     u32 umask = 022;
 
-    sched::Thread* main_thread = nullptr;
+    sched::Thread* main_thread = nullptr;     // the thread the process started with
+
+    // All threads of this process (the "thread group"); protected by thread_lock.
+    IntrusiveList<sched::Thread, &sched::Thread::proc_node> threads;
+    IrqSpinlock thread_lock;
+    u32 live_threads = 0;
+    bool group_exiting = false;               // exit_group() / fatal signal: all threads must exit
+    int group_exit_status = 0;
+    sched::Thread* zap_except = nullptr;      // execve: every thread but this one must exit
+    sched::WaitQueue thread_exit_wait;        // woken whenever a thread of this process exits
+
+    // Accounting.
+    u64 start_ns = 0;                         // clock::now_ns() when created
+    u64 dead_utime = 0, dead_stime = 0;       // ticks of threads that already exited
 
     // ---- Process tree (protected by the global process table lock) ----
     Process* parent = nullptr;           // null: started by the kernel or orphaned
@@ -57,9 +70,8 @@ struct Process {
     bool vfork_child = false;
 
     // ---- Signals ----
-    u64 sig_pending = 0;                 // bit n-1 = signal n
-    u64 sigmask = 0;
-    SigAction sigactions[MAX_SIGNALS + 1];
+    u64 sig_pending = 0;                 // process-wide pending signals, bit n-1 = signal n
+    SigAction sigactions[MAX_SIGNALS + 1];  // shared by all threads (per-thread masks live in Thread)
 };
 
 Process* current();
@@ -80,8 +92,16 @@ long do_clone(interrupts::Frame* frame, u64 flags, u64 new_sp, u64 parent_tid, u
 long do_execve(interrupts::Frame* frame, const char* path, const char* const* argv, const char* const* envp);
 long do_wait4(int pid, int* status_out, int options);
 
-// End the current process with a wait() status word (exit: code << 8, killed: signal number).
+// End the whole current process (all threads) with a wait() status word
+// (exit: code << 8, killed: signal number).
 [[noreturn]] void exit_current(int wait_status);
+[[noreturn]] void exit_group(int wait_status);
+
+// End only the calling thread (exit(2)); the last thread ending ends the process.
+[[noreturn]] void exit_thread(int code);
+
+// Find a thread by its Linux thread id; caller holds table_lock().
+sched::Thread* find_thread(int tid);
 
 // Kill the current process because of a fatal CPU exception in user mode.
 [[noreturn]] void kill_current_on_fault(const char* what, u64 address, u64 ip, int signal);

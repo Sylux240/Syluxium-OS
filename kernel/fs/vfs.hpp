@@ -97,7 +97,11 @@ struct File {
     u32 flags = 0;    // O_* access mode and status flags
     u32 refcount = 1;
     sched::Mutex lock; // protects offset; a mutex because reads may sleep (terminals, pipes)
+    char* path = nullptr; // absolute path it was opened by (for /proc/<pid>/fd), heap-allocated
 };
+
+// Remember the path a file was opened by.
+void file_set_path(File* f, const char* path);
 
 // Linux open() flags.
 constexpr u32 O_ACCMODE = 3, O_RDONLY = 0, O_WRONLY = 1, O_RDWR = 2;

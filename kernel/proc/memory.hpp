@@ -68,8 +68,20 @@ public:
     // Write into this address space even when it isn't the active one.
     long write_remote(uptr addr, const void* data, usize len);
 
+    // Read from this (maybe inactive) address space; stops at unmapped pages.
+    usize read_remote(uptr addr, void* out, usize len);
+
     // Unmap everything and free the page tables.
     void destroy();
+
+    // Accounting / introspection (for /proc).
+    u64 rss_pages() const { return __atomic_load_n(&m_rss, __ATOMIC_RELAXED); }
+    u64 virtual_size();
+    // Visit every mapping (with the lock held; fn must not sleep).
+    void for_each_vma(void (*fn)(const Vma& v, void* ctx), void* ctx);
+
+    // Where exec put the argument and environment strings (/proc/<pid>/cmdline, environ).
+    uptr arg_start = 0, arg_end = 0, env_start = 0, env_end = 0;
 
 private:
     Vma* find(uptr addr);
@@ -82,12 +94,14 @@ private:
     bool populate(Vma* v, uptr page);
     bool copy_on_write(Vma* v, uptr page);
     long prepare_locked(uptr addr, usize len, bool write);
+    void unmap_pages(uptr start, uptr end); // unmap, shoot down, then free
 
     vmm::AddressSpace* m_as;
     IntrusiveList<Vma, &Vma::node> m_vmas; // sorted by address
     sched::Mutex m_lock;
     uptr m_brk_base = 0, m_brk = 0;
     u32 m_refs = 1;
+    u64 m_rss = 0; // resident pages
 };
 
 u32 prot_to_map_flags(u32 prot);

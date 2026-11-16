@@ -77,10 +77,17 @@ bool is_ignored(proc::Process* p, int sig) {
     return h == SIG_IGN || (h == SIG_DFL && ignored_by_default(sig));
 }
 
+// Wake every sleeping thread of `p` so it re-checks for signals.
 void wake_process(proc::Process* p) {
-    sched::Thread* t = p->main_thread;
-    if (t && t->state == sched::ThreadState::Blocked)
-        sched::wake(t);
+    LockGuard guard(p->thread_lock);
+    for (sched::Thread* t : p->threads)
+        if (t->state == sched::ThreadState::Blocked)
+            sched::wake(t);
+}
+
+// The whole process is going away (exit_group, fatal signal, execve): this thread must exit.
+bool must_exit(proc::Process* p, sched::Thread* t) {
+    return p->group_exiting || (p->zap_except && p->zap_except != t);
 }
 
 constexpr u64 FIX_EFLAGS = 0x50DD5; // AC OF DF TF SF ZF AF PF CF RF: what sigreturn may change
@@ -90,11 +97,22 @@ constexpr u64 FIX_EFLAGS = 0x50DD5; // AC OF DF TF SF ZF AF PF CF RF: what sigre
 void send(proc::Process* p, int sig) {
     if (!p || sig < 1 || sig > proc::MAX_SIGNALS || p->state == proc::State::Zombie)
         return;
-    if (is_ignored(p, sig) && !(p->sigmask & bit(sig)))
+    if (is_ignored(p, sig))
         return; // would be discarded on delivery anyway
     __atomic_or_fetch(&p->sig_pending, bit(sig), __ATOMIC_RELEASE);
     wake_process(p);
 }
+
+void send_thread(sched::Thread* t, int sig) {
+    proc::Process* p = t->process;
+    if (!p || sig < 1 || sig > proc::MAX_SIGNALS || is_ignored(p, sig))
+        return;
+    __atomic_or_fetch(&t->sig_pending, bit(sig), __ATOMIC_RELEASE);
+    if (t->state == sched::ThreadState::Blocked)
+        sched::wake(t);
+}
+
+void wake_all_threads(proc::Process* p) { wake_process(p); }
 
 void send_to_group(int pgid, int sig) {
     struct Ctx {
@@ -110,15 +128,20 @@ void send_to_group(int pgid, int sig) {
 bool pending(proc::Process* p) {
     if (!p)
         return false;
-    u64 pend = __atomic_load_n(&p->sig_pending, __ATOMIC_ACQUIRE);
-    u64 deliverable = pend & (~p->sigmask | UNBLOCKABLE);
+    sched::Thread* t = sched::current();
+    if (must_exit(p, t))
+        return true;
+    u64 pend = __atomic_load_n(&p->sig_pending, __ATOMIC_ACQUIRE) | __atomic_load_n(&t->sig_pending, __ATOMIC_ACQUIRE);
+    u64 deliverable = pend & (~t->sigmask | UNBLOCKABLE);
     while (deliverable) {
         int sig = __builtin_ctzll(deliverable) + 1;
         deliverable &= ~bit(sig);
-        if (is_ignored(p, sig))
+        if (is_ignored(p, sig)) {
             __atomic_and_fetch(&p->sig_pending, ~bit(sig), __ATOMIC_RELEASE);
-        else
+            __atomic_and_fetch(&t->sig_pending, ~bit(sig), __ATOMIC_RELEASE);
+        } else {
             return true;
+        }
     }
     return false;
 }
@@ -129,15 +152,28 @@ void deliver(interrupts::Frame* frame) {
     proc::Process* p = proc::current();
     if (!pending(p))
         return;
+    sched::Thread* t = sched::current();
+    if (must_exit(p, t)) {
+        arch::sti();
+        proc::exit_thread(0); // another thread ended the process (or is exec'ing)
+    }
 
-    u64 pend = __atomic_load_n(&p->sig_pending, __ATOMIC_ACQUIRE) & (~p->sigmask | UNBLOCKABLE);
-    int sig = __builtin_ctzll(pend) + 1;
-    __atomic_and_fetch(&p->sig_pending, ~bit(sig), __ATOMIC_RELEASE);
+    // Thread-directed signals first, then process-wide ones.
+    u64 mine = __atomic_load_n(&t->sig_pending, __ATOMIC_ACQUIRE) & (~t->sigmask | UNBLOCKABLE);
+    u64 shared = __atomic_load_n(&p->sig_pending, __ATOMIC_ACQUIRE) & (~t->sigmask | UNBLOCKABLE);
+    int sig;
+    if (mine) {
+        sig = __builtin_ctzll(mine) + 1;
+        __atomic_and_fetch(&t->sig_pending, ~bit(sig), __ATOMIC_RELEASE);
+    } else {
+        sig = __builtin_ctzll(shared) + 1;
+        __atomic_and_fetch(&p->sig_pending, ~bit(sig), __ATOMIC_RELEASE);
+    }
     proc::SigAction act = p->sigactions[sig];
 
     if (act.handler == SIG_DFL || sig == SIGKILL) {
         arch::sti();
-        proc::exit_current(sig); // default action: terminate ("killed by signal")
+        proc::exit_group(sig); // default action: terminate the whole process ("killed by signal")
     }
 
     // A syscall interrupted by this signal: restart it transparently if the
@@ -147,7 +183,6 @@ void deliver(interrupts::Frame* frame) {
         frame->rip -= 2; // back over the 2-byte `syscall` instruction
     }
 
-    sched::Thread* t = sched::current();
     usize fp_size = fpu::state_size();
     uptr sp = frame->rsp - 128;                      // skip the red zone
     sp = align_down<uptr>(sp - fp_size, 64);         // FPU/AVX state
@@ -163,9 +198,9 @@ void deliver(interrupts::Frame* frame) {
     c.rdx = frame->rdx; c.rax = frame->rax; c.rcx = frame->rcx; c.rsp = frame->rsp;
     c.rip = frame->rip; c.eflags = frame->rflags;
     c.cs = gdt::USER_CODE; c.ss = gdt::USER_DATA;
-    c.oldmask = p->sigmask;
+    c.oldmask = t->sigmask;
     c.fpstate = fp_addr;
-    f.uc.sigmask = p->sigmask;
+    f.uc.sigmask = t->sigmask;
     f.info.si_signo = sig;
 
     fpu::save(t->fpu_state);
@@ -175,10 +210,10 @@ void deliver(interrupts::Frame* frame) {
         proc::exit_current(SIGSEGV); // can't build the frame: like Linux, the process dies
     }
 
-    p->sigmask |= act.mask;
+    t->sigmask |= act.mask;
     if (!(act.flags & SA_NODEFER))
-        p->sigmask |= bit(sig);
-    p->sigmask &= ~UNBLOCKABLE;
+        t->sigmask |= bit(sig);
+    t->sigmask &= ~UNBLOCKABLE;
     if (act.flags & SA_RESETHAND)
         p->sigactions[sig].handler = SIG_DFL;
 
@@ -193,7 +228,6 @@ void deliver(interrupts::Frame* frame) {
 }
 
 long sigreturn(interrupts::Frame* frame) {
-    proc::Process* p = proc::current();
     sched::Thread* t = sched::current();
     uptr base = frame->rsp - 8; // the handler's `ret` popped pretcode
 
@@ -213,7 +247,7 @@ long sigreturn(interrupts::Frame* frame) {
     frame->cs = gdt::USER_CODE;
     frame->ss = gdt::USER_DATA;
     frame->vector = 0; // not a restartable syscall frame any more
-    p->sigmask = f.uc.sigmask & ~UNBLOCKABLE;
+    t->sigmask = f.uc.sigmask & ~UNBLOCKABLE;
 
     if (c.fpstate) {
         usize size = fpu::state_size();

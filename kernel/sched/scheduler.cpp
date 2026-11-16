@@ -421,11 +421,23 @@ void sleep_ns(u64 ns) {
     lock.unlock();
 }
 
-void timer_tick() {
+void timer_tick(bool from_user) {
     Cpu* cpu = this_cpu();
     cpu->ticks++;
     if (!cpu->online)
         return;
+
+    // CPU time accounting: who was running when the tick hit?
+    Thread* running = cpu->current;
+    if (running == cpu->rq.idle) {
+        cpu->idle_ticks++;
+    } else if (from_user) {
+        cpu->user_ticks++;
+        running->utime_ticks++;
+    } else {
+        cpu->system_ticks++;
+        running->stime_ticks++;
+    }
 
     u64 now = clock::now_ns();
     RunQueue& rq = cpu->rq;
@@ -466,7 +478,7 @@ void prepare_cpu(Cpu* cpu) {
 }
 
 void init() {
-    interrupts::set_handler(interrupts::VEC_TIMER, [](interrupts::Frame*) { timer_tick(); });
+    interrupts::set_handler(interrupts::VEC_TIMER, [](interrupts::Frame* f) { timer_tick(f->cs & 3); });
     interrupts::set_handler(interrupts::VEC_RESCHEDULE, [](interrupts::Frame*) { this_cpu()->need_resched = true; });
     prepare_cpu(this_cpu());
     spawn("reaper", reaper_loop, nullptr, -1, true);

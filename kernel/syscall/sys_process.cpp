@@ -8,12 +8,14 @@
 #include <mm/layout.hpp>
 #include <mm/pmm.hpp>
 #include <mm/heap.hpp>
+#include <proc/futex.hpp>
 #include <proc/process.hpp>
 #include <proc/signal.hpp>
 #include <proc/uaccess.hpp>
 #include <sched/sched.hpp>
 #include <syscall/syscall.hpp>
 #include <time/clock.hpp>
+#include <time/rtc.hpp>
 
 namespace syscall {
 
@@ -26,8 +28,7 @@ using proc::Process;
 
 long sys_exit(SYSCALL_ARGS) {
     SYSCALL_UNUSED;
-    // Single-threaded processes: exiting the thread ends the process.
-    proc::exit_current(static_cast<int>(a0 & 0xFF) << 8);
+    proc::exit_thread(static_cast<int>(a0 & 0xFF)); // just this thread (the last one ends the process)
 }
 
 long sys_exit_group(SYSCALL_ARGS) {
@@ -42,7 +43,7 @@ long sys_getppid(SYSCALL_ARGS) {
     Process* parent = proc::current()->parent;
     return parent ? parent->pid : 1; // orphans belong to "init", as on Linux
 }
-long sys_gettid(SYSCALL_ARGS) { SYSCALL_UNUSED; return proc::current()->pid; } // one thread per process for now
+long sys_gettid(SYSCALL_ARGS) { SYSCALL_UNUSED; return sched::current()->user_tid; }
 long sys_getid(SYSCALL_ARGS) { SYSCALL_UNUSED; return 0; } // uid/gid/euid/egid: root
 long sys_setid(SYSCALL_ARGS) { SYSCALL_UNUSED; return 0; }
 
@@ -210,24 +211,23 @@ long sys_kill(SYSCALL_ARGS) {
 
 long sys_tgkill(SYSCALL_ARGS) {
     SYSCALL_UNUSED;
-    // One thread per process: the thread id is the process id.
     LockGuard guard(proc::table_lock());
-    Process* p = proc::find(static_cast<int>(a1));
-    if (!p)
+    sched::Thread* t = proc::find_thread(static_cast<int>(a1));
+    if (!t || !t->process || t->process->pid != static_cast<int>(a0))
         return -err::SRCH;
     if (a2)
-        signal::send(p, static_cast<int>(a2));
+        signal::send_thread(t, static_cast<int>(a2));
     return 0;
 }
 
 long sys_tkill(SYSCALL_ARGS) {
     SYSCALL_UNUSED;
     LockGuard guard(proc::table_lock());
-    Process* p = proc::find(static_cast<int>(a0));
-    if (!p)
+    sched::Thread* t = proc::find_thread(static_cast<int>(a0));
+    if (!t)
         return -err::SRCH;
     if (a1)
-        signal::send(p, static_cast<int>(a1));
+        signal::send_thread(t, static_cast<int>(a1));
     return 0;
 }
 
@@ -242,18 +242,18 @@ long sys_pause(SYSCALL_ARGS) {
 
 long sys_rt_sigsuspend(SYSCALL_ARGS) {
     SYSCALL_UNUSED;
-    Process* p = proc::current();
+    sched::Thread* t = sched::current();
     u64 mask;
     if (long r = uaccess::get(&mask, reinterpret_cast<const u64*>(a0)); r < 0)
         return r;
-    u64 old = p->sigmask;
-    p->sigmask = mask & ~((1ull << 8) | (1ull << 18)); // never block SIGKILL / SIGSTOP
+    u64 old = t->sigmask;
+    t->sigmask = mask & ~((1ull << 8) | (1ull << 18)); // never block SIGKILL / SIGSTOP
     sched::WaitQueue wq;
     wq.wait_until([] { return signal::interrupted(); });
     // The handler must run with the temporary mask; restored when it returns.
     // TODO: save `old` in the signal frame instead of restoring it here.
     signal::deliver(frame);
-    p->sigmask = old;
+    t->sigmask = old;
     return -err::INTR;
 }
 
@@ -292,7 +292,7 @@ long sys_arch_prctl(SYSCALL_ARGS) {
 long sys_set_tid_address(SYSCALL_ARGS) {
     SYSCALL_UNUSED;
     sched::current()->clear_child_tid = a0;
-    return proc::current()->pid;
+    return sched::current()->user_tid;
 }
 
 long sys_set_robust_list(SYSCALL_ARGS) { SYSCALL_UNUSED; return 0; }
@@ -341,9 +341,9 @@ long sys_rt_sigaction(SYSCALL_ARGS) {
 long sys_rt_sigprocmask(SYSCALL_ARGS) {
     SYSCALL_UNUSED;
     constexpr int SIG_BLOCK = 0, SIG_UNBLOCK = 1, SIG_SETMASK = 2;
-    Process* p = proc::current();
+    sched::Thread* t = sched::current();
     if (a2) {
-        if (long r = uaccess::put(reinterpret_cast<u64*>(a2), p->sigmask); r < 0)
+        if (long r = uaccess::put(reinterpret_cast<u64*>(a2), t->sigmask); r < 0)
             return r;
     }
     if (a1) {
@@ -351,9 +351,9 @@ long sys_rt_sigprocmask(SYSCALL_ARGS) {
         if (long r = uaccess::get(&set, reinterpret_cast<const u64*>(a1)); r < 0)
             return r;
         switch (static_cast<int>(a0)) {
-        case SIG_BLOCK:   p->sigmask |= set; break;
-        case SIG_UNBLOCK: p->sigmask &= ~set; break;
-        case SIG_SETMASK: p->sigmask = set; break;
+        case SIG_BLOCK:   t->sigmask |= set; break;
+        case SIG_UNBLOCK: t->sigmask &= ~set; break;
+        case SIG_SETMASK: t->sigmask = set; break;
         default:          return -err::INVAL;
         }
     }
@@ -421,6 +421,16 @@ long sys_sysinfo(SYSCALL_ARGS) {
     return uaccess::put(reinterpret_cast<SysInfo*>(a0), info);
 }
 
+long sys_getcpu(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    u32 cpu = this_cpu()->index;
+    if (a0 && uaccess::put(reinterpret_cast<u32*>(a0), cpu) < 0)
+        return -err::FAULT;
+    if (a1 && uaccess::put(reinterpret_cast<u32*>(a1), 0u) < 0) // NUMA node
+        return -err::FAULT;
+    return 0;
+}
+
 long sys_sched_getaffinity(SYSCALL_ARGS) {
     SYSCALL_UNUSED;
     u32 cpus = percpu::online_count();
@@ -435,15 +445,51 @@ long sys_sched_getaffinity(SYSCALL_ARGS) {
 
 long sys_futex(SYSCALL_ARGS) {
     SYSCALL_UNUSED;
-    // Single-threaded processes never actually contend; WAKE has nobody to
-    // wake and WAIT would block forever. Real futexes arrive with threads.
-    constexpr u32 FUTEX_WAIT = 0, FUTEX_WAKE = 1;
-    u32 op = static_cast<u32>(a1) & 0x7F;
-    if (op == FUTEX_WAKE)
-        return 0;
-    if (op == FUTEX_WAIT)
-        return -err::AGAIN;
-    return -err::NOSYS;
+    constexpr u32 FUTEX_WAIT = 0, FUTEX_WAKE = 1, FUTEX_REQUEUE = 3, FUTEX_CMP_REQUEUE = 4,
+                  FUTEX_WAIT_BITSET = 9, FUTEX_WAKE_BITSET = 10;
+    constexpr u32 FUTEX_PRIVATE_FLAG = 128, FUTEX_CLOCK_REALTIME = 256;
+    u64 uaddr = a0;
+    u32 op = static_cast<u32>(a1);
+    u32 cmd = op & ~(FUTEX_PRIVATE_FLAG | FUTEX_CLOCK_REALTIME);
+    bool is_private = op & FUTEX_PRIVATE_FLAG;
+    u32 val = static_cast<u32>(a2);
+
+    switch (cmd) {
+    case FUTEX_WAIT:
+    case FUTEX_WAIT_BITSET: {
+        u64 deadline = 0;
+        if (a3) {
+            struct { i64 sec, nsec; } ts;
+            if (long r = uaccess::copy_from(&ts, reinterpret_cast<void*>(a3), sizeof(ts)); r < 0)
+                return r;
+            if (ts.sec < 0 || ts.nsec < 0 || ts.nsec >= 1'000'000'000)
+                return -err::INVAL;
+            u64 t = static_cast<u64>(ts.sec) * 1'000'000'000 + static_cast<u64>(ts.nsec);
+            if (cmd == FUTEX_WAIT) {
+                deadline = clock::now_ns() + t; // relative timeout
+            } else if (op & FUTEX_CLOCK_REALTIME) {
+                u64 real_now = rtc::realtime_ns(), mono_now = clock::now_ns();
+                deadline = t > real_now ? mono_now + (t - real_now) : mono_now; // absolute, wall clock
+            } else {
+                deadline = t; // absolute, CLOCK_MONOTONIC (our clock::now_ns)
+            }
+            if (deadline == 0)
+                deadline = 1; // 0 means "no timeout"
+        }
+        u32 bitset = cmd == FUTEX_WAIT ? ~0u : static_cast<u32>(a5);
+        return futex::wait(uaddr, val, deadline, bitset, is_private);
+    }
+    case FUTEX_WAKE:
+        return futex::wake(uaddr, static_cast<int>(val), ~0u, is_private);
+    case FUTEX_WAKE_BITSET:
+        return futex::wake(uaddr, static_cast<int>(val), static_cast<u32>(a5), is_private);
+    case FUTEX_REQUEUE:
+    case FUTEX_CMP_REQUEUE:
+        return futex::requeue(uaddr, a4, static_cast<int>(val), static_cast<int>(a3), cmd == FUTEX_CMP_REQUEUE,
+                              static_cast<u32>(a5), is_private);
+    default:
+        return -err::NOSYS;
+    }
 }
 
 } // namespace
@@ -493,6 +539,7 @@ void register_process() {
     set(273, sys_set_robust_list, "set_robust_list");
     set(302, sys_prlimit64, "prlimit64");
     set(318, sys_getrandom, "getrandom");
+    set(309, sys_getcpu, "getcpu");
     set(334, sys_quiet_nosys, "rseq");
 }
 

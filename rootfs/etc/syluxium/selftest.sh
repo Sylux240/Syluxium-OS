@@ -50,5 +50,15 @@ after" ]'
 check "kill a sleeping process (SIGTERM)"   sh -c 'sleep 10 & p=$!; kill $p; wait $p; [ $? -eq 143 ]'
 check "SIGPIPE when the reader is gone"     sh -c 'yes | head -n 3 >/dev/null'
 
+# --- /proc and /sys ---
+check "/proc/self/exe points at the program" sh -c 'readlink /proc/self/exe | grep -q -e readlink -e busybox'
+check "/proc/cpuinfo lists every CPU"       sh -c '[ "$(grep -c ^processor /proc/cpuinfo)" -eq "$(nproc)" ]'
+check "/proc/meminfo has MemTotal"          sh -c 'grep -q "^MemTotal:" /proc/meminfo'
+check "ps sees this shell"                  sh -c 'ps | grep -q selftest'
+check "/proc/<pid>/cmdline"                 sh -c 'sleep 3 & p=$!; tr "\\0" " " < /proc/$p/cmdline | grep -q "^sleep 3"; r=$?; kill $p; exit $r'
+check "/proc/<pid>/fd lists open files"     sh -c 'exec 7</etc/hostname; [ "$(readlink /proc/$$/fd/7)" = /etc/hostname ]'
+check "free / uptime work"                  sh -c 'free >/dev/null && uptime >/dev/null'
+check "/sys/devices/system/cpu/online"      sh -c 'grep -q "^0" /sys/devices/system/cpu/online'
+
 echo "selftest: $pass passed, $fail failed"
 exit $fail

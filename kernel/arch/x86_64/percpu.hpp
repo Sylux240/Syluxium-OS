@@ -37,6 +37,7 @@ struct alignas(64) Cpu {
     // Statistics.
     u64 ticks = 0;
     u64 context_switches = 0;
+    u64 user_ticks = 0, system_ticks = 0, idle_ticks = 0; // for /proc/stat and CPU usage graphs
 };
 
 static_assert(__builtin_offsetof(Cpu, self) == cpu_local::OFFSET_SELF);

@@ -70,8 +70,9 @@ tools/smoke-test.sh   headless QEMU boot: serial log + screenshot
 - [x] **Phase 4a**: user mode, Linux syscall ABI (core set), static ELF loader, VFS, ramfs, initramfs, /dev, tty
 - [x] **Phase 4b**: fork/exec/wait (copy-on-write), pipes, signals, poll/select, dynamic linker,
       PS/2 keyboard, VT100 console, interactive Debian bash shell
-- [ ] **Phase 4c**: threads (clone/futex), 32-bit compat syscalls, /proc (process list,
-      CPU/memory usage per process), /sys
+- [x] **Phase 4c**: threads (clone/futex, per-thread signals, TLB shootdown per address space),
+      /proc (processes, CPU/memory accounting, cpuinfo, meminfo, stat, ...), /sys (CPUs)
+- [ ] **Phase 4d** (before phase 10): 32-bit (ia32) program support, needed by Steam
 - [ ] **Phase 5**: PCI, AHCI/NVMe, USB (xHCI) keyboard/mouse/storage, driver model with a
       device registry (every device: name, vendor, driver, status, resources), ext4 so files persist
 - [ ] **Phase 6**: wired networking: virtio-net/e1000/Realtek, Ethernet/ARP/IPv4/IPv6/UDP/TCP, DHCP, DNS
@@ -120,9 +121,10 @@ Legend: ✅ done · 🟡 partly done · ⬜ to do
 - ✅ Memory management, interrupts, APIC timer, preemptive SMP scheduler
 - ✅ Processes, user/kernel split, Linux system calls (core set)
 - ✅ Pipes, signals
-- ⬜ User-space threads + futexes
+- ✅ User-space threads + futexes
 - ⬜ Shared memory, Unix domain sockets
-- ⬜ /proc and /sys
+- ✅ /proc (process list, per-process CPU/memory, cpuinfo, meminfo, stat) and /sys (CPUs;
+     devices come with the phase 5 driver model)
 - ⬜ 32-bit (ia32) program support
 - 🟡 High-resolution timers: ns clock done; precise timer interrupts to do
 
@@ -175,4 +177,4 @@ Legend: ✅ done · 🟡 partly done · ⬜ to do
 - ⬜ Power management: sleep, battery, CPU frequency scaling
 - ⬜ Updates and recovery
 
-Tally: 12 done · 6 partly done · 39 to do.
+Tally: 14 done · 6 partly done · 37 to do.

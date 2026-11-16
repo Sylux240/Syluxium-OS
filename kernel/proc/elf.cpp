@@ -293,15 +293,24 @@ long load(proc::Memory* mem, vfs::Inode* file, const char* exec_path, const char
     for (usize i = argc; i-- > 0;)
         sb.push_u64(arg_ptrs[i]);
     sb.push_u64(argc);
-    kfree(env_ptrs);
 
-    if (!sb.ok())
+    if (!sb.ok()) {
+        kfree(env_ptrs);
         return -err::TOOBIG;
-    if ((r = sb.commit(mem)) < 0)
+    }
+    if ((r = sb.commit(mem)) < 0) {
+        kfree(env_ptrs);
         return r;
+    }
 
+    // Strings were pushed top-down: argv, then envp, then the exec path above them.
+    mem->arg_start = argc ? arg_ptrs[0] : execfn;
+    mem->arg_end = envc ? env_ptrs[0] : execfn;
+    mem->env_start = mem->arg_end;
+    mem->env_end = execfn;
     out->entry = start_entry;
     out->stack_ptr = sb.sp();
+    kfree(env_ptrs);
     return 0;
 }
 

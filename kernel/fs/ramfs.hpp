@@ -17,6 +17,7 @@ public:
 
     // Attach an existing inode under `name`.
     long attach(const char* name, usize len, vfs::Inode* node);
+    usize child_count() const { return m_count; }
 
 private:
     struct Child {

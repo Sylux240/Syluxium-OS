@@ -68,9 +68,11 @@ void init();
 // Per-CPU setup on an application processor (PAT, global pages, NX, CR3).
 void init_ap();
 
-// Make other CPUs drop stale TLB entries for kernel pages after an unmap.
-// Must be called with interrupts enabled (it waits for the other CPUs).
-void shootdown(uptr start, usize pages);
+// Make other CPUs drop stale TLB entries after an unmap/protect. For kernel
+// mappings (user == nullptr) every CPU is told; for a user address space
+// only CPUs currently running it (others reload CR3, which flushes, before
+// they use it again). Must be called with interrupts enabled.
+void shootdown(uptr start, usize pages, const AddressSpace* user = nullptr);
 
 // Drop one reference to a page that was mapped into user space; frees it
 // with the last reference.

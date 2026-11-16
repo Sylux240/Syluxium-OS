@@ -83,6 +83,8 @@ private:
     long m_error;
 };
 
+void join_path(const char* cwd, const char* path, char* out, usize out_size);
+
 // Directory a *at() call is relative to.
 long dir_for(Process* p, long dirfd, const char* path, Inode** out) {
     if (path[0] == '/' || dirfd == AT_FDCWD) {
@@ -187,6 +189,20 @@ long do_openat(long dirfd, u64 user_path, u32 flags, u32 mode) {
         inode->truncate(0);
 
     File* f = open_inode(inode, flags & ~(O_CREAT | O_EXCL | O_TRUNC | O_NOCTTY | O_CLOEXEC));
+    {
+        char abs[512];
+        const char* base_path = p->cwd_path;
+        char dir_path[512];
+        if (path.c_str()[0] != '/' && dirfd != AT_FDCWD) {
+            FileRef dir(p, dirfd);
+            if (dir && dir->path) {
+                snprintf(dir_path, sizeof(dir_path), "%s", dir->path);
+                base_path = dir_path;
+            }
+        }
+        join_path(base_path, path.c_str(), abs, sizeof(abs));
+        file_set_path(f, abs);
+    }
     long fd = proc::fd_install(p, f, 0, flags & O_CLOEXEC);
     if (fd < 0)
         file_put(f);
@@ -668,6 +684,10 @@ long sys_pipe2(SYSCALL_ARGS) {
     File *rd, *wr;
     if (long r = pipe::create(static_cast<u32>(a1), &rd, &wr); r < 0)
         return r;
+    char name[48];
+    snprintf(name, sizeof(name), "pipe:[%lu]", rd->inode->ino);
+    file_set_path(rd, name);
+    file_set_path(wr, name);
     bool cloexec = a1 & O_CLOEXEC;
     long fd0 = proc::fd_install(p, rd, 0, cloexec);
     if (fd0 < 0) {

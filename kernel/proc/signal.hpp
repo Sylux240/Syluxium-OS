@@ -6,6 +6,9 @@
 namespace proc {
 struct Process;
 }
+namespace sched {
+struct Thread;
+}
 
 // POSIX signals with Linux numbering and Linux's x86_64 signal-frame layout,
 // so glibc's handlers and sigreturn trampolines work unmodified.
@@ -19,6 +22,8 @@ constexpr int SIGHUP = 1, SIGINT = 2, SIGQUIT = 3, SIGILL = 4, SIGTRAP = 5, SIGA
 // Queue a signal for a process and wake it if it's sleeping. Interrupt-safe.
 void send(proc::Process* p, int sig);
 void send_to_group(int pgid, int sig);
+void send_thread(sched::Thread* t, int sig); // tgkill: to one specific thread
+void wake_all_threads(proc::Process* p);     // make every sleeping thread re-check (group exit)
 
 // Does `p` have a signal that would actually do something if delivered?
 // Discards pending signals that are ignored.

@@ -1,6 +1,7 @@
 #include <fs/ramfs.hpp>
 #include <fs/vfs.hpp>
 #include <lib/string.hpp>
+#include <mm/heap.hpp>
 #include <time/clock.hpp>
 #include <time/rtc.hpp>
 
@@ -203,11 +204,20 @@ File* open_inode(Inode* inode, u32 flags) {
     return f;
 }
 
+void file_set_path(File* f, const char* path) {
+    kfree(f->path);
+    usize n = strlen(path);
+    f->path = static_cast<char*>(kmalloc(n + 1));
+    if (f->path)
+        memcpy(f->path, path, n + 1);
+}
+
 void file_get(File* f) { __atomic_add_fetch(&f->refcount, 1, __ATOMIC_RELAXED); }
 
 void file_put(File* f) {
     if (__atomic_sub_fetch(&f->refcount, 1, __ATOMIC_ACQ_REL) == 0) {
         f->inode->on_release(f);
+        kfree(f->path);
         delete f;
     }
 }

@@ -54,9 +54,16 @@ Memory* Memory::fork() {
             if (flags & vmm::WRITE)
                 m_as->protect(page, shared_flags);
             as->map(page, phys, shared_flags);
+            child->m_rss++;
         }
     }
-    // TODO(threads): other CPUs running this address space need a TLB shootdown here.
+    // Our other threads may still hold writable TLB entries for the pages we
+    // just made copy-on-write: flush them everywhere this space is running.
+    vmm::shootdown(0, ~usize(0) >> 1, m_as);
+    child->arg_start = arg_start;
+    child->arg_end = arg_end;
+    child->env_start = env_start;
+    child->env_end = env_end;
     return child;
 }
 
@@ -68,7 +75,8 @@ bool Memory::copy_on_write(Vma* v, uptr page) {
     u32 flags = prot_to_map_flags(v->prot);
 
     if (__atomic_load_n(&f->refcount, __ATOMIC_ACQUIRE) == 1) {
-        // Last user of the page: just make it writable again.
+        // Last user of the page: just make it writable again (upgrading
+        // permissions needs no shootdown: stale entries just fault again).
         return m_as->protect(page, flags);
     }
     u64 new_phys = pmm::alloc_page();
@@ -76,8 +84,10 @@ bool Memory::copy_on_write(Vma* v, uptr page) {
         return false;
     memcpy(mm::phys_to_virt(new_phys), mm::phys_to_virt(old_phys), PAGE_SIZE);
     m_as->unmap(page);
+    bool ok = m_as->map(page, new_phys, flags);
+    vmm::shootdown(page, 1, m_as);
     vmm::release_user_page(old_phys);
-    return m_as->map(page, new_phys, flags);
+    return ok;
 }
 
 Vma* Memory::find(uptr addr) {
@@ -155,10 +165,7 @@ void Memory::remove_range(uptr start, uptr end) {
             split(v, end);
             next = m_vmas.next_of(v);
         }
-        for (uptr page = v->start; page < v->end; page += PAGE_SIZE) {
-            if (u64 phys = m_as->unmap(page))
-                vmm::release_user_page(phys);
-        }
+        unmap_pages(v->start, v->end);
         m_vmas.remove(v);
         delete v;
         v = next;
@@ -243,6 +250,7 @@ long Memory::protect(uptr addr, usize len, u32 prot) {
         u32 flags = prot_to_map_flags(prot);
         for (uptr page = v->start; page < v->end; page += PAGE_SIZE)
             m_as->protect(page, flags); // only affects pages already present
+        vmm::shootdown(v->start, (v->end - v->start) / PAGE_SIZE, m_as);
     }
     return 0;
 }
@@ -273,10 +281,7 @@ long Memory::brk(uptr new_end) {
                 delete heap;
         }
     } else if (new_top < old_top && heap) {
-        for (uptr page = new_top; page < old_top; page += PAGE_SIZE) {
-            if (u64 phys = m_as->unmap(page))
-                vmm::release_user_page(phys);
-        }
+        unmap_pages(new_top, old_top);
         heap->end = new_top;
         if (heap->end <= heap->start) {
             m_vmas.remove(heap);
@@ -306,7 +311,56 @@ bool Memory::populate(Vma* v, uptr page) {
         pmm::free_page(phys);
         return false;
     }
+    __atomic_add_fetch(&m_rss, 1, __ATOMIC_RELAXED);
     return true;
+}
+
+void Memory::unmap_pages(uptr start, uptr end) {
+    constexpr usize BATCH = 64;
+    u64 phys[BATCH];
+    for (uptr chunk = start; chunk < end;) {
+        usize n = 0;
+        uptr chunk_start = chunk;
+        for (; n < BATCH && chunk < end; chunk += PAGE_SIZE)
+            phys[n++] = m_as->unmap(chunk);
+        // No CPU may still reach these pages through its TLB once we free them.
+        vmm::shootdown(chunk_start, n, m_as);
+        for (usize i = 0; i < n; i++) {
+            if (phys[i]) {
+                vmm::release_user_page(phys[i]);
+                __atomic_sub_fetch(&m_rss, 1, __ATOMIC_RELAXED);
+            }
+        }
+    }
+}
+
+usize Memory::read_remote(uptr addr, void* out, usize len) {
+    LockGuard guard(m_lock);
+    auto* dst = static_cast<u8*>(out);
+    usize done = 0;
+    while (done < len) {
+        u64 phys;
+        if (!m_as || !m_as->translate(addr + done, &phys))
+            break;
+        usize chunk = min<usize>(len - done, PAGE_SIZE - ((addr + done) & (PAGE_SIZE - 1)));
+        memcpy(dst + done, mm::phys_to_virt(phys), chunk);
+        done += chunk;
+    }
+    return done;
+}
+
+u64 Memory::virtual_size() {
+    LockGuard guard(m_lock);
+    u64 total = 0;
+    for (Vma* v : m_vmas)
+        total += v->end - v->start;
+    return total;
+}
+
+void Memory::for_each_vma(void (*fn)(const Vma&, void*), void* ctx) {
+    LockGuard guard(m_lock);
+    for (Vma* v : m_vmas)
+        fn(*v, ctx);
 }
 
 bool Memory::fault(uptr addr, bool write) {
