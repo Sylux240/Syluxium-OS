@@ -79,12 +79,49 @@ struct Endpoint {
     u16 port = 0;
 };
 
+constexpr u16 AF_UNIX = 1, AF_NETLINK = 16;
+constexpr int SOCK_SEQPACKET = 5;
+constexpr int MSG_CTRUNC = 0x8, MSG_EOR = 0x80, MSG_CMSG_CLOEXEC = 0x40000000;
+constexpr long EPROTOTYPE = 91, ENOPROTOOPT = 92, EAFNOSUPPORT = 97;
+
+// A socket address exactly as programs pass it (struct sockaddr_storage).
+// Families other than AF_INET (Unix paths, netlink port ids) are
+// interpreted by the socket itself.
+struct SockAddr {
+    u32 len = 0;
+    u8 data[128] = {};
+    u16 family() const { return len >= 2 ? static_cast<u16>(data[0] | (data[1] << 8)) : AF_UNSPEC; }
+};
+
+// struct ucred (SCM_CREDENTIALS, SO_PEERCRED).
+struct Ucred {
+    i32 pid = 0;
+    u32 uid = 0, gid = 0;
+};
+
+// Ancillary data of sendmsg/recvmsg (control messages); only AF_UNIX
+// sockets carry it. `files` is a heap array of file references owned by
+// whoever holds the Control; release_control() drops them.
+struct Control {
+    vfs::File** files = nullptr; // SCM_RIGHTS
+    int nfiles = 0;
+    bool has_cred = false;       // SCM_CREDENTIALS
+    Ucred cred;
+};
+void release_control(Control& c);
+Ucred current_cred();
+
+// Socket option hooks return this when they don't handle an option, so the
+// generic SOL_SOCKET code runs instead.
+constexpr long OPT_UNHANDLED = 1;
+
 class Socket : public vfs::Inode {
 public:
-    Socket(int type, int protocol);
+    Socket(int type, int protocol, u16 domain = AF_INET);
     ~Socket() override = default;
 
     int type, protocol;
+    u16 domain;
     Endpoint local, remote;
     bool bound = false, connected = false;
     int error = 0;          // pending error (SO_ERROR), positive errno
@@ -106,6 +143,21 @@ public:
     virtual u16 poll_mask() = 0;
     virtual void close() = 0; // the last file reference is gone
     virtual usize bytes_available() { return 0; }
+
+    // Address-family-neutral entry points used by the system calls. The
+    // defaults translate sockaddr_in to Endpoint and call the operations
+    // above; Unix and netlink sockets override them.
+    virtual long bind_addr(const SockAddr& sa);
+    virtual long connect_addr(const SockAddr& sa, bool nonblock);
+    virtual long get_name(SockAddr* out, bool peer); // getsockname / getpeername
+    // `ctl` (may be null) carries control messages; a socket that keeps the
+    // passed files takes them out of `ctl` (sets nfiles to 0).
+    virtual isize send_msg(const u8* data, usize len, int flags, const SockAddr* to, Control* ctl, bool nonblock);
+    virtual isize recv_msg(u8* buf, usize len, int flags, SockAddr* from, Control* ctl, bool nonblock,
+                           usize* full_len);
+    // Per-family socket options; return OPT_UNHANDLED to fall back to the generic code.
+    virtual long set_option(int level, int name, const u8* val, u32 len) { return OPT_UNHANDLED; }
+    virtual long get_option(int level, int name, u8* val, u32* len) { return OPT_UNHANDLED; }
 
     // vfs::Inode plumbing
     bool seekable() const override { return false; }
@@ -145,6 +197,14 @@ long sock_wait(Socket* s, bool nonblock, u64 timeout_ns, Cond cond) {
     return intr && !cond() ? -err::INTR : 0;
 }
 
+// sockaddr_in <-> Endpoint (AF_INET only; -EAFNOSUPPORT / -EINVAL otherwise).
+long sockaddr_to_endpoint(const SockAddr& sa, Endpoint* out);
+void endpoint_to_sockaddr(const Endpoint& ep, SockAddr* out);
+
+Socket* create_unix(int type);
+long unix_socketpair(int type, Socket** a, Socket** b);
+Socket* create_netlink(int type, int protocol);
+
 Socket* create_udp(int type, int protocol);
 Socket* create_tcp();
 Socket* create_icmp(int type);
@@ -155,6 +215,7 @@ bool port_in_use(u8 proto, u32 addr, u16 port);
 
 // /proc/net/* contents.
 void proc_net_init();
+void unix_proc_init(); // /proc/net/unix
 void for_each_tcp(void (*fn)(Socket*, int state, void*), void* ctx);
 void for_each_udp(void (*fn)(Socket*, void*), void* ctx);
 

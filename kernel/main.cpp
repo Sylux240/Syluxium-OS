@@ -239,7 +239,10 @@ void run_userspace_tests() {
     static const char* const crash[] = {"/opt/syluxium/tests/crashtest", nullptr};
     static const char* const threads[] = {"/opt/syluxium/tests/threadtest", nullptr};
     static const char* const nettest[] = {"/opt/syluxium/tests/nettest", nullptr};
-    const Test sequential[] = {{hello, 0}, {systest, 0}, {crash, 11 /* SIGSEGV */}, {threads, 0}, {nettest, 0}};
+    static const char* const unixtest[] = {"/opt/syluxium/tests/unixtest", nullptr};
+    static const char* const nltest[] = {"/opt/syluxium/tests/nltest", nullptr};
+    const Test sequential[] = {{hello, 0},   {systest, 0},  {crash, 11 /* SIGSEGV */}, {threads, 0},
+                               {nettest, 0}, {unixtest, 0}, {nltest, 0}};
 
     for (const Test& t : sequential) {
         int status = run_program(t.argv);

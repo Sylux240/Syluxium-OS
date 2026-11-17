@@ -101,7 +101,7 @@ void proc_net_init() {
     vfs::add_node("/proc/net/udp", new genfs::GeneratedFile(gen_udp, nullptr));
     genfs::static_file("/proc/net/tcp6", "  sl  local_address                         remote_address                        st\n");
     genfs::static_file("/proc/net/udp6", "  sl  local_address                         remote_address                        st\n");
-    genfs::static_file("/proc/net/unix", "Num       RefCount Protocol Flags    Type St Inode Path\n");
+    unix_proc_init();
     vfs::mkdir_p("/etc");
     vfs::add_node("/etc/resolv.conf", new genfs::GeneratedFile(gen_resolv, nullptr, 0644));
 }
