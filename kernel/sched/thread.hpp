@@ -53,6 +53,10 @@ struct Thread {
     int user_tid = 0;                    // Linux thread id (shares the pid number space)
     u64 sig_pending = 0;                 // signals sent to this thread only (tgkill)
     u64 sigmask = 0;                     // blocked signals (per thread, as on Linux)
+    // ppoll/pselect/epoll_pwait: the mask to put back on the way to user
+    // mode (or, if a handler runs, when it returns via sigreturn).
+    u64 saved_sigmask = 0;
+    bool restore_sigmask = false;
     u64 futex_key_a = 0, futex_key_b = 0;// futex this thread sleeps on
     u32 futex_bitset = 0;
     u64 utime_ticks = 0, stime_ticks = 0;// CPU time (scheduler ticks) in user / kernel mode

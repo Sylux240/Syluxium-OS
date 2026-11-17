@@ -250,8 +250,12 @@ void file_set_path(File* f, const char* path) {
 
 void file_get(File* f) { __atomic_add_fetch(&f->refcount, 1, __ATOMIC_RELAXED); }
 
+void (*file_release_hook)(File* f) = nullptr;
+
 void file_put(File* f) {
     if (__atomic_sub_fetch(&f->refcount, 1, __ATOMIC_ACQ_REL) == 0) {
+        if (file_release_hook)
+            file_release_hook(f);
         f->inode->on_release(f);
         kfree(f->path);
         delete f;

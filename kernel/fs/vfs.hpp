@@ -49,6 +49,7 @@ public:
     u64 ino = 0;
     u32 mode = 0;
     u32 nlink = 1;
+    u8 anon_kind = 0; // anonymous-inode files (eventfd, epoll, memfd...): which kind, 0 = none
     u32 uid = 0;
     u32 gid = 0;
     u64 size = 0;
@@ -167,6 +168,9 @@ long remove_node(const char* path);            // unplugged device: drop its /de
 File* open_inode(Inode* inode, u32 flags);
 void file_get(File* f);
 void file_put(File* f);
+// Called just before a file's last reference goes away (epoll uses it to
+// drop the file from every set watching it). Set once at boot.
+extern void (*file_release_hook)(File* f);
 
 u64 next_ino();
 Timespec now();

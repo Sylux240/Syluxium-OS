@@ -250,13 +250,14 @@ void run_userspace_tests() {
     static const char* const unixtest[] = {"/opt/syluxium/tests/unixtest", nullptr};
     static const char* const nltest[] = {"/opt/syluxium/tests/nltest", nullptr};
     static const char* const ip6test[] = {"/opt/syluxium/tests/ip6test", nullptr};
+    static const char* const eventtest[] = {"/opt/syluxium/tests/eventtest", nullptr};
     // 32-bit (ia32) programs: static glibc tests, then dynamic Debian i386 binaries.
     static const char* const ia32test[] = {"/opt/syluxium/tests/ia32test", nullptr};
     static const char* const ia32threads[] = {"/opt/syluxium/tests/ia32threads", nullptr};
     static const char* const ia32dynamic[] = {"/bin/sh", "/etc/syluxium/selftest-ia32.sh", nullptr};
     const Test sequential[] = {{hello, 0},       {systest, 0},     {crash, 11 /* SIGSEGV */}, {threads, 0},
                                {nettest, 0},     {unixtest, 0},    {nltest, 0},              {ip6test, 0},
-                               {ia32test, 0},    {ia32threads, 0}, {ia32dynamic, 0}};
+                               {eventtest, 0},   {ia32test, 0},    {ia32threads, 0},          {ia32dynamic, 0}};
 
     for (const Test& t : sequential) {
         int status = run_program(t.argv);

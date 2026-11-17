@@ -32,6 +32,11 @@ bool pending(proc::Process* p);
 // For blocking system calls: should the current wait end with -EINTR?
 bool interrupted();
 
+// signalfd: signals pending for the calling thread (its own + process-wide),
+// and taking one of them (lowest number in `mask`; 0 if none).
+u64 pending_set();
+int dequeue(u64 mask);
+
 // On the way back to user mode: run the default action or set up a
 // handler frame on the user stack.
 void deliver(interrupts::Frame* frame);

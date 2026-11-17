@@ -786,7 +786,17 @@ long sys_ppoll(SYSCALL_ARGS) {
             return r;
         timeout = static_cast<u64>(ts.sec) * 1'000'000'000 + static_cast<u64>(ts.nsec);
     }
-    // TODO: apply the temporary signal mask (a3) while waiting.
+    if (a3) { // temporary signal mask while waiting (restored on the way back to user mode)
+        if (a4 != 8)
+            return -err::INVAL;
+        u64 mask;
+        if (long r = uaccess::get(&mask, reinterpret_cast<u64*>(a3)); r < 0)
+            return r;
+        sched::Thread* t = sched::current();
+        t->saved_sigmask = t->sigmask;
+        t->restore_sigmask = true;
+        t->sigmask = mask & ~((1ull << 8) | (1ull << 18)); // SIGKILL/SIGSTOP stay unblockable
+    }
     return poll_user(a0, a1, timeout);
 }
 
@@ -864,7 +874,22 @@ long sys_pselect6(SYSCALL_ARGS) {
             return r;
         timeout = static_cast<u64>(ts.sec) * 1'000'000'000 + static_cast<u64>(ts.nsec);
     }
-    // TODO: apply the temporary signal mask (a5) while waiting.
+    if (a5) { // struct { const sigset_t* ss; size_t ss_len; }: temporary signal mask
+        u64 arg[2];
+        if (long r = uaccess::copy_from(arg, reinterpret_cast<void*>(a5), sizeof(arg)); r < 0)
+            return r;
+        if (arg[0]) {
+            if (arg[1] != 8)
+                return -err::INVAL;
+            u64 mask;
+            if (long r = uaccess::get(&mask, reinterpret_cast<u64*>(arg[0])); r < 0)
+                return r;
+            sched::Thread* t = sched::current();
+            t->saved_sigmask = t->sigmask;
+            t->restore_sigmask = true;
+            t->sigmask = mask & ~((1ull << 8) | (1ull << 18));
+        }
+    }
     return do_select(a0, a1, a2, a3, timeout);
 }
 

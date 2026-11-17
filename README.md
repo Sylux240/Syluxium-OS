@@ -172,7 +172,7 @@ Legend: ✅ done · 🟡 partly done · ⬜ to do
 - ✅ Processes, user/kernel split, Linux system calls (core set)
 - ✅ Pipes, signals
 - ✅ User-space threads + futexes
-- ⬜ Shared memory, Unix domain sockets
+- 🟡 Unix domain sockets done; shared memory (memfd, POSIX/SysV shm) to do
 - ✅ /proc (process list, per-process CPU/memory, cpuinfo, meminfo, stat) and /sys (CPUs;
      devices come with the phase 5 driver model)
 - ✅ 32-bit (ia32) program support
@@ -186,8 +186,8 @@ Legend: ✅ done · 🟡 partly done · ⬜ to do
 - ✅ USB (xHCI, USB 2/3 hubs, hot-plug): keyboards, mice, tablets, gamepads, Xbox pads, storage
 - ✅ Input event interface (/dev/input/eventN, Linux evdev ABI) for games and the desktop
 - ✅ AHCI/SATA, NVMe (polled DMA; interrupts/NCQ later)
-- ⬜ Wired network cards
-- ⬜ Linux driver compatibility layer (shared by Wi-Fi and GPU)
+- ✅ Wired network cards: Intel e1000/e1000e, virtio-net, RTL8139 (Linux 8139cp), Realtek r8169 (untested)
+- 🟡 Linux driver compatibility layer (LinuxKPI): core + PCI + networking done, real Linux drivers run; USB, wireless and DRM parts to do
 - ⬜ Wi-Fi: Intel, Qualcomm, MediaTek, Realtek, Broadcom
 - 🟡 Audio: ALSA-compatible interface, Intel HDA, virtio-sound done; USB audio to do
 - ⬜ GPU: AMD + NVIDIA kernel drivers, DRM/KMS (resolution, refresh, multi-monitor, vsync,
@@ -239,4 +239,4 @@ Legend: ✅ done · 🟡 partly done · ⬜ to do
 - ⬜ Power management: sleep, battery, CPU frequency scaling
 - ⬜ Updates and recovery
 
-Tally: 24 done · 9 partly done · 32 to do.
+Tally: 25 done · 11 partly done · 29 to do.

@@ -1,3 +1,4 @@
+#include <fs/poll.hpp>
 #include <arch/x86_64/cpu.hpp>
 #include <arch/x86_64/fpu.hpp>
 #include <arch/x86_64/gdt.hpp>
@@ -105,22 +106,37 @@ void block_for_handler(proc::Process* p, sched::Thread* t, int sig, const proc::
 
 } // namespace
 
+// Linux keeps a signal whose default action is "ignore" pending while some
+// thread blocks it (that's how signalfd receives SIGCHLD). Explicit SIG_IGN
+// still discards it.
+bool blocked_somewhere(proc::Process* p, int sig) {
+    LockGuard guard(p->thread_lock);
+    for (sched::Thread* t : p->threads)
+        if (t->sigmask & bit(sig))
+            return true;
+    return false;
+}
+
 void send(proc::Process* p, int sig) {
     if (!p || sig < 1 || sig > proc::MAX_SIGNALS || p->state == proc::State::Zombie)
         return;
-    if (is_ignored(p, sig))
+    if (is_ignored(p, sig) && (p->sigactions[sig].handler == SIG_IGN || !blocked_somewhere(p, sig)))
         return; // would be discarded on delivery anyway
     __atomic_or_fetch(&p->sig_pending, bit(sig), __ATOMIC_RELEASE);
     wake_process(p);
+    poll::notify(); // signalfd readers
 }
 
 void send_thread(sched::Thread* t, int sig) {
     proc::Process* p = t->process;
-    if (!p || sig < 1 || sig > proc::MAX_SIGNALS || is_ignored(p, sig))
+    if (!p || sig < 1 || sig > proc::MAX_SIGNALS)
+        return;
+    if (is_ignored(p, sig) && (p->sigactions[sig].handler == SIG_IGN || !(t->sigmask & bit(sig))))
         return;
     __atomic_or_fetch(&t->sig_pending, bit(sig), __ATOMIC_RELEASE);
     if (t->state == sched::ThreadState::Blocked)
         sched::wake(t);
+    poll::notify();
 }
 
 void wake_all_threads(proc::Process* p) { wake_process(p); }
@@ -159,11 +175,43 @@ bool pending(proc::Process* p) {
 
 bool interrupted() { return pending(proc::current()); }
 
+u64 pending_set() {
+    proc::Process* p = proc::current();
+    sched::Thread* t = sched::current();
+    if (!p)
+        return 0;
+    return __atomic_load_n(&p->sig_pending, __ATOMIC_ACQUIRE) | __atomic_load_n(&t->sig_pending, __ATOMIC_ACQUIRE);
+}
+
+int dequeue(u64 mask) {
+    proc::Process* p = proc::current();
+    sched::Thread* t = sched::current();
+    if (!p)
+        return 0;
+    for (;;) {
+        u64 mine = __atomic_load_n(&t->sig_pending, __ATOMIC_ACQUIRE) & mask;
+        u64 shared = __atomic_load_n(&p->sig_pending, __ATOMIC_ACQUIRE) & mask;
+        u64* src = mine ? &t->sig_pending : &p->sig_pending;
+        u64 set = mine ? mine : shared;
+        if (!set)
+            return 0;
+        int sig = __builtin_ctzll(set) + 1;
+        // Only one taker wins when several threads race for the same signal.
+        if (__atomic_fetch_and(src, ~bit(sig), __ATOMIC_ACQ_REL) & bit(sig))
+            return sig;
+    }
+}
+
 void deliver(interrupts::Frame* frame) {
     proc::Process* p = proc::current();
-    if (!pending(p))
-        return;
     sched::Thread* t = sched::current();
+    if (!pending(p)) {
+        if (t->restore_sigmask) { // temporary mask of ppoll & co.: no signal came, put it back
+            t->sigmask = t->saved_sigmask;
+            t->restore_sigmask = false;
+        }
+        return;
+    }
     if (must_exit(p, t)) {
         arch::sti();
         proc::exit_thread(0); // another thread ended the process (or is exec'ing)
@@ -187,6 +235,11 @@ void deliver(interrupts::Frame* frame) {
         proc::exit_group(sig); // default action: terminate the whole process ("killed by signal")
     }
 
+    // The mask sigreturn restores: the one from before a temporary
+    // ppoll/pselect/epoll_pwait mask, if one is active.
+    u64 restore_mask = t->restore_sigmask ? t->saved_sigmask : t->sigmask;
+    t->restore_sigmask = false;
+
     // A syscall interrupted by this signal: restart it transparently if the
     // handler asked for SA_RESTART (orig syscall number is kept in error_code).
     if (frame->vector == 0x80 && static_cast<long>(frame->rax) == -err::INTR && (act.flags & SA_RESTART)) {
@@ -196,7 +249,7 @@ void deliver(interrupts::Frame* frame) {
 
     if (p->compat) {
         // 32-bit program: Linux's ia32 sigframe / rt_sigframe layout.
-        u64 blocked = t->sigmask;
+        u64 blocked = restore_mask;
         arch::sti(); // writing user memory may fault pages in (and sleep)
         if (!compat::setup_signal_frame(frame, sig, act, blocked))
             proc::exit_current(SIGSEGV);
@@ -219,9 +272,9 @@ void deliver(interrupts::Frame* frame) {
     c.rdx = frame->rdx; c.rax = frame->rax; c.rcx = frame->rcx; c.rsp = frame->rsp;
     c.rip = frame->rip; c.eflags = frame->rflags;
     c.cs = gdt::USER_CODE; c.ss = gdt::USER_DATA;
-    c.oldmask = t->sigmask;
+    c.oldmask = restore_mask;
     c.fpstate = fp_addr;
-    f.uc.sigmask = t->sigmask;
+    f.uc.sigmask = restore_mask;
     f.info.si_signo = sig;
 
     fpu::save(t->fpu_state);
