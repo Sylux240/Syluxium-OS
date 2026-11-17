@@ -27,7 +27,7 @@ constexpr u32 CTRL = 0x0000, STATUS = 0x0008, EERD = 0x0014, ICR = 0x00C0, IMS =
               RDH = 0x2810, RDT = 0x2818, TDBAL = 0x3800, TDBAH = 0x3804, TDLEN = 0x3808, TDH = 0x3810,
               TDT = 0x3818, MTA = 0x5200, RAL0 = 0x5400, RAH0 = 0x5404;
 constexpr u32 CTRL_SLU = 1u << 6, CTRL_ASDE = 1u << 5, CTRL_RST = 1u << 26;
-constexpr u32 RCTL_EN = 1u << 1, RCTL_BAM = 1u << 15, RCTL_SECRC = 1u << 26;
+constexpr u32 RCTL_EN = 1u << 1, RCTL_MPE = 1u << 4, RCTL_BAM = 1u << 15, RCTL_SECRC = 1u << 26;
 constexpr u32 TCTL_EN = 1u << 1, TCTL_PSP = 1u << 3;
 constexpr u8 TX_EOP = 1, TX_IFCS = 2, TX_RS = 8;
 constexpr u8 DESC_DD = 1, RX_EOP = 2;
@@ -152,7 +152,8 @@ public:
         wr(RDLEN, RX_COUNT * sizeof(RxDesc));
         wr(RDH, 0);
         wr(RDT, RX_COUNT - 1);
-        wr(RCTL, RCTL_EN | RCTL_BAM | RCTL_SECRC); // 2 KiB buffers (BSIZE 0)
+        // Multicast promiscuous: IPv6 neighbour discovery and router adverts use multicast.
+        wr(RCTL, RCTL_EN | RCTL_MPE | RCTL_BAM | RCTL_SECRC); // 2 KiB buffers (BSIZE 0)
 
         wr(TDBAL, static_cast<u32>(tx_phys));
         wr(TDBAH, static_cast<u32>(tx_phys >> 32));

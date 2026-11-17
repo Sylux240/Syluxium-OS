@@ -4,6 +4,7 @@
 #include <lib/string.hpp>
 #include <mm/heap.hpp>
 #include <mm/pmm.hpp>
+#include <proc/uaccess.hpp>
 #include <time/clock.hpp>
 #include <time/rtc.hpp>
 
@@ -217,6 +218,18 @@ long remove_node(const char* path) {
     if (long r = resolve_parent(path, nullptr, &parent, &name, &len); r < 0)
         return r;
     return parent->unlink(name, len, false);
+}
+
+long Inode::ioctl_file(File*, u64 request, u64 arg) {
+    // Linux encodes the argument size in bits 16-29 of most ioctl numbers;
+    // older terminal ioctls don't, and use at most a termios (36 bytes).
+    // Make sure the buffer is mapped and writable before a driver touches it.
+    usize arg_size = (request >> 16) & 0x3FFF;
+    if (arg_size == 0)
+        arg_size = 36;
+    if (arg && uaccess::check(reinterpret_cast<void*>(arg), arg_size, true) < 0)
+        return -err::FAULT;
+    return ioctl(request, arg);
 }
 
 File* open_inode(Inode* inode, u32 flags) {

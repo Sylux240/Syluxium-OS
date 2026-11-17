@@ -39,11 +39,13 @@ USER32_PROGS  := $(patsubst userspace/ia32/%.c,$(TESTS_DIR)/%,$(wildcard userspa
 
 # Official Debian packages (and their dependencies) that make up the userland.
 DEBIAN_SUITE := trixie
-DEBIAN_PKGS  := bash busybox hello ncurses-base pciutils pci.ids netbase
+DEBIAN_PKGS  := bash busybox hello ncurses-base pciutils pci.ids netbase alsa-utils
 DEBIAN_ROOT  := $(BUILD)/rootfs-debian
 DEBIAN_STAMP := $(DEBIAN_ROOT)/.fetched
 # A few i386 packages for testing 32-bit dynamic linking (Steam is 32-bit).
 DEBIAN_I386_PKGS  := hello busybox bash
+# Only the libraries these programs need (base-files would pull in gawk & co.).
+DEBIAN_I386_EXCLUDE := base-files,debianutils,gawk,libmpfr6,libgmp10,libsigsegv2,readline-common,libreadline8t64
 DEBIAN_I386_PROGS := hello busybox bash
 DEBIAN_I386_ROOT  := $(BUILD)/rootfs-debian-i386
 DEBIAN_I386_STAMP := $(DEBIAN_I386_ROOT)/.fetched
@@ -82,7 +84,7 @@ CFLAGS := \
     --target=x86_64-unknown-none-elf \
     -std=gnu11 \
     -O2 -g \
-    -Wall -Wextra -Wno-unused-parameter -Wno-sign-compare -Wno-missing-field-initializers \
+    -Wall -Wextra -Wno-unused-parameter -Wno-sign-compare -Wno-missing-field-initializers -Wno-pointer-sign \
     -ffreestanding -fno-stack-protector -fno-stack-check -fno-pic -fno-pie \
     -fno-omit-frame-pointer -fno-strict-aliasing \
     -nostdlibinc -mcmodel=kernel -mno-red-zone \
@@ -176,14 +178,14 @@ $(TESTS_DIR)/%: userspace/ia32/%.c
 	@echo "  USER32 $<"
 	@$(USER_CC) $(USER32_CFLAGS) $< -o $@
 
-$(DEBIAN_STAMP): tools/debian-fetch.py
+$(DEBIAN_STAMP): tools/debian-fetch.py Makefile
 	@echo "  DEB   $(DEBIAN_PKGS) (+ dependencies, Debian $(DEBIAN_SUITE))"
 	@python3 tools/debian-fetch.py --suite $(DEBIAN_SUITE) --out $(DEBIAN_ROOT) --cache deps/debian $(DEBIAN_PKGS)
 	@touch $@
 
-$(DEBIAN_I386_STAMP): tools/debian-fetch.py
+$(DEBIAN_I386_STAMP): tools/debian-fetch.py Makefile
 	@echo "  DEB   $(DEBIAN_I386_PKGS) (i386, Debian $(DEBIAN_SUITE))"
-	@python3 tools/debian-fetch.py --arch i386 --suite $(DEBIAN_SUITE) --out $(DEBIAN_I386_ROOT) --cache deps/debian $(DEBIAN_I386_PKGS)
+	@python3 tools/debian-fetch.py --arch i386 --suite $(DEBIAN_SUITE) --out $(DEBIAN_I386_ROOT) --cache deps/debian --exclude $(DEBIAN_I386_EXCLUDE) $(DEBIAN_I386_PKGS)
 	@touch $@
 
 $(INITRAMFS): $(DEBIAN_STAMP) $(DEBIAN_I386_STAMP) $(USER_PROGS) $(USER32_PROGS) $(shell find rootfs -type f 2>/dev/null) Makefile
@@ -202,6 +204,7 @@ $(INITRAMFS): $(DEBIAN_STAMP) $(DEBIAN_I386_STAMP) $(USER_PROGS) $(USER32_PROGS)
 	@# /usr/lib/i386-linux-gnu, ld-linux.so.2, programs installed as <name>-i386
 	@mkdir -p $(ROOTFS)/usr/lib/i386-linux-gnu
 	@cp -a $(DEBIAN_I386_ROOT)/usr/lib/i386-linux-gnu/. $(ROOTFS)/usr/lib/i386-linux-gnu/
+	@rm -rf $(ROOTFS)/usr/lib/i386-linux-gnu/gconv   # iconv modules: 8 MiB nobody needs here
 	@cp -a $(DEBIAN_I386_ROOT)/usr/lib/ld-linux.so.2 $(ROOTFS)/usr/lib/
 	@for prog in $(DEBIAN_I386_PROGS); do cp $(DEBIAN_I386_ROOT)/usr/bin/$$prog $(ROOTFS)/usr/bin/$$prog-i386; done
 	@cp -r rootfs/. $(ROOTFS)/

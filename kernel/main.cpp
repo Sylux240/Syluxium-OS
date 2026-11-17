@@ -20,6 +20,8 @@
 #include <linuxkpi/linuxkpi.hpp>
 #include <net/net.hpp>
 #include <drivers/storage/storage.hpp>
+#include <drivers/sound/sound_drivers.hpp>
+#include <sound/sound.hpp>
 #include <block/block.hpp>
 #include <fs/ext2.hpp>
 #include <fs/fat.hpp>
@@ -130,6 +132,10 @@ void discover_hardware() {
     net::init(); // loopback first: it becomes ifindex 1, like Linux
     e1000::register_driver();
     virtio_net::register_driver();
+    r8169::register_driver();
+    sound::init(); // phase 8: ALSA-compatible sound core
+    hda::register_driver();
+    virtio_snd::register_driver();
     linuxkpi::init(); // Linux drivers register themselves (module_init) here
     pci::init();
     dev::register_platform_devices(g_keyboard);
@@ -241,12 +247,16 @@ void run_userspace_tests() {
     static const char* const crash[] = {"/opt/syluxium/tests/crashtest", nullptr};
     static const char* const threads[] = {"/opt/syluxium/tests/threadtest", nullptr};
     static const char* const nettest[] = {"/opt/syluxium/tests/nettest", nullptr};
+    static const char* const unixtest[] = {"/opt/syluxium/tests/unixtest", nullptr};
+    static const char* const nltest[] = {"/opt/syluxium/tests/nltest", nullptr};
+    static const char* const ip6test[] = {"/opt/syluxium/tests/ip6test", nullptr};
     // 32-bit (ia32) programs: static glibc tests, then dynamic Debian i386 binaries.
     static const char* const ia32test[] = {"/opt/syluxium/tests/ia32test", nullptr};
     static const char* const ia32threads[] = {"/opt/syluxium/tests/ia32threads", nullptr};
     static const char* const ia32dynamic[] = {"/bin/sh", "/etc/syluxium/selftest-ia32.sh", nullptr};
-    const Test sequential[] = {{hello, 0},    {systest, 0},     {crash, 11 /* SIGSEGV */}, {threads, 0},
-                               {nettest, 0},  {ia32test, 0},    {ia32threads, 0},          {ia32dynamic, 0}};
+    const Test sequential[] = {{hello, 0},       {systest, 0},     {crash, 11 /* SIGSEGV */}, {threads, 0},
+                               {nettest, 0},     {unixtest, 0},    {nltest, 0},              {ip6test, 0},
+                               {ia32test, 0},    {ia32threads, 0}, {ia32dynamic, 0}};
 
     for (const Test& t : sequential) {
         int status = run_program(t.argv);

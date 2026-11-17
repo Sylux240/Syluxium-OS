@@ -27,6 +27,10 @@ namespace {
 void* sylux_kmalloc(usize n) { return kmalloc(n); }
 void sylux_kfree(void* p) { kfree(p); }
 int sylux_vsnprintf(char* b, usize n, const char* f, va_list a) { return vsnprintf(b, n, f, a); }
+int sylux_snprintf_int(char* b, usize n, int v) { return snprintf(b, n, "%d", v); }
+int sylux_snprintf_long(char* b, usize n, const char* f, long v) { return snprintf(b, n, f, v); }
+int sylux_snprintf_str(char* b, usize n, const char* f, const char* v) { return snprintf(b, n, f, v); }
+int sylux_snprintf_ip4(char* b, usize n, const u8* p) { return snprintf(b, n, "%u.%u.%u.%u", p[0], p[1], p[2], p[3]); }
 void* sylux_valloc(usize n) { return vmalloc::alloc(n ? n : 1); }
 void sylux_vfree(void* p) { vmalloc::free(p); }
 
@@ -396,14 +400,173 @@ int kstrtoint(const char* s, unsigned int base, int* res) {
 
 // ======================= printing =======================
 
+// Linux-compatible vsnprintf: standard conversions go through the kernel's
+// formatter one at a time; Linux's %p extensions are handled here
+// (%pM/%pm MAC, %pI4/%pi4 IPv4, %pI6c IPv6, %*ph hex dump, %pe error, %pS
+// symbol). Plain %p prints the bare hex address, as Linux does.
+struct Out {
+    char* buf;
+    size_t size, pos;
+    void put(char c) {
+        if (pos + 1 < size)
+            buf[pos] = c;
+        pos++;
+    }
+    void puts(const char* s) {
+        while (*s)
+            put(*s++);
+    }
+};
+
+static void hex2(Out& o, u8 v, bool upper) {
+    const char* d = upper ? "0123456789ABCDEF" : "0123456789abcdef";
+    o.put(d[v >> 4]);
+    o.put(d[v & 15]);
+}
+
 int lkpi_vsnprintf(char* buf, size_t size, const char* fmt, va_list args) {
-    return sylux_vsnprintf(buf, size, fmt, args);
+    Out o{buf, size, 0};
+    va_list ap;
+    va_copy(ap, args);
+    while (*fmt) {
+        if (*fmt != '%') {
+            o.put(*fmt++);
+            continue;
+        }
+        const char* start = fmt++;
+        if (*fmt == '%') {
+            o.put('%');
+            fmt++;
+            continue;
+        }
+        // flags, width, precision
+        char spec[32];
+        size_t sp = 0;
+        spec[sp++] = '%';
+        while (*fmt && strchr("-+ #0", *fmt) && sp < 8)
+            spec[sp++] = *fmt++;
+        int width = -1;
+        if (*fmt == '*') {
+            width = va_arg(ap, int);
+            fmt++;
+            sp += static_cast<size_t>(sylux_snprintf_int(spec + sp, sizeof(spec) - sp, width));
+        } else {
+            while (*fmt >= '0' && *fmt <= '9' && sp < 20)
+                spec[sp++] = *fmt++;
+        }
+        if (*fmt == '.') {
+            spec[sp++] = *fmt++;
+            if (*fmt == '*') {
+                int prec = va_arg(ap, int);
+                fmt++;
+                sp += static_cast<size_t>(sylux_snprintf_int(spec + sp, sizeof(spec) - sp, prec));
+            } else {
+                while (*fmt >= '0' && *fmt <= '9' && sp < 28)
+                    spec[sp++] = *fmt++;
+            }
+        }
+        // length
+        int longs = 0;
+        bool size_t_len = false;
+        while (*fmt == 'l' || *fmt == 'h' || *fmt == 'z' || *fmt == 't' || *fmt == 'j' || *fmt == 'L' || *fmt == 'q') {
+            if (*fmt == 'l' || *fmt == 'L' || *fmt == 'q') longs++;
+            if (*fmt == 'z' || *fmt == 't' || *fmt == 'j') size_t_len = true;
+            fmt++;
+        }
+        char conv = *fmt ? *fmt++ : 0;
+        char piece[128];
+        switch (conv) {
+        case 'd': case 'i': case 'u': case 'x': case 'X': case 'o': {
+            spec[sp++] = 'l';
+            spec[sp++] = conv;
+            spec[sp] = 0;
+            long v;
+            if (longs || size_t_len)
+                v = va_arg(ap, long);
+            else
+                v = (conv == 'd' || conv == 'i') ? static_cast<long>(va_arg(ap, int))
+                                                 : static_cast<long>(va_arg(ap, unsigned int));
+            sylux_snprintf_long(piece, sizeof(piece), spec, v);
+            o.puts(piece);
+            break;
+        }
+        case 'c':
+            o.put(static_cast<char>(va_arg(ap, int)));
+            break;
+        case 's': {
+            const char* str = va_arg(ap, const char*);
+            spec[sp++] = 's';
+            spec[sp] = 0;
+            sylux_snprintf_str(piece, sizeof(piece), spec, str ? str : "(null)");
+            o.puts(piece);
+            break;
+        }
+        case 'p': {
+            const u8* p = static_cast<const u8*>(va_arg(ap, const void*));
+            char ext = *fmt;
+            if ((ext == 'M' || ext == 'm') && p) {
+                fmt++;
+                for (int i = 0; i < 6; i++) {
+                    if (i && ext == 'M')
+                        o.put(':');
+                    hex2(o, p[i], false);
+                }
+            } else if ((ext == 'I' || ext == 'i') && fmt[1] == '4' && p) {
+                fmt += 2;
+                sylux_snprintf_ip4(piece, sizeof(piece), p);
+                o.puts(piece);
+            } else if ((ext == 'I' || ext == 'i') && fmt[1] == '6' && p) {
+                fmt += 2;
+                if (*fmt == 'c')
+                    fmt++;
+                for (int i = 0; i < 16; i += 2) {
+                    if (i)
+                        o.put(':');
+                    hex2(o, p[i], false);
+                    hex2(o, p[i + 1], false);
+                }
+            } else if (ext == 'h' && p) {
+                fmt++;
+                char sep = ' ';
+                if (*fmt == 'C' || *fmt == 'D' || *fmt == 'N') {
+                    sep = *fmt == 'C' ? ':' : *fmt == 'D' ? '-' : 0;
+                    fmt++;
+                }
+                int n = width > 0 ? width : 1;
+                for (int i = 0; i < n && i < 64; i++) {
+                    if (i && sep)
+                        o.put(sep);
+                    hex2(o, p[i], false);
+                }
+            } else if (ext == 'e') {
+                fmt++;
+                sylux_snprintf_long(piece, sizeof(piece), "error %ld", reinterpret_cast<long>(p));
+                o.puts(piece);
+            } else {
+                // %pS, %pK, %px, plain %p, ...: skip any extension letters, print hex
+                while ((*fmt >= 'a' && *fmt <= 'z') || (*fmt >= 'A' && *fmt <= 'Z'))
+                    fmt++;
+                sylux_snprintf_long(piece, sizeof(piece), "%lx", reinterpret_cast<long>(p));
+                o.puts(piece);
+            }
+            break;
+        }
+        default:
+            while (start < fmt)
+                o.put(*start++);
+            break;
+        }
+    }
+    va_end(ap);
+    if (size)
+        buf[o.pos < size ? o.pos : size - 1] = 0;
+    return static_cast<int>(o.pos);
 }
 
 int lkpi_snprintf(char* buf, size_t size, const char* fmt, ...) {
     va_list a;
     va_start(a, fmt);
-    int n = sylux_vsnprintf(buf, size, fmt, a);
+    int n = lkpi_vsnprintf(buf, size, fmt, a);
     va_end(a);
     return n;
 }
@@ -411,7 +574,7 @@ int lkpi_snprintf(char* buf, size_t size, const char* fmt, ...) {
 int lkpi_scnprintf(char* buf, size_t size, const char* fmt, ...) {
     va_list a;
     va_start(a, fmt);
-    int n = sylux_vsnprintf(buf, size, fmt, a);
+    int n = lkpi_vsnprintf(buf, size, fmt, a);
     va_end(a);
     if (!size)
         return 0;
@@ -421,7 +584,7 @@ int lkpi_scnprintf(char* buf, size_t size, const char* fmt, ...) {
 int lkpi_sprintf(char* buf, const char* fmt, ...) {
     va_list a;
     va_start(a, fmt);
-    int n = sylux_vsnprintf(buf, 4096, fmt, a); // Linux's sprintf is unbounded too
+    int n = lkpi_vsnprintf(buf, 4096, fmt, a); // Linux's sprintf is unbounded too
     va_end(a);
     return n;
 }
@@ -430,11 +593,11 @@ char* kasprintf(gfp_t gfp, const char* fmt, ...) {
     va_list a, b;
     va_start(a, fmt);
     va_copy(b, a);
-    int n = sylux_vsnprintf(nullptr, 0, fmt, a);
+    int n = lkpi_vsnprintf(nullptr, 0, fmt, a);
     va_end(a);
     char* s = static_cast<char*>(lkpi_kmalloc(static_cast<usize>(n) + 1, gfp));
     if (s)
-        sylux_vsnprintf(s, static_cast<usize>(n) + 1, fmt, b);
+        lkpi_vsnprintf(s, static_cast<usize>(n) + 1, fmt, b);
     va_end(b);
     return s;
 }
@@ -469,7 +632,7 @@ static char strip_level(const char** fmt) {
 int vprintk(const char* fmt, va_list args) {
     char level = strip_level(&fmt);
     char buf[512];
-    int n = sylux_vsnprintf(buf, sizeof(buf), fmt, args);
+    int n = lkpi_vsnprintf(buf, sizeof(buf), fmt, args);
     log_at(level, buf);
     return n;
 }
@@ -482,11 +645,18 @@ int printk(const char* fmt, ...) {
     return n;
 }
 
+int lkpi_log_line(const char* level, const char* text) {
+    char line[512];
+    lkpi_snprintf(line, sizeof(line), "%s", text);
+    log_at(strip_level(&level), line);
+    return static_cast<int>(strlen(line));
+}
+
 int lkpi_dev_printk(const char* level, const struct device* d, const char* fmt, ...) {
     char msg[448];
     va_list a;
     va_start(a, fmt);
-    sylux_vsnprintf(msg, sizeof(msg), fmt, a);
+    lkpi_vsnprintf(msg, sizeof(msg), fmt, a);
     va_end(a);
     char line[512];
     int n = lkpi_snprintf(line, sizeof(line), "%s: %s", d ? dev_name(d) : "(no device)", msg);

@@ -1,3 +1,4 @@
+#include <lib/errno.hpp>
 #include <core/log.hpp>
 #include <dev/device.hpp>
 #include <lib/format.hpp>
@@ -48,6 +49,10 @@ void probe_all() {
             if (r == 0) {
                 d->status = Status::Ok;
                 break;
+            }
+            if (r == -err::NODEV) { // "not mine after all": let the next driver try, as Linux does
+                d->driver_name = nullptr;
+                continue;
             }
             d->status = Status::Error;
             snprintf(d->status_text, sizeof(d->status_text), "%s failed to start (error %ld)", drv->name, -r);

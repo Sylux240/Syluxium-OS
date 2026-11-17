@@ -30,8 +30,18 @@ long sys_mmap(SYSCALL_ARGS) {
         if (!f)
             return -err::BADF;
         if (!vfs::is_reg(f->inode->mode)) {
-            vfs::file_put(f);
-            return -err::NODEV; // device mmap (framebuffers, GPUs) comes with their drivers
+            // Device memory (sound buffers; framebuffers and GPUs later): the
+            // driver must support it, and the mapping is always shared.
+            // Check the first and last page now so mmap() fails cleanly.
+            u64 phys;
+            u64 last = offset + align_up<u64>(len, 4096) - 4096;
+            long r = !(flags & MAP_SHARED) ? -err::INVAL : f->inode->mmap_phys(offset, &phys);
+            if (r == 0)
+                r = f->inode->mmap_phys(last, &phys);
+            if (r < 0) {
+                vfs::file_put(f);
+                return r;
+            }
         }
         file = f->inode;
     }

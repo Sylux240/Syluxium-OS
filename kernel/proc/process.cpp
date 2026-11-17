@@ -154,7 +154,7 @@ void page_fault(interrupts::Frame* frame) {
         // Resolving may sleep on the memory lock; fine with interrupts on.
         if (frame->rflags & arch::RFLAGS_IF)
             arch::sti();
-        if (p->mem->fault(addr, write))
+        if (p->mem->fault(addr, write, frame->error_code & 1))
             return;
         if (from_user) {
             arch::sti();

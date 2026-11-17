@@ -30,7 +30,9 @@ constexpr uptr COMPAT_VSYSCALL   = 0xFFFFE000;      // int $0x80; ret + sigretur
 constexpr uptr COMPAT_STACK_TOP  = 0xFFFFD000;
 constexpr uptr COMPAT_MMAP_TOP   = 0xF7000000;      // leaves 128+ MiB for the stack
 
-enum VmaKind : u8 { VMA_NORMAL, VMA_HEAP, VMA_STACK };
+// VMA_DEVICE: a MAP_SHARED mapping of device memory (Inode::mmap_phys). Its
+// pages belong to the driver: never copied on write, never freed by us.
+enum VmaKind : u8 { VMA_NORMAL, VMA_HEAP, VMA_STACK, VMA_DEVICE };
 
 struct Vma {
     uptr start = 0, end = 0;      // [start, end), page aligned
@@ -73,7 +75,8 @@ public:
     uptr task_end() const { return m_compat ? COMPAT_TASK_END : mm::USER_END; }
 
     // Resolve a page fault. False means the access is invalid (segfault).
-    bool fault(uptr addr, bool write);
+    // was_present: the CPU saw a present page (a protection fault, error code P=1).
+    bool fault(uptr addr, bool write, bool was_present = false);
 
     // Make sure [addr, addr+len) is mapped with the needed access, faulting
     // pages in as required. 0 or -EFAULT.
@@ -108,7 +111,7 @@ private:
     bool populate(Vma* v, uptr page);
     bool copy_on_write(Vma* v, uptr page);
     long prepare_locked(uptr addr, usize len, bool write);
-    void unmap_pages(uptr start, uptr end); // unmap, shoot down, then free
+    void unmap_pages(uptr start, uptr end, bool release = true); // unmap, shoot down, then free (if release)
 
     vmm::AddressSpace* m_as;
     IntrusiveList<Vma, &Vma::node> m_vmas; // sorted by address

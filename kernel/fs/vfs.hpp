@@ -62,6 +62,16 @@ public:
     virtual isize write(u64 offset, const void* buf, usize count) { return -err::INVAL; }
     virtual long truncate(u64 new_size) { return -err::INVAL; }
     virtual long ioctl(u64 request, u64 arg) { return -err::NOTTY; }
+    // ioctl through an open file (sys_ioctl calls this). The default checks
+    // the argument buffer (size from the ioctl number) and calls ioctl().
+    // Devices that need the file (per-open state, O_NONBLOCK) or take plain
+    // integers as arguments override it and access user memory with uaccess.
+    virtual long ioctl_file(File* f, u64 request, u64 arg);
+    // mmap(MAP_SHARED) of a device: the physical address of the page at file
+    // offset `offset` (page aligned). The memory must stay valid for as long
+    // as the inode exists; it's mapped as is (no copy-on-write, never freed
+    // by the address space). -ENODEV: this inode can't be mapped.
+    virtual long mmap_phys(u64 offset, u64* phys) { return -err::NODEV; }
     // Change access/modification times (utimensat). Disk file systems persist them.
     virtual long set_times(Timespec access, Timespec modify) {
         atime = access;

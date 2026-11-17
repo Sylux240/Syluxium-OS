@@ -58,6 +58,9 @@ void format_ip(u32 ip, char* out, usize size);
 namespace virtio_net {
 void register_driver();
 }
+namespace r8169 {
+void register_driver(); // untested on hardware
+}
 namespace e1000 {
 void register_driver();
 }

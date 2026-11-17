@@ -360,15 +360,7 @@ long sys_ioctl(SYSCALL_ARGS) {
     FileRef f(proc::current(), static_cast<long>(a0));
     if (!f)
         return -err::BADF;
-    // Linux encodes the argument size in bits 16-29 of most ioctl numbers;
-    // older terminal ioctls don't, and use at most a termios (36 bytes).
-    // Make sure the buffer is mapped and writable before a driver touches it.
-    usize arg_size = (a1 >> 16) & 0x3FFF;
-    if (arg_size == 0)
-        arg_size = 36;
-    if (a2 && uaccess::check(reinterpret_cast<void*>(a2), arg_size, true) < 0)
-        return -err::FAULT;
-    return f->inode->ioctl(a1, a2);
+    return f->inode->ioctl_file(f.get(), a1, a2); // checks the argument buffer (see vfs::Inode)
 }
 
 long sys_access(SYSCALL_ARGS) {
