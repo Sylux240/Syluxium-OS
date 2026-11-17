@@ -1,6 +1,7 @@
 // USB mass storage (Bulk-Only Transport + SCSI): USB sticks, card readers,
 // external drives. Each LUN 0 disk becomes /dev/sdX like a SATA disk, so
-// partitions and FAT/ext mounting work the same.
+// partitions and FAT/ext mounting work the same. Unplugging a stick removes
+// /dev/sdX (and its partitions); I/O to a still-mounted file system fails.
 
 #include <block/block.hpp>
 #include <core/log.hpp>
@@ -95,9 +96,14 @@ public:
         return sector_size >= 512 && sector_size <= 4096 && sector_count > 1;
     }
 
+    // Unplugged: from now on every request fails without touching the device.
+    void unplug() { __atomic_store_n(&m_gone, true, __ATOMIC_RELEASE); }
+
     long read_sectors(u64 lba, u32 count, void* buf) override { return rw(lba, count, buf, false); }
     long write_sectors(u64 lba, u32 count, const void* buf) override { return rw(lba, count, const_cast<void*>(buf), true); }
     long flush() override {
+        if (m_gone)
+            return 0;
         LockGuard guard(m_lock);
         const u8 cb[10] = {0x35}; // SYNCHRONIZE CACHE(10)
         scsi(cb, 10, nullptr, 0, false); // optional for many sticks: ignore failure
@@ -106,7 +112,7 @@ public:
 
 private:
     long rw(u64 lba, u32 count, void* buf, bool write) {
-        if (lba + count > sector_count || lba + count > 0xFFFFFFFFull)
+        if (m_gone || lba + count > sector_count || lba + count > 0xFFFFFFFFull)
             return -err::IO;
         LockGuard guard(m_lock);
         auto* p = static_cast<u8*>(buf);
@@ -128,8 +134,15 @@ private:
     usb::Device* m_usb;
     u8 m_in, m_out;
     u32 m_tag = 0;
+    bool m_gone = false;
     sched::Mutex m_lock;
 };
+
+void disconnect(void* ctx) {
+    auto* disk = static_cast<Disk*>(ctx);
+    disk->unplug();
+    block::unregister_disk(disk); // the Disk stays allocated: mounts may still refer to it
+}
 
 } // namespace
 
@@ -155,6 +168,7 @@ bool probe(Device* d, const Interface& intf) {
     block::next_sd_name(disk->name, sizeof(disk->name));
     disk->hw = d->entry;
     block::register_disk(disk);
+    d->add_binding(disconnect, disk);
     return true;
 }
 

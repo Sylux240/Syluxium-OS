@@ -37,6 +37,9 @@ sched::Mutex g_cache_lock; // I/O happens under it: disk requests may sleep
 constexpr usize MAX_DEVICES = 64;
 Device* g_devices[MAX_DEVICES];
 usize g_device_count = 0;
+// sdX letters handed out by next_sd_name() (before the disk is registered).
+u32 g_sd_taken = 0;
+sched::Mutex g_sd_lock;
 
 usize hash_of(const Device* d, u64 n) { return ((reinterpret_cast<uptr>(d) >> 4) ^ (n * 0x9E3779B1)) % HASH_SIZE; }
 
@@ -51,11 +54,8 @@ long write_back(CacheBlock* b) {
     return r;
 }
 
-void evict_one() {
-    CacheBlock* victim = g_lru.front();
-    if (!victim)
-        return;
-    write_back(victim);
+// Unlink and free a cached block. Cache lock held.
+void drop_block(CacheBlock* victim) {
     g_lru.remove(victim);
     CacheBlock** link = &g_hash[hash_of(victim->dev, victim->number)];
     while (*link != victim)
@@ -64,6 +64,14 @@ void evict_one() {
     pmm::free_page(mm::direct_virt_to_phys(victim->data));
     delete victim;
     g_cached--;
+}
+
+void evict_one() {
+    CacheBlock* victim = g_lru.front();
+    if (!victim)
+        return;
+    write_back(victim);
+    drop_block(victim);
 }
 
 // Find or load block `n` of `d`. Cache lock held.
@@ -115,6 +123,7 @@ public:
         sector_size = parent->sector_size;
         snprintf(model, sizeof(model), "%s", parent->model);
         hw = parent->hw;
+        this->parent = parent;
     }
     long read_sectors(u64 lba, u32 count, void* buf) override {
         if (lba + count > sector_count)
@@ -243,8 +252,42 @@ void register_disk(Device* disk) {
 }
 
 void next_sd_name(char* out, usize size) {
-    static int next = 0;
-    snprintf(out, size, "sd%c", 'a' + __atomic_fetch_add(&next, 1, __ATOMIC_RELAXED));
+    LockGuard guard(g_sd_lock);
+    for (int c = 0; c < 26; c++) {
+        char name[4] = {'s', 'd', static_cast<char>('a' + c), 0};
+        if (find(name) || (g_sd_taken & (1u << c)))
+            continue;
+        g_sd_taken |= 1u << c;
+        snprintf(out, size, "%s", name);
+        return;
+    }
+    snprintf(out, size, "sdz");
+}
+
+void unregister_disk(Device* disk) {
+    LockGuard guard(g_cache_lock);
+    for (CacheBlock* b = g_lru.front(); b;) {
+        CacheBlock* next = g_lru.next_of(b);
+        if (b->dev == disk || b->dev->parent == disk)
+            drop_block(b);
+        b = next;
+    }
+    usize kept = 0;
+    for (usize i = 0; i < g_device_count; i++) {
+        Device* d = g_devices[i];
+        if (d == disk || d->parent == disk) {
+            char path[32];
+            snprintf(path, sizeof(path), "/dev/%s", d->name);
+            vfs::remove_node(path);
+            klog::info("Disk %s removed", d->name);
+            continue;
+        }
+        g_devices[kept++] = d;
+    }
+    g_device_count = kept;
+    // The letter may be handed out again (the next stick becomes sdb again).
+    if (disk->name[0] == 's' && disk->name[1] == 'd' && disk->name[2] >= 'a' && disk->name[2] <= 'z' && !disk->name[3])
+        __atomic_and_fetch(&g_sd_taken, ~(1u << (disk->name[2] - 'a')), __ATOMIC_RELAXED);
 }
 
 Device* find(const char* name) {

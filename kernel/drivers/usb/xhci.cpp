@@ -1,8 +1,13 @@
 // xHCI (USB 3) host controller driver.
 //
 // Command ring, one event ring (serviced by a polling thread), a transfer
-// ring per endpoint, devices on root ports (hubs come later). Handles low,
+// ring per endpoint, devices on root ports and behind hubs. Handles low,
 // full, high and super speed devices.
+//
+// Hot-plug: Port Status Change events mark root ports as changed; the USB
+// core's worker thread then enumerates new devices or detaches removed ones
+// (Controller::port_work). Removing a device disables its slot and frees its
+// rings once the event thread can no longer be using them (UsbDevice::disable).
 
 #include <core/log.hpp>
 #include <dev/device.hpp>
@@ -30,9 +35,15 @@ static_assert(sizeof(Trb) == 16);
 
 constexpr u32 TRB_NOOP = 8;
 constexpr u32 TRB_NORMAL = 1, TRB_SETUP = 2, TRB_DATA = 3, TRB_STATUS = 4, TRB_LINK = 6, TRB_ENABLE_SLOT = 9,
-              TRB_ADDRESS_DEVICE = 11, TRB_CONFIGURE_EP = 12, TRB_EVALUATE_CTX = 13, TRB_TRANSFER_EVENT = 32,
-              TRB_COMMAND_COMPLETION = 33;
+              TRB_DISABLE_SLOT = 10, TRB_ADDRESS_DEVICE = 11, TRB_CONFIGURE_EP = 12, TRB_EVALUATE_CTX = 13,
+              TRB_TRANSFER_EVENT = 32, TRB_COMMAND_COMPLETION = 33, TRB_PORT_STATUS_CHANGE = 34;
 constexpr u32 CC_SUCCESS = 1, CC_SHORT_PACKET = 13;
+constexpr u32 CC_DEVICE_GONE = 0x100; // ours, not the controller's: the device was unplugged
+
+// PORTSC bits.
+constexpr u32 PORTSC_CCS = 1u << 0, PORTSC_PED = 1u << 1, PORTSC_CSC = 1u << 17;
+constexpr u32 PORTSC_CHANGES = 0x00FE0000; // CSC PEC WRC OCC PRC PLC CEC: write 1 to clear
+constexpr u32 PORTSC_RW1C = PORTSC_CHANGES | PORTSC_PED; // writing 1 to PED disables the port
 constexpr u32 RING_SIZE = 256; // TRBs per ring (one page); the last is a link TRB
 
 struct Ring {
@@ -40,6 +51,13 @@ struct Ring {
     u64 phys = 0;
     u32 enqueue = 0;
     u32 cycle = 1;
+
+    void free() {
+        if (phys)
+            pmm::free_page(phys);
+        phys = 0;
+        trbs = nullptr;
+    }
 
     bool init() {
         phys = pmm::alloc_page(true);
@@ -82,6 +100,7 @@ struct EndpointState {
     u8* buffer = nullptr;   // DMA bounce buffer
     u64 buffer_phys = 0;
     u32 buffer_size = 0;
+    unsigned buffer_order = 0;
     u32 requested = 0;
     // Completion of the outstanding synchronous request.
     volatile u64 wait_trb = 0;
@@ -112,6 +131,7 @@ public:
     long open_endpoint(const usb::Endpoint& ep) override;
     long transfer(u8 ep_address, void* data, u32 length) override;
     long start_interrupt_in(u8 ep_address, u32 length, usb::InterruptCallback cb, void* ctx) override;
+    void disable() override;
 
     void on_transfer_event(u8 dci, u64 trb, u32 code, u32 residual);
 
@@ -129,6 +149,18 @@ private:
     u8* m_out = nullptr;
     EndpointState m_eps[32];
     sched::Mutex m_ep0_lock;
+    u32 m_active = 0; // requests in progress (disable() waits for them before freeing buffers)
+
+    // RAII: counts a request as active; `ok` is false once the device is gone.
+    struct Active {
+        UsbDevice* d;
+        bool ok;
+        explicit Active(UsbDevice* dev) : d(dev) {
+            __atomic_add_fetch(&d->m_active, 1, __ATOMIC_ACQ_REL);
+            ok = !d->gone;
+        }
+        ~Active() { __atomic_sub_fetch(&d->m_active, 1, __ATOMIC_ACQ_REL); }
+    };
 };
 
 class Controller {
@@ -145,6 +177,10 @@ public:
     u64 events_phys = 0;
     u32 event_dequeue = 0, event_cycle = 1;
     UsbDevice* slots[256] = {};
+    UsbDevice* root_devices[256] = {}; // device on each root port (index = port number)
+    u64 pending_ports[4] = {};         // root ports with a status change to look at
+    bool port_work_queued = false;
+    volatile u64 event_passes = 0;     // event-thread loops completed (a grace period for teardown)
     dev::Device* entry = nullptr;
     u32 bus_number = 1;
     Controller* next = nullptr;
@@ -169,6 +205,10 @@ public:
     void process_events();
     void scan_ports();
     bool reset_port(u32 port);
+    void enumerate_port(u32 port, bool hotplug);
+    void port_changed(u32 port);
+    static void port_work(void* arg);
+    void wait_event_pass();
 };
 
 // ---- controller ----
@@ -276,7 +316,9 @@ void Controller::process_events() {
             if (slots[slot])
                 slots[slot]->on_transfer_event(dci, e.param, code, e.status & 0xFFFFFF);
         }
-        // Port status changes: hot-plug is handled in a later step.
+        else if (type == TRB_PORT_STATUS_CHANGE) {
+            port_changed(static_cast<u32>(e.param >> 24) & 0xFF);
+        }
         any = true;
         if (++event_dequeue == RING_SIZE) {
             event_dequeue = 0;
@@ -316,29 +358,86 @@ bool Controller::reset_port(u32 port) {
     return *sc & (1u << 1); // enabled
 }
 
-void Controller::scan_ports() {
-    for (u32 port = 1; port <= max_ports; port++) {
-        u32 sc = *portsc(port);
-        if (!(sc & 1))
-            continue; // nothing connected
-        // USB 3 ports enable themselves; USB 2 ports need a reset first.
-        if (!(sc & (1u << 1)) && !reset_port(port))
+void Controller::wait_event_pass() {
+    u64 start = __atomic_load_n(&event_passes, __ATOMIC_ACQUIRE);
+    // Two completed passes: any process_events() that could still have seen
+    // an old slots[] entry has finished.
+    while (__atomic_load_n(&event_passes, __ATOMIC_ACQUIRE) < start + 2)
+        sched::sleep_ms(1);
+}
+
+// Event thread: remember the port and let the USB worker look at it.
+void Controller::port_changed(u32 port) {
+    if (port == 0 || port > max_ports)
+        return;
+    __atomic_or_fetch(&pending_ports[port / 64], 1ull << (port % 64), __ATOMIC_RELEASE);
+    if (!__atomic_exchange_n(&port_work_queued, true, __ATOMIC_ACQ_REL))
+        usb::queue_work(port_work, this);
+}
+
+// USB worker (topology lock held): connects and disconnects on root ports.
+void Controller::port_work(void* arg) {
+    auto* hc = static_cast<Controller*>(arg);
+    __atomic_store_n(&hc->port_work_queued, false, __ATOMIC_RELEASE); // later events queue us again
+    for (u32 port = 1; port <= hc->max_ports; port++) {
+        u64 bit = 1ull << (port % 64);
+        if (!(__atomic_fetch_and(&hc->pending_ports[port / 64], ~bit, __ATOMIC_ACQ_REL) & bit))
             continue;
-        u32 slot;
-        if (command(0, 0, TRB_ENABLE_SLOT << 10, &slot) != 0 || !slot || slot >= 256)
-            continue;
-        auto* d = new UsbDevice(this, static_cast<u8>(slot), static_cast<u8>(port));
-        d->speed = static_cast<u8>((*portsc(port) >> 10) & 0xF);
-        d->controller = entry;
-        snprintf(d->path, sizeof(d->path), "%u-%u", bus_number, port);
-        slots[slot] = d;
-        if (!d->setup()) {
-            klog::warn("xhci: device on port %u could not be addressed", port);
-            slots[slot] = nullptr;
-            continue;
+        volatile u32* reg = hc->portsc(port);
+        u32 sc = *reg;
+        u32 changes = sc & PORTSC_CHANGES;
+        if (changes)
+            *reg = (sc & ~PORTSC_RW1C) | changes; // acknowledge
+        bool connected = sc & PORTSC_CCS;
+        UsbDevice* d = hc->root_devices[port];
+        // Unplugged - or unplugged and replugged before we looked (a connect
+        // change on a port that still has a device).
+        if (d && (!connected || (changes & PORTSC_CSC))) {
+            usb::detach(d);
+            hc->root_devices[port] = nullptr;
         }
-        usb::attach(d);
+        if (connected && !hc->root_devices[port])
+            hc->enumerate_port(port, true);
     }
+}
+
+void Controller::enumerate_port(u32 port, bool hotplug) {
+    volatile u32* reg = portsc(port);
+    u32 sc = *reg;
+    // This connection is being handled now: clear its change bits so a later
+    // event on the port doesn't mistake them for an unplug + replug.
+    if (sc & PORTSC_CHANGES)
+        *reg = (sc & ~PORTSC_RW1C) | (sc & PORTSC_CHANGES);
+    if (!(sc & PORTSC_CCS))
+        return;
+    if (hotplug) {
+        sched::sleep_ms(100); // USB 2.0 7.1.7.3: let the connection settle (debounce)
+        if (!(*reg & PORTSC_CCS))
+            return;
+    }
+    // USB 3 ports enable themselves; USB 2 ports need a reset first.
+    if (!(*reg & PORTSC_PED) && !reset_port(port))
+        return;
+    u32 slot;
+    if (command(0, 0, TRB_ENABLE_SLOT << 10, &slot) != 0 || !slot || slot >= 256)
+        return;
+    auto* d = new UsbDevice(this, static_cast<u8>(slot), static_cast<u8>(port));
+    d->speed = static_cast<u8>((*reg >> 10) & 0xF);
+    d->controller = entry;
+    snprintf(d->path, sizeof(d->path), "%u-%u", bus_number, port);
+    slots[slot] = d;
+    if (!d->setup()) {
+        klog::warn("xhci: device on port %u could not be addressed", port);
+        d->disable(); // gives the slot back
+        return;
+    }
+    root_devices[port] = d;
+    usb::attach(d);
+}
+
+void Controller::scan_ports() {
+    for (u32 port = 1; port <= max_ports; port++)
+        enumerate_port(port, false);
 }
 
 // ---- device ----
@@ -356,6 +455,7 @@ bool UsbDevice::alloc_endpoint(u8 dci, u32 buffer_size) {
         return false;
     ep.buffer = mm::phys_to_virt<u8>(ep.buffer_phys);
     ep.buffer_size = 4096u << order;
+    ep.buffer_order = order;
     return true;
 }
 
@@ -422,6 +522,7 @@ usb::Device* UsbDevice::add_child(u8 hub_port, u8 child_speed) {
     d->speed = child_speed;
     d->controller = controller;
     d->depth = static_cast<u8>(depth + 1);
+    d->hub_depth = d->depth;
     d->route = route | (static_cast<u32>(hub_port < 15 ? hub_port : 15) << (4 * depth));
     snprintf(d->path, sizeof(d->path), "%s.%u", path, hub_port);
     // Low/full-speed device: the nearest high-speed hub translates for it.
@@ -436,23 +537,27 @@ usb::Device* UsbDevice::add_child(u8 hub_port, u8 child_speed) {
     }
     m_hc->slots[slot_id] = d;
     if (!d->setup()) {
-        m_hc->slots[slot_id] = nullptr;
+        d->disable(); // gives the slot back
         return nullptr;
     }
     return d;
 }
 
 long UsbDevice::wait(EndpointState& ep, u64 timeout_ms) {
-    m_hc->completions.wait_until_timeout([&] { return ep.done; }, timeout_ms * 1'000'000);
+    m_hc->completions.wait_until_timeout([&] { return ep.done || gone; }, timeout_ms * 1'000'000);
+    if (gone)
+        return -err::NODEV;
     if (!ep.done)
         return -err::TIMEDOUT;
+    if (ep.code == CC_DEVICE_GONE)
+        return -err::NODEV;
     if (ep.code != CC_SUCCESS && ep.code != CC_SHORT_PACKET)
         return -err::IO;
     return 0;
 }
 
 void UsbDevice::on_transfer_event(u8 dci, u64 trb, u32 code, u32 residual) {
-    if (dci >= 32)
+    if (dci >= 32 || gone)
         return;
     EndpointState& ep = m_eps[dci];
     if (ep.callback) {
@@ -470,6 +575,9 @@ void UsbDevice::on_transfer_event(u8 dci, u64 trb, u32 code, u32 residual) {
 }
 
 long UsbDevice::control(u8 type, u8 request, u16 value, u16 index, void* data, u16 length) {
+    Active active(this);
+    if (!active.ok)
+        return -err::NODEV;
     LockGuard guard(m_ep0_lock);
     EndpointState& ep = m_eps[1];
     bool in = type & 0x80;
@@ -535,6 +643,9 @@ long UsbDevice::open_endpoint(const usb::Endpoint& e) {
 }
 
 long UsbDevice::transfer(u8 ep_address, void* data, u32 length) {
+    Active active(this);
+    if (!active.ok)
+        return -err::NODEV;
     u8 dci = static_cast<u8>((ep_address & 0xF) * 2 + ((ep_address & 0x80) ? 1 : 0));
     EndpointState& ep = m_eps[dci];
     if (!ep.buffer || length > ep.buffer_size)
@@ -557,6 +668,8 @@ long UsbDevice::transfer(u8 ep_address, void* data, u32 length) {
 }
 
 void UsbDevice::queue_interrupt(u8 dci) {
+    if (gone)
+        return;
     EndpointState& ep = m_eps[dci];
     ep.ring.push(ep.buffer_phys, ep.requested, (TRB_NORMAL << 10) | (1 << 5) | (1 << 2));
     m_hc->doorbells[m_slot] = dci;
@@ -574,12 +687,54 @@ long UsbDevice::start_interrupt_in(u8 ep_address, u32 length, usb::InterruptCall
     return 0;
 }
 
+void UsbDevice::disable() {
+    if (gone)
+        return;
+    gone = true;
+    // Fail every waiting request right away instead of letting it time out.
+    for (EndpointState& ep : m_eps) {
+        if (!ep.ring.trbs)
+            continue;
+        ep.callback = nullptr;
+        ep.code = CC_DEVICE_GONE;
+        ep.done = true;
+    }
+    m_hc->completions.wake_all();
+    // No more events for this slot; wait until the event thread can't be in
+    // one of our callbacks any more.
+    if (m_hc->slots[m_slot] == this)
+        m_hc->slots[m_slot] = nullptr;
+    m_hc->wait_event_pass();
+    // Requests that were already running return before we free their buffers.
+    while (__atomic_load_n(&m_active, __ATOMIC_ACQUIRE))
+        sched::sleep_ms(1);
+    // The controller stops the endpoints and forgets the slot.
+    m_hc->command(0, 0, (TRB_DISABLE_SLOT << 10) | (static_cast<u32>(m_slot) << 24), nullptr);
+    m_hc->dcbaa[m_slot] = 0;
+    for (EndpointState& ep : m_eps) {
+        ep.ring.free();
+        if (ep.buffer_phys)
+            pmm::free_pages(ep.buffer_phys, ep.buffer_order);
+        ep.buffer_phys = 0;
+        ep.buffer = nullptr;
+        ep.buffer_size = 0;
+    }
+    if (m_in_phys)
+        pmm::free_page(m_in_phys);
+    if (m_out_phys)
+        pmm::free_page(m_out_phys);
+    m_in_phys = m_out_phys = 0;
+    m_in = m_out = nullptr;
+    // The UsbDevice object stays allocated: class drivers may still hold it.
+}
+
 // ---- driver ----
 
 void event_thread(void* arg) {
     auto* hc = static_cast<Controller*>(arg);
     for (;;) {
         hc->process_events();
+        __atomic_add_fetch(&hc->event_passes, 1, __ATOMIC_RELEASE);
         sched::sleep_ms(1);
     }
 }
@@ -616,14 +771,23 @@ dev::Driver g_driver{"xhci_hcd", match, probe, {}};
 
 } // namespace
 
-void register_driver() { dev::register_driver(&g_driver); }
+void register_driver() {
+    // The USB input layer's decoders are checked first (no hardware needed).
+    usb::hid::run_selftest();
+    usb::xpad::run_selftest();
+    dev::register_driver(&g_driver);
+}
 
 void enumerate_all() {
     if (!g_controllers)
         return;
     sched::sleep_ms(50); // let ports settle after power-up
-    for (Controller* hc = g_controllers; hc; hc = hc->next)
-        hc->scan_ports();
+    {
+        LockGuard guard(usb::topology_lock());
+        for (Controller* hc = g_controllers; hc; hc = hc->next)
+            hc->scan_ports();
+    }
+    usb::start_hotplug(); // from now on, port changes are handled as they come
 }
 
 } // namespace xhci

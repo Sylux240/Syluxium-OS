@@ -11,6 +11,7 @@ IntrusiveList<Device, &Device::node> g_devices;
 IntrusiveList<Driver, &Driver::node> g_drivers;
 IrqSpinlock g_lock;
 u32 g_next_id = 1;
+u32 g_removed = 0;
 
 } // namespace
 
@@ -19,6 +20,13 @@ Device* add(Device* d) {
     d->id = g_next_id++;
     g_devices.push_back(d);
     return d;
+}
+
+void remove(Device* d) {
+    LockGuard guard(g_lock);
+    if (!d->removed)
+        g_removed++;
+    d->removed = true;
 }
 
 void register_driver(Driver* drv) {
@@ -30,7 +38,7 @@ void probe_all() {
     // Probing may sleep and allocate, so walk the lists without the lock
     // (devices and drivers are only ever added, never removed, for now).
     for (Device* d = g_devices.front(); d; d = g_devices.next_of(d)) {
-        if (d->driver_name)
+        if (d->driver_name || d->removed)
             continue;
         for (Driver* drv = g_drivers.front(); drv; drv = g_drivers.next_of(drv)) {
             if (drv->match_ex ? !drv->match_ex(drv, d) : !drv->match(d))
@@ -51,12 +59,13 @@ void probe_all() {
 
 void for_each(void (*fn)(Device*, void*), void* ctx) {
     for (Device* d = g_devices.front(); d; d = g_devices.next_of(d))
-        fn(d, ctx);
+        if (!d->removed)
+            fn(d, ctx);
 }
 
 u32 count() {
     LockGuard guard(g_lock);
-    return static_cast<u32>(g_devices.size());
+    return static_cast<u32>(g_devices.size()) - g_removed;
 }
 
 const char* category_name(Category c) {

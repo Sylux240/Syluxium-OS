@@ -1,7 +1,9 @@
 #include <core/log.hpp>
 #include <drivers/usb/usb.hpp>
 #include <lib/format.hpp>
+#include <lib/spinlock.hpp>
 #include <lib/string.hpp>
+#include <sched/sched.hpp>
 
 namespace usb {
 
@@ -35,7 +37,77 @@ dev::Category category_for(u8 cls) {
     }
 }
 
+// ---- usb-hub worker ----
+
+struct Work {
+    void (*fn)(void*);
+    void* arg;
+    Work* next;
+};
+
+IrqSpinlock g_work_lock;
+Work* g_work_head = nullptr;
+Work* g_work_tail = nullptr;
+sched::WaitQueue g_work_wait;
+sched::Mutex g_topology_lock;
+bool g_worker_started = false;
+
+void worker_thread(void*) {
+    for (;;) {
+        g_work_wait.wait_until([] { return __atomic_load_n(&g_work_head, __ATOMIC_ACQUIRE) != nullptr; });
+        Work* w;
+        {
+            LockGuard guard(g_work_lock);
+            w = g_work_head;
+            if (!w)
+                continue;
+            g_work_head = w->next;
+            if (!g_work_head)
+                g_work_tail = nullptr;
+        }
+        {
+            LockGuard guard(g_topology_lock);
+            w->fn(w->arg);
+        }
+        delete w;
+    }
+}
+
 } // namespace
+
+sched::Mutex& topology_lock() { return g_topology_lock; }
+
+void queue_work(void (*fn)(void*), void* arg) {
+    auto* w = new Work{fn, arg, nullptr};
+    {
+        LockGuard guard(g_work_lock);
+        if (g_work_tail)
+            g_work_tail->next = w;
+        else
+            g_work_head = w;
+        g_work_tail = w;
+    }
+    g_work_wait.wake_all();
+}
+
+void start_hotplug() {
+    if (!__atomic_exchange_n(&g_worker_started, true, __ATOMIC_ACQ_REL))
+        sched::spawn("usb-hub", worker_thread, nullptr, -1, true);
+}
+
+void detach(Device* d) {
+    if (d->gone)
+        return; // already detached (disable() sets it)
+    klog::info("USB %s: %s disconnected", d->path, d->product_name);
+    d->disable(); // no callbacks or transfers from here on
+    for (int i = d->binding_count; i-- > 0;)
+        d->bindings[i].disconnect(d->bindings[i].ctx);
+    d->binding_count = 0;
+    if (d->entry) {
+        dev::remove(d->entry);
+        d->entry = nullptr;
+    }
+}
 
 void attach(Device* d) {
     u8 desc[18];
@@ -81,7 +153,11 @@ void attach(Device* d) {
             return;
         entry->category = category_for(intf.cls);
         entry->class_code = (static_cast<u32>(intf.cls) << 16) | (static_cast<u32>(intf.subclass) << 8) | intf.protocol;
-        if (hid::probe(d, intf)) {
+        if (xpad::probe(d, intf)) {
+            entry->category = dev::Category::Input;
+            entry->driver_name = "xpad";
+            bound = true;
+        } else if (hid::probe(d, intf)) {
             entry->driver_name = "usbhid";
             bound = true;
         } else if (storage::probe(d, intf)) {
@@ -96,8 +172,13 @@ void attach(Device* d) {
         u8 len = config[off], type = config[off + 1];
         if (type == DESC_INTERFACE && len >= 9) {
             offer();
-            intf = Interface{config[off + 2], config[off + 3], config[off + 5], config[off + 6], config[off + 7], {}, 0};
+            intf = Interface{config[off + 2], config[off + 3], config[off + 5], config[off + 6], config[off + 7], {}, 0, 0};
             have_intf = true;
+        } else if (type == DESC_HID && len >= 9 && have_intf) {
+            // HID class descriptor: (type, length) pairs from byte 6; we want the report descriptor's.
+            for (u16 k = 6; k + 2 < len; k += 3)
+                if (config[off + k] == DESC_HID_REPORT)
+                    intf.hid_report_length = static_cast<u16>(config[off + k + 1] | (config[off + k + 2] << 8));
         } else if (type == DESC_ENDPOINT && len >= 7 && have_intf && intf.endpoint_count < 8) {
             Endpoint& e = intf.endpoints[intf.endpoint_count++];
             e.address = config[off + 2];

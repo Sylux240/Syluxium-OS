@@ -20,6 +20,7 @@ public:
     u64 sector_count = 0;
     u32 sector_size = 512;
     dev::Device* hw = nullptr;
+    Device* parent = nullptr;  // partitions: the disk they're on
 
     u64 size_bytes() const { return sector_count * sector_size; }
 
@@ -32,7 +33,12 @@ public:
 // (which become devices of their own: sda1, sda2, ...).
 void register_disk(Device* disk);
 Device* find(const char* name);
-// Next free SCSI-style disk name: "sda", "sdb", ... (shared by SATA and USB storage).
+// The disk was unplugged: drop its cached blocks (unwritten data is lost, as
+// on Linux), remove /dev/<name> and its partitions. The objects stay
+// allocated - a mounted file system may still point at them - and the
+// driver makes their I/O fail from now on.
+void unregister_disk(Device* disk);
+// Lowest free SCSI-style disk name: "sda", "sdb", ... (shared by SATA and USB storage).
 void next_sd_name(char* out, usize size);
 void for_each(void (*fn)(Device* d, void* ctx), void* ctx);
 

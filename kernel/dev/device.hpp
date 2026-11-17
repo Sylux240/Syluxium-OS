@@ -50,6 +50,7 @@ struct Device {
 
     void* bus_data = nullptr;    // bus-specific info (e.g. pci::Function)
     void* driver_data = nullptr; // owned by the bound driver
+    bool removed = false;        // unplugged (see dev::remove)
 
     ListNode node;
 
@@ -74,6 +75,9 @@ struct Driver {
 };
 
 Device* add(Device* d);
+// Unplugged hardware: hide it from the registry. The record stays in the list
+// (flagged, never freed) because walkers like /sys don't hold the lock.
+void remove(Device* d);
 void register_driver(Driver* drv);
 void probe_all();            // try every registered driver on every unbound device
 

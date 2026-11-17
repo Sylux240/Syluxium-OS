@@ -29,7 +29,8 @@ struct Client {
 };
 
 struct DeviceState {
-    Device* dev;
+    Device* dev;              // null once unplugged
+    bool dead = false;
     Client* clients = nullptr;
     sched::WaitQueue readers; // its lock protects `clients` and the queues
 };
@@ -91,6 +92,10 @@ public:
             return -err::INVAL;
         for (;;) {
             m_state->readers.lock().lock();
+            if (!c->count && m_state->dead) {
+                m_state->readers.lock().unlock();
+                return -err::NODEV; // unplugged
+            }
             if (c->count) {
                 usize n = min(count / sizeof(LinuxEvent), c->count);
                 auto* out = static_cast<LinuxEvent*>(buf);
@@ -107,7 +112,7 @@ public:
                 return -err::AGAIN;
             if (signal::interrupted())
                 return -err::INTR;
-            m_state->readers.wait_until([&] { return c->count > 0 || signal::interrupted(); });
+            m_state->readers.wait_until([&] { return c->count > 0 || m_state->dead || signal::interrupted(); });
         }
     }
 
@@ -116,13 +121,20 @@ public:
     u16 poll(vfs::File* f) override {
         auto* c = static_cast<Client*>(f->private_data);
         LockGuard guard(m_state->readers.lock());
+        if (m_state->dead)
+            return poll::POLLIN | poll::POLLERR | poll::POLLHUP;
         return poll::POLLOUT | (c->count ? poll::POLLIN : 0);
     }
 
     long ioctl(u64 req, u64 arg) override {
-        Device* d = m_state->dev;
         if (ioc_type(req) != 'E')
             return -err::NOTTY;
+        // Held across the ioctl so the device can't be unplugged (and freed)
+        // under us. sys_ioctl already faulted the user buffer in: no sleeping.
+        LockGuard guard(m_state->readers.lock());
+        Device* d = m_state->dev;
+        if (!d)
+            return -err::NODEV;
         u32 nr = ioc_nr(req), size = ioc_size(req);
         switch (nr) {
         case 0x01: { // EVIOCGVERSION
@@ -149,7 +161,7 @@ public:
             return static_cast<long>(n);
         }
         case 0x09: // EVIOCGPROP
-            return copy_bits(arg, "\0\0\0\0", 4, size);
+            return copy_bits(arg, &d->props, sizeof(d->props), size);
         case 0x18: // EVIOCGKEY: currently pressed keys
             return copy_bits(arg, d->key_down, sizeof(d->key_down), size);
         case 0x19: case 0x1a: case 0x1b: // LED / SND / SW state: none
@@ -167,12 +179,15 @@ public:
             case EV_KEY: return copy_bits(arg, d->key_bits, sizeof(d->key_bits), size);
             case EV_REL: return copy_bits(arg, &d->rel_bits, 8, size);
             case EV_ABS: return copy_bits(arg, &d->abs_bits, 8, size);
+            case EV_MSC: return copy_bits(arg, &d->msc_bits, 8, size);
             default: return copy_bits(arg, "\0\0\0\0\0\0\0\0", 8, size);
             }
         }
         if (nr >= 0x40 && nr < 0x80) { // EVIOCGABS(axis): struct input_absinfo
-            u32 axis = nr - 0x40;
-            i32 info[6] = {0, axis < 2 ? d->abs_min[axis] : 0, axis < 2 ? d->abs_max[axis] : 0, 0, 0, 0};
+            u32 axis = nr - 0x40; // < 64 = ABS_MAX + 1
+            // struct input_absinfo: value, minimum, maximum, fuzz, flat, resolution
+            i32 info[6] = {d->abs_value[axis], d->abs_min[axis], d->abs_max[axis], 0, d->abs_flat[axis],
+                           d->abs_res[axis]};
             memcpy(reinterpret_cast<void*>(arg), info, min<u32>(size, sizeof(info)));
             return 0;
         }
@@ -194,9 +209,11 @@ void Device::report(u16 type, u16 code, i32 value) {
             key_down[code / 64] |= 1ull << (code % 64);
         else
             key_down[code / 64] &= ~(1ull << (code % 64));
+    } else if (type == EV_ABS && code <= ABS_MAX) {
+        abs_value[code] = value;
     }
     DeviceState* st = state_of(this);
-    if (!st)
+    if (!st || st->dev != this)
         return;
     u64 ns = rtc::realtime_ns();
     LinuxEvent e{static_cast<i64>(ns / 1'000'000'000), static_cast<i64>(ns % 1'000'000'000 / 1000), type, code, value};
@@ -217,15 +234,46 @@ void Device::report(u16 type, u16 code, i32 value) {
 }
 
 void register_device(Device* d) {
-    if (g_count >= MAX_DEVICES)
+    // Reuse the lowest eventN of an unplugged device nobody has open any
+    // more (as Linux does); otherwise take a new one.
+    u32 slot = g_count;
+    for (u32 i = 0; i < g_count; i++) {
+        LockGuard guard(g_states[i].readers.lock());
+        if (g_states[i].dead && !g_states[i].clients) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot >= MAX_DEVICES)
         return;
-    d->index = g_count;
-    g_states[g_count].dev = d;
+    d->index = slot;
     d->ev_bits |= 1ull << EV_SYN;
+    {
+        LockGuard guard(g_states[slot].readers.lock());
+        g_states[slot].dev = d;
+        g_states[slot].dead = false;
+    }
     char path[32];
-    snprintf(path, sizeof(path), "/dev/input/event%u", g_count);
-    vfs::add_node(path, new EvdevNode(&g_states[g_count]));
-    g_count++;
+    snprintf(path, sizeof(path), "/dev/input/event%u", slot);
+    vfs::add_node(path, new EvdevNode(&g_states[slot]));
+    if (slot == g_count)
+        g_count++;
+}
+
+void unregister_device(Device* d) {
+    DeviceState* st = state_of(d);
+    if (!st || st->dev != d)
+        return;
+    char path[32];
+    snprintf(path, sizeof(path), "/dev/input/event%u", d->index);
+    vfs::remove_node(path);
+    {
+        LockGuard guard(st->readers.lock());
+        st->dev = nullptr;
+        st->dead = true;
+    }
+    st->readers.wake_all();
+    poll::notify();
 }
 
 void init() { vfs::mkdir_p("/dev/input"); }

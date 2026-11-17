@@ -152,6 +152,7 @@ long resolve_parent(const char* path, Inode* cwd, Inode** parent, const char** n
 long mkdir_p(const char* path, u32 mode = 0755);
 long create_file(const char* path, const void* data, usize size, u32 mode);
 long add_node(const char* path, Inode* node); // place a ready-made inode (devices)
+long remove_node(const char* path);            // unplugged device: drop its /dev entry (open files keep the inode)
 
 File* open_inode(Inode* inode, u32 flags);
 void file_get(File* f);

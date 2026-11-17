@@ -210,6 +210,15 @@ long add_node(const char* path, Inode* node) {
     return static_cast<ramfs::Dir*>(parent)->attach(name, len, node);
 }
 
+long remove_node(const char* path) {
+    Inode* parent;
+    const char* name;
+    usize len;
+    if (long r = resolve_parent(path, nullptr, &parent, &name, &len); r < 0)
+        return r;
+    return parent->unlink(name, len, false);
+}
+
 File* open_inode(Inode* inode, u32 flags) {
     auto* f = new File;
     f->inode = inode;
