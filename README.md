@@ -141,6 +141,8 @@ tools/smoke-test.sh   headless QEMU boot: serial log + screenshot
         Python, ...); real IDEs (KDevelop, Qt Creator, VS Code-likes, Geany) installable from the App Store
       - **Image Writer** (GUI): flash .iso/.img (and compressed images) to USB sticks and SD cards
         with verification, like balenaEtcher / Rufus
+      - **Firefox** web browser: Debian's real firefox-esr package, preinstalled and pinned to
+        the start menu/taskbar (needs Wayland or XWayland, GTK 3, epoll, shared memory, fonts)
       - Every system tool has a GUI (command line optional)
 - [ ] **Phase 10**: GPU drivers and acceleration, for gaming and other graphics work: virtio-gpu
       (virgl) first, then AMD (amdgpu) and NVIDIA (nouveau, and NVIDIA's open kernel modules)
@@ -226,6 +228,7 @@ Legend: ✅ done · 🟡 partly done · ⬜ to do
 - ⬜ Printing (CUPS-compatible print services, Devices and Printers)
 - ⬜ Programming tools: KDevelop-like IDE (editor, build, gdb debugger front end)
 - ⬜ Image Writer: flash .iso/.img to USB/SD with verification
+- ⬜ Firefox (Debian firefox-esr) preinstalled
 - ⬜ Notifications
 
 **Packages and system**
@@ -236,4 +239,4 @@ Legend: ✅ done · 🟡 partly done · ⬜ to do
 - ⬜ Power management: sleep, battery, CPU frequency scaling
 - ⬜ Updates and recovery
 
-Tally: 24 done · 9 partly done · 31 to do.
+Tally: 24 done · 9 partly done · 32 to do.
