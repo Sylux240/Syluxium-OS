@@ -2,6 +2,7 @@
 
 #include <block/block.hpp>
 #include <fs/ext2.hpp>
+#include <core/log.hpp>
 #include <fs/exfat.hpp>
 #include <fs/inotify.hpp>
 #include <fs/fat.hpp>
@@ -203,7 +204,8 @@ long do_openat(long dirfd, u64 user_path, u32 flags, u32 mode) {
         inotify::self_event(inode, inotify::IN_MODIFY);
     }
 
-    File* f = open_inode(inode, flags & ~(O_CREAT | O_EXCL | O_TRUNC | O_NOCTTY | O_CLOEXEC));
+    inode = inode->open_redirect();
+    File* f = open_inode(inode, flags & ~(O_CREAT | O_EXCL | O_TRUNC | O_CLOEXEC) /* O_NOCTTY stays: terminals check it */);
     {
         char abs[512];
         const char* base_path = p->cwd_path;
@@ -607,6 +609,44 @@ long do_symlinkat(u64 user_target, long dirfd, u64 user_path) {
     if (r == 0)
         inotify::child_event(parent, inotify::IN_CREATE, name, len);
     return r;
+}
+
+// link/linkat: hard links (same tmpfs only; X servers use them for lock files).
+long do_linkat(long olddirfd, u64 old_user, long newdirfd, u64 new_user, u32 flags) {
+    constexpr u32 AT_SYMLINK_FOLLOW = 0x400;
+    Process* p = proc::current();
+    UserPath oldp(old_user), newp(new_user);
+    if (oldp.error()) return oldp.error();
+    if (newp.error()) return newp.error();
+    Inode *obase, *nbase;
+    if (long r = dir_for(p, olddirfd, oldp.c_str(), &obase); r < 0) return r;
+    if (long r = dir_for(p, newdirfd, newp.c_str(), &nbase); r < 0) return r;
+    Inode* target;
+    if (long r = resolve(oldp.c_str(), obase, flags & AT_SYMLINK_FOLLOW, &target); r < 0)
+        return r;
+    if (is_dir(target->mode))
+        return -err::PERM;
+    Inode* dir;
+    const char* name;
+    usize len;
+    if (long r = resolve_parent(newp.c_str(), nbase, &dir, &name, &len); r < 0)
+        return r;
+    if (!dir->is_ramfs_dir() || !target->shared_mappable())
+        return -err::XDEV; // hard links exist only within tmpfs for now
+    if (dir->lookup(name, len))
+        return -err::EXIST;
+    if (long r = static_cast<ramfs::Dir*>(dir)->attach(name, len, target); r < 0)
+        return r;
+    target->nlink++;
+    target->ctime = vfs::now();
+    inotify::child_event(dir, inotify::IN_CREATE, name, len);
+    return 0;
+}
+
+long sys_link(SYSCALL_ARGS) { SYSCALL_UNUSED; return do_linkat(AT_FDCWD, a0, AT_FDCWD, a1, 0); }
+long sys_linkat(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    return do_linkat(static_cast<i32>(a0), a1, static_cast<i32>(a2), a3, static_cast<u32>(a4));
 }
 
 long sys_symlink(SYSCALL_ARGS) { SYSCALL_UNUSED; return do_symlinkat(a0, AT_FDCWD, a1); }
@@ -1315,7 +1355,9 @@ void register_file() {
     set(84, sys_rmdir, "rmdir");
     set(85, sys_creat, "creat");
     set(87, sys_unlink, "unlink");
+    set(86, sys_link, "link");
     set(88, sys_symlink, "symlink");
+    set(265, sys_linkat, "linkat");
     set(89, sys_readlink, "readlink");
     set(7, sys_poll, "poll");
     set(23, sys_select, "select");

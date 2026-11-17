@@ -143,6 +143,7 @@ void discover_hardware() {
     dev::probe_all();
     xhci::enumerate_all();
     sysfs::populate_devices();
+    fbdev::init(); // /dev/fb0 (after the PCI devices are in /sys: fb0 may belong to one)
 
     // The EFI system partition (FAT32) appears at /boot/efi, as on Linux.
     block::for_each([](block::Device* d, void*) {
@@ -209,7 +210,6 @@ void mount_initramfs() {
                  st.bytes / KiB);
     vfs::mkdir_p("/tmp", 01777);
     vfs::mkdir_p("/dev/shm", 01777); // POSIX shared memory (shm_open) lives here, as on Linux
-    fbdev::init();                   // /dev/fb0
 }
 
 // Run a program from the initramfs and wait for it. Returns the wait status.
@@ -256,13 +256,14 @@ void run_userspace_tests() {
     static const char* const eventtest[] = {"/opt/syluxium/tests/eventtest", nullptr};
     static const char* const shmtest[] = {"/opt/syluxium/tests/shmtest", nullptr};
     static const char* const inotifytest[] = {"/opt/syluxium/tests/inotifytest", nullptr};
+    static const char* const ptytest[] = {"/opt/syluxium/tests/ptytest", nullptr};
     // 32-bit (ia32) programs: static glibc tests, then dynamic Debian i386 binaries.
     static const char* const ia32test[] = {"/opt/syluxium/tests/ia32test", nullptr};
     static const char* const ia32threads[] = {"/opt/syluxium/tests/ia32threads", nullptr};
     static const char* const ia32dynamic[] = {"/bin/sh", "/etc/syluxium/selftest-ia32.sh", nullptr};
     const Test sequential[] = {{hello, 0},       {systest, 0},     {crash, 11 /* SIGSEGV */}, {threads, 0},
                                {nettest, 0},     {unixtest, 0},    {nltest, 0},              {ip6test, 0},
-                               {eventtest, 0},   {shmtest, 0},     {inotifytest, 0},          {ia32test, 0},    {ia32threads, 0},          {ia32dynamic, 0}};
+                               {eventtest, 0},   {shmtest, 0},     {inotifytest, 0},          {ptytest, 0},     {ia32test, 0},    {ia32threads, 0},          {ia32dynamic, 0}};
 
     for (const Test& t : sequential) {
         int status = run_program(t.argv);

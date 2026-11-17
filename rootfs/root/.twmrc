@@ -1,0 +1,22 @@
+# Plain twm configuration (Debian's default uses m4 macros, and m4 isn't installed).
+BorderWidth 2
+TitleFont "-misc-fixed-bold-r-normal--13-*-*-*-*-*-iso8859-1"
+MenuFont "-misc-fixed-medium-r-normal--13-*-*-*-*-*-iso8859-1"
+IconFont "-misc-fixed-medium-r-normal--13-*-*-*-*-*-iso8859-1"
+RandomPlacement
+Color {
+    BorderColor "#3a6ea5"
+    TitleBackground "#245edb"
+    TitleForeground "white"
+    MenuBackground "#ece9d8"
+    MenuForeground "black"
+    MenuTitleBackground "#245edb"
+    MenuTitleForeground "white"
+}
+Button1 = : root : f.menu "main"
+Button1 = : title : f.move
+menu "main" {
+    "Syluxium" f.title
+    "Terminal" f.exec "xterm &"
+    "Refresh" f.refresh
+}

@@ -5,11 +5,16 @@
 // The mode is whatever the firmware set up; FBIOPUT_VSCREENINFO accepts
 // only that mode. Real mode setting comes with DRM/KMS drivers.
 
+#include <dev/device.hpp>
+#include <drivers/pci/pci.hpp>
+#include <fs/genfs.hpp>
 #include <fs/vfs.hpp>
+#include <fs/ramfs.hpp>
 #include <lib/format.hpp>
 #include <lib/string.hpp>
 #include <mm/layout.hpp>
 #include <proc/uaccess.hpp>
+#include <drivers/tty.hpp>
 #include <video/console.hpp>
 #include <video/fbdev.hpp>
 #include <video/framebuffer.hpp>
@@ -113,6 +118,29 @@ public:
         }
     }
 
+    // Whoever has /dev/fb0 open for writing owns the screen (Xorg, a game):
+    // the text console stops drawing and the keyboard stops feeding the
+    // terminal (programs read /dev/input). Both come back on the last close.
+    // Linux does this through VT ioctls, which X servers under
+    // systemd-logind (like Debian's) leave to logind.
+    void on_open(vfs::File* f) override {
+        if ((f->flags & vfs::O_ACCMODE) == vfs::O_RDONLY)
+            return;
+        if (__atomic_add_fetch(&m_owners, 1, __ATOMIC_ACQ_REL) == 1) {
+            console::set_graphics(true);
+            tty::set_keyboard_to_tty(false);
+        }
+    }
+
+    void on_release(vfs::File* f) override {
+        if ((f->flags & vfs::O_ACCMODE) == vfs::O_RDONLY)
+            return;
+        if (__atomic_sub_fetch(&m_owners, 1, __ATOMIC_ACQ_REL) == 0) {
+            tty::set_keyboard_to_tty(true);
+            console::set_graphics(false);
+        }
+    }
+
     // mmap(): the screen memory itself.
     long mmap_phys(u64 offset, u64* phys) override {
         if (offset >= align_up<u64>(m_bytes, 4096))
@@ -140,7 +168,21 @@ public:
 private:
     video::Framebuffer& m_fb;
     u64 m_phys = 0, m_bytes = 0;
+    u32 m_owners = 0;
 };
+
+struct Ctx {
+    u64 phys;
+    char* dir;
+    char* link;
+    bool found;
+};
+
+Ctx g_ctx;
+Ctx& ctx_for(u64 phys, char* dir, char* link) {
+    g_ctx = Ctx{phys, dir, link, false};
+    return g_ctx;
+}
 
 } // namespace
 
@@ -149,6 +191,46 @@ void init() {
     if (!fb.valid())
         return;
     vfs::add_node("/dev/fb0", new FbDevice(fb));
+
+    // sysfs. If the framebuffer lies inside a PCI display device's memory
+    // (QEMU's VGA, a GPU's aperture), fb0 belongs to that device, as on
+    // Linux: Xorg's fbdev driver then finds it through the PCI device.
+    // Otherwise it's a firmware ("platform") framebuffer.
+    u64 phys = mm::direct_virt_to_phys(fb.base());
+    char dir[160] = "/sys/devices/platform/efi-framebuffer.0/graphics/fb0";
+    char link[160] = "../../devices/platform/efi-framebuffer.0/graphics/fb0";
+    dev::for_each([](dev::Device* d, void* ctx) {
+        auto* c = static_cast<Ctx*>(ctx);
+        if (d->bus != dev::Bus::Pci || (d->class_code >> 16) != 0x03 || c->found)
+            return;
+        pci::Function* f = pci::function_of(d);
+        for (const pci::Bar& b : f->bars) {
+            if (!b.is_io && b.size && c->phys >= b.address && c->phys < b.address + b.size) {
+                snprintf(c->dir, 160, "/sys/bus/pci/devices/%s/graphics/fb0", d->bus_id);
+                snprintf(c->link, 160, "../../bus/pci/devices/%s/graphics/fb0", d->bus_id);
+                c->found = true;
+                return;
+            }
+        }
+    }, &ctx_for(phys, dir, link));
+    vfs::mkdir_p(dir);
+    char path[200], text[64];
+    snprintf(path, sizeof(path), "%s/dev", dir);
+    genfs::static_file(path, "29:0\n");
+    snprintf(path, sizeof(path), "%s/uevent", dir);
+    genfs::static_file(path, "MAJOR=29\nMINOR=0\nDEVNAME=fb0\n");
+    snprintf(path, sizeof(path), "%s/name", dir);
+    genfs::static_file(path, "EFI VGA\n");
+    snprintf(path, sizeof(path), "%s/virtual_size", dir);
+    snprintf(text, sizeof(text), "%u,%u\n", fb.width(), fb.height());
+    genfs::static_file(path, text);
+    snprintf(path, sizeof(path), "%s/stride", dir);
+    snprintf(text, sizeof(text), "%u\n", fb.pitch());
+    genfs::static_file(path, text);
+    snprintf(path, sizeof(path), "%s/bits_per_pixel", dir);
+    genfs::static_file(path, "32\n");
+    vfs::mkdir_p("/sys/class/graphics");
+    vfs::add_node("/sys/class/graphics/fb0", new ramfs::Symlink(link));
 }
 
 } // namespace fbdev

@@ -404,6 +404,7 @@ long do_clone(interrupts::Frame* frame, u64 flags, u64 new_sp, u64 parent_tid, u
     memcpy(child->cwd_path, parent->cwd_path, sizeof(child->cwd_path));
     child->cwd = parent->cwd;
     child->umask = parent->umask;
+    child->ctty = parent->ctty;
     for (int i = 0; i <= MAX_SIGNALS; i++)
         child->sigactions[i] = parent->sigactions[i];
     child->exit_signal = static_cast<int>(flags & 0xFF);

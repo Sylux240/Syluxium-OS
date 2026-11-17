@@ -116,8 +116,11 @@ tools/smoke-test.sh   headless QEMU boot: serial log + screenshot
       (TDE's Debian packages), customized to the XP/7 look: the start button says **"Start"**
       (instead of TDE's logo), theme/taskbar/start menu restyled. Later: a desktop-environment
       choice in the Control Panel; our own Wayland desktop is optional/later.
-      Prerequisites: epoll/eventfd/timerfd/signalfd, shared memory (MIT-SHM), inotify (done),
-      /dev/fb0 + DRM/KMS display device, pseudo-terminals, Xorg running.
+      - [x] 9-pre: epoll/eventfd/timerfd/signalfd, shared memory (memfd, POSIX, SysV, MAP_SHARED
+            tmpfs), inotify, /dev/fb0, pseudo-terminals + controlling terminals, hard links;
+            **the real Xorg server runs** (fbdev + evdev) with twm and an interactive xterm
+      - [ ] 9a: TDE packages (Trinity's own Debian repo), D-Bus, a session (startx/login), fonts
+      - [ ] 9b: "Start" button, XP/7 theme, DRM/KMS driver for display settings
       Look: clean, glossy and rounded like Windows XP / Windows 7 (not Windows 11).
       - Right-click context menus everywhere: on files (Open, Open with, Extract Here / Extract
         to..., Compress, Rename, Delete, Properties, Change icon), on folders and empty space
@@ -177,7 +180,7 @@ Legend: ✅ done · 🟡 partly done · ⬜ to do
 - ✅ Processes, user/kernel split, Linux system calls (core set)
 - ✅ Pipes, signals
 - ✅ User-space threads + futexes
-- 🟡 Unix domain sockets done; shared memory (memfd, POSIX/SysV shm) to do
+- ✅ Unix domain sockets, shared memory (memfd + seals, POSIX shm, System V shm/semaphores, MAP_SHARED)
 - ✅ /proc (process list, per-process CPU/memory, cpuinfo, meminfo, stat) and /sys (CPUs;
      devices come with the phase 5 driver model)
 - ✅ 32-bit (ia32) program support
@@ -209,7 +212,7 @@ Legend: ✅ done · 🟡 partly done · ⬜ to do
 **Networking**
 - ✅ TCP/IP stack: Ethernet, ARP, IPv4 + IPv6, ICMP, UDP, TCP (window scaling), DHCP, SLAAC,
      fragments. Drivers: e1000/e1000e, virtio-net, RTL8139 (Linux 8139cp), r8169 (untested)
-- 🟡 Sockets API: AF_INET/AF_INET6, AF_UNIX (fd passing), AF_NETLINK done; epoll to do
+- ✅ Sockets API: AF_INET/AF_INET6, AF_UNIX (fd passing), AF_NETLINK; epoll, eventfd, timerfd, signalfd, inotify
 - 🟡 Netlink: rtnetlink done (ip, getifaddrs); nl80211 (Wi-Fi) to do
 
 **Linux compatibility**
@@ -244,4 +247,4 @@ Legend: ✅ done · 🟡 partly done · ⬜ to do
 - ⬜ Power management: sleep, battery, CPU frequency scaling
 - ⬜ Updates and recovery
 
-Tally: 25 done · 11 partly done · 29 to do.
+Tally: 27 done · 9 partly done · 29 to do.

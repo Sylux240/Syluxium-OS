@@ -5,6 +5,7 @@
 #include <core/log.hpp>
 #include <drivers/serial.hpp>
 #include <drivers/tty.hpp>
+#include <proc/process.hpp>
 #include <proc/uaccess.hpp>
 #include <fs/poll.hpp>
 #include <lib/string.hpp>
@@ -102,6 +103,7 @@ public:
         void* uarg = reinterpret_cast<void*>(arg);
         switch (request) {
         case KDSETMODE: // 0 = KD_TEXT, 1 = KD_GRAPHICS
+            klog::info("console: %s mode (pid %d)", arg == 1 ? "graphics" : "text", proc::current()->pid);
             console::set_graphics(arg == 1);
             return 0;
         case KDGETMODE: {
@@ -240,6 +242,7 @@ Console* g_console = nullptr;
 } // namespace
 
 bool keyboard_to_tty() { return g_keyboard_to_tty; }
+void set_keyboard_to_tty(bool on) { g_keyboard_to_tty = on; }
 
 void input_char(char c) {
     bool wake = false;

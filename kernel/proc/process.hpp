@@ -24,6 +24,7 @@ struct Process {
     int pid = 0;
     int pgid = 0;   // process group (job)
     int sid = 0;    // session
+    vfs::Inode* ctty = nullptr; // controlling terminal (what /dev/tty opens); nullptr = the console
     char name[64] = {};
     char exe_path[256] = {};
 

@@ -39,12 +39,15 @@ USER32_PROGS  := $(patsubst userspace/ia32/%.c,$(TESTS_DIR)/%,$(wildcard userspa
 
 # Official Debian packages (and their dependencies) that make up the userland.
 DEBIAN_SUITE := trixie
-DEBIAN_PKGS  := bash busybox hello ncurses-base pciutils pci.ids netbase alsa-utils
+DEBIAN_PKGS  := bash busybox hello ncurses-base pciutils pci.ids netbase alsa-utils xserver-xorg-core xserver-xorg-video-fbdev xserver-xorg-input-evdev xinit x11-xserver-utils x11-xkb-utils xterm twm xfonts-base
 DEBIAN_ROOT  := $(BUILD)/rootfs-debian
 DEBIAN_STAMP := $(DEBIAN_ROOT)/.fetched
 # A few i386 packages for testing 32-bit dynamic linking (Steam is 32-bit).
 DEBIAN_I386_PKGS  := hello busybox bash
 # Only the libraries these programs need (base-files would pull in gawk & co.).
+# Mesa's 3D stack (~190 MB) is only used by Xorg's GLAMOR acceleration, which the
+# fbdev driver doesn't use; it returns with real GPU drivers (phase 10).
+DEBIAN_EXCLUDE := mesa-libgallium,libllvm19,libz3-4,libgl1-mesa-dri,libglx-mesa0,libegl-mesa0
 DEBIAN_I386_EXCLUDE := base-files,debianutils,gawk,libmpfr6,libgmp10,libsigsegv2,readline-common,libreadline8t64
 DEBIAN_I386_PROGS := hello busybox bash
 DEBIAN_I386_ROOT  := $(BUILD)/rootfs-debian-i386
@@ -180,7 +183,7 @@ $(TESTS_DIR)/%: userspace/ia32/%.c
 
 $(DEBIAN_STAMP): tools/debian-fetch.py Makefile
 	@echo "  DEB   $(DEBIAN_PKGS) (+ dependencies, Debian $(DEBIAN_SUITE))"
-	@python3 tools/debian-fetch.py --suite $(DEBIAN_SUITE) --out $(DEBIAN_ROOT) --cache deps/debian $(DEBIAN_PKGS)
+	@python3 tools/debian-fetch.py --suite $(DEBIAN_SUITE) --out $(DEBIAN_ROOT) --cache deps/debian --exclude $(DEBIAN_EXCLUDE) $(DEBIAN_PKGS)
 	@touch $@
 
 $(DEBIAN_I386_STAMP): tools/debian-fetch.py Makefile
@@ -188,7 +191,7 @@ $(DEBIAN_I386_STAMP): tools/debian-fetch.py Makefile
 	@python3 tools/debian-fetch.py --arch i386 --suite $(DEBIAN_SUITE) --out $(DEBIAN_I386_ROOT) --cache deps/debian --exclude $(DEBIAN_I386_EXCLUDE) $(DEBIAN_I386_PKGS)
 	@touch $@
 
-$(INITRAMFS): $(DEBIAN_STAMP) $(DEBIAN_I386_STAMP) $(USER_PROGS) $(USER32_PROGS) $(shell find rootfs -type f 2>/dev/null) Makefile
+$(INITRAMFS): tools/mkfontdir.py $(DEBIAN_STAMP) $(DEBIAN_I386_STAMP) $(USER_PROGS) $(USER32_PROGS) $(shell find rootfs -type f 2>/dev/null) Makefile
 	@echo "  ROOT  $(ROOTFS)"
 	@rm -rf $(ROOTFS)
 	@cp -a $(DEBIAN_ROOT) $(ROOTFS)
@@ -208,6 +211,8 @@ $(INITRAMFS): $(DEBIAN_STAMP) $(DEBIAN_I386_STAMP) $(USER_PROGS) $(USER32_PROGS)
 	@cp -a $(DEBIAN_I386_ROOT)/usr/lib/ld-linux.so.2 $(ROOTFS)/usr/lib/
 	@for prog in $(DEBIAN_I386_PROGS); do cp $(DEBIAN_I386_ROOT)/usr/bin/$$prog $(ROOTFS)/usr/bin/$$prog-i386; done
 	@cp -r rootfs/. $(ROOTFS)/
+	@# Font indexes Debian's install scripts would have made (mkfontdir).
+	@python3 tools/mkfontdir.py $(ROOTFS)/usr/share/fonts/X11/misc $(ROOTFS)/usr/share/fonts/X11/100dpi $(ROOTFS)/usr/share/fonts/X11/75dpi > /dev/null
 	@echo "  CPIO  $@"
 	@cd $(ROOTFS) && find . | LC_ALL=C sort | cpio -o -H newc --quiet --owner=0:0 > ../initramfs.cpio
 

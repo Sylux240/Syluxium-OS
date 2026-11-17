@@ -93,6 +93,7 @@ long sys_setsid(SYSCALL_ARGS) {
     if (me->pgid == me->pid)
         return -err::PERM; // already a group leader
     me->sid = me->pgid = me->pid;
+    me->ctty = nullptr; // a new session has no controlling terminal until it opens one
     return me->sid;
 }
 
@@ -423,6 +424,18 @@ long sys_sysinfo(SYSCALL_ARGS) {
 }
 
 // syslog(2) / klogctl: what dmesg uses.
+// getresuid/getresgid: real, effective and saved IDs (everyone is root for now).
+long sys_getresid(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    u32 zero = 0;
+    const u64 ptrs[3] = {a0, a1, a2};
+    for (u64 p : ptrs)
+        if (p)
+            if (long r = uaccess::put(reinterpret_cast<u32*>(p), zero); r < 0)
+                return r;
+    return 0;
+}
+
 long sys_syslog(SYSCALL_ARGS) {
     SYSCALL_UNUSED;
     int type = static_cast<int>(a0);
@@ -568,6 +581,12 @@ void register_process() {
     set(97, sys_getrlimit, "getrlimit");
     set(99, sys_sysinfo, "sysinfo");
     set(103, sys_syslog, "syslog");
+    set(117, sys_setid, "setresuid");
+    set(118, sys_getresid, "getresuid");
+    set(119, sys_setid, "setresgid");
+    set(120, sys_getresid, "getresgid");
+    set(115, sys_getid, "getgroups"); // no supplementary groups
+    set(116, sys_setid, "setgroups");
     set(102, sys_getid, "getuid");
     set(104, sys_getid, "getgid");
     set(105, sys_setid, "setuid");

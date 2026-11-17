@@ -1,4 +1,6 @@
 #include <core/log.hpp>
+#include <drivers/pty.hpp>
+#include <proc/process.hpp>
 #include <drivers/tty.hpp>
 #include <fs/devices.hpp>
 #include <fs/vfs.hpp>
@@ -70,6 +72,22 @@ public:
 
 } // namespace
 
+// /dev/tty: opens the caller's controlling terminal (a pseudo-terminal in
+// xterm, the console for programs started from it).
+class DevTty : public vfs::Inode {
+public:
+    DevTty() {
+        ino = vfs::next_ino();
+        mode = vfs::S_IFCHR | 0666;
+        rdev = (5u << 8) | 0;
+        atime = mtime = ctime = vfs::now();
+    }
+    vfs::Inode* open_redirect() override {
+        proc::Process* p = proc::current();
+        return p && p->ctty ? p->ctty : tty::console_inode();
+    }
+};
+
 void init() {
     vfs::mkdir_p("/dev");
     vfs::add_node("/dev/null", new Null);
@@ -79,8 +97,9 @@ void init() {
     vfs::add_node("/dev/urandom", new Random(9));
     vfs::add_node("/dev/kmsg", new Kmsg);
     vfs::add_node("/dev/console", tty::console_inode());
-    vfs::add_node("/dev/tty", tty::console_inode());
+    vfs::add_node("/dev/tty", new DevTty);
     vfs::add_node("/dev/tty0", tty::console_inode());
+    pty::init(); // /dev/ptmx, /dev/pts
     // One real console: tty1..tty7 (what X servers open for "their" VT) are the same terminal.
     static const char* const vts[] = {"/dev/tty1", "/dev/tty2", "/dev/tty3", "/dev/tty4",
                                       "/dev/tty5", "/dev/tty6", "/dev/tty7"};

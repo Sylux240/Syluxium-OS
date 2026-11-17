@@ -12,6 +12,7 @@ namespace tty {
 
 // False while an X server owns the keyboard (KDSKBMODE K_OFF/K_RAW).
 bool keyboard_to_tty();
+void set_keyboard_to_tty(bool on);
 
 void init();                       // enable serial receive interrupts
 void input_char(char c);           // called by input drivers (interrupt-safe)

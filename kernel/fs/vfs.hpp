@@ -83,6 +83,9 @@ public:
     virtual long seals(bool add, u32 bits) { return -err::INVAL; }
     // The last directory entry naming this inode was removed.
     virtual void unlinked() {}
+    // open() of this node opens another inode instead (/dev/tty -> the
+    // caller's controlling terminal).
+    virtual Inode* open_redirect() { return this; }
     // Change access/modification times (utimensat). Disk file systems persist them.
     virtual long set_times(Timespec access, Timespec modify) {
         atime = access;
