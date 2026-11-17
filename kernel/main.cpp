@@ -17,6 +17,7 @@
 #include <drivers/input/input.hpp>
 #include <drivers/ps2kbd.hpp>
 #include <drivers/usb/usb.hpp>
+#include <linuxkpi/linuxkpi.hpp>
 #include <net/net.hpp>
 #include <drivers/storage/storage.hpp>
 #include <block/block.hpp>
@@ -129,6 +130,7 @@ void discover_hardware() {
     net::init(); // loopback first: it becomes ifindex 1, like Linux
     e1000::register_driver();
     virtio_net::register_driver();
+    linuxkpi::init(); // Linux drivers register themselves (module_init) here
     pci::init();
     dev::register_platform_devices(g_keyboard);
     dev::probe_all();

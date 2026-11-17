@@ -67,6 +67,22 @@ CXXFLAGS := \
     -MMD -MP \
     $(EXTRA_CXXFLAGS)
 
+# Linux drivers (C) built against the LinuxKPI headers.
+CC := clang
+LKPI_INCLUDE := kernel/linuxkpi/include
+CFLAGS := \
+    --target=x86_64-unknown-none-elf \
+    -std=gnu11 \
+    -O2 -g \
+    -Wall -Wextra -Wno-unused-parameter -Wno-sign-compare -Wno-missing-field-initializers \
+    -ffreestanding -fno-stack-protector -fno-stack-check -fno-pic -fno-pie \
+    -fno-omit-frame-pointer -fno-strict-aliasing \
+    -nostdlibinc -mcmodel=kernel -mno-red-zone \
+    -mno-80387 -mno-mmx -mno-sse -mno-sse2 -msoft-float \
+    -isystem $(LKPI_INCLUDE) \
+    -MMD -MP
+CXXFLAGS += -isystem $(LKPI_INCLUDE)
+
 ASFLAGS := --target=x86_64-unknown-none-elf -g -Ikernel -MMD -MP
 
 LDFLAGS := \
@@ -89,7 +105,8 @@ QEMU_FLAGS := \
 # ---------------------------------------------------------------------------
 CXX_SRCS := $(shell find kernel -name '*.cpp')
 ASM_SRCS := $(shell find kernel -name '*.S')
-OBJS     := $(CXX_SRCS:%.cpp=$(OBJDIR)/%.cpp.o) $(ASM_SRCS:%.S=$(OBJDIR)/%.S.o)
+C_SRCS   := $(shell find kernel -name '*.c')
+OBJS     := $(CXX_SRCS:%.cpp=$(OBJDIR)/%.cpp.o) $(ASM_SRCS:%.S=$(OBJDIR)/%.S.o) $(C_SRCS:%.c=$(OBJDIR)/%.c.o)
 DEPS     := $(OBJS:.o=.d)
 
 .PHONY: all kernel image initramfs run run-uefi debug clean distclean deps
@@ -121,6 +138,11 @@ $(OBJDIR)/%.cpp.o: %.cpp | $(LIMINE_PROTOCOL_DIR)/include/limine.h
 	@mkdir -p $(dir $@)
 	@echo "  CXX   $<"
 	@$(CXX) $(CXXFLAGS) -MJ $@.json -c $< -o $@
+
+$(OBJDIR)/%.c.o: %.c
+	@mkdir -p $(dir $@)
+	@echo "  CC    $<"
+	@$(CC) $(CFLAGS) -MJ $@.json -c $< -o $@
 
 $(OBJDIR)/%.S.o: %.S
 	@mkdir -p $(dir $@)

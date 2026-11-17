@@ -40,6 +40,8 @@ args=(-M q35 -m 2G -smp 4 -cpu max
       -display none -serial "file:$LOG"
       -monitor "unix:$SOCK,server,nowait"
       -no-reboot)
+# QEMU's "edu" teaching device: the LinuxKPI test driver (kernel/linuxkpi/drivers/edu.c) binds to it.
+args+=(-device edu,dma_mask=0xffffffffffffffff)
 if [[ -n ${USB:-} ]]; then
     args+=(-device qemu-xhci,id=xhci -device usb-kbd,bus=xhci.0 -device usb-mouse,bus=xhci.0
            -drive file=build/test-disks/usb-fat.img,if=none,id=stick,format=raw
