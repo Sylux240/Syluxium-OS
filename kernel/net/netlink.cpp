@@ -164,12 +164,11 @@ private:
     Datagram** m_tail = &m_head;
 };
 
-// IPv6 parts (filled in with the IPv6 stack).
-constexpr u8 AF_INET6_HOOK = 10;
-long add_or_del_addr6_hook(bool, const u8*, usize) { return -EOPNOTSUPP_; }
-long change_route6_hook(bool, const u8*, usize) { return -EOPNOTSUPP_; }
-void dump_addr6_hook(Builder*) {}
-void dump_routes6_hook(Builder*) {}
+// IPv6 parts (defined further down).
+long change_addr6(bool add, const u8* p, usize len);
+long change_route6(bool add, const u8* p, usize len);
+void dump_addr6(Builder& b);
+void dump_routes6(Builder& b);
 
 u8 prefix_len(u32 mask) { return static_cast<u8>(__builtin_popcount(mask)); }
 u32 mask_of(u8 prefix) { return prefix == 0 ? 0 : prefix >= 32 ? 0xFFFFFFFF : ~((1u << (32 - prefix)) - 1); }
@@ -295,7 +294,7 @@ long change_addr(bool add, const u8* p, usize len) {
     u32 index;
     memcpy(&index, p + 4, 4);
     if (family != AF_INET)
-        return add_or_del_addr6_hook(add, p, len);
+        return family == AF_INET6 ? change_addr6(add, p, len) : -EAFNOSUPPORT;
     Interface* f = interface_by_index(index);
     if (!f)
         return -err::NODEV;
@@ -367,7 +366,7 @@ long change_route(bool add, const u8* p, usize len) {
     RtMsg rt;
     memcpy(&rt, p, sizeof(rt));
     if (rt.family != AF_INET)
-        return change_route6_hook(add, p, len);
+        return rt.family == AF_INET6 ? change_route6(add, p, len) : -EAFNOSUPPORT;
     u32 gw = 0;
     for_each_attr(p + sizeof(rt), len - sizeof(rt), [&](u16 type, const u8* data, usize alen) {
         if (type == RTA_GATEWAY && alen >= 4) {
@@ -388,6 +387,79 @@ long change_route(bool add, const u8* p, usize len) {
         return -err::SRCH;
     }
     return 0;
+}
+
+// ---- IPv6 addresses and routes ----
+
+void dump_addr6(Builder& b) {
+    for_each_addr6([](const Addr6& a, void* ctx) {
+        auto& bb = *static_cast<Builder*>(ctx);
+        struct {
+            u8 family, prefixlen, flags, scope;
+            u32 index;
+        } ifa{AF_INET6, a.prefix_len, a.flags, a.scope, a.ifindex};
+        bb.begin(RTM_NEWADDR, NLM_F_MULTI, &ifa, sizeof(ifa));
+        bb.attr(IFA_ADDRESS, a.addr, 16);
+        bb.attr_u32(IFA_FLAGS, a.flags);
+        bb.end();
+    }, &b);
+}
+
+long change_addr6(bool add, const u8* p, usize len) {
+    u8 prefix = p[1];
+    u32 index;
+    memcpy(&index, p + 4, 4);
+    u8 addr[16];
+    bool have = false;
+    for_each_attr(p + 8, len - 8, [&](u16 type, const u8* data, usize alen) {
+        if ((type == IFA_LOCAL || (type == IFA_ADDRESS && !have)) && alen >= 16) {
+            memcpy(addr, data, 16);
+            have = true;
+        }
+    });
+    if (!have)
+        return -err::INVAL;
+    return add ? add_addr6(index, addr, prefix) : del_addr6(index, addr);
+}
+
+void dump_routes6(Builder& b) {
+    for_each_route6([](const Route6& r, void* ctx) {
+        auto& bb = *static_cast<Builder*>(ctx);
+        RtMsg rt{AF_INET6, r.dst_len, 0, 0, RT_TABLE_MAIN, r.protocol,
+                 RT_SCOPE_UNIVERSE, RTN_UNICAST, 0};
+        bb.begin(RTM_NEWROUTE, NLM_F_MULTI, &rt, sizeof(rt));
+        bb.attr_u32(RTA_TABLE, RT_TABLE_MAIN);
+        if (r.dst_len)
+            bb.attr(RTA_DST, r.dst, 16);
+        if (r.has_gateway)
+            bb.attr(RTA_GATEWAY, r.gateway, 16);
+        bb.attr_u32(RTA_PRIORITY, r.has_gateway ? 1024 : 256);
+        bb.attr_u32(RTA_OIF, r.ifindex);
+        bb.end();
+    }, &b);
+}
+
+long change_route6(bool add, const u8* p, usize len) {
+    RtMsg rt;
+    memcpy(&rt, p, sizeof(rt));
+    u8 gw[16];
+    bool have_gw = false;
+    u32 oif = 0;
+    for_each_attr(p + sizeof(rt), len - sizeof(rt), [&](u16 type, const u8* data, usize alen) {
+        if (type == RTA_GATEWAY && alen >= 16) {
+            memcpy(gw, data, 16);
+            have_gw = true;
+        } else if (type == RTA_OIF && alen >= 4) {
+            memcpy(&oif, data, 4);
+        }
+    });
+    if (rt.dst_len != 0)
+        return 0; // on-link prefixes follow from the addresses
+    if (!add)
+        return set_default_route6(nullptr, 0);
+    if (!have_gw)
+        return -err::INVAL;
+    return set_default_route6(gw, oif);
 }
 
 // ---- the socket ----
@@ -526,8 +598,8 @@ public:
                     for (u32 i = 1; Interface* f = interface_by_index(i); i++)
                         if (f->addr)
                             put_addr4(*b, f, NLM_F_MULTI);
-                if (family == AF_UNSPEC || family == AF_INET6_HOOK)
-                    dump_addr6_hook(b);
+                if (family == AF_UNSPEC || family == AF_INET6)
+                    dump_addr6(*b);
                 break;
             case RTM_NEWADDR:
             case RTM_DELADDR: result = change_addr(h.type == RTM_NEWADDR, p, len); break;
@@ -538,8 +610,8 @@ public:
                 }
                 if (family == AF_UNSPEC || family == AF_INET)
                     dump_routes4(*b, NLM_F_MULTI);
-                if (family == AF_UNSPEC || family == AF_INET6_HOOK)
-                    dump_routes6_hook(b);
+                if (family == AF_UNSPEC || family == AF_INET6)
+                    dump_routes6(*b);
                 break;
             case RTM_NEWROUTE:
             case RTM_DELROUTE: result = change_route(h.type == RTM_NEWROUTE, p, len); break;

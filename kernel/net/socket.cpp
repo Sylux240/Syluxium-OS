@@ -40,7 +40,25 @@ void Socket::wake() {
 
 // ---- address translation ----
 
-long sockaddr_to_endpoint(const SockAddr& sa, Endpoint* out) {
+long sockaddr_to_endpoint(const SockAddr& sa, Endpoint* out, u16 domain) {
+    *out = Endpoint{};
+    if (domain == AF_INET6) {
+        if (sa.family() != AF_INET6)
+            return -EAFNOSUPPORT;
+        if (sa.len < 24) // sin6_scope_id is optional (RFC 2133 layout)
+            return -err::INVAL;
+        SockAddrIn6 in6{};
+        memcpy(&in6, sa.data, min<u32>(sa.len, sizeof(in6)));
+        out->port = be16(in6.port);
+        if (ip6::is_v4mapped(in6.addr)) {
+            out->addr = get32(in6.addr + 12);
+        } else {
+            out->v6 = true;
+            memcpy(out->addr6, in6.addr, 16);
+            out->scope = sa.len >= sizeof(in6) ? in6.scope_id : 0;
+        }
+        return 0;
+    }
     if (sa.family() != AF_INET)
         return -EAFNOSUPPORT;
     if (sa.len < sizeof(SockAddrIn))
@@ -52,21 +70,52 @@ long sockaddr_to_endpoint(const SockAddr& sa, Endpoint* out) {
     return 0;
 }
 
-void endpoint_to_sockaddr(const Endpoint& ep, SockAddr* out) {
+void endpoint_to_sockaddr(const Endpoint& ep, SockAddr* out, u16 domain) {
+    memset(out->data, 0, sizeof(out->data));
+    if (domain == AF_INET6) {
+        SockAddrIn6 in6{};
+        in6.family = AF_INET6;
+        in6.port = be16(ep.port);
+        if (ep.v6) {
+            memcpy(in6.addr, ep.addr6, 16);
+            in6.scope_id = ip6::is_link_local(ep.addr6) ? ep.scope : 0;
+        } else if (ep.addr) { // v4-mapped; 0.0.0.0 stays ::
+            in6.addr[10] = in6.addr[11] = 0xFF;
+            put32(in6.addr + 12, ep.addr);
+        }
+        memcpy(out->data, &in6, sizeof(in6));
+        out->len = sizeof(in6);
+        return;
+    }
     SockAddrIn in{};
     in.family = AF_INET;
     in.port = be16(ep.port);
     in.addr = be32(ep.addr);
-    memset(out->data, 0, sizeof(out->data));
     memcpy(out->data, &in, sizeof(in));
     out->len = sizeof(in);
+}
+
+bool local_accepts(const Socket* s, const Endpoint& dst) {
+    if (dst.v6 && s->domain != AF_INET6)
+        return false;
+    if (!dst.v6 && s->domain == AF_INET6 && s->v6only)
+        return false;
+    if (s->local.any()) // a v4-mapped wildcard (::ffff:0.0.0.0) only takes IPv4
+        return !(dst.v6 && !s->local.v6);
+    return s->local.same_addr(dst);
+}
+
+bool bindings_overlap(const Endpoint& a, const Endpoint& b) {
+    if (a.any() || b.any())
+        return true;
+    return a.same_addr(b);
 }
 
 // ---- default (Internet) implementations of the generic entry points ----
 
 long Socket::bind_addr(const SockAddr& sa) {
     Endpoint ep;
-    if (long r = sockaddr_to_endpoint(sa, &ep); r < 0)
+    if (long r = sockaddr_to_endpoint(sa, &ep, domain); r < 0)
         return r;
     return bind(ep);
 }
@@ -75,7 +124,7 @@ long Socket::connect_addr(const SockAddr& sa, bool nonblock) {
     Endpoint ep;
     if (sa.family() == AF_UNSPEC) // dissolve a datagram association
         return connect(Endpoint{}, nonblock);
-    if (long r = sockaddr_to_endpoint(sa, &ep); r < 0)
+    if (long r = sockaddr_to_endpoint(sa, &ep, domain); r < 0)
         return r;
     return connect(ep, nonblock);
 }
@@ -84,22 +133,26 @@ long Socket::get_name(SockAddr* out, bool peer) {
     if (peer) {
         if (!connected)
             return -ENOTCONN;
-        endpoint_to_sockaddr(remote, out);
+        endpoint_to_sockaddr(remote, out, domain);
         return 0;
     }
     Endpoint ep = local;
-    if (!ep.addr && connected) {
+    if (ep.any() && connected) {
         LockGuard guard(g_lock);
-        ep.addr = source_for(remote.addr);
+        Endpoint src;
+        if (source_endpoint(remote, &src)) {
+            src.port = ep.port;
+            ep = src;
+        }
     }
-    endpoint_to_sockaddr(ep, out);
+    endpoint_to_sockaddr(ep, out, domain);
     return 0;
 }
 
 isize Socket::send_msg(const u8* data, usize len, int flags, const SockAddr* to, Control*, bool nonblock) {
     Endpoint ep;
     if (to) {
-        if (long r = sockaddr_to_endpoint(*to, &ep); r < 0)
+        if (long r = sockaddr_to_endpoint(*to, &ep, domain); r < 0)
             return r;
     }
     return send(data, len, flags, to ? &ep : nullptr, nonblock);
@@ -109,7 +162,7 @@ isize Socket::recv_msg(u8* buf, usize len, int flags, SockAddr* from, Control*, 
     Endpoint ep = remote;
     isize r = recv(buf, len, flags, &ep, nonblock, full_len);
     if (r >= 0 && from)
-        endpoint_to_sockaddr(ep, from);
+        endpoint_to_sockaddr(ep, from, domain);
     return r;
 }
 
@@ -394,6 +447,16 @@ long sys_socket(SYSCALL_ARGS) {
             s = create_udp(type, PROTO_UDP);
         else if ((type == SOCK_DGRAM || type == SOCK_RAW) && protocol == PROTO_ICMP)
             s = create_icmp(type);
+        else
+            return -EPROTONOSUPPORT;
+        break;
+    case AF_INET6:
+        if (type == SOCK_STREAM && (protocol == 0 || protocol == PROTO_TCP))
+            s = create_tcp(AF_INET6);
+        else if (type == SOCK_DGRAM && (protocol == 0 || protocol == PROTO_UDP))
+            s = create_udp(type, PROTO_UDP, AF_INET6);
+        else if ((type == SOCK_DGRAM || type == SOCK_RAW) && protocol == PROTO_ICMPV6)
+            s = create_icmp6(type);
         else
             return -EPROTONOSUPPORT;
         break;
@@ -872,7 +935,8 @@ long sys_shutdown(SYSCALL_ARGS) {
     return s->shutdown(static_cast<int>(a1));
 }
 
-constexpr int IPPROTO_IP = 0, IPPROTO_TCP = 6;
+constexpr int IPPROTO_IP = 0, IPPROTO_TCP = 6, IPPROTO_UDP = 17, IPPROTO_IPV6 = 41, IPPROTO_ICMPV6 = 58;
+constexpr int IPV6_V6ONLY = 26;
 
 long sys_setsockopt(SYSCALL_ARGS) {
     SYSCALL_UNUSED;
@@ -902,8 +966,17 @@ long sys_setsockopt(SYSCALL_ARGS) {
         default: return 0; // SO_KEEPALIVE, SO_BROADCAST, buffer sizes, ...: accepted
         }
     }
-    if (s->domain == AF_INET && (level == IPPROTO_TCP || level == IPPROTO_IP))
-        return 0; // TCP_NODELAY (we never delay), IP_TOS, IP_RECVERR, ...
+    if (s->domain == AF_INET6 && level == IPPROTO_IPV6 && name == IPV6_V6ONLY) {
+        if (s->bound)
+            return -err::INVAL;
+        s->v6only = value != 0;
+        return 0;
+    }
+    bool inet = s->domain == AF_INET || s->domain == AF_INET6;
+    // TCP_NODELAY (we never delay), IP_TOS, IP_RECVERR, IPV6_RECVHOPLIMIT, ICMP6_FILTER, ...: accepted
+    if (inet && (level == IPPROTO_TCP || level == IPPROTO_IP || level == IPPROTO_UDP ||
+                 (s->domain == AF_INET6 && (level == IPPROTO_IPV6 || level == IPPROTO_ICMPV6))))
+        return 0;
     return -ENOPROTOOPT;
 }
 
@@ -934,7 +1007,9 @@ long sys_getsockopt(SYSCALL_ARGS) {
             default: value = 0; break;
             }
         } else if (level == IPPROTO_TCP && name == 2) {     // TCP_MAXSEG
-            value = 1460;
+            value = s->domain == AF_INET6 ? 1440 : 1460;
+        } else if (level == IPPROTO_IPV6 && name == IPV6_V6ONLY) {
+            value = s->v6only;
         }
         memcpy(raw, &value, 4);
         rlen = 4;
