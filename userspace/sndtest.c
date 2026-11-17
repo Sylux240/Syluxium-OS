@@ -22,6 +22,7 @@
 #include <sound/asound.h>
 
 static int failures = 0;
+static int capture_mode = 0;
 #define CHECK(cond, ...) do { if (cond) { printf("  [PASS] "); } else { printf("  [FAIL] "); failures++; } printf(__VA_ARGS__); printf("\n"); } while (0)
 
 static struct snd_interval* iv(struct snd_pcm_hw_params* p, int k) { return &p->intervals[k - SNDRV_PCM_HW_PARAM_FIRST_INTERVAL]; }
@@ -57,7 +58,8 @@ static int configure(int fd, int access, unsigned rate, unsigned period, unsigne
     struct snd_pcm_sw_params sw;
     memset(&sw, 0, sizeof(sw));
     sw.avail_min = period;
-    sw.start_threshold = period * periods;
+    // Playback starts once the buffer is full; capture as soon as anyone reads.
+    sw.start_threshold = access == SNDRV_PCM_ACCESS_RW_INTERLEAVED && capture_mode ? 1 : period * periods;
     sw.stop_threshold = period * periods;
     sw.boundary = 0;
     sw.proto = SNDRV_PCM_VERSION;
@@ -213,6 +215,9 @@ static int cmd_abi(void) {
         size_t phase = 0;
         sine(data, 4096, 660, 48000, &phase, 0.3);
         control->appl_ptr = 4096; // commit a full buffer through the control page
+        snd_pcm_uframes_t back = 512, fwd = 1000;
+        CHECK(ioctl(fd, SNDRV_PCM_IOCTL_REWIND, &back) == 0 && back == 512 && control->appl_ptr == 3584, "REWIND 512 frames (appl_ptr %lu)", (unsigned long)control->appl_ptr);
+        CHECK(ioctl(fd, SNDRV_PCM_IOCTL_FORWARD, &fwd) == 0 && fwd == 512 && control->appl_ptr == 4096, "FORWARD clamps to the free space (%lu frames)", (unsigned long)fwd);
         CHECK(ioctl(fd, SNDRV_PCM_IOCTL_START) == 0, "START after mmap commit");
         usleep(30000);
         ioctl(fd, SNDRV_PCM_IOCTL_HWSYNC);
@@ -223,8 +228,6 @@ static int cmd_abi(void) {
         ioctl(fd, SNDRV_PCM_IOCTL_HWSYNC);
         CHECK(status->hw_ptr == hw, "hw_ptr frozen while paused");
         CHECK(ioctl(fd, SNDRV_PCM_IOCTL_PAUSE, 0) == 0 && status->state == SNDRV_PCM_STATE_RUNNING, "resume");
-        snd_pcm_uframes_t back = 512;
-        CHECK(ioctl(fd, SNDRV_PCM_IOCTL_REWIND, &back) == 0 && back > 0, "REWIND %lu frames", (unsigned long)back);
         usleep(250000); // let it run dry
         CHECK(pcm_state(fd) == SNDRV_PCM_STATE_XRUN, "underrun detected (state XRUN)");
         snd_pcm_sframes_t delay;
@@ -260,6 +263,7 @@ static int cmd_abi(void) {
 
 static int cmd_capture(double secs) {
     int fd = open("/dev/snd/pcmC0D0c", O_RDWR);
+    capture_mode = 1;
     if (fd < 0) { perror("pcmC0D0c"); return 1; }
     if (configure(fd, SNDRV_PCM_ACCESS_RW_INTERLEAVED, 48000, 1024, 4) < 0) return 1;
     size_t total = (size_t)(secs * 48000), got = 0;

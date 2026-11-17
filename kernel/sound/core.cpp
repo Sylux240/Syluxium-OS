@@ -327,6 +327,8 @@ long card_register(Card* card) {
 
 void card_proc_file(Card* card, const char* name, bool (*gen)(genfs::TextBuffer&, const void*), const void* ctx) {
     char path[96];
+    snprintf(path, sizeof(path), "/proc/asound/card%d", card->number);
+    vfs::mkdir_p(path); // drivers may add files before card_register()
     snprintf(path, sizeof(path), "/proc/asound/card%d/%s", card->number, name);
     add_file(path, gen, ctx);
 }
