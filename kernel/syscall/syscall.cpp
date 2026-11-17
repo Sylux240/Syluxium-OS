@@ -46,6 +46,7 @@ void register_all() {
     register_memory();
     register_process();
     register_time();
+    register_net(); // after register_file: replaces its socket stubs
 }
 
 } // namespace syscall

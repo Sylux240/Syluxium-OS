@@ -7,6 +7,7 @@
 #include <arch/x86_64/percpu.hpp>
 #include <dev/device.hpp>
 #include <dev/platform.hpp>
+#include <drivers/ps2kbd.hpp>
 #include <drivers/serial.hpp>
 #include <lib/format.hpp>
 #include <lib/string.hpp>
@@ -89,6 +90,11 @@ void register_platform_devices(bool keyboard) {
     kbd->add_resource(Resource::Io, 0x64, 1);
     kbd->add_resource(Resource::Irq, 1, 1);
     add(kbd);
+    if (keyboard && ps2kbd::mouse_present()) {
+        Device* mouse = platform("i8042-aux", "PS/2 mouse (wheel)", Category::Input, "ps2mouse");
+        mouse->add_resource(Resource::Irq, 12, 1);
+        add(mouse);
+    }
 
     auto& fb = video::primary_framebuffer();
     if (fb.valid()) {

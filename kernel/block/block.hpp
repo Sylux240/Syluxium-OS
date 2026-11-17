@@ -32,6 +32,8 @@ public:
 // (which become devices of their own: sda1, sda2, ...).
 void register_disk(Device* disk);
 Device* find(const char* name);
+// Next free SCSI-style disk name: "sda", "sdb", ... (shared by SATA and USB storage).
+void next_sd_name(char* out, usize size);
 void for_each(void (*fn)(Device* d, void* ctx), void* ctx);
 
 // Byte-granular access through the cache.

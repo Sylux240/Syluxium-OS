@@ -1,5 +1,6 @@
 // Process, identity, signal-bookkeeping and system-information calls.
 
+#include <core/log.hpp>
 #include <arch/x86_64/cpu.hpp>
 #include <arch/x86_64/percpu.hpp>
 #include <lib/format.hpp>
@@ -421,6 +422,37 @@ long sys_sysinfo(SYSCALL_ARGS) {
     return uaccess::put(reinterpret_cast<SysInfo*>(a0), info);
 }
 
+// syslog(2) / klogctl: what dmesg uses.
+long sys_syslog(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    int type = static_cast<int>(a0);
+    switch (type) {
+    case 2: case 3: case 4: { // READ, READ_ALL, READ_CLEAR
+        usize len = static_cast<usize>(a2);
+        if (static_cast<i64>(a2) < 0)
+            return -err::INVAL;
+        if (len > 128 * 1024)
+            len = 128 * 1024;
+        char* tmp = static_cast<char*>(kmalloc(len ? len : 1));
+        if (!tmp)
+            return -err::NOMEM;
+        usize n = klog::read_buffer(tmp, len);
+        long r = uaccess::copy_to(reinterpret_cast<void*>(a1), tmp, n);
+        kfree(tmp);
+        if (r < 0)
+            return r;
+        if (type == 4)
+            klog::clear_buffer();
+        return static_cast<long>(n);
+    }
+    case 5: klog::clear_buffer(); return 0;   // CLEAR
+    case 0: case 1: case 6: case 7: case 8: return 0; // close/open/console level
+    case 9: return static_cast<long>(klog::buffer_length()); // SIZE_UNREAD
+    case 10: return 128 * 1024;                              // SIZE_BUFFER
+    default: return -err::INVAL;
+    }
+}
+
 long sys_prctl(SYSCALL_ARGS) {
     SYSCALL_UNUSED;
     constexpr int PR_SET_PDEATHSIG = 1, PR_GET_PDEATHSIG = 2, PR_GET_DUMPABLE = 3, PR_SET_DUMPABLE = 4,
@@ -535,6 +567,7 @@ void register_process() {
     set(63, sys_uname, "uname");
     set(97, sys_getrlimit, "getrlimit");
     set(99, sys_sysinfo, "sysinfo");
+    set(103, sys_syslog, "syslog");
     set(102, sys_getid, "getuid");
     set(104, sys_getid, "getgid");
     set(105, sys_setid, "setuid");

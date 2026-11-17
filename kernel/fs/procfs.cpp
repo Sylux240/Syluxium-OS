@@ -653,7 +653,7 @@ void init() {
     genfs::static_file("/proc/version",
                        "Linux version 6.12.0-syluxium (syluxium@build) (clang) #1 SMP Syluxium " __DATE__ "\n");
     genfs::static_file("/proc/cmdline", "\n");
-    genfs::static_file("/proc/filesystems", "nodev\tramfs\nnodev\tproc\nnodev\tsysfs\nnodev\tdevtmpfs\n");
+    genfs::static_file("/proc/filesystems", "nodev\tramfs\nnodev\tproc\nnodev\tsysfs\nnodev\tdevtmpfs\nnodev\ttmpfs\n\tvfat\n\texfat\n\text4\n\text3\n\text2\n");
     add("mounts", new GeneratedFile(gen_mounts, nullptr));
     vfs::mkdir_p("/proc/sys/kernel");
     genfs::static_file("/proc/sys/kernel/hostname", "syluxium\n");

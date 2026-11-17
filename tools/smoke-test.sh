@@ -8,8 +8,10 @@
 #   smoke/<date>_<label>_<mode>.png / .log
 # which lives outside build/ so `make clean` keeps it.
 # Extra QEMU arguments can be passed in $QEMU_EXTRA (e.g. QEMU_EXTRA="-cpu max").
+# USB=1 adds an xHCI controller with a USB keyboard, mouse and the FAT32
+# stick from tools/make-test-disks.sh (as /dev/sdb).
 # $TYPE: text typed on the (PS/2) keyboard after the boot wait, then a few
-# more seconds pass before the screenshot. "\n" = Enter, "\c" = Ctrl+C, "\w" = wait 2 s.
+# more seconds pass before the screenshot. "\n" = Enter, "\c" = Ctrl+C, "\w" = wait 2 s, "\m" = mouse moves/clicks/scroll.
 set -euo pipefail
 
 MODE=${1:-bios}
@@ -38,6 +40,14 @@ args=(-M q35 -m 2G -smp 4 -cpu max
       -display none -serial "file:$LOG"
       -monitor "unix:$SOCK,server,nowait"
       -no-reboot)
+if [[ -n ${USB:-} ]]; then
+    args+=(-device qemu-xhci,id=xhci -device usb-kbd,bus=xhci.0 -device usb-mouse,bus=xhci.0
+           -drive file=build/test-disks/usb-fat.img,if=none,id=stick,format=raw
+           -device usb-storage,bus=xhci.0,drive=stick)
+    [[ -f build/test-disks/usb-exfat.img ]] && args+=(
+           -drive file=build/test-disks/usb-exfat.img,if=none,id=stick2,format=raw
+           -device usb-storage,bus=xhci.0,drive=stick2)
+fi
 [[ -n ${QEMU_EXTRA:-} ]] && read -ra extra <<< "$QEMU_EXTRA" && args+=("${extra[@]}")
 [[ $MODE == uefi ]] && args+=(-drive "if=pflash,format=raw,readonly=on,file=$OVMF")
 
@@ -58,12 +68,17 @@ names = {" ": "spc", "\n": "ret", "-": "minus", "=": "equal", ".": "dot", ",": "
 shifted = {"|": "backslash", "_": "minus", "+": "equal", ">": "dot", "<": "comma", "?": "slash", ":": "semicolon",
            '"': "apostrophe", "{": "bracket_left", "}": "bracket_right", "~": "grave_accent", "!": "1", "@": "2",
            "#": "3", "$": "4", "%": "5", "^": "6", "&": "7", "*": "8", "(": "9", ")": "0"}
-text = sys.argv[3].replace("\\n", "\n").replace("\\c", "\x03").replace("\\w", "\x01")
+text = sys.argv[3].replace("\\n", "\n").replace("\\c", "\x03").replace("\\w", "\x01").replace("\\m", "\x02")
 for ch in text:
     if ch == "\x03":       # \c in $TYPE: Ctrl+C
         s.sendall(b"sendkey ctrl-c\n"); time.sleep(0.3); continue
     if ch == "\x01":       # \w in $TYPE: wait 2 seconds
         time.sleep(2); continue
+    if ch == "\x02":       # \m in $TYPE: move the mouse, click, scroll
+        for cmd in ["mouse_move 40 0", "mouse_move 0 25", "mouse_move -10 -5", "mouse_button 1", "mouse_button 0",
+                    "mouse_button 2", "mouse_button 0", "mouse_move 0 0 -1", "mouse_move 0 0 -1"]:
+            s.sendall((cmd + "\n").encode()); time.sleep(0.15)
+        continue
     if ch in shifted:
         key = "shift-" + shifted[ch]
     elif ch.isupper():

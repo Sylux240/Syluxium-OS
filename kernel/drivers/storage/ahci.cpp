@@ -214,8 +214,6 @@ long Port::transfer(u64 lba, u32 count, void* buf, bool write) {
     return 0;
 }
 
-int g_disk_index = 0;
-
 bool match(const dev::Device* d) { return d->bus == dev::Bus::Pci && (d->class_code >> 8) == 0x0106 && (d->class_code & 0xFF) == 1; }
 
 long probe(dev::Device* d) {
@@ -246,7 +244,7 @@ long probe(dev::Device* d) {
             delete port;
             continue;
         }
-        snprintf(port->name, sizeof(port->name), "sd%c", 'a' + g_disk_index++);
+        block::next_sd_name(port->name, sizeof(port->name));
         port->hw = d;
         block::register_disk(port);
         disks++;

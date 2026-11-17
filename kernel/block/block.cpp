@@ -242,6 +242,11 @@ void register_disk(Device* disk) {
     scan_partitions(disk);
 }
 
+void next_sd_name(char* out, usize size) {
+    static int next = 0;
+    snprintf(out, size, "sd%c", 'a' + __atomic_fetch_add(&next, 1, __ATOMIC_RELAXED));
+}
+
 Device* find(const char* name) {
     for (usize i = 0; i < g_device_count; i++)
         if (strcmp(g_devices[i]->name, name) == 0)

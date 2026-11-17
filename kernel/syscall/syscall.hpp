@@ -24,6 +24,7 @@ void register_file();
 void register_memory();
 void register_process();
 void register_time();
+void register_net();
 
 } // namespace syscall
 

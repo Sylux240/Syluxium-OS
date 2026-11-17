@@ -125,6 +125,7 @@ struct File {
     u32 refcount = 1;
     sched::Mutex lock; // protects offset; a mutex because reads may sleep (terminals, pipes)
     char* path = nullptr; // absolute path it was opened by (for /proc/<pid>/fd), heap-allocated
+    void* private_data = nullptr; // per-open state owned by the inode (input clients, ...)
 };
 
 // Remember the path a file was opened by.

@@ -2,6 +2,7 @@
 
 #include <block/block.hpp>
 #include <fs/ext2.hpp>
+#include <fs/exfat.hpp>
 #include <fs/fat.hpp>
 #include <fs/pipe.hpp>
 #include <fs/ramfs.hpp>
@@ -1124,6 +1125,27 @@ long sys_mount(SYSCALL_ARGS) {
     join_path(proc::current()->cwd_path, target.c_str(), abs, sizeof(abs));
 
     const char* t = type.c_str();
+    // No type (or "auto"): detect it from the device.
+    if ((!t[0] || strcmp(t, "auto") == 0) && !source.error()) {
+        const char* src = source.c_str();
+        if (strncmp(src, "/dev/", 5) == 0)
+            src += 5;
+        if (block::Device* dev = block::find(src))
+            t = exfat::probe(dev) ? "exfat" : fat::probe(dev) ? "vfat" : ext2::probe(dev) ? "ext4" : t;
+    }
+    if (strcmp(t, "exfat") == 0) {
+        if (source.error()) return source.error();
+        const char* src = source.c_str();
+        if (strncmp(src, "/dev/", 5) == 0)
+            src += 5;
+        block::Device* dev = block::find(src);
+        if (!dev)
+            return -err::NODEV;
+        Inode* root;
+        if (long r = exfat::mount(dev, &root); r < 0)
+            return r;
+        return vfs::mount_at(abs, root, source.c_str(), "exfat");
+    }
     if (strcmp(t, "vfat") == 0 || strcmp(t, "fat") == 0 || strcmp(t, "msdos") == 0) {
         if (source.error()) return source.error();
         const char* src = source.c_str();

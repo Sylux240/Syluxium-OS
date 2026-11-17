@@ -35,6 +35,8 @@ struct Process {
 
     vfs::Inode* cwd = nullptr;
     char cwd_path[512] = "/";
+    // ITIMER_REAL / alarm(): absolute deadline (clock ns, 0 = off) and reload interval.
+    u64 alarm_deadline = 0, alarm_interval = 0;
     u32 umask = 022;
 
     sched::Thread* main_thread = nullptr;     // the thread the process started with

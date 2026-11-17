@@ -14,7 +14,10 @@
 #include <dev/device.hpp>
 #include <dev/platform.hpp>
 #include <drivers/pci/pci.hpp>
+#include <drivers/input/input.hpp>
 #include <drivers/ps2kbd.hpp>
+#include <drivers/usb/usb.hpp>
+#include <net/net.hpp>
 #include <drivers/storage/storage.hpp>
 #include <block/block.hpp>
 #include <fs/ext2.hpp>
@@ -122,9 +125,14 @@ void discover_hardware() {
     block::init();
     ahci::register_driver();
     nvme::register_driver();
+    xhci::register_driver();
+    net::init(); // loopback first: it becomes ifindex 1, like Linux
+    e1000::register_driver();
+    virtio_net::register_driver();
     pci::init();
     dev::register_platform_devices(g_keyboard);
     dev::probe_all();
+    xhci::enumerate_all();
     sysfs::populate_devices();
 
     // The EFI system partition (FAT32) appears at /boot/efi, as on Linux.
@@ -138,6 +146,9 @@ void discover_hardware() {
         vfs::Inode* root;
         if (fat::mount(d, &root) != 0)
             return;
+        vfs::Inode* efi_dir = root->lookup("EFI", 3);
+        if (!efi_dir || !vfs::is_dir(efi_dir->mode))
+            return; // a FAT volume, but not an EFI system partition (USB stick, SD card)
         vfs::mkdir_p("/boot/efi");
         char source[32];
         snprintf(source, sizeof(source), "/dev/%s", d->name);
@@ -172,6 +183,8 @@ void discover_hardware() {
         kprintf_serial("    %-14s %04x:%04x  %-22s %-10s %s\n", d->bus_id, d->vendor, d->device,
                        dev::category_name(d->category), d->driver_name ? d->driver_name : "-", d->name);
     }, nullptr);
+
+    net::start(4000); // DHCP; wait a little so the shell starts online
 }
 
 void mount_initramfs() {
@@ -225,7 +238,8 @@ void run_userspace_tests() {
     static const char* const systest[] = {"/opt/syluxium/tests/systest", "arg-one", "arg two", nullptr};
     static const char* const crash[] = {"/opt/syluxium/tests/crashtest", nullptr};
     static const char* const threads[] = {"/opt/syluxium/tests/threadtest", nullptr};
-    const Test sequential[] = {{hello, 0}, {systest, 0}, {crash, 11 /* SIGSEGV */}, {threads, 0}};
+    static const char* const nettest[] = {"/opt/syluxium/tests/nettest", nullptr};
+    const Test sequential[] = {{hello, 0}, {systest, 0}, {crash, 11 /* SIGSEGV */}, {threads, 0}, {nettest, 0}};
 
     for (const Test& t : sequential) {
         int status = run_program(t.argv);
@@ -412,6 +426,7 @@ extern "C" [[noreturn]] void kmain() {
     // ---- Phase 4: files, devices, processes --------------------------------
     vfs::init();
     tty::init();
+    input::init();
     g_keyboard = ps2kbd::init();
     devices::init();
     proc::init();

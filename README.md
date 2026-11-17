@@ -77,9 +77,20 @@ tools/smoke-test.sh   headless QEMU boot: serial log + screenshot
       device registry (every device: name, vendor, driver, status, resources), ext4 so files persist
       - [x] 5a: PCI + device registry + driver model, block layer + cache + partitions, AHCI, NVMe,
             FAT32 (rw), ext2 (rw) / ext3 / ext4 (ro), mount/umount/rename/statfs/utimensat
-      - [ ] 5b: PS/2 mouse, input events (/dev/input), USB (xHCI): HID keyboard/mouse, mass storage
-      - [ ] 5c: ext4 writes, exFAT
+      - [x] 5b: PS/2 mouse (wheel), Linux input events (/dev/input/eventN, evdev ioctls), USB:
+            xHCI host controller, hubs, HID keyboards/mice, mass storage (USB sticks as /dev/sdX),
+            kernel log buffer (dmesg)
+      - [x] 5c: exFAT read/write (long names, rename; fsck.exfat-clean), mount type auto-detection
+      - [ ] later: USB hot-plug, HID report parsing
+            (gamepads, tablets, media keys), USB 3 hubs
 - [ ] **Phase 6**: wired networking: virtio-net/e1000/Realtek, Ethernet/ARP/IPv4/IPv6/UDP/TCP, DHCP, DNS
+      - [x] 6a: Intel e1000/e1000e (82540EM, 82574L, I217-I219) and virtio-net drivers; Ethernet,
+            ARP, IPv4, ICMP (ping), UDP, TCP (retransmission, RTT-based timeout, flow control,
+            listen/accept, half-close), loopback, kernel DHCP client, /etc/resolv.conf, BSD socket
+            API (glibc DNS, wget, ping, httpd, nc work), ifconfig/route ioctls, /proc/net/*,
+            alarm/setitimer
+      - [ ] 6b: Realtek r8169 (most desktop boards), IPv6, AF_UNIX sockets, netlink (ip command),
+            TCP window scaling/SACK, IP fragment reassembly
 - [ ] **Phase 7**: Linux driver compatibility layer (LinuxKPI) + **Wi-Fi** for many chips: Intel
       (iwlwifi), Qualcomm/Atheros (ath9k/10k/11k/12k), MediaTek (mt76), Realtek (rtw88/rtw89),
       Broadcom (brcmfmac); mac80211/cfg80211, WPA2/WPA3 via wpa_supplicant/iwd, linux-firmware
@@ -100,13 +111,30 @@ tools/smoke-test.sh   headless QEMU boot: serial log + screenshot
       - **System page** (like Windows "About" / macOS "About This Mac"): OS version, CPU, RAM,
         GPU, storage, uptime
       - **Device Manager**: tree of all hardware by category, driver and status per device
+      - **Disk Management** (partitions, format, mount, drive letters/labels) and **Computer
+        Management** (one console: Device Manager, Disk Management, services, event log, users)
+      - Accessories (original Syluxium apps, Windows-style): **File Explorer**, **Notepad**,
+        **WordPad** (rich text), **Paint**, **Calculator**, **Character Map**, **Snipping Tool**
+        (screenshots + markup), **Media Player** (music and video)
+      - Accessibility: **Magnifier**, **On-Screen Keyboard**
+      - Network apps: **Network and Sharing Center** (connections, adapters, sharing),
+        **Firewall** (inbound/outbound rules), **Remote Desktop** client (RDP/VNC)
+      - **Printing**: print services (CUPS-compatible spooler, printer drivers, Devices and Printers)
+      - **Programming tools** (GUI): an IDE like KDevelop (projects, editor with highlighting and
+        completion, build, debugger front end for gdb), plus GUI tools around compilers (gcc/clang,
+        Python, ...); real IDEs (KDevelop, Qt Creator, VS Code-likes, Geany) installable from the App Store
+      - **Image Writer** (GUI): flash .iso/.img (and compressed images) to USB sticks and SD cards
+        with verification, like balenaEtcher / Rufus
+      - Every system tool has a GUI (command line optional)
 - [ ] **Phase 10**: GPU drivers and acceleration, for gaming and other graphics work: virtio-gpu
       (virgl) first, then AMD (amdgpu) and NVIDIA (nouveau, and NVIDIA's open kernel modules)
       through the driver compatibility layer. Display side (KMS): resolutions, refresh rates,
       multiple monitors. 3D: Mesa's **Vulkan** (RADV, NVK) and **OpenGL** (radeonsi, zink/nouveau)
       drivers, so Steam, Proton and other games and 3D apps run
-- [ ] **Phase 11**: package installer: double-click a .deb or .rpm to install it (dependencies
-      fetched from Debian / Fedora repos into per-distro runtimes), apps appear in the start menu
+- [ ] **Phase 11**: **App Store** + package installer (.deb only; .rpm dropped): a Play Store-like
+      app with screenshots, icons, descriptions, ratings/details, categories and search, pulling
+      .deb packages from several repositories (Debian, Ubuntu, third-party apt repos); double-click
+      a .deb to install it too; dependencies resolved by apt; apps appear in the start menu
 
 ## Checklist
 
@@ -136,9 +164,9 @@ Legend: ✅ done · 🟡 partly done · ⬜ to do
 - ✅ Serial, PS/2 keyboard, firmware framebuffer
 - ✅ PCI/PCIe enumeration (ECAM, BARs, MSI/MSI-X) + device registry (/sys/bus/pci, lspci works,
      /sys/kernel/syluxium/devices for the Device Manager)
-- ⬜ PS/2 mouse
-- ⬜ USB (xHCI): keyboards, mice, gamepads, storage
-- ⬜ Input event interface (/dev/input): raw mouse + gamepads for games and the desktop
+- ✅ PS/2 mouse (with wheel)
+- 🟡 USB (xHCI + hubs): keyboards, mice, storage work; gamepads (HID report parsing) and hot-plug to do
+- ✅ Input event interface (/dev/input/eventN, Linux evdev ABI) for games and the desktop
 - ✅ AHCI/SATA, NVMe (polled DMA; interrupts/NCQ later)
 - ⬜ Wired network cards
 - ⬜ Linux driver compatibility layer (shared by Wi-Fi and GPU)
@@ -149,14 +177,16 @@ Legend: ✅ done · 🟡 partly done · ⬜ to do
 
 **Storage**
 - ✅ VFS, RAM filesystem, initramfs
-- 🟡 ext2/3/4: reads all three (extents, 64-bit); writes ext2-style volumes (e2fsck-clean);
-     ext4 writing (extents, metadata checksums) to do
-- 🟡 FAT32 read/write with long file names, mounted at /boot/efi; exFAT to do
+- ✅ ext2/3/4: reads all three (extents, 64-bit); writes ext2-style volumes (e2fsck-clean).
+     ext4 is read-only by design (other systems' Linux partitions stay safe); a journal for
+     Syluxium's own volumes (crash safety) is planned before installing on real PCs
+- ✅ FAT32 and exFAT read/write with long file names (ESP mounted at /boot/efi)
 - ✅ Disk cache (4 KiB blocks, write-back every 5 s and on sync), MBR + GPT partitions
 
 **Networking**
-- ⬜ TCP/IP stack: Ethernet, ARP, IPv4/IPv6, UDP, TCP
-- ⬜ Sockets API
+- 🟡 TCP/IP stack: Ethernet, ARP, IPv4, ICMP, UDP, TCP, DHCP done (ping google.com, wget, inbound
+     HTTP verified); IPv6 to do. Drivers: e1000/e1000e, virtio-net; Realtek r8169 to do
+- 🟡 Sockets API: AF_INET (TCP, UDP, ICMP) done; AF_UNIX (needed by the desktop) to do
 - ⬜ Netlink (network tools, Wi-Fi configuration)
 
 **Linux compatibility**
@@ -173,14 +203,21 @@ Legend: ✅ done · 🟡 partly done · ⬜ to do
 - ⬜ Task Manager with End Task
 - ⬜ System page: OS version, CPU, RAM, GPU, storage
 - ⬜ Device Manager
+- ⬜ Disk Management, Computer Management
+- ⬜ File Explorer, Notepad, WordPad, Paint, Calculator, Character Map, Snipping Tool, Media Player
+- ⬜ Magnifier, On-Screen Keyboard
+- ⬜ Network and Sharing Center, Firewall (kernel packet filter + rules UI), Remote Desktop client
+- ⬜ Printing (CUPS-compatible print services, Devices and Printers)
+- ⬜ Programming tools: KDevelop-like IDE (editor, build, gdb debugger front end)
+- ⬜ Image Writer: flash .iso/.img to USB/SD with verification
 - ⬜ Notifications
 
 **Packages and system**
-- 🟡 Package installer: build-time Debian fetcher done; double-click .deb/.rpm on the device to do
+- 🟡 Package installer: build-time Debian fetcher done; App Store + double-click .deb on the device to do
 - ⬜ Running packages' maintainer (install) scripts
 - ⬜ Users and permissions (everything runs as root today)
 - 🟡 Security: NX, kernel W^X, guard pages done; ASLR, SMEP/SMAP to do
 - ⬜ Power management: sleep, battery, CPU frequency scaling
 - ⬜ Updates and recovery
 
-Tally: 17 done · 8 partly done · 32 to do.
+Tally: 21 done · 9 partly done · 34 to do.

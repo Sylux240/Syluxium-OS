@@ -2,6 +2,7 @@
 #include <drivers/serial.hpp>
 #include <lib/format.hpp>
 #include <lib/spinlock.hpp>
+#include <time/clock.hpp>
 #include <video/console.hpp>
 
 namespace {
@@ -23,11 +24,39 @@ int print_unlocked(const char* fmt, ...) {
     return n;
 }
 
-void log_line(const char* tag, const char* fmt, va_list args) {
+// Ring buffer of log lines (oldest bytes are overwritten).
+constexpr usize RING = 128 * 1024;
+char g_ring[RING];
+usize g_ring_start = 0, g_ring_len = 0;
+
+void ring_sink(char c, void*) {
+    if (g_ring_len < RING) {
+        g_ring[(g_ring_start + g_ring_len++) % RING] = c;
+    } else {
+        g_ring[g_ring_start] = c;
+        g_ring_start = (g_ring_start + 1) % RING;
+    }
+}
+
+void ring_printf(const char* fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    vformat(ring_sink, nullptr, fmt, args);
+    va_end(args);
+}
+
+void log_line(int level, const char* tag, const char* fmt, va_list args) {
     LockGuard guard(g_print_lock);
+    va_list copy;
+    va_copy(copy, args);
     print_unlocked("%s ", tag);
     vprint_unlocked(fmt, args);
     print_unlocked("\n");
+    u64 us = clock::now_ns() / 1000;
+    ring_printf("<%d>[%5lu.%06lu] ", level, us / 1'000'000, us % 1'000'000);
+    vformat(ring_sink, nullptr, fmt, copy);
+    ring_sink('\n', nullptr);
+    va_end(copy);
 }
 
 } // namespace
@@ -66,21 +95,41 @@ int kprintf_serial(const char* fmt, ...) {
 
 namespace klog {
 
-#define DEFINE_LOG_FN(name, tag)       \
-    void name(const char* fmt, ...) {  \
-        va_list args;                  \
-        va_start(args, fmt);           \
-        log_line(tag, fmt, args);      \
-        va_end(args);                  \
+#define DEFINE_LOG_FN(name, level, tag)  \
+    void name(const char* fmt, ...) {    \
+        va_list args;                    \
+        va_start(args, fmt);             \
+        log_line(level, tag, fmt, args); \
+        va_end(args);                    \
     }
 
-DEFINE_LOG_FN(debug, "\x1b[90m[ DEBUG ]\x1b[0m")
-DEFINE_LOG_FN(info,  "\x1b[94m[ INFO  ]\x1b[0m")
-DEFINE_LOG_FN(ok,    "\x1b[92m[  OK   ]\x1b[0m")
-DEFINE_LOG_FN(warn,  "\x1b[93m[ WARN  ]\x1b[0m")
-DEFINE_LOG_FN(error, "\x1b[91m[ ERROR ]\x1b[0m")
+// Levels as in Linux: 7 debug, 6 info, 4 warning, 3 error.
+DEFINE_LOG_FN(debug, 7, "\x1b[90m[ DEBUG ]\x1b[0m")
+DEFINE_LOG_FN(info,  6, "\x1b[94m[ INFO  ]\x1b[0m")
+DEFINE_LOG_FN(ok,    6, "\x1b[92m[  OK   ]\x1b[0m")
+DEFINE_LOG_FN(warn,  4, "\x1b[93m[ WARN  ]\x1b[0m")
+DEFINE_LOG_FN(error, 3, "\x1b[91m[ ERROR ]\x1b[0m")
 
 #undef DEFINE_LOG_FN
+
+usize read_buffer(char* out, usize max) {
+    LockGuard guard(g_print_lock);
+    usize n = g_ring_len < max ? g_ring_len : max;
+    usize skip = g_ring_len - n; // keep the newest bytes
+    for (usize i = 0; i < n; i++)
+        out[i] = g_ring[(g_ring_start + skip + i) % RING];
+    return n;
+}
+
+usize buffer_length() {
+    LockGuard guard(g_print_lock);
+    return g_ring_len;
+}
+
+void clear_buffer() {
+    LockGuard guard(g_print_lock);
+    g_ring_start = g_ring_len = 0;
+}
 
 void break_lock() { g_print_lock.force_unlock(); }
 
