@@ -366,20 +366,28 @@ void Memory::for_each_vma(void (*fn)(const Vma&, void*), void* ctx) {
         fn(*v, ctx);
 }
 
-bool Memory::fault(uptr addr, bool write) {
+bool Memory::fault(uptr addr, bool write, bool exec) {
     LockGuard guard(m_lock);
     Vma* v = find(addr);
     if (!v || v->prot == PROT_NONE)
         return false;
     if (write && !(v->prot & PROT_WRITE))
         return false;
+    if (exec && !(v->prot & PROT_EXEC))
+        return false;
     uptr page = align_down<uptr>(addr, PAGE_SIZE);
     u64 phys;
     if (m_as->translate(page, &phys)) {
         // Present: a write to a page shared copy-on-write after fork().
-        if (write && (v->prot & PROT_WRITE))
+        if (write && !m_as->is_writable(page))
             return copy_on_write(v, page);
-        return false; // a real protection violation
+        // Otherwise the page already allows this access: another thread of
+        // the process faulted on the same page at the same time and mapped
+        // it while we waited for the lock (or a CoW break finished first).
+        // The VMA permits the access, so this is a spurious fault - return
+        // and let the CPU retry. (Treating it as a violation killed
+        // multithreaded programs at random on machines with many CPUs.)
+        return true;
     }
     return populate(v, page);
 }
