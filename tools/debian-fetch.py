@@ -11,6 +11,7 @@ This is what Syluxium's own package installer will do on the device later;
 for now it runs at build time to put a Debian userland into the initramfs.
 """
 import argparse
+import gzip
 import hashlib
 import io
 import lzma
@@ -33,19 +34,15 @@ SKIP_PREFIXES = ("usr/share/doc/", "usr/share/man/", "usr/share/info/", "usr/sha
 
 def fetch(url: str, dest: str) -> None:
     tmp = dest + ".part"
-    with urllib.request.urlopen(url) as r, open(tmp, "wb") as f:
+    # Some mirrors (Trinity's) reject Python's default user agent.
+    req = urllib.request.Request(url, headers={"User-Agent": "Syluxium-debian-fetch/1.0"})
+    with urllib.request.urlopen(req) as r, open(tmp, "wb") as f:
         shutil.copyfileobj(r, f)
     os.replace(tmp, dest)
 
 
-def load_index(suite: str, cache: str) -> dict:
-    """Package index for the global ARCH (set from --arch)."""
-    path = os.path.join(cache, f"Packages-{suite}-{ARCH}.xz")
-    if not os.path.exists(path):
-        print(f"  fetching package index for {suite}/{ARCH}", file=sys.stderr)
-        fetch(f"{MIRROR}/dists/{suite}/main/binary-{ARCH}/Packages.xz", path)
-    packages, provides = {}, {}
-    text = lzma.open(path, "rt", encoding="utf-8").read()
+def parse_index(text: str, base: str, packages: dict, provides: dict) -> None:
+    """Add the stanzas of one Packages file; later repositories override earlier ones."""
     for stanza in text.split("\n\n"):
         fields, key = {}, None
         for line in stanza.splitlines():
@@ -57,11 +54,35 @@ def load_index(suite: str, cache: str) -> dict:
         name = fields.get("Package")
         if not name:
             continue
+        fields["_base"] = base
         packages[name] = fields
         for p in fields.get("Provides", "").split(","):
             p = p.strip().split(" ")[0]
             if p:
-                provides.setdefault(p, name)
+                provides[p] = name
+
+
+def load_index(suite: str, cache: str, extra_repos: list) -> dict:
+    """Package index for the global ARCH: Debian's main, then each extra
+    repository ("BASEURL|SUITE|COMPONENT,COMPONENT", e.g. Trinity's)."""
+    packages, provides = {}, {}
+    path = os.path.join(cache, f"Packages-{suite}-{ARCH}.xz")
+    if not os.path.exists(path):
+        print(f"  fetching package index for {suite}/{ARCH}", file=sys.stderr)
+        fetch(f"{MIRROR}/dists/{suite}/main/binary-{ARCH}/Packages.xz", path)
+    parse_index(lzma.open(path, "rt", encoding="utf-8").read(), MIRROR, packages, provides)
+    for spec in extra_repos:
+        base, rsuite, comps = spec.split("|")
+        tag = re.sub(r"[^A-Za-z0-9]+", "-", base.split("//")[-1]).strip("-")[-40:]
+        for comp in comps.split(","):
+            path = os.path.join(cache, f"Packages-{tag}-{rsuite}-{comp}-{ARCH}.gz")
+            if not os.path.exists(path):
+                print(f"  fetching package index {base} {rsuite}/{comp}/{ARCH}", file=sys.stderr)
+                fetch(f"{base}/dists/{rsuite}/{comp}/binary-{ARCH}/Packages.gz", path)
+            parse_index(gzip.open(path, "rt", encoding="utf-8").read(), base, packages, provides)
+    # A real package always wins over a "Provides:" of another one.
+    for name in packages:
+        provides.pop(name, None)
     return {"packages": packages, "provides": provides}
 
 
@@ -103,7 +124,7 @@ def download(index: dict, name: str, cache: str) -> str:
     dest = os.path.join(cache, os.path.basename(filename))
     if not os.path.exists(dest):
         print(f"  downloading {name} {fields['Version']}", file=sys.stderr)
-        fetch(f"{MIRROR}/{filename}", dest)
+        fetch(f"{fields['_base']}/{filename}", dest)
     digest = hashlib.sha256(open(dest, "rb").read()).hexdigest()
     if digest != fields["SHA256"]:
         os.remove(dest)
@@ -180,6 +201,8 @@ def main() -> None:
     ap.add_argument("--cache", required=True)
     ap.add_argument("--exclude", default="", help="comma-separated packages to leave out")
     ap.add_argument("--arch", default="amd64", help="Debian architecture (amd64, i386, ...)")
+    ap.add_argument("--repo", action="append", default=[],
+                    help="extra repository BASEURL|SUITE|COMP1,COMP2 (packages there override Debian's)")
     ap.add_argument("packages", nargs="+")
     args = ap.parse_args()
     global ARCH
@@ -195,7 +218,7 @@ def main() -> None:
     for link, target in (("bin", "usr/bin"), ("sbin", "usr/sbin"), ("lib", "usr/lib"), ("lib64", "usr/lib64")):
         os.symlink(target, os.path.join(args.out, link))
 
-    index = load_index(args.suite, args.cache)
+    index = load_index(args.suite, args.cache, args.repo)
     exclude = {e for e in args.exclude.split(",") if e}
     order = resolve(index, args.packages, exclude)
     total = 0

@@ -119,7 +119,10 @@ tools/smoke-test.sh   headless QEMU boot: serial log + screenshot
       - [x] 9-pre: epoll/eventfd/timerfd/signalfd, shared memory (memfd, POSIX, SysV, MAP_SHARED
             tmpfs), inotify, /dev/fb0, pseudo-terminals + controlling terminals, hard links;
             **the real Xorg server runs** (fbdev + evdev) with twm and an interactive xterm
-      - [ ] 9a: TDE packages (Trinity's own Debian repo), D-Bus, a session (startx/login), fonts
+      - [x] 9a: **TDE runs**: Trinity R14.1.7 from Trinity's Debian repo (twin, kicker, kdesktop,
+            konqueror, konsole, kcontrol, ksmserver), D-Bus system + session buses, ld.so.cache,
+            `starttde-test` session script (aRts sound server off; ALSA is used directly)
+      - [ ] 9-boot: boot from a disk root filesystem instead of a 350 MB initramfs; a login/session
       - [ ] 9b: "Start" button, XP/7 theme, DRM/KMS driver for display settings
       Look: clean, glossy and rounded like Windows XP / Windows 7 (not Windows 11).
       - Right-click context menus everywhere: on files (Open, Open with, Extract Here / Extract

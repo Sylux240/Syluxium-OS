@@ -436,6 +436,64 @@ long sys_getresid(SYSCALL_ARGS) {
     return 0;
 }
 
+// capget/capset: everything runs as root with every capability.
+long sys_capget(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    struct Header {
+        u32 version;
+        i32 pid;
+    } h;
+    if (long r = uaccess::get(&h, reinterpret_cast<Header*>(a0)); r < 0)
+        return r;
+    constexpr u32 V3 = 0x20080522;
+    if (h.version != V3 && h.version != 0x20071026 && h.version != 0x19980330) {
+        h.version = V3; // tell the caller which version we speak
+        uaccess::put(reinterpret_cast<Header*>(a0), h);
+        return a1 ? -err::INVAL : 0;
+    }
+    if (a1) {
+        u32 data[6] = {0xFFFFFFFF, 0xFFFFFFFF, 0, 0x000001FF, 0x000001FF, 0}; // effective, permitted, inheritable x2
+        int words = h.version == 0x19980330 ? 3 : 6;
+        return uaccess::copy_to(reinterpret_cast<void*>(a1), data, static_cast<usize>(words) * 4);
+    }
+    return 0;
+}
+
+long sys_capset(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    return 0;
+}
+
+// getpriority/setpriority: nice values are accepted but don't change scheduling yet.
+long sys_getpriority(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    return 20; // the kernel returns 20 - nice
+}
+
+long sys_setpriority(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    return 0;
+}
+
+// close_range(first, last, flags): what glibc's closefrom() and many daemons use.
+long sys_close_range(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    constexpr u64 CLOSE_RANGE_UNSHARE = 2, CLOSE_RANGE_CLOEXEC = 4;
+    if (a2 & ~(CLOSE_RANGE_UNSHARE | CLOSE_RANGE_CLOEXEC) || a0 > a1)
+        return -err::INVAL;
+    proc::Process* p = proc::current();
+    u64 last = a1 < static_cast<u64>(proc::MAX_FDS) ? a1 : proc::MAX_FDS - 1;
+    for (u64 fd = a0; fd <= last; fd++) {
+        if (a2 & CLOSE_RANGE_CLOEXEC) {
+            if (p->fds[fd])
+                p->cloexec[fd] = true;
+        } else if (p->fds[fd]) {
+            proc::fd_close(p, static_cast<int>(fd));
+        }
+    }
+    return 0;
+}
+
 long sys_syslog(SYSCALL_ARGS) {
     SYSCALL_UNUSED;
     int type = static_cast<int>(a0);
@@ -494,6 +552,18 @@ long sys_prctl(SYSCALL_ARGS) {
     case PR_SET_DUMPABLE: case PR_SET_PDEATHSIG: case PR_SET_NO_NEW_PRIVS: return 0;
     case PR_GET_PDEATHSIG: return uaccess::put(reinterpret_cast<i32*>(a1), 0);
     case PR_GET_NO_NEW_PRIVS: return 0;
+    // Capabilities (libcap-ng, daemons dropping privileges): every process is
+    // root with every capability, so these succeed without changing anything.
+    case 7:  return 0;                       // PR_GET_KEEPCAPS
+    case 8:  return a1 > 1 ? -err::INVAL : 0; // PR_SET_KEEPCAPS
+    case 23: return a1 <= 40 ? 1 : -err::INVAL; // PR_CAPBSET_READ: in the bounding set
+    case 24: return 0;                       // PR_CAPBSET_DROP
+    case 27: return 0;                       // PR_GET_SECUREBITS
+    case 28: return 0;                       // PR_SET_SECUREBITS
+    case 47: return a1 == 1 /* IS_SET */ ? 0 : 0; // PR_CAP_AMBIENT
+    case 36: case 37: return 0;              // PR_SET/GET_CHILD_SUBREAPER
+    case 22: return 0;                       // PR_SET_SECCOMP / 21 GET: no filters
+    case 21: return 0;
     default: return -err::INVAL;
     }
 }
@@ -581,6 +651,11 @@ void register_process() {
     set(97, sys_getrlimit, "getrlimit");
     set(99, sys_sysinfo, "sysinfo");
     set(103, sys_syslog, "syslog");
+    set(125, sys_capget, "capget");
+    set(126, sys_capset, "capset");
+    set(140, sys_getpriority, "getpriority");
+    set(141, sys_setpriority, "setpriority");
+    set(436, sys_close_range, "close_range");
     set(117, sys_setid, "setresuid");
     set(118, sys_getresid, "getresuid");
     set(119, sys_setid, "setresgid");

@@ -649,6 +649,13 @@ long sys_linkat(SYSCALL_ARGS) {
     return do_linkat(static_cast<i32>(a0), a1, static_cast<i32>(a2), a3, static_cast<u32>(a4));
 }
 
+// Extended attributes: none are stored (tmpfs/ext2 without xattrs).
+long sys_getxattr(SYSCALL_ARGS) { SYSCALL_UNUSED; return -err::NODATA; }
+long sys_listxattr(SYSCALL_ARGS) { SYSCALL_UNUSED; return 0; }
+long sys_setxattr(SYSCALL_ARGS) { SYSCALL_UNUSED; return -err::OPNOTSUPP; }
+long sys_removexattr(SYSCALL_ARGS) { SYSCALL_UNUSED; return -err::NODATA; }
+long sys_fadvise64(SYSCALL_ARGS) { SYSCALL_UNUSED; return 0; } // advice only
+
 long sys_symlink(SYSCALL_ARGS) { SYSCALL_UNUSED; return do_symlinkat(a0, AT_FDCWD, a1); }
 long sys_symlinkat(SYSCALL_ARGS) { SYSCALL_UNUSED; return do_symlinkat(a0, static_cast<i32>(a1), a2); }
 
@@ -1356,6 +1363,19 @@ void register_file() {
     set(85, sys_creat, "creat");
     set(87, sys_unlink, "unlink");
     set(86, sys_link, "link");
+    set(188, sys_setxattr, "setxattr");
+    set(189, sys_setxattr, "lsetxattr");
+    set(190, sys_setxattr, "fsetxattr");
+    set(191, sys_getxattr, "getxattr");
+    set(192, sys_getxattr, "lgetxattr");
+    set(193, sys_getxattr, "fgetxattr");
+    set(194, sys_listxattr, "listxattr");
+    set(195, sys_listxattr, "llistxattr");
+    set(196, sys_listxattr, "flistxattr");
+    set(197, sys_removexattr, "removexattr");
+    set(198, sys_removexattr, "lremovexattr");
+    set(199, sys_removexattr, "fremovexattr");
+    set(221, sys_fadvise64, "fadvise64");
     set(88, sys_symlink, "symlink");
     set(265, sys_linkat, "linkat");
     set(89, sys_readlink, "readlink");

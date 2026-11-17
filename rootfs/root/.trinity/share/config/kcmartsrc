@@ -1,0 +1,3 @@
+# aRts (TDE's legacy sound server) is off: programs use ALSA directly.
+[Arts]
+StartServer=false
