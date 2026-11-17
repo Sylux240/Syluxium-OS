@@ -19,6 +19,7 @@ limine_module_response* modules(); // files loaded next to the kernel (initramfs
 
 // Called once bootloader-reclaimable memory is handed to the page allocator:
 // every response lives there, so all accessors return nullptr afterwards.
+const char* cmdline(); // kernel command line ("" if none); valid after release()
 void release();
 bool released();
 

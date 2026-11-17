@@ -36,6 +36,12 @@ rm -f "$SOCK" "$LOG" "$PPM"
 DISK="$OUT/disk-$MODE.img"
 if [[ -z ${KEEP_DISK:-} || ! -f $DISK ]]; then
     cp "$IMAGE" "$DISK"
+    # Tests type at the text console, so boot the "text console" entry
+    # unless DESKTOP=1 (boot straight into TDE like a real install).
+    if [[ ${DESKTOP:-0} != 1 ]]; then
+        sed 's/^default_entry: 1$/default_entry: 2/' limine.conf > "$OUT/limine-test.conf"
+        mcopy -o -i "$DISK@@1M" "$OUT/limine-test.conf" ::/boot/limine/limine.conf
+    fi
 fi
 
 # Hardware virtualization when available (10-50x faster boots); KVM=0 forces

@@ -1,0 +1,6 @@
+[Desktop Entry]
+# Syluxium: no first-run tde_release_notes window
+Name=tde_release_notes
+Type=Application
+Exec=true
+Hidden=true

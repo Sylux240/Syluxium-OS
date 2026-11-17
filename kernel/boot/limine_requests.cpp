@@ -35,6 +35,10 @@ LIMINE_REQUEST limine_module_request module_request = {
     .id = LIMINE_MODULE_REQUEST_ID, .revision = 0, .response = nullptr,
     .internal_module_count = 0, .internal_modules = nullptr};
 
+// The kernel command line from limine.conf ("cmdline:"), e.g. "desktop".
+LIMINE_REQUEST limine_executable_cmdline_request cmdline_request = {
+    .id = LIMINE_EXECUTABLE_CMDLINE_REQUEST_ID, .revision = 0, .response = nullptr};
+
 // Starting the other CPUs happens in phase 3; asking now lets us report the count.
 LIMINE_REQUEST limine_mp_request mp_request = {
     .id = LIMINE_MP_REQUEST_ID, .revision = 0, .response = nullptr, .flags = 0};
@@ -50,6 +54,7 @@ namespace boot {
 
 namespace {
 bool g_released = false;
+char g_cmdline[256] = {}; // copied before the bootloader's memory is reclaimed
 u64 g_hhdm_offset_copy = 0; // the one value still needed afterwards
 } // namespace
 
@@ -67,8 +72,20 @@ void* rsdp() { return !g_released && rsdp_request.response ? rsdp_request.respon
 limine_mp_response* mp() { return g_released ? nullptr : mp_request.response; }
 limine_module_response* modules() { return g_released ? nullptr : module_request.response; }
 
+const char* cmdline() {
+    if (!g_released && cmdline_request.response && cmdline_request.response->cmdline) {
+        const char* src = cmdline_request.response->cmdline;
+        usize i = 0;
+        for (; src[i] && i + 1 < sizeof(g_cmdline); i++)
+            g_cmdline[i] = src[i];
+        g_cmdline[i] = 0;
+    }
+    return g_cmdline;
+}
+
 void release() {
     hhdm_offset();
+    cmdline();
     g_released = true;
 }
 bool released() { return g_released; }
