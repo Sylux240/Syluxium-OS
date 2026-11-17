@@ -56,6 +56,7 @@ void register_all() {
     register_net(); // after register_file: replaces its socket stubs
     register_events();
     register_ipc();
+    register_inotify();
     register_compat(); // last: the 32-bit table reuses native handlers
 }
 

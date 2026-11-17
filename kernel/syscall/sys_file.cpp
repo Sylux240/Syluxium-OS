@@ -3,6 +3,7 @@
 #include <block/block.hpp>
 #include <fs/ext2.hpp>
 #include <fs/exfat.hpp>
+#include <fs/inotify.hpp>
 #include <fs/fat.hpp>
 #include <fs/pipe.hpp>
 #include <fs/ramfs.hpp>
@@ -147,14 +148,20 @@ long do_write(File* f, u64 user_buf, u64 count, i64 offset = -1) {
         return -err::BADF;
     if (long r = uaccess::check(reinterpret_cast<void*>(user_buf), count, false); r < 0)
         return r;
-    if (offset >= 0)
-        return f->inode->write_file(f, static_cast<u64>(offset), reinterpret_cast<const void*>(user_buf), count);
+    if (offset >= 0) {
+        isize n = f->inode->write_file(f, static_cast<u64>(offset), reinterpret_cast<const void*>(user_buf), count);
+        if (n > 0 && is_reg(f->inode->mode))
+            inotify::file_event(f, inotify::IN_MODIFY);
+        return n;
+    }
     LockGuard guard(f->lock);
     if (f->flags & O_APPEND)
         f->offset = f->inode->size;
     isize n = f->inode->write_file(f, f->offset, reinterpret_cast<const void*>(user_buf), count);
     if (n > 0 && f->inode->seekable())
         f->offset += static_cast<u64>(n);
+    if (n > 0 && is_reg(f->inode->mode))
+        inotify::file_event(f, inotify::IN_MODIFY);
     return n;
 }
 
@@ -178,6 +185,7 @@ long do_openat(long dirfd, u64 user_path, u32 flags, u32 mode) {
             return r;
         if ((r = parent->create(name, len, S_IFREG | (mode & ~p->umask & 07777), nullptr, &inode)) < 0)
             return r;
+        inotify::child_event(parent, inotify::IN_CREATE, name, len);
     } else if (r < 0) {
         return r;
     } else if ((flags & O_CREAT) && (flags & O_EXCL)) {
@@ -190,8 +198,10 @@ long do_openat(long dirfd, u64 user_path, u32 flags, u32 mode) {
         return -err::ISDIR;
     if (is_lnk(inode->mode) && !(flags & O_PATH))
         return -err::LOOP; // O_NOFOLLOW on a symlink
-    if ((flags & O_TRUNC) && is_reg(inode->mode) && (flags & O_ACCMODE) != O_RDONLY)
+    if ((flags & O_TRUNC) && is_reg(inode->mode) && (flags & O_ACCMODE) != O_RDONLY && inode->size) {
         inode->truncate(0);
+        inotify::self_event(inode, inotify::IN_MODIFY);
+    }
 
     File* f = open_inode(inode, flags & ~(O_CREAT | O_EXCL | O_TRUNC | O_NOCTTY | O_CLOEXEC));
     {
@@ -208,6 +218,8 @@ long do_openat(long dirfd, u64 user_path, u32 flags, u32 mode) {
         join_path(base_path, path.c_str(), abs, sizeof(abs));
         file_set_path(f, abs);
     }
+    if (is_reg(inode->mode) || is_dir(inode->mode))
+        inotify::file_event(f, inotify::IN_OPEN);
     long fd = proc::fd_install(p, f, 0, flags & O_CLOEXEC);
     if (fd < 0)
         file_put(f);
@@ -538,7 +550,10 @@ long do_mkdirat(long dirfd, u64 user_path, u32 mode) {
     usize len;
     if (long r = resolve_parent(path.c_str(), base, &parent, &name, &len); r < 0)
         return r;
-    return parent->create(name, len, S_IFDIR | (mode & ~p->umask & 07777), nullptr, nullptr);
+    long r = parent->create(name, len, S_IFDIR | (mode & ~p->umask & 07777), nullptr, nullptr);
+    if (r == 0)
+        inotify::child_event(parent, inotify::IN_CREATE | inotify::IN_ISDIR, name, len);
+    return r;
 }
 
 long sys_mkdir(SYSCALL_ARGS) { SYSCALL_UNUSED; return do_mkdirat(AT_FDCWD, a0, static_cast<u32>(a1)); }
@@ -557,7 +572,17 @@ long do_unlinkat(long dirfd, u64 user_path, bool dir) {
     usize len;
     if (long r = resolve_parent(path.c_str(), base, &parent, &name, &len); r < 0)
         return r;
-    return parent->unlink(name, len, dir);
+    // Files report IN_DELETE_SELF when they're really destroyed (last link
+    // and last user gone: inotify::inode_gone from the destructor); `victim`
+    // may already be freed after unlink, so it's only used for directories.
+    Inode* victim = (inotify::active() && dir) ? parent->lookup(name, len) : nullptr;
+    long r = parent->unlink(name, len, dir);
+    if (r == 0) {
+        inotify::child_event(parent, inotify::IN_DELETE | (dir ? inotify::IN_ISDIR : 0), name, len);
+        if (victim)
+            inotify::inode_gone(victim); // directories: IN_DELETE_SELF + IN_IGNORED
+    }
+    return r;
 }
 
 long sys_unlink(SYSCALL_ARGS) { SYSCALL_UNUSED; return do_unlinkat(AT_FDCWD, a0, false); }
@@ -578,7 +603,10 @@ long do_symlinkat(u64 user_target, long dirfd, u64 user_path) {
     usize len;
     if (long r = resolve_parent(path.c_str(), base, &parent, &name, &len); r < 0)
         return r;
-    return parent->create(name, len, S_IFLNK | 0777, target.c_str(), nullptr);
+    long r = parent->create(name, len, S_IFLNK | 0777, target.c_str(), nullptr);
+    if (r == 0)
+        inotify::child_event(parent, inotify::IN_CREATE, name, len);
+    return r;
 }
 
 long sys_symlink(SYSCALL_ARGS) { SYSCALL_UNUSED; return do_symlinkat(a0, AT_FDCWD, a1); }
@@ -663,7 +691,10 @@ long sys_ftruncate(SYSCALL_ARGS) {
         return -err::BADF;
     if (!can_write(f.get()))
         return -err::INVAL;
-    return f->inode->truncate(a1);
+    long r = f->inode->truncate(a1);
+    if (r == 0)
+        inotify::file_event(f.get(), inotify::IN_MODIFY);
+    return r;
 }
 
 long sys_truncate(SYSCALL_ARGS) {
@@ -674,7 +705,10 @@ long sys_truncate(SYSCALL_ARGS) {
     Inode* n;
     if (long r = resolve(path.c_str(), proc::current()->cwd, true, &n); r < 0)
         return r;
-    return n->truncate(a1);
+    long r = n->truncate(a1);
+    if (r == 0)
+        inotify::self_event(n, inotify::IN_MODIFY);
+    return r;
 }
 
 long sys_umask(SYSCALL_ARGS) {
@@ -1085,7 +1119,10 @@ long do_utimensat(long dirfd, u64 user_path, u64 user_times, u32 flags) {
         access = ts[0].nsec == UTIME_NOW ? now : ts[0].nsec == UTIME_OMIT ? inode->atime : Timespec{ts[0].sec, ts[0].nsec};
         modify = ts[1].nsec == UTIME_NOW ? now : ts[1].nsec == UTIME_OMIT ? inode->mtime : Timespec{ts[1].sec, ts[1].nsec};
     }
-    return inode->set_times(access, modify);
+    long r = inode->set_times(access, modify);
+    if (r == 0)
+        inotify::self_event(inode, inotify::IN_ATTRIB);
+    return r;
 }
 
 long sys_utimensat(SYSCALL_ARGS) {
@@ -1129,7 +1166,16 @@ long do_renameat(long olddirfd, u64 old_user, long newdirfd, u64 new_user, u32 f
     if (long r = resolve_parent(newp.c_str(), nbase, &ndir, &nname, &nlen); r < 0) return r;
     if ((flags & RENAME_NOREPLACE) && ndir->lookup(nname, nlen))
         return -err::EXIST;
-    return odir->rename(oname, olen, ndir, nname, nlen);
+    Inode* moved = inotify::active() ? odir->lookup(oname, olen) : nullptr;
+    long r = odir->rename(oname, olen, ndir, nname, nlen);
+    if (r == 0 && moved) {
+        u32 isdir = is_dir(moved->mode) ? inotify::IN_ISDIR : 0;
+        u32 cookie = inotify::next_cookie();
+        inotify::child_event(odir, inotify::IN_MOVED_FROM | isdir, oname, olen, cookie);
+        inotify::child_event(ndir, inotify::IN_MOVED_TO | isdir, nname, nlen, cookie);
+        inotify::self_event(moved, inotify::IN_MOVE_SELF);
+    }
+    return r;
 }
 
 long sys_rename(SYSCALL_ARGS) { SYSCALL_UNUSED; return do_renameat(AT_FDCWD, a0, AT_FDCWD, a1, 0); }

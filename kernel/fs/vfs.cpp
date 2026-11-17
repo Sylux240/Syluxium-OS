@@ -1,4 +1,5 @@
 #include <fs/ramfs.hpp>
+#include <fs/inotify.hpp>
 #include <fs/vfs.hpp>
 #include <lib/format.hpp>
 #include <lib/string.hpp>
@@ -256,6 +257,8 @@ void file_put(File* f) {
     if (__atomic_sub_fetch(&f->refcount, 1, __ATOMIC_ACQ_REL) == 0) {
         if (file_release_hook)
             file_release_hook(f);
+        if (inotify::active() && (is_reg(f->inode->mode) || is_dir(f->inode->mode)))
+            inotify::file_event(f, (f->flags & O_ACCMODE) != O_RDONLY ? inotify::IN_CLOSE_WRITE : inotify::IN_CLOSE_NOWRITE);
         f->inode->on_release(f);
         kfree(f->path);
         delete f;

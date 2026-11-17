@@ -1,3 +1,4 @@
+#include <fs/inotify.hpp>
 #include <fs/ramfs.hpp>
 #include <mm/layout.hpp>
 #include <mm/pmm.hpp>
@@ -212,6 +213,7 @@ RegularFile::RegularFile() {
 }
 
 RegularFile::~RegularFile() {
+    inotify::inode_gone(this); // watches on it get IN_IGNORED (pointer is about to be reused)
     free_pages_from(0);
     kfree(m_pages);
 }
