@@ -13,7 +13,8 @@
 # USB=1 adds an xHCI controller with a USB keyboard, mouse and the FAT32
 # stick from tools/make-test-disks.sh (as /dev/sdb).
 # $TYPE: text typed on the (PS/2) keyboard after the boot wait, then a few
-# more seconds pass before the screenshot. "\n" = Enter, "\c" = Ctrl+C, "\w" = wait 2 s, "\m" = mouse moves/clicks/scroll.
+# more seconds pass before the screenshot. "\n" = Enter, "\c" = Ctrl+C, "\w" = wait 2 s, "\m" = mouse moves/clicks/scroll,
+# "\{cmd}" = run a QEMU monitor command (e.g. "\{device_add usb-kbd,bus=xhci.0,id=k2}" for hot-plug tests).
 set -euo pipefail
 
 MODE=${1:-bios}
@@ -90,7 +91,16 @@ shifted = {"|": "backslash", "_": "minus", "+": "equal", ">": "dot", "<": "comma
            '"': "apostrophe", "{": "bracket_left", "}": "bracket_right", "~": "grave_accent", "!": "1", "@": "2",
            "#": "3", "$": "4", "%": "5", "^": "6", "&": "7", "*": "8", "(": "9", ")": "0"}
 text = sys.argv[3].replace("\\n", "\n").replace("\\c", "\x03").replace("\\w", "\x01").replace("\\m", "\x02")
-for ch in text:
+# "\{monitor command}": pulled out first, executed in order with the keys.
+pieces, rest = [], text
+while "\\{" in rest:
+    before, _, after = rest.partition("\\{")
+    cmd, _, rest = after.partition("}")
+    pieces += list(before) + [("monitor", cmd)]
+pieces += list(rest)
+for ch in pieces:
+    if isinstance(ch, tuple):  # \{cmd}
+        s.sendall((ch[1] + "\n").encode()); time.sleep(1); continue
     if ch == "\x03":       # \c in $TYPE: Ctrl+C
         s.sendall(b"sendkey ctrl-c\n"); time.sleep(0.3); continue
     if ch == "\x01":       # \w in $TYPE: wait 2 seconds
