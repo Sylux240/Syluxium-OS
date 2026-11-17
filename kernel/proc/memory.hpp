@@ -2,6 +2,7 @@
 
 #include <fs/vfs.hpp>
 #include <lib/list.hpp>
+#include <mm/layout.hpp>
 #include <mm/vmm.hpp>
 #include <sched/sync.hpp>
 
@@ -21,6 +22,13 @@ constexpr uptr USER_MIN      = 0x10000;            // keep NULL-ish addresses un
 constexpr uptr MMAP_TOP      = 0x7ff000000000;     // mmap() allocates downwards from here
 constexpr uptr STACK_TOP     = 0x7ffffffff000;
 constexpr usize STACK_SIZE   = 8 * MiB;
+
+// 32-bit (ia32) programs can only address the low 4 GiB. Layout like Linux:
+// a vsyscall page at the very top, the stack below it, mmap() below that.
+constexpr uptr COMPAT_TASK_END   = 0x100000000;     // exclusive
+constexpr uptr COMPAT_VSYSCALL   = 0xFFFFE000;      // int $0x80; ret + sigreturn trampolines
+constexpr uptr COMPAT_STACK_TOP  = 0xFFFFD000;
+constexpr uptr COMPAT_MMAP_TOP   = 0xF7000000;      // leaves 128+ MiB for the stack
 
 enum VmaKind : u8 { VMA_NORMAL, VMA_HEAP, VMA_STACK };
 
@@ -57,6 +65,12 @@ public:
     long protect(uptr addr, usize len, u32 prot);
     long brk(uptr new_end);  // returns the (possibly unchanged) break
     void set_brk_base(uptr base) { m_brk_base = m_brk = base; }
+
+    // 32-bit address space: every mapping stays below 4 GiB.
+    void set_compat() { m_compat = true; }
+    bool compat() const { return m_compat; }
+    uptr mmap_top() const { return m_compat ? COMPAT_MMAP_TOP : MMAP_TOP; }
+    uptr task_end() const { return m_compat ? COMPAT_TASK_END : mm::USER_END; }
 
     // Resolve a page fault. False means the access is invalid (segfault).
     bool fault(uptr addr, bool write);
@@ -102,6 +116,7 @@ private:
     uptr m_brk_base = 0, m_brk = 0;
     u32 m_refs = 1;
     u64 m_rss = 0; // resident pages
+    bool m_compat = false;
 };
 
 u32 prot_to_map_flags(u32 prot);

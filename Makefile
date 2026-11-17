@@ -33,12 +33,20 @@ USER_CC     := gcc
 USER_CFLAGS := -static -O2 -Wall
 TESTS_DIR   := $(BUILD)/tests
 USER_PROGS  := $(patsubst userspace/%.c,$(TESTS_DIR)/%,$(wildcard userspace/*.c))
+# 32-bit (i386) test programs for the compat layer (host gcc multilib, static).
+USER32_CFLAGS := -m32 -static -O2 -Wall -pthread
+USER32_PROGS  := $(patsubst userspace/ia32/%.c,$(TESTS_DIR)/%,$(wildcard userspace/ia32/*.c))
 
 # Official Debian packages (and their dependencies) that make up the userland.
 DEBIAN_SUITE := trixie
 DEBIAN_PKGS  := bash busybox hello ncurses-base pciutils pci.ids netbase
 DEBIAN_ROOT  := $(BUILD)/rootfs-debian
 DEBIAN_STAMP := $(DEBIAN_ROOT)/.fetched
+# A few i386 packages for testing 32-bit dynamic linking (Steam is 32-bit).
+DEBIAN_I386_PKGS  := hello busybox bash
+DEBIAN_I386_PROGS := hello busybox bash
+DEBIAN_I386_ROOT  := $(BUILD)/rootfs-debian-i386
+DEBIAN_I386_STAMP := $(DEBIAN_I386_ROOT)/.fetched
 
 LIMINE_DIR          := deps/limine
 LIMINE_PROTOCOL_DIR := deps/limine-protocol
@@ -141,12 +149,22 @@ $(TESTS_DIR)/%: userspace/%.c
 	@echo "  USER  $<"
 	@$(USER_CC) $(USER_CFLAGS) $< -o $@ -lm
 
+$(TESTS_DIR)/%: userspace/ia32/%.c
+	@mkdir -p $(dir $@)
+	@echo "  USER32 $<"
+	@$(USER_CC) $(USER32_CFLAGS) $< -o $@
+
 $(DEBIAN_STAMP): tools/debian-fetch.py
 	@echo "  DEB   $(DEBIAN_PKGS) (+ dependencies, Debian $(DEBIAN_SUITE))"
 	@python3 tools/debian-fetch.py --suite $(DEBIAN_SUITE) --out $(DEBIAN_ROOT) --cache deps/debian $(DEBIAN_PKGS)
 	@touch $@
 
-$(INITRAMFS): $(DEBIAN_STAMP) $(USER_PROGS) $(shell find rootfs -type f 2>/dev/null) Makefile
+$(DEBIAN_I386_STAMP): tools/debian-fetch.py
+	@echo "  DEB   $(DEBIAN_I386_PKGS) (i386, Debian $(DEBIAN_SUITE))"
+	@python3 tools/debian-fetch.py --arch i386 --suite $(DEBIAN_SUITE) --out $(DEBIAN_I386_ROOT) --cache deps/debian $(DEBIAN_I386_PKGS)
+	@touch $@
+
+$(INITRAMFS): $(DEBIAN_STAMP) $(DEBIAN_I386_STAMP) $(USER_PROGS) $(USER32_PROGS) $(shell find rootfs -type f 2>/dev/null) Makefile
 	@echo "  ROOT  $(ROOTFS)"
 	@rm -rf $(ROOTFS)
 	@cp -a $(DEBIAN_ROOT) $(ROOTFS)
@@ -157,7 +175,13 @@ $(INITRAMFS): $(DEBIAN_STAMP) $(USER_PROGS) $(shell find rootfs -type f 2>/dev/n
 	        ln -s busybox $(ROOTFS)/usr/bin/$$applet; done
 	@ln -sf busybox $(ROOTFS)/usr/bin/sh
 	@mkdir -p $(ROOTFS)/opt/syluxium/tests
-	@cp $(USER_PROGS) $(ROOTFS)/opt/syluxium/tests/
+	@cp $(USER_PROGS) $(USER32_PROGS) $(ROOTFS)/opt/syluxium/tests/
+	@# 32-bit Debian userland (multiarch, as on Debian): libraries in
+	@# /usr/lib/i386-linux-gnu, ld-linux.so.2, programs installed as <name>-i386
+	@mkdir -p $(ROOTFS)/usr/lib/i386-linux-gnu
+	@cp -a $(DEBIAN_I386_ROOT)/usr/lib/i386-linux-gnu/. $(ROOTFS)/usr/lib/i386-linux-gnu/
+	@cp -a $(DEBIAN_I386_ROOT)/usr/lib/ld-linux.so.2 $(ROOTFS)/usr/lib/
+	@for prog in $(DEBIAN_I386_PROGS); do cp $(DEBIAN_I386_ROOT)/usr/bin/$$prog $(ROOTFS)/usr/bin/$$prog-i386; done
 	@cp -r rootfs/. $(ROOTFS)/
 	@echo "  CPIO  $@"
 	@cd $(ROOTFS) && find . | LC_ALL=C sort | cpio -o -H newc --quiet --owner=0:0 > ../initramfs.cpio

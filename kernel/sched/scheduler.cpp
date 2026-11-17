@@ -1,4 +1,5 @@
 #include <arch/x86_64/apic.hpp>
+#include <arch/x86_64/compat_segments.hpp>
 #include <arch/x86_64/fpu.hpp>
 #include <arch/x86_64/gdt.hpp>
 #include <arch/x86_64/interrupts.hpp>
@@ -9,6 +10,7 @@
 #include <lib/string.hpp>
 #include <mm/vmalloc.hpp>
 #include <mm/vmm.hpp>
+#include <proc/process.hpp>
 #include <sched/sched.hpp>
 #include <time/clock.hpp>
 
@@ -66,6 +68,7 @@ void load_thread_state(Cpu* cpu, Thread* t) {
     if (t->fpu_state)
         fpu::restore(t->fpu_state);
     if (t->process) {
+        compat_segments::load(cpu, t, t->process->compat); // before the base MSRs: may refresh them
         arch::wrmsr(MSR_FS_BASE, t->fs_base);
         arch::wrmsr(MSR_KERNEL_GS_BASE, t->gs_base); // becomes GS on the swapgs back to user
     }
@@ -78,8 +81,11 @@ void load_thread_state(Cpu* cpu, Thread* t) {
 void save_thread_state(Thread* t) {
     if (t->fpu_state)
         fpu::save(t->fpu_state);
-    if (t->process)
+    if (t->process) {
         t->gs_base = arch::rdmsr(MSR_KERNEL_GS_BASE);
+        if (t->process->compat)
+            compat_segments::save(t);
+    }
 }
 
 // Runs on the new thread right after every switch (lock still held).

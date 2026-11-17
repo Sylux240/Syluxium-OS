@@ -33,6 +33,7 @@ Memory* Memory::fork() {
     LockGuard guard(m_lock);
     child->m_brk_base = m_brk_base;
     child->m_brk = m_brk;
+    child->m_compat = m_compat;
     for (Vma* v : m_vmas) {
         auto* c = new Vma;
         c->start = v->start;
@@ -121,9 +122,9 @@ void Memory::insert(Vma* v) {
     m_vmas.insert_before(v, pos);
 }
 
-// Highest free gap of `len` bytes below MMAP_TOP.
+// Highest free gap of `len` bytes below the mmap area's top.
 uptr Memory::find_gap(usize len) {
-    uptr top = MMAP_TOP;
+    uptr top = mmap_top();
     for (Vma* v = m_vmas.back(); v; v = m_vmas.prev_of(v)) {
         if (v->start >= top)
             continue;
@@ -183,8 +184,10 @@ long Memory::map(uptr addr, usize len, u32 prot, u32 flags, vfs::Inode* file, u6
     LockGuard guard(m_lock);
     bool fixed = flags & (MAP_FIXED | MAP_FIXED_NOREPLACE);
     if (fixed) {
-        if ((addr & (PAGE_SIZE - 1)) || addr < USER_MIN || addr + len > mm::USER_END || addr + len < addr)
+        if ((addr & (PAGE_SIZE - 1)) || addr < USER_MIN || addr + len < addr)
             return -err::INVAL;
+        if (addr + len > task_end())
+            return m_compat ? -err::NOMEM : -err::INVAL; // Linux: ENOMEM beyond a 32-bit task's end
         if (flags & MAP_FIXED_NOREPLACE) {
             if (overlaps(addr, addr + len))
                 return -err::EXIST;
@@ -193,7 +196,7 @@ long Memory::map(uptr addr, usize len, u32 prot, u32 flags, vfs::Inode* file, u6
         }
     } else {
         addr = align_down<uptr>(addr, PAGE_SIZE);
-        if (!addr || addr < USER_MIN || addr + len > MMAP_TOP || overlaps(addr, addr + len))
+        if (!addr || addr < USER_MIN || addr + len > mmap_top() || overlaps(addr, addr + len))
             addr = find_gap(len);
         if (!addr)
             return -err::NOMEM;

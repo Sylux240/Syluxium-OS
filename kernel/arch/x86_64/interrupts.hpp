@@ -30,6 +30,7 @@ constexpr u8 VEC_MACHINE_CHECK     = 18;
 constexpr u8 VEC_LEGACY_PIC_BASE    = 0x20; // 0x20-0x2F: remapped (masked) 8259 PIC
 constexpr u8 VEC_DEVICE_FIRST      = 0x30; // 0x30-0xEF: allocated to devices
 constexpr u8 VEC_DEVICE_LAST       = 0xEF;
+constexpr u8 VEC_SYSCALL_INT80     = 0x80; // int $0x80: 32-bit system calls (never given to a device)
 constexpr u8 VEC_TIMER             = 0xF0; // local APIC timer (scheduler tick)
 constexpr u8 VEC_RESCHEDULE        = 0xF1; // IPI: "check your run queue"
 constexpr u8 VEC_TLB_SHOOTDOWN     = 0xF2; // IPI: flush TLB entries
@@ -40,6 +41,10 @@ constexpr u8 VEC_SPURIOUS          = 0xFF;
 void init();      // build the IDT and load it on the boot CPU
 void load_idt();  // load the (shared) IDT on another CPU
 void set_handler(u8 vector, Handler handler);
+
+// Point `vector` at a dedicated entry stub that user mode may invoke with
+// `int` (a DPL-3 interrupt gate), bypassing isr_common.
+void set_user_gate(u8 vector, void (*entry)());
 
 // Reserve a free device vector; 0 if none are left.
 u8 allocate_vector();

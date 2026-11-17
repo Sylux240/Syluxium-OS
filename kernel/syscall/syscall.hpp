@@ -18,6 +18,7 @@ void init_cpu();          // program the SYSCALL MSRs on this CPU
 void register_all();      // fill the dispatch table
 
 void set(u32 number, Handler handler, const char* name);
+Handler native(u32 number); // the registered x86_64 handler, or null
 
 // Handler groups (one per source file).
 void register_file();
@@ -25,6 +26,7 @@ void register_memory();
 void register_process();
 void register_time();
 void register_net();
+void register_compat(); // 32-bit (ia32) table + int $0x80 gate (compat32.cpp)
 
 } // namespace syscall
 

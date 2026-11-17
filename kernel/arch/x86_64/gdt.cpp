@@ -22,6 +22,7 @@ constexpr u64 KERNEL_CODE_DESC = 0x00AF9A000000FFFF; // P DPL0 S E R, L G
 constexpr u64 KERNEL_DATA_DESC = 0x00CF92000000FFFF; // P DPL0 S W,   DB G
 constexpr u64 USER_DATA_DESC   = 0x00CFF2000000FFFF; // P DPL3 S W,   DB G
 constexpr u64 USER_CODE_DESC   = 0x00AFFA000000FFFF; // P DPL3 S E R, L G
+constexpr u64 USER32_CODE_DESC = 0x00CFFA000000FFFF; // P DPL3 S E R, DB G (compatibility mode)
 
 } // namespace
 
@@ -46,6 +47,9 @@ void load(CpuTables& t, const u64* ist_tops) {
                  | (((limit >> 16) & 0xF) << 48)
                  | (((base >> 24) & 0xFF) << 56);
     t.entries[6] = base >> 32;
+    t.entries[7] = USER32_CODE_DESC;
+    for (int i = 0; i < TLS_ENTRIES; i++)
+        t.entries[TLS_FIRST_ENTRY + i] = 0; // not present until a 32-bit thread installs its own
 
     Gdtr gdtr{sizeof(t.entries) - 1, reinterpret_cast<u64>(t.entries)};
 
@@ -74,6 +78,11 @@ void init_bsp(CpuTables& tables) {
     for (int i = 0; i < IST_COUNT; i++)
         tops[i] = reinterpret_cast<u64>(&g_bsp_ist_stacks[i][IST_STACK_SIZE]); // stacks grow down
     load(tables, tops);
+}
+
+void install_tls(CpuTables& tables, const u64* descs) {
+    for (int i = 0; i < TLS_ENTRIES; i++)
+        tables.entries[TLS_FIRST_ENTRY + i] = descs[i];
 }
 
 void set_kernel_stack(CpuTables& tables, u64 rsp0) { tables.tss.rsp[0] = rsp0; }

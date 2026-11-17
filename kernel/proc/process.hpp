@@ -28,6 +28,7 @@ struct Process {
     char exe_path[256] = {};
 
     Memory* mem = nullptr;
+    bool compat = false;  // a 32-bit (ia32) program: compat syscalls, 32-bit signal frames, < 4 GiB
 
     vfs::File* fds[MAX_FDS] = {};
     bool cloexec[MAX_FDS] = {};

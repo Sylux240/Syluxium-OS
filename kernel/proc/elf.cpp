@@ -4,6 +4,7 @@
 #include <lib/string.hpp>
 #include <mm/heap.hpp>
 #include <mm/layout.hpp>
+#include <proc/compat.hpp>
 #include <proc/elf.hpp>
 
 namespace elf {
@@ -40,8 +41,41 @@ struct Elf64Phdr {
 };
 static_assert(sizeof(Elf64Phdr) == 56);
 
+// 32-bit (ia32) variants. They're converted to the 64-bit structures when
+// read, so everything after read_headers() handles both classes alike.
+struct Elf32Header {
+    u8 ident[16];
+    u16 type;
+    u16 machine;
+    u32 version;
+    u32 entry;
+    u32 phoff;
+    u32 shoff;
+    u32 flags;
+    u16 ehsize;
+    u16 phentsize;
+    u16 phnum;
+    u16 shentsize;
+    u16 shnum;
+    u16 shstrndx;
+};
+static_assert(sizeof(Elf32Header) == 52);
+
+struct Elf32Phdr {
+    u32 type;
+    u32 offset;
+    u32 vaddr;
+    u32 paddr;
+    u32 filesz;
+    u32 memsz;
+    u32 flags;
+    u32 align;
+};
+static_assert(sizeof(Elf32Phdr) == 32);
+
 constexpr u16 ET_EXEC = 2, ET_DYN = 3;
-constexpr u16 EM_X86_64 = 62;
+constexpr u16 EM_386 = 3, EM_X86_64 = 62;
+constexpr u8 ELFCLASS32 = 1, ELFCLASS64 = 2;
 constexpr u32 PT_LOAD = 1, PT_INTERP = 3, PT_PHDR = 6;
 constexpr u32 PF_X = 1, PF_W = 2, PF_R = 4;
 
@@ -49,10 +83,30 @@ constexpr u32 PF_X = 1, PF_W = 2, PF_R = 4;
 constexpr u64 AT_NULL = 0, AT_PHDR = 3, AT_PHENT = 4, AT_PHNUM = 5, AT_PAGESZ = 6, AT_BASE = 7,
               AT_FLAGS = 8, AT_ENTRY = 9, AT_UID = 11, AT_EUID = 12, AT_GID = 13, AT_EGID = 14,
               AT_PLATFORM = 15, AT_HWCAP = 16, AT_CLKTCK = 17, AT_SECURE = 23, AT_RANDOM = 25,
-              AT_HWCAP2 = 26, AT_EXECFN = 31;
+              AT_HWCAP2 = 26, AT_EXECFN = 31, AT_SYSINFO = 32;
 
 constexpr u64 PIE_BASE = 0x555555554000; // where Linux puts position-independent executables
+constexpr u64 PIE_BASE32 = 0x56555000;   // ... and 32-bit ones
 constexpr usize STACK_IMAGE_MAX = 128 * KiB;
+
+// What differs between loading a 64-bit and a 32-bit program.
+struct Layout {
+    bool is32;
+    u64 stack_top;
+    u64 pie_base;
+    usize word; // pointer size on the initial stack (argv, envp, auxv)
+    const char* platform;
+};
+constexpr Layout LAYOUT64{false, proc::STACK_TOP, PIE_BASE, 8, "x86_64"};
+constexpr Layout LAYOUT32{true, proc::COMPAT_STACK_TOP, PIE_BASE32, 4, "i686"};
+
+// An ELF header + program headers of either class, normalized to ELF64.
+struct Image {
+    Elf64Header eh;
+    Elf64Phdr phdrs[64];
+    bool is32;
+    u16 phent_size; // the file's own program-header size (for AT_PHENT)
+};
 
 u32 segment_prot(u32 pflags) {
     u32 prot = 0;
@@ -66,11 +120,11 @@ u32 segment_prot(u32 pflags) {
 // then copies it into the new address space in one go.
 class StackBuilder {
 public:
-    StackBuilder() : m_buf(static_cast<u8*>(kmalloc(STACK_IMAGE_MAX))) {}
+    explicit StackBuilder(u64 top) : m_buf(static_cast<u8*>(kmalloc(STACK_IMAGE_MAX))), m_top(top) {}
     ~StackBuilder() { kfree(m_buf); }
 
     bool ok() const { return m_buf && !m_overflow; }
-    u64 sp() const { return proc::STACK_TOP - m_used; }
+    u64 sp() const { return m_top - m_used; }
 
     u64 push_bytes(const void* data, usize len) {
         if (m_used + len > STACK_IMAGE_MAX) {
@@ -82,7 +136,15 @@ public:
         return sp();
     }
     u64 push_string(const char* s) { return push_bytes(s, strlen(s) + 1); }
-    void push_u64(u64 v) { push_bytes(&v, 8); }
+    // One pointer-sized word of the program's ABI (4 bytes for 32-bit programs).
+    void push_word(u64 v, usize size) {
+        if (size == 4) {
+            u32 w = static_cast<u32>(v);
+            push_bytes(&w, 4);
+        } else {
+            push_bytes(&v, 8);
+        }
+    }
     void align(usize a) {
         usize pad = (sp() & (a - 1));
         if (pad) {
@@ -96,6 +158,7 @@ public:
 
 private:
     u8* m_buf;
+    u64 m_top;
     usize m_used = 0;
     bool m_overflow = false;
 };
@@ -109,12 +172,13 @@ usize count(const char* const* v) {
 
 // Map every PT_LOAD segment of an ELF image at `base`. Fills in the
 // highest mapped address and the run-time address of the program headers.
-long map_segments(proc::Memory* mem, vfs::Inode* file, const Elf64Header& eh, const Elf64Phdr* phdrs, u64 base,
+long map_segments(proc::Memory* mem, vfs::Inode* file, const Image& img, u64 base, const Layout& layout,
                   u64* highest, u64* phdr_addr) {
+    const Elf64Header& eh = img.eh;
     *highest = 0;
     *phdr_addr = 0;
     for (u32 i = 0; i < eh.phnum; i++) {
-        const Elf64Phdr& ph = phdrs[i];
+        const Elf64Phdr& ph = img.phdrs[i];
         if (ph.type == PT_PHDR)
             *phdr_addr = base + ph.vaddr;
         if (ph.type != PT_LOAD || ph.memsz == 0)
@@ -127,7 +191,7 @@ long map_segments(proc::Memory* mem, vfs::Inode* file, const Elf64Header& eh, co
         u64 lead = ph.vaddr - page_vaddr;
         u64 start = base + page_vaddr;
         u64 end = base + align_up<u64>(ph.vaddr + ph.memsz, mm::PAGE_SIZE);
-        if (end > proc::STACK_TOP - proc::STACK_SIZE || start < proc::USER_MIN)
+        if (end > layout.stack_top - proc::STACK_SIZE || start < proc::USER_MIN || end < start)
             return -err::NOEXEC;
 
         uptr mapped;
@@ -143,41 +207,79 @@ long map_segments(proc::Memory* mem, vfs::Inode* file, const Elf64Header& eh, co
     return *highest ? 0 : -err::NOEXEC;
 }
 
-long read_headers(vfs::Inode* file, Elf64Header* eh, Elf64Phdr* phdrs) {
-    if (file->read(0, eh, sizeof(*eh)) != sizeof(*eh))
+long read_headers(vfs::Inode* file, Image* img) {
+    u8 raw[sizeof(Elf64Header)];
+    if (file->read(0, raw, sizeof(raw)) != sizeof(raw))
         return -err::NOEXEC;
-    if (memcmp(eh->ident, "\x7f" "ELF", 4) != 0 || eh->ident[4] != 2 /* 64-bit */ || eh->ident[5] != 1 /* LE */)
+    if (memcmp(raw, "\x7f" "ELF", 4) != 0 || raw[5] != 1 /* little endian */)
         return -err::NOEXEC;
-    if (eh->machine != EM_X86_64 || (eh->type != ET_EXEC && eh->type != ET_DYN))
+    Elf64Header* eh = &img->eh;
+    if (raw[4] == ELFCLASS64) {
+        memcpy(eh, raw, sizeof(*eh));
+        if (eh->machine != EM_X86_64 || eh->phentsize != sizeof(Elf64Phdr))
+            return -err::NOEXEC;
+        img->is32 = false;
+        img->phent_size = sizeof(Elf64Phdr);
+    } else if (raw[4] == ELFCLASS32) {
+        Elf32Header h;
+        memcpy(&h, raw, sizeof(h));
+        if (h.machine != EM_386 || h.phentsize != sizeof(Elf32Phdr))
+            return -err::NOEXEC;
+        memcpy(eh->ident, h.ident, sizeof(eh->ident));
+        eh->type = h.type;
+        eh->machine = h.machine;
+        eh->version = h.version;
+        eh->entry = h.entry;
+        eh->phoff = h.phoff;
+        eh->shoff = h.shoff;
+        eh->flags = h.flags;
+        eh->ehsize = h.ehsize;
+        eh->phentsize = sizeof(Elf64Phdr);
+        eh->phnum = h.phnum;
+        eh->shentsize = h.shentsize;
+        eh->shnum = h.shnum;
+        eh->shstrndx = h.shstrndx;
+        img->is32 = true;
+        img->phent_size = sizeof(Elf32Phdr);
+    } else {
         return -err::NOEXEC;
-    if (eh->phentsize != sizeof(Elf64Phdr) || eh->phnum == 0 || eh->phnum > 64)
+    }
+    if ((eh->type != ET_EXEC && eh->type != ET_DYN) || eh->phnum == 0 || eh->phnum > 64)
         return -err::NOEXEC;
-    usize ph_bytes = eh->phnum * sizeof(Elf64Phdr);
-    if (file->read(eh->phoff, phdrs, ph_bytes) != static_cast<isize>(ph_bytes))
+
+    usize ph_bytes = eh->phnum * img->phent_size;
+    if (!img->is32)
+        return file->read(eh->phoff, img->phdrs, ph_bytes) == static_cast<isize>(ph_bytes) ? 0 : -err::NOEXEC;
+
+    Elf32Phdr ph32[64];
+    if (file->read(eh->phoff, ph32, ph_bytes) != static_cast<isize>(ph_bytes))
         return -err::NOEXEC;
+    for (u32 i = 0; i < eh->phnum; i++)
+        img->phdrs[i] = Elf64Phdr{ph32[i].type,  ph32[i].flags,  ph32[i].offset, ph32[i].vaddr,
+                                  ph32[i].paddr, ph32[i].filesz, ph32[i].memsz,  ph32[i].align};
     return 0;
 }
 
-// Load the program interpreter (ld-linux.so) at an address mmap picks.
-long load_interpreter(proc::Memory* mem, const char* path, u64* base_out, u64* entry_out) {
+// Load the program interpreter (ld-linux.so) at an address mmap picks. It
+// must be of the same class as the program (ld-linux.so.2 for 32-bit).
+long load_interpreter(proc::Memory* mem, const char* path, const Layout& layout, Image* img, u64* base_out,
+                      u64* entry_out) {
     vfs::Inode* file;
     if (long r = vfs::resolve(path, nullptr, true, &file); r < 0)
         return r;
-    Elf64Header eh;
-    Elf64Phdr phdrs[64];
-    if (long r = read_headers(file, &eh, phdrs); r < 0)
+    if (long r = read_headers(file, img); r < 0)
         return r;
-    if (eh.type != ET_DYN)
+    if (img->eh.type != ET_DYN || img->is32 != layout.is32)
         return -err::NOEXEC;
 
     // Reserve one region big enough for the whole image, then map the
     // segments into it (MAP_FIXED replaces the reservation piece by piece).
     u64 lo = ~0ull, hi = 0;
-    for (u32 i = 0; i < eh.phnum; i++) {
-        if (phdrs[i].type != PT_LOAD)
+    for (u32 i = 0; i < img->eh.phnum; i++) {
+        if (img->phdrs[i].type != PT_LOAD)
             continue;
-        lo = min(lo, align_down<u64>(phdrs[i].vaddr, mm::PAGE_SIZE));
-        hi = max(hi, align_up<u64>(phdrs[i].vaddr + phdrs[i].memsz, mm::PAGE_SIZE));
+        lo = min(lo, align_down<u64>(img->phdrs[i].vaddr, mm::PAGE_SIZE));
+        hi = max(hi, align_up<u64>(img->phdrs[i].vaddr + img->phdrs[i].memsz, mm::PAGE_SIZE));
     }
     if (hi <= lo)
         return -err::NOEXEC;
@@ -187,58 +289,65 @@ long load_interpreter(proc::Memory* mem, const char* path, u64* base_out, u64* e
         return r;
     u64 base = region - lo;
     u64 highest, phdr_addr;
-    if (long r = map_segments(mem, file, eh, phdrs, base, &highest, &phdr_addr); r < 0)
+    if (long r = map_segments(mem, file, *img, base, layout, &highest, &phdr_addr); r < 0)
         return r;
     *base_out = base;
-    *entry_out = base + eh.entry;
+    *entry_out = base + img->eh.entry;
     return 0;
 }
 
-} // namespace
-
-long load(proc::Memory* mem, vfs::Inode* file, const char* exec_path, const char* const* argv,
-          const char* const* envp, LoadResult* out) {
-    Elf64Header eh;
-    Elf64Phdr phdrs[64];
-    if (long r = read_headers(file, &eh, phdrs); r < 0)
-        return r;
+// `img` (already read) is reused as scratch space for the interpreter's headers.
+long load_image(proc::Memory* mem, vfs::Inode* file, const char* exec_path, const char* const* argv,
+                const char* const* envp, Image* img, LoadResult* out) {
+    const Layout& layout = img->is32 ? LAYOUT32 : LAYOUT64;
+    if (layout.is32)
+        mem->set_compat(); // before anything is mapped: mmap() must stay below 4 GiB
 
     char interp[256] = {};
-    for (u32 i = 0; i < eh.phnum; i++) {
-        if (phdrs[i].type == PT_INTERP) {
-            if (phdrs[i].filesz >= sizeof(interp))
+    for (u32 i = 0; i < img->eh.phnum; i++) {
+        if (img->phdrs[i].type == PT_INTERP) {
+            if (img->phdrs[i].filesz >= sizeof(interp))
                 return -err::NOEXEC;
-            file->read(phdrs[i].offset, interp, phdrs[i].filesz);
-            interp[phdrs[i].filesz] = 0;
+            file->read(img->phdrs[i].offset, interp, img->phdrs[i].filesz);
+            interp[img->phdrs[i].filesz] = 0;
         }
     }
 
-    u64 base = eh.type == ET_DYN ? PIE_BASE : 0;
+    // Everything the auxiliary vector needs from the program's own headers.
+    u64 base = img->eh.type == ET_DYN ? layout.pie_base : 0;
     u64 highest, phdr_addr;
-    if (long r = map_segments(mem, file, eh, phdrs, base, &highest, &phdr_addr); r < 0)
+    if (long r = map_segments(mem, file, *img, base, layout, &highest, &phdr_addr); r < 0)
         return r;
+    u64 prog_entry = base + img->eh.entry;
+    u64 phnum = img->eh.phnum;
+    u64 phent = img->phent_size;
 
     // Dynamically linked: the interpreter starts first and loads the libraries.
     u64 interp_base = 0;
-    u64 start_entry = base + eh.entry;
+    u64 start_entry = prog_entry;
     if (interp[0]) {
-        if (long r = load_interpreter(mem, interp, &interp_base, &start_entry); r < 0) {
+        if (long r = load_interpreter(mem, interp, layout, img, &interp_base, &start_entry); r < 0) {
             klog::warn("exec %s: cannot load interpreter %s (error %ld)", exec_path, interp, -r);
             return r;
         }
     }
     mem->set_brk_base(highest);
 
+    if (layout.is32) {
+        if (long r = compat::map_vsyscall_page(mem); r < 0)
+            return r;
+    }
+
     // Stack: 8 MiB, faulted in on demand.
     uptr stack_base;
-    long r = mem->map(proc::STACK_TOP - proc::STACK_SIZE, proc::STACK_SIZE, proc::PROT_READ | proc::PROT_WRITE,
+    long r = mem->map(layout.stack_top - proc::STACK_SIZE, proc::STACK_SIZE, proc::PROT_READ | proc::PROT_WRITE,
                       proc::MAP_PRIVATE | proc::MAP_ANONYMOUS | proc::MAP_FIXED | proc::MAP_GROWSDOWN, nullptr, 0, 0,
                       &stack_base);
     if (r < 0)
         return r;
 
     // ---- Initial stack, from the top down ----
-    StackBuilder sb;
+    StackBuilder sb(layout.stack_top);
     usize argc = count(argv), envc = count(envp);
 
     u64 execfn = sb.push_string(exec_path);
@@ -250,20 +359,24 @@ long load(proc::Memory* mem, vfs::Inode* file, const char* exec_path, const char
         env_ptrs[i] = sb.push_string(envp[i]);
     for (usize i = argc; i-- > 0;)
         arg_ptrs[i] = sb.push_string(argv[i]);
-    u64 platform = sb.push_string("x86_64");
+    u64 platform = sb.push_string(layout.platform);
     u8 random_bytes[16];
     random::fill(random_bytes, sizeof(random_bytes));
     sb.align(16);
     u64 random_addr = sb.push_bytes(random_bytes, sizeof(random_bytes));
 
     u64 auxv[][2] = {
+        // 32-bit only (dropped below for 64-bit): glibc calls __kernel_vsyscall
+        // for system calls. No AT_SYSINFO_EHDR: there's no 32-bit vDSO image,
+        // so glibc makes real syscalls for clock_gettime & co.
+        {AT_SYSINFO, compat::VSYSCALL_ENTRY},
         {AT_PHDR, phdr_addr},
-        {AT_PHENT, sizeof(Elf64Phdr)},
-        {AT_PHNUM, eh.phnum},
+        {AT_PHENT, phent},
+        {AT_PHNUM, phnum},
         {AT_PAGESZ, mm::PAGE_SIZE},
         {AT_BASE, interp_base},
         {AT_FLAGS, 0},
-        {AT_ENTRY, base + eh.entry},
+        {AT_ENTRY, prog_entry},
         {AT_UID, 0}, {AT_EUID, 0}, {AT_GID, 0}, {AT_EGID, 0},
         {AT_SECURE, 0},
         {AT_HWCAP, arch::cpuid(1).edx},
@@ -274,25 +387,29 @@ long load(proc::Memory* mem, vfs::Inode* file, const char* exec_path, const char
         {AT_EXECFN, execfn},
         {AT_NULL, 0},
     };
-    constexpr usize AUXV_WORDS = sizeof(auxv) / 8;
+    usize first_aux = layout.is32 ? 0 : 1;
+    usize aux_count = sizeof(auxv) / sizeof(auxv[0]) - first_aux;
 
-    // Final RSP (at argc) must be 16-byte aligned.
-    usize words = 1 + (argc + 1) + (envc + 1) + AUXV_WORDS;
+    // Final stack pointer (at argc) must be 16-byte aligned.
+    usize words = 1 + (argc + 1) + (envc + 1) + aux_count * 2;
     sb.align(16);
-    if (words & 1)
-        sb.push_u64(0);
-
-    for (usize i = sizeof(auxv) / sizeof(auxv[0]); i-- > 0;) {
-        sb.push_u64(auxv[i][1]);
-        sb.push_u64(auxv[i][0]);
+    usize misalign = (words * layout.word) & 15;
+    if (misalign) {
+        u8 zeros[16] = {};
+        sb.push_bytes(zeros, 16 - misalign);
     }
-    sb.push_u64(0); // envp terminator
+
+    for (usize i = sizeof(auxv) / sizeof(auxv[0]); i-- > first_aux;) {
+        sb.push_word(auxv[i][1], layout.word);
+        sb.push_word(auxv[i][0], layout.word);
+    }
+    sb.push_word(0, layout.word); // envp terminator
     for (usize i = envc; i-- > 0;)
-        sb.push_u64(env_ptrs[i]);
-    sb.push_u64(0); // argv terminator
+        sb.push_word(env_ptrs[i], layout.word);
+    sb.push_word(0, layout.word); // argv terminator
     for (usize i = argc; i-- > 0;)
-        sb.push_u64(arg_ptrs[i]);
-    sb.push_u64(argc);
+        sb.push_word(arg_ptrs[i], layout.word);
+    sb.push_word(argc, layout.word);
 
     if (!sb.ok()) {
         kfree(env_ptrs);
@@ -310,8 +427,24 @@ long load(proc::Memory* mem, vfs::Inode* file, const char* exec_path, const char
     mem->env_end = execfn;
     out->entry = start_entry;
     out->stack_ptr = sb.sp();
+    out->compat = layout.is32;
     kfree(env_ptrs);
     return 0;
+}
+
+} // namespace
+
+long load(proc::Memory* mem, vfs::Inode* file, const char* exec_path, const char* const* argv,
+          const char* const* envp, LoadResult* out) {
+    // Header buffers are large (64 program headers): keep them off the kernel stack.
+    auto* img = static_cast<Image*>(kmalloc(sizeof(Image)));
+    if (!img)
+        return -err::NOMEM;
+    long r = read_headers(file, img);
+    if (r == 0)
+        r = load_image(mem, file, exec_path, argv, envp, img, out);
+    kfree(img);
+    return r;
 }
 
 } // namespace elf

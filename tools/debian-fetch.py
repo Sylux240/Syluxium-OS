@@ -39,6 +39,7 @@ def fetch(url: str, dest: str) -> None:
 
 
 def load_index(suite: str, cache: str) -> dict:
+    """Package index for the global ARCH (set from --arch)."""
     path = os.path.join(cache, f"Packages-{suite}-{ARCH}.xz")
     if not os.path.exists(path):
         print(f"  fetching package index for {suite}/{ARCH}", file=sys.stderr)
@@ -178,8 +179,11 @@ def main() -> None:
     ap.add_argument("--out", required=True)
     ap.add_argument("--cache", required=True)
     ap.add_argument("--exclude", default="", help="comma-separated packages to leave out")
+    ap.add_argument("--arch", default="amd64", help="Debian architecture (amd64, i386, ...)")
     ap.add_argument("packages", nargs="+")
     args = ap.parse_args()
+    global ARCH
+    ARCH = args.arch
 
     os.makedirs(args.cache, exist_ok=True)
     if os.path.exists(args.out):

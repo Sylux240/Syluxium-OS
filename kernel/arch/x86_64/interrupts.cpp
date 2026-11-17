@@ -30,6 +30,7 @@ struct PACKED Idtr {
 };
 
 constexpr u8 GATE_INTERRUPT = 0x8E; // present, DPL0, 64-bit interrupt gate (IF cleared on entry)
+constexpr u8 GATE_USER_INTERRUPT = 0xEE; // same, but DPL3: `int N` allowed from ring 3
 
 ALIGNED(16) IdtEntry g_idt[256];
 Handler g_handlers[256];
@@ -114,8 +115,14 @@ void load_idt() {
 
 void set_handler(u8 vector, Handler handler) { g_handlers[vector] = handler; }
 
+void set_user_gate(u8 vector, void (*entry)()) {
+    set_gate(vector, reinterpret_cast<u64>(entry), 0, GATE_USER_INTERRUPT);
+}
+
 u8 allocate_vector() {
     u8 v = __atomic_fetch_add(&g_next_vector, 1, __ATOMIC_RELAXED);
+    if (v == VEC_SYSCALL_INT80) // reserved for 32-bit system calls
+        v = __atomic_fetch_add(&g_next_vector, 1, __ATOMIC_RELAXED);
     return v <= VEC_DEVICE_LAST ? v : 0;
 }
 
@@ -146,8 +153,10 @@ extern "C" void isr_dispatch(interrupts::Frame* frame) {
         h(frame);
     } else if (vector < 32) {
         if ((frame->cs & 3) && g_user_fault_hook)
-            g_user_fault_hook(frame); // normally doesn't return (kills the process)
-        fatal_exception(frame);
+            g_user_fault_hook(frame); // kills the process, or queues a signal for its handler
+        // Returning for a user process means a signal was queued for its handler.
+        if (!(frame->cs & 3) || !sched::current()->process)
+            fatal_exception(frame);
     } else if (vector != VEC_SPURIOUS && (vector < VEC_LEGACY_PIC_BASE || vector >= VEC_DEVICE_FIRST)) {
         klog::warn("unhandled interrupt vector %lu", vector);
     }

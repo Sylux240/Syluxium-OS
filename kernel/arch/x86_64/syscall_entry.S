@@ -64,6 +64,7 @@ syscall_entry:
 return_to_user:
     cli
     movq %rdi, %rsp
+.global return_to_user_frame          /* also the exit path of compat_entry.S */
 return_to_user_frame:
     popq %r15
     popq %r14

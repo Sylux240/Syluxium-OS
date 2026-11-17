@@ -1,3 +1,4 @@
+#include <arch/x86_64/compat_segments.hpp>
 #include <arch/x86_64/cpu.hpp>
 #include <arch/x86_64/fpu.hpp>
 #include <arch/x86_64/gdt.hpp>
@@ -10,6 +11,7 @@
 #include <lib/string.hpp>
 #include <mm/heap.hpp>
 #include <mm/layout.hpp>
+#include <proc/compat.hpp>
 #include <proc/elf.hpp>
 #include <proc/futex.hpp>
 #include <proc/process.hpp>
@@ -119,13 +121,27 @@ int signal_for(u64 vector) {
     }
 }
 
+// A CPU exception in user mode: if the program installed a handler for the
+// signal (and doesn't block it), queue it for this thread - it runs on the
+// way back to user mode, like on Linux (JITs, Wine and garbage collectors
+// rely on catching SIGSEGV). Otherwise the process dies.
+void fault_signal(const char* what, u64 address, u64 ip, int sig) {
+    Process* p = current();
+    sched::Thread* t = sched::current();
+    if (p->sigactions[sig].handler > 1 && !(t->sigmask & (1ull << (sig - 1)))) {
+        signal::send_thread(t, sig);
+        return;
+    }
+    kill_current_on_fault(what, address, ip, sig);
+}
+
 void user_fault(interrupts::Frame* frame) {
     if (!current())
         return; // not a process: let the kernel report it
     arch::sti();
-    kill_current_on_fault(interrupts::exception_name(frame->vector),
-                          frame->vector == interrupts::VEC_PAGE_FAULT ? arch::read_cr2() : 0, frame->rip,
-                          signal_for(frame->vector));
+    fault_signal(interrupts::exception_name(frame->vector),
+                 frame->vector == interrupts::VEC_PAGE_FAULT ? arch::read_cr2() : 0, frame->rip,
+                 signal_for(frame->vector));
 }
 
 void page_fault(interrupts::Frame* frame) {
@@ -142,13 +158,15 @@ void page_fault(interrupts::Frame* frame) {
             return;
         if (from_user) {
             arch::sti();
-            kill_current_on_fault((frame->error_code & 1) ? "protection fault" : "segmentation fault", addr,
-                                  frame->rip, signal::SIGSEGV);
+            fault_signal((frame->error_code & 1) ? "protection fault" : "segmentation fault", addr, frame->rip,
+                         signal::SIGSEGV);
+            return;
         }
     }
     if (from_user && p) {
         arch::sti();
-        kill_current_on_fault("segmentation fault", addr, frame->rip, signal::SIGSEGV);
+        fault_signal("segmentation fault", addr, frame->rip, signal::SIGSEGV);
+        return;
     }
     interrupts::fatal_exception(frame);
 }
@@ -301,7 +319,10 @@ long spawn(const char* path, const char* const* argv, const char* const* envp, P
     }
 
     p->start_ns = clock::now_ns();
-    sched::Thread* t = make_user_thread(p, initial_frame(loaded.entry, loaded.stack_ptr), p->pid);
+    p->compat = loaded.compat;
+    sched::Thread* t = make_user_thread(p, loaded.compat ? compat::initial_frame(loaded.entry, loaded.stack_ptr)
+                                                         : initial_frame(loaded.entry, loaded.stack_ptr),
+                                        p->pid);
     sched::start(t);
     *out = p;
     return 0;
@@ -341,6 +362,8 @@ long clone_thread(interrupts::Frame* frame, u64 flags, u64 new_sp, u64 parent_ti
     memcpy(t->fpu_state, me->fpu_state, fpu::state_size());
     t->fs_base = (flags & CLONE_SETTLS) ? tls : me->fs_base;
     t->gs_base = arch::rdmsr(MSR_KERNEL_GS_BASE);
+    if (p->compat) // 32-bit: TLS is a GDT descriptor (tls points at a user_desc)
+        compat::clone_tls(t, me, flags & CLONE_SETTLS, tls);
     t->sigmask = me->sigmask;
     snprintf(t->name, sizeof(t->name), "%s", p->name);
 
@@ -384,6 +407,7 @@ long do_clone(interrupts::Frame* frame, u64 flags, u64 new_sp, u64 parent_tid, u
     for (int i = 0; i <= MAX_SIGNALS; i++)
         child->sigactions[i] = parent->sigactions[i];
     child->exit_signal = static_cast<int>(flags & 0xFF);
+    child->compat = parent->compat;
     child->vfork_child = flags & CLONE_VFORK;
 
     {
@@ -420,6 +444,8 @@ long do_clone(interrupts::Frame* frame, u64 flags, u64 new_sp, u64 parent_tid, u
     memcpy(t->fpu_state, parent_thread->fpu_state, fpu::state_size());
     t->fs_base = (flags & CLONE_SETTLS) ? tls : parent_thread->fs_base;
     t->gs_base = arch::rdmsr(MSR_KERNEL_GS_BASE);
+    if (child->compat)
+        compat::clone_tls(t, parent_thread, flags & CLONE_SETTLS, tls);
 
     if (flags & CLONE_PARENT_SETTID)
         uaccess::put(reinterpret_cast<i32*>(parent_tid), pid);
@@ -532,6 +558,8 @@ long exec_impl(interrupts::Frame* frame, const char* path, const char* const* ar
     snprintf(p->name, sizeof(p->name), "%s", basename(path));
     snprintf(p->exe_path, sizeof(p->exe_path), "%s", path);
     snprintf(t->name, sizeof(t->name), "%s", p->name);
+    p->compat = loaded.compat;
+    compat_segments::reset(t, p->compat); // drop the old program's TLS selectors/descriptors
     t->fs_base = 0;
     t->gs_base = 0;
     arch::wrmsr(MSR_FS_BASE, 0);
@@ -539,7 +567,8 @@ long exec_impl(interrupts::Frame* frame, const char* path, const char* const* ar
     fpu::reset(t->fpu_state);
     fpu::restore(t->fpu_state);
 
-    *frame = initial_frame(loaded.entry, loaded.stack_ptr);
+    *frame = loaded.compat ? compat::initial_frame(loaded.entry, loaded.stack_ptr)
+                           : initial_frame(loaded.entry, loaded.stack_ptr);
     frame->vector = 0x80;
 
     if (p->vfork_child) {

@@ -44,6 +44,11 @@ struct Thread {
     void* fpu_state = nullptr;           // FPU/SSE/AVX registers, saved on switch
     u64 fs_base = 0;                     // TLS pointer (arch_prctl ARCH_SET_FS)
     u64 gs_base = 0;                     // user GS base (swapped out while in the kernel)
+    // 32-bit (ia32) programs address TLS through segment selectors, not MSRs:
+    // the thread's set_thread_area descriptors and its FS/GS selector values
+    // are saved here and reloaded on every switch (see arch/x86_64/compat_segments.cpp).
+    u64 tls_desc[3] = {};
+    u16 user_fs_sel = 0, user_gs_sel = 0;
     u64 clear_child_tid = 0;             // set_tid_address / CLONE_CHILD_CLEARTID
     int user_tid = 0;                    // Linux thread id (shares the pid number space)
     u64 sig_pending = 0;                 // signals sent to this thread only (tgkill)

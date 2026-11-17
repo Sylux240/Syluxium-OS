@@ -5,6 +5,7 @@
 #include <lib/string.hpp>
 #include <mm/heap.hpp>
 #include <mm/layout.hpp>
+#include <proc/compat.hpp>
 #include <proc/process.hpp>
 #include <proc/signal.hpp>
 #include <proc/uaccess.hpp>
@@ -91,6 +92,16 @@ bool must_exit(proc::Process* p, sched::Thread* t) {
 }
 
 constexpr u64 FIX_EFLAGS = 0x50DD5; // AC OF DF TF SF ZF AF PF CF RF: what sigreturn may change
+
+// While a handler runs: block its sa_mask and (unless SA_NODEFER) the signal itself.
+void block_for_handler(proc::Process* p, sched::Thread* t, int sig, const proc::SigAction& act) {
+    t->sigmask |= act.mask;
+    if (!(act.flags & SA_NODEFER))
+        t->sigmask |= bit(sig);
+    t->sigmask &= ~UNBLOCKABLE;
+    if (act.flags & SA_RESETHAND)
+        p->sigactions[sig].handler = SIG_DFL;
+}
 
 } // namespace
 
@@ -183,6 +194,16 @@ void deliver(interrupts::Frame* frame) {
         frame->rip -= 2; // back over the 2-byte `syscall` instruction
     }
 
+    if (p->compat) {
+        // 32-bit program: Linux's ia32 sigframe / rt_sigframe layout.
+        u64 blocked = t->sigmask;
+        arch::sti(); // writing user memory may fault pages in (and sleep)
+        if (!compat::setup_signal_frame(frame, sig, act, blocked))
+            proc::exit_current(SIGSEGV);
+        block_for_handler(p, t, sig, act);
+        return;
+    }
+
     usize fp_size = fpu::state_size();
     uptr sp = frame->rsp - 128;                      // skip the red zone
     sp = align_down<uptr>(sp - fp_size, 64);         // FPU/AVX state
@@ -210,12 +231,7 @@ void deliver(interrupts::Frame* frame) {
         proc::exit_current(SIGSEGV); // can't build the frame: like Linux, the process dies
     }
 
-    t->sigmask |= act.mask;
-    if (!(act.flags & SA_NODEFER))
-        t->sigmask |= bit(sig);
-    t->sigmask &= ~UNBLOCKABLE;
-    if (act.flags & SA_RESETHAND)
-        p->sigactions[sig].handler = SIG_DFL;
+    block_for_handler(p, t, sig, act);
 
     frame->rip = act.handler;
     frame->rsp = sp;
