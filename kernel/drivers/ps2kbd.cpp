@@ -199,6 +199,8 @@ bool init_mouse() {
 
 // Translate a Linux key code into characters for the console terminal.
 void console_key(u16 keycode, bool pressed) {
+    if (!tty::keyboard_to_tty())
+        return; // an X server reads the keyboard through /dev/input instead
     switch (keycode) {
     case 42: case 54: g_console_shift = pressed; return;   // shifts
     case 29: case 97: g_console_ctrl = pressed; return;    // ctrls

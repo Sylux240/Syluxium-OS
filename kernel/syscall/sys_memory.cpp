@@ -93,6 +93,13 @@ long sys_brk(SYSCALL_ARGS) {
     return current()->mem->brk(a0);
 }
 
+long sys_msync(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    if (a0 & 0xFFF)
+        return -err::INVAL;
+    return 0; // shared mappings are the file's own pages (tmpfs) or device memory: nothing to write back
+}
+
 long sys_madvise(SYSCALL_ARGS) {
     SYSCALL_UNUSED;
     return 0; // advice only
@@ -105,6 +112,7 @@ void register_memory() {
     set(10, sys_mprotect, "mprotect");
     set(11, sys_munmap, "munmap");
     set(12, sys_brk, "brk");
+    set(26, sys_msync, "msync");
     set(28, sys_madvise, "madvise");
 }
 

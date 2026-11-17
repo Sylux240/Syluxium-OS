@@ -81,6 +81,11 @@ void init() {
     vfs::add_node("/dev/console", tty::console_inode());
     vfs::add_node("/dev/tty", tty::console_inode());
     vfs::add_node("/dev/tty0", tty::console_inode());
+    // One real console: tty1..tty7 (what X servers open for "their" VT) are the same terminal.
+    static const char* const vts[] = {"/dev/tty1", "/dev/tty2", "/dev/tty3", "/dev/tty4",
+                                      "/dev/tty5", "/dev/tty6", "/dev/tty7"};
+    for (const char* vt : vts)
+        vfs::add_node(vt, tty::console_inode());
 }
 
 } // namespace devices

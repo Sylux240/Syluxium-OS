@@ -18,6 +18,7 @@
 #include <drivers/ps2kbd.hpp>
 #include <drivers/usb/usb.hpp>
 #include <linuxkpi/linuxkpi.hpp>
+#include <video/fbdev.hpp>
 #include <net/net.hpp>
 #include <drivers/storage/storage.hpp>
 #include <drivers/sound/sound_drivers.hpp>
@@ -208,6 +209,7 @@ void mount_initramfs() {
                  st.bytes / KiB);
     vfs::mkdir_p("/tmp", 01777);
     vfs::mkdir_p("/dev/shm", 01777); // POSIX shared memory (shm_open) lives here, as on Linux
+    fbdev::init();                   // /dev/fb0
 }
 
 // Run a program from the initramfs and wait for it. Returns the wait status.

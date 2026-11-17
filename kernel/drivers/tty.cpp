@@ -5,6 +5,7 @@
 #include <core/log.hpp>
 #include <drivers/serial.hpp>
 #include <drivers/tty.hpp>
+#include <proc/uaccess.hpp>
 #include <fs/poll.hpp>
 #include <lib/string.hpp>
 #include <proc/signal.hpp>
@@ -76,6 +77,9 @@ void serial_irq(interrupts::Frame*) {
         input_char(static_cast<char>(arch::inb(0x3F8)));
 }
 
+// KDSKBMODE: false while an X server reads the keyboard itself (K_OFF/K_RAW).
+bool g_keyboard_to_tty = true;
+
 class Console : public vfs::Inode {
 public:
     Console() {
@@ -85,6 +89,60 @@ public:
     }
 
     bool seekable() const override { return false; }
+
+    // Linux console (KD*) and virtual terminal (VT_*) ioctls, as used by X
+    // servers. Several pass a plain number, not a pointer, so they're handled
+    // before the generic pointer check of Inode::ioctl_file.
+    long ioctl_file(vfs::File* f, u64 request, u64 arg) override {
+        constexpr u64 KDSETMODE = 0x4B3A, KDGETMODE = 0x4B3B, KDGKBMODE = 0x4B44, KDSKBMODE = 0x4B45,
+                      KIOCSOUND = 0x4B2F, KDMKTONE = 0x4B30, KDSETLED = 0x4B32, KDGETLED = 0x4B31,
+                      VT_OPENQRY = 0x5600, VT_GETMODE = 0x5601, VT_SETMODE = 0x5602, VT_GETSTATE = 0x5603,
+                      VT_RELDISP = 0x5605, VT_ACTIVATE = 0x5606, VT_WAITACTIVE = 0x5607, VT_DISALLOCATE = 0x5608;
+        constexpr int K_OFF = 4, K_XLATE = 1;
+        void* uarg = reinterpret_cast<void*>(arg);
+        switch (request) {
+        case KDSETMODE: // 0 = KD_TEXT, 1 = KD_GRAPHICS
+            console::set_graphics(arg == 1);
+            return 0;
+        case KDGETMODE: {
+            i32 m = console::graphics() ? 1 : 0;
+            return uaccess::put(static_cast<i32*>(uarg), m);
+        }
+        case KDSKBMODE: // K_OFF/K_RAW/K_MEDIUMRAW: keys stop reaching the terminal (X reads evdev)
+            g_keyboard_to_tty = (static_cast<int>(arg) == K_XLATE || static_cast<int>(arg) == 3 /* K_UNICODE */);
+            return 0;
+        case KDGKBMODE: {
+            i32 m = g_keyboard_to_tty ? K_XLATE : K_OFF;
+            return uaccess::put(static_cast<i32*>(uarg), m);
+        }
+        case KIOCSOUND: case KDMKTONE: case KDSETLED:
+            return 0;
+        case KDGETLED: {
+            u8 leds = 0;
+            return uaccess::put(static_cast<u8*>(uarg), leds);
+        }
+        case VT_OPENQRY: { // a free VT: Syluxium has one console, VT 1
+            i32 vt = 1;
+            return uaccess::put(static_cast<i32*>(uarg), vt);
+        }
+        case VT_GETSTATE: {
+            u16 st[3] = {1, 0, 0x2}; // active VT 1, VT 1 in use
+            return uaccess::copy_to(uarg, st, sizeof(st));
+        }
+        case VT_GETMODE: {
+            u8 mode[8] = {}; // VT_AUTO, no signals
+            return uaccess::copy_to(uarg, mode, sizeof(mode));
+        }
+        case VT_SETMODE:
+        case VT_RELDISP:
+        case VT_ACTIVATE:
+        case VT_WAITACTIVE:
+        case VT_DISALLOCATE:
+            return 0;
+        default:
+            return vfs::Inode::ioctl_file(f, request, arg);
+        }
+    }
 
     isize write(u64, const void* buf, usize count) override {
         kwrite(static_cast<const char*>(buf), count);
@@ -180,6 +238,8 @@ public:
 Console* g_console = nullptr;
 
 } // namespace
+
+bool keyboard_to_tty() { return g_keyboard_to_tty; }
 
 void input_char(char c) {
     bool wake = false;

@@ -10,6 +10,9 @@
 // with echo and backspace, like a Linux tty.
 namespace tty {
 
+// False while an X server owns the keyboard (KDSKBMODE K_OFF/K_RAW).
+bool keyboard_to_tty();
+
 void init();                       // enable serial receive interrupts
 void input_char(char c);           // called by input drivers (interrupt-safe)
 vfs::Inode* console_inode();

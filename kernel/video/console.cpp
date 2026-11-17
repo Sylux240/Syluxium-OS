@@ -58,7 +58,12 @@ bool g_private = false; // CSI ? ...
 
 // ---- drawing ----
 
+// KD_GRAPHICS (an X server owns the screen): keep the text in memory, draw nothing.
+bool g_graphics = false;
+
 void draw_cell_colors(u32 col, u32 row, u32 fg, u32 bg, bool underline_cursor) {
+    if (g_graphics)
+        return;
     const Cell& cell = g_cells[row][col];
     const u8* glyph = g_font->glyph(cell.ch);
     u32 px = col * g_font->width;
@@ -381,6 +386,20 @@ void init(video::Framebuffer& fb) {
 }
 
 bool ready() { return g_fb != nullptr; }
+
+void set_graphics(bool graphics) {
+    if (!g_fb || graphics == g_graphics)
+        return;
+    g_graphics = graphics;
+    if (!graphics) { // back to text: repaint everything the screen owner drew over
+        g_fb->fill_rect(0, 0, g_fb->width(), g_fb->height(), g_palette[DEFAULT_BG]);
+        g_cursor_drawn = false;
+        redraw_rows(0, g_rows - 1);
+        show_cursor();
+    }
+}
+
+bool graphics() { return g_graphics; }
 u32 rows() { return g_rows; }
 u32 cols() { return g_cols; }
 
@@ -394,7 +413,8 @@ void clear() {
         for (u32 c = 0; c < g_cols; c++)
             g_cells[r][c] = blank();
     // Also clear the margin that doesn't fit a whole character cell.
-    g_fb->fill_rect(0, 0, g_fb->width(), g_fb->height(), g_palette[DEFAULT_BG]);
+    if (!g_graphics)
+        g_fb->fill_rect(0, 0, g_fb->width(), g_fb->height(), g_palette[DEFAULT_BG]);
     g_cx = g_cy = 0;
     g_top = 0;
     g_bottom = g_rows - 1;

@@ -112,7 +112,12 @@ tools/smoke-test.sh   headless QEMU boot: serial log + screenshot
             Debian aplay/arecord/amixer/speaker-test work (verified by WAV capture analysis)
       - [ ] later: USB Audio (needs xHCI isochronous), SysV shm for dmix/PulseAudio/PipeWire,
             HDA jack sensing + Realtek quirks, HDMI audio
-- [ ] **Phase 9**: Wayland compositor, GUI toolkit, Windows-style desktop (taskbar, start menu).
+- [ ] **Phase 9**: Desktop: port the **Trinity Desktop Environment (TDE)** on the real Xorg X server
+      (TDE's Debian packages), customized to the XP/7 look: the start button says **"Start"**
+      (instead of TDE's logo), theme/taskbar/start menu restyled. Later: a desktop-environment
+      choice in the Control Panel; our own Wayland desktop is optional/later.
+      Prerequisites: epoll/eventfd/timerfd/signalfd, shared memory (MIT-SHM), inotify (done),
+      /dev/fb0 + DRM/KMS display device, pseudo-terminals, Xorg running.
       Look: clean, glossy and rounded like Windows XP / Windows 7 (not Windows 11).
       - Right-click context menus everywhere: on files (Open, Open with, Extract Here / Extract
         to..., Compress, Rename, Delete, Properties, Change icon), on folders and empty space
@@ -212,24 +217,24 @@ Legend: ✅ done · 🟡 partly done · ⬜ to do
 - 🟡 System-call coverage (grows with every phase)
 
 **Desktop** (Syluxium's own; XP/7 style: clean, rounded, glossy)
-- ⬜ Wayland compositor + desktop shell: taskbar, start menu
-- ⬜ Right-click menus: extract, compress, new file/folder, change icon, properties
-- ⬜ File manager with archive extraction
-- ⬜ Display settings: resolution, refresh rate, scaling, multi-monitor
-- ⬜ Personalize: themes, colors, wallpapers, icons, cursors
-- ⬜ Control Panel / Settings
-- ⬜ Task Manager with End Task
-- ⬜ System page: OS version, CPU, RAM, GPU, storage
+- ⬜ Desktop: Trinity (TDE) on Xorg, "Start" text button, XP/7 styling; desktop chooser in the Control Panel (later)
+- ⬜ Right-click menus: extract, compress, new file/folder, change icon, properties (TDE: Konqueror + Ark service menus; adapt)
+- ⬜ File manager with archive extraction (TDE: Konqueror + Ark)
+- ⬜ Display settings: resolution, refresh rate, scaling, multi-monitor (TDE Control Center via XRandR; needs a DRM/KMS driver for mode changes)
+- ⬜ Personalize: themes, colors, wallpapers, icons, cursors (TDE: Appearance & Themes)
+- ⬜ Control Panel / Settings (TDE Control Center, restyled)
+- ⬜ Task Manager with End Task (TDE: KSysGuard; maybe a Windows-style front end)
+- ⬜ System page: OS version, CPU, RAM, GPU, storage (TDE: KInfoCenter)
 - ⬜ Device Manager
 - ⬜ Disk Management, Computer Management
-- ⬜ File Explorer, Notepad, WordPad, Paint, Calculator, Character Map, Snipping Tool, Media Player
-- ⬜ Magnifier, On-Screen Keyboard
-- ⬜ Network and Sharing Center, Firewall (kernel packet filter + rules UI), Remote Desktop client
-- ⬜ Printing (CUPS-compatible print services, Devices and Printers)
-- ⬜ Programming tools: KDevelop-like IDE (editor, build, gdb debugger front end)
+- ⬜ File Explorer, Notepad, WordPad, Paint, Calculator, Character Map, Snipping Tool, Media Player (TDE: Konqueror, KWrite/Kate, KWord, KolourPaint, KCalc, KCharSelect, KSnapshot, Kaffeine/Amarok)
+- ⬜ Magnifier, On-Screen Keyboard (TDE: KMag; on-screen keyboard to find)
+- ⬜ Network and Sharing Center, Firewall (kernel packet filter + rules UI), Remote Desktop client (TDE: KRDC)
+- ⬜ Printing (CUPS-compatible print services, Devices and Printers) (TDE print manager + CUPS)
+- ⬜ Programming tools: KDevelop-like IDE (editor, build, gdb debugger front end) (TDE: KDevelop)
 - ⬜ Image Writer: flash .iso/.img to USB/SD with verification
 - ⬜ Firefox (Debian firefox-esr) preinstalled
-- ⬜ Notifications
+- ⬜ Notifications (TDE: KNotify)
 
 **Packages and system**
 - 🟡 Package installer: build-time Debian fetcher done; App Store + double-click .deb on the device to do

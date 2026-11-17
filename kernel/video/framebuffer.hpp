@@ -30,6 +30,13 @@ public:
 
     void fill_rect(u32 x, u32 y, u32 w, u32 h, u32 native_color) const;
 
+    // For /dev/fb0 and DRM: raw layout of the scanout memory.
+    void* base() const { return m_base; }
+    u32 pitch() const { return m_pitch; }
+    u8 red_shift() const { return m_red_shift; }
+    u8 green_shift() const { return m_green_shift; }
+    u8 blue_shift() const { return m_blue_shift; }
+
 private:
     u32* m_base = nullptr;
     u32 m_width = 0;
