@@ -7,6 +7,8 @@
 # With a label (for major tests), the screenshot and log are also archived to
 #   smoke/<date>_<label>_<mode>.png / .log
 # which lives outside build/ so `make clean` keeps it.
+# <seconds> is the maximum wait for the shell prompt; typing starts as soon as it
+# appears, and the run ends once the output has been quiet for 3 s.
 # Extra QEMU arguments can be passed in $QEMU_EXTRA (e.g. QEMU_EXTRA="-cpu max").
 # USB=1 adds an xHCI controller with a USB keyboard, mouse and the FAT32
 # stick from tools/make-test-disks.sh (as /dev/sdb).
@@ -35,7 +37,14 @@ if [[ -z ${KEEP_DISK:-} || ! -f $DISK ]]; then
     cp "$IMAGE" "$DISK"
 fi
 
-args=(-M q35 -m 2G -smp 4 -cpu max
+# Hardware virtualization when available (10-50x faster boots); KVM=0 forces
+# software emulation (TCG), useful to rule out KVM-specific behaviour.
+if [[ ${KVM:-1} != 0 && -r /dev/kvm && -w /dev/kvm ]]; then
+    ACCEL="-accel kvm -cpu host"
+else
+    ACCEL="-cpu max"
+fi
+args=(-M q35 -m 2G -smp 4 $ACCEL
       -drive "file=$DISK,format=raw,if=ide"
       -display none -serial "file:$LOG"
       -monitor "unix:$SOCK,server,nowait"
@@ -57,11 +66,21 @@ qemu-system-x86_64 "${args[@]}" &
 QEMU_PID=$!
 trap 'kill $QEMU_PID 2>/dev/null || true' EXIT
 
-sleep "$SECONDS_TO_RUN"
+# Wait for the shell prompt (or give up after <seconds>): with KVM the system
+# is usually ready long before the limit.
+waited=0
+until grep -q "root@syluxium" "$LOG" 2>/dev/null; do
+    sleep 0.5
+    waited=$((waited + 1))
+    if (( waited >= SECONDS_TO_RUN * 2 )) || ! kill -0 $QEMU_PID 2>/dev/null; then
+        break
+    fi
+done
+sleep 1
 
 # Optionally type on the keyboard, then take a screenshot and quit.
-python3 - "$SOCK" "$PPM" "${TYPE:-}" <<'EOF'
-import socket, sys, time
+python3 - "$SOCK" "$PPM" "${TYPE:-}" "$LOG" <<'EOF'
+import os, socket, sys, time
 s = socket.socket(socket.AF_UNIX)
 s.connect(sys.argv[1])
 names = {" ": "spc", "\n": "ret", "-": "minus", "=": "equal", ".": "dot", ",": "comma", "/": "slash",
@@ -90,7 +109,16 @@ for ch in text:
     s.sendall(f"sendkey {key}\n".encode())
     time.sleep(0.06)
 if text:
-    time.sleep(6)
+    # Done when the serial output has been quiet for 3 s (commands finished),
+    # at most 10 minutes.
+    log, last, quiet_since, start = sys.argv[4], -1, time.time(), time.time()
+    while time.time() - start < 600:
+        size = os.path.getsize(log) if os.path.exists(log) else 0
+        if size != last:
+            last, quiet_since = size, time.time()
+        elif time.time() - quiet_since >= 3:
+            break
+        time.sleep(0.25)
 s.sendall(f"screendump {sys.argv[2]}\n".encode())
 time.sleep(1)
 s.sendall(b"quit\n")
