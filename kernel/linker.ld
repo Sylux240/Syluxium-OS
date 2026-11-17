@@ -52,6 +52,13 @@ SECTIONS
         *(.data .data.*)
     } :data
 
+    /* module_init() functions of Linux drivers (LinuxKPI). */
+    .lkpi_initcalls : {
+        __lkpi_initcalls_start = .;
+        KEEP(*(.lkpi_initcalls))
+        __lkpi_initcalls_end = .;
+    } :data
+
     .bss : {
         __bss_start = .;
         *(.bss .bss.*)

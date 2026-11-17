@@ -33,10 +33,10 @@ void probe_all() {
         if (d->driver_name)
             continue;
         for (Driver* drv = g_drivers.front(); drv; drv = g_drivers.next_of(drv)) {
-            if (!drv->match(d))
+            if (drv->match_ex ? !drv->match_ex(drv, d) : !drv->match(d))
                 continue;
             d->driver_name = drv->name;
-            long r = drv->probe(d);
+            long r = drv->probe_ex ? drv->probe_ex(drv, d) : drv->probe(d);
             if (r == 0) {
                 d->status = Status::Ok;
                 break;

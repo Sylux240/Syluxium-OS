@@ -1,0 +1,1033 @@
+// LinuxKPI core: the Linux kernel API (memory, strings, printk, locks, wait
+// queues, completions, time, timers, workqueues) implemented on Syluxium's
+// own primitives, so Linux drivers compile and run unchanged.
+//
+// Layout of this file: Syluxium headers and thin wrappers first; then the
+// Linux headers (whose macros, like min/max, must not leak into the C++
+// code above); then the C-linkage implementations.
+
+#include <arch/x86_64/cpu.hpp>
+#include <core/log.hpp>
+#include <core/panic.hpp>
+#include <cxx/runtime.hpp>
+#include <lib/format.hpp>
+#include <lib/spinlock.hpp>
+#include <linuxkpi/linuxkpi.hpp>
+#include <mm/heap.hpp>
+#include <mm/layout.hpp>
+#include <mm/pmm.hpp>
+#include <mm/vmalloc.hpp>
+#include <proc/signal.hpp>
+#include <sched/sched.hpp>
+#include <sched/sync.hpp>
+#include <time/clock.hpp>
+
+namespace {
+
+void* sylux_kmalloc(usize n) { return kmalloc(n); }
+void sylux_kfree(void* p) { kfree(p); }
+int sylux_vsnprintf(char* b, usize n, const char* f, va_list a) { return vsnprintf(b, n, f, a); }
+void* sylux_valloc(usize n) { return vmalloc::alloc(n ? n : 1); }
+void sylux_vfree(void* p) { vmalloc::free(p); }
+
+// Lazily constructed kernel object stored in a Linux struct's opaque words.
+// State word: 0 = untouched (zero-filled static initializer), 1 = being
+// constructed, 2 = ready. Lets DEFINE_MUTEX & co. work without constructors.
+template <typename T>
+T* lazy(unsigned long* storage, volatile u32* state) {
+    static_assert(alignof(T) <= alignof(unsigned long));
+    if (__atomic_load_n(state, __ATOMIC_ACQUIRE) != 2) {
+        u32 expected = 0;
+        if (__atomic_compare_exchange_n(state, &expected, 1, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+            new (storage) T();
+            __atomic_store_n(state, 2, __ATOMIC_RELEASE);
+        } else {
+            while (__atomic_load_n(state, __ATOMIC_ACQUIRE) != 2)
+                arch::pause();
+        }
+    }
+    return reinterpret_cast<T*>(storage);
+}
+
+} // namespace
+
+// ---- Linux headers from here on ----
+#include <linux/atomic.h>
+#include <linux/bitops.h>
+#include <linux/completion.h>
+#include <linux/delay.h>
+#include <linux/device.h>
+#include <linux/jiffies.h>
+#include <linux/kernel.h>
+#include <linux/module.h>
+#include <linux/mutex.h>
+#include <linux/slab.h>
+#include <linux/spinlock.h>
+#include <linux/timer.h>
+#include <linux/wait.h>
+#include <linux/workqueue.h>
+#undef min
+#undef max
+#undef abs
+#undef swap
+#undef clamp
+
+// Each wrapped object keeps its lazy-init state word right after the object.
+static_assert(sizeof(IrqSpinlock) <= sizeof(spinlock_t), "spinlock_t too small");
+static_assert(sizeof(sched::Mutex) + sizeof(u32) <= sizeof(struct mutex), "struct mutex too small");
+static_assert(sizeof(sched::WaitQueue) + sizeof(u32) <= sizeof(((wait_queue_head_t*)nullptr)->opaque),
+              "wait queue too small");
+static_assert(sizeof(sched::Semaphore) + sizeof(u32) <= sizeof(((struct semaphore*)nullptr)->opaque),
+              "semaphore too small");
+
+namespace {
+
+IrqSpinlock* spin_of(spinlock_t* l) { return reinterpret_cast<IrqSpinlock*>(l->opaque); }
+
+sched::Mutex* mutex_of(struct mutex* m) {
+    auto* state = reinterpret_cast<volatile u32*>(reinterpret_cast<u8*>(m->opaque) + sizeof(sched::Mutex));
+    return lazy<sched::Mutex>(m->opaque, state);
+}
+
+sched::WaitQueue* wq_of(wait_queue_head_t* w) {
+    auto* state = reinterpret_cast<volatile u32*>(reinterpret_cast<u8*>(w->opaque) + sizeof(sched::WaitQueue));
+    return lazy<sched::WaitQueue>(w->opaque, state);
+}
+
+sched::Semaphore* sem_of(struct semaphore* s) {
+    auto* state = reinterpret_cast<volatile u32*>(reinterpret_cast<u8*>(s->opaque) + sizeof(sched::Semaphore));
+    sched::Semaphore* sem = lazy<sched::Semaphore>(s->opaque, state);
+    return sem;
+}
+
+} // namespace
+
+extern "C" {
+
+// ======================= memory =======================
+
+// Every block carries a 16-byte header: small blocks come from the slab
+// heap (direct-mapped), large ones are whole physically contiguous pages,
+// so all of them are valid for dma_map_single().
+struct LkpiAllocHeader {
+    u32 magic;
+    u32 order_plus_one; // 0 = slab
+    u64 size;
+};
+constexpr u32 ALLOC_MAGIC = 0x4C4B5049; // "LKPI"
+constexpr usize SLAB_LIMIT = 2048;
+
+void* lkpi_kmalloc(size_t size, gfp_t flags) {
+    usize total = size + sizeof(LkpiAllocHeader);
+    LkpiAllocHeader* h;
+    if (total <= SLAB_LIMIT) {
+        h = static_cast<LkpiAllocHeader*>(sylux_kmalloc(total));
+        if (!h)
+            return nullptr;
+        h->order_plus_one = 0;
+    } else {
+        unsigned order = pmm::order_for_size(total);
+        u64 phys = pmm::alloc_pages(order);
+        if (!phys)
+            return nullptr;
+        h = mm::phys_to_virt<LkpiAllocHeader>(phys);
+        h->order_plus_one = order + 1;
+    }
+    h->magic = ALLOC_MAGIC;
+    h->size = size;
+    void* p = h + 1;
+    if (flags & __GFP_ZERO)
+        memset(p, 0, size);
+    return p;
+}
+
+void lkpi_kfree(const void* p) {
+    if (!p || IS_ERR(p))
+        return;
+    auto* h = const_cast<LkpiAllocHeader*>(static_cast<const LkpiAllocHeader*>(p) - 1);
+    if (h->magic != ALLOC_MAGIC) {
+        klog::error("linuxkpi: kfree of a pointer kmalloc didn't return (%p)", p);
+        return;
+    }
+    h->magic = 0;
+    if (h->order_plus_one)
+        pmm::free_pages(mm::direct_virt_to_phys(h), h->order_plus_one - 1);
+    else
+        sylux_kfree(h);
+}
+
+void* lkpi_kzalloc(size_t size, gfp_t flags) { return lkpi_kmalloc(size, flags | __GFP_ZERO); }
+
+void* lkpi_kcalloc(size_t n, size_t size, gfp_t flags) {
+    if (size && n > ~0ul / size)
+        return nullptr;
+    return lkpi_kmalloc(n * size, flags | __GFP_ZERO);
+}
+
+void* lkpi_kmalloc_array(size_t n, size_t size, gfp_t flags) {
+    if (size && n > ~0ul / size)
+        return nullptr;
+    return lkpi_kmalloc(n * size, flags);
+}
+
+size_t lkpi_ksize(const void* p) { return p ? (static_cast<const LkpiAllocHeader*>(p) - 1)->size : 0; }
+
+void* lkpi_krealloc(const void* p, size_t size, gfp_t flags) {
+    if (!size) {
+        lkpi_kfree(p);
+        return ZERO_SIZE_PTR;
+    }
+    if (p && lkpi_ksize(p) >= size)
+        return const_cast<void*>(p);
+    void* n = lkpi_kmalloc(size, flags);
+    if (n && p) {
+        memcpy(n, p, lkpi_ksize(p));
+        lkpi_kfree(p);
+    }
+    return n;
+}
+
+void lkpi_kfree_sensitive(const void* p) {
+    if (p && !IS_ERR(p))
+        memset(const_cast<void*>(p), 0, lkpi_ksize(p));
+    lkpi_kfree(p);
+}
+
+void* lkpi_vmalloc(size_t size) { return sylux_valloc(size); }
+void* lkpi_vzalloc(size_t size) { return sylux_valloc(size); } // vmalloc memory is zeroed
+void lkpi_vfree(const void* p) {
+    if (p)
+        sylux_vfree(const_cast<void*>(p));
+}
+
+struct kmem_cache* kmem_cache_create(const char* name, size_t size, size_t, unsigned long, void (*)(void*)) {
+    auto* c = static_cast<struct kmem_cache*>(lkpi_kzalloc(sizeof(struct kmem_cache), GFP_KERNEL));
+    if (c) {
+        c->size = size;
+        c->name = name;
+    }
+    return c;
+}
+void kmem_cache_destroy(struct kmem_cache* c) { lkpi_kfree(c); }
+void* kmem_cache_alloc(struct kmem_cache* c, gfp_t flags) { return lkpi_kmalloc(c->size, flags); }
+void* kmem_cache_zalloc(struct kmem_cache* c, gfp_t flags) { return lkpi_kzalloc(c->size, flags); }
+void kmem_cache_free(struct kmem_cache*, void* p) { lkpi_kfree(p); }
+
+// ======================= strings =======================
+
+size_t strnlen(const char* s, size_t max) {
+    size_t n = 0;
+    while (n < max && s[n])
+        n++;
+    return n;
+}
+
+static int lower(int c) { return c >= 'A' && c <= 'Z' ? c + 32 : c; }
+
+int strcasecmp(const char* a, const char* b) {
+    while (*a && lower(*a) == lower(*b))
+        a++, b++;
+    return lower(static_cast<u8>(*a)) - lower(static_cast<u8>(*b));
+}
+
+char* strcpy(char* d, const char* s) {
+    char* r = d;
+    while ((*d++ = *s++))
+        ;
+    return r;
+}
+
+char* strncpy(char* d, const char* s, size_t n) {
+    size_t i = 0;
+    for (; i < n && s[i]; i++)
+        d[i] = s[i];
+    for (; i < n; i++)
+        d[i] = 0;
+    return d;
+}
+
+size_t strlcpy(char* d, const char* s, size_t size) {
+    size_t len = strlen(s);
+    if (size) {
+        size_t n = len < size - 1 ? len : size - 1;
+        memcpy(d, s, n);
+        d[n] = 0;
+    }
+    return len;
+}
+
+ssize_t strscpy(char* d, const char* s, size_t size) {
+    if (!size)
+        return -E2BIG;
+    size_t len = strnlen(s, size);
+    if (len == size) {
+        memcpy(d, s, size - 1);
+        d[size - 1] = 0;
+        return -E2BIG;
+    }
+    memcpy(d, s, len + 1);
+    return static_cast<ssize_t>(len);
+}
+
+char* strcat(char* d, const char* s) {
+    strcpy(d + strlen(d), s);
+    return d;
+}
+
+char* strchr(const char* s, int c) {
+    for (;; s++) {
+        if (*s == static_cast<char>(c))
+            return const_cast<char*>(s);
+        if (!*s)
+            return nullptr;
+    }
+}
+
+char* strrchr(const char* s, int c) {
+    const char* last = nullptr;
+    for (;; s++) {
+        if (*s == static_cast<char>(c))
+            last = s;
+        if (!*s)
+            return const_cast<char*>(last);
+    }
+}
+
+char* strstr(const char* hay, const char* needle) {
+    size_t n = strlen(needle);
+    if (!n)
+        return const_cast<char*>(hay);
+    for (; *hay; hay++)
+        if (strncmp(hay, needle, n) == 0)
+            return const_cast<char*>(hay);
+    return nullptr;
+}
+
+void* memchr(const void* s, int c, size_t n) {
+    auto* p = static_cast<const u8*>(s);
+    for (size_t i = 0; i < n; i++)
+        if (p[i] == static_cast<u8>(c))
+            return const_cast<u8*>(p + i);
+    return nullptr;
+}
+
+char* kstrdup(const char* s, gfp_t gfp) {
+    if (!s)
+        return nullptr;
+    size_t n = strlen(s) + 1;
+    char* d = static_cast<char*>(lkpi_kmalloc(n, gfp));
+    if (d)
+        memcpy(d, s, n);
+    return d;
+}
+
+void* kmemdup(const void* src, size_t len, gfp_t gfp) {
+    void* d = lkpi_kmalloc(len, gfp);
+    if (d)
+        memcpy(d, src, len);
+    return d;
+}
+
+unsigned long simple_strtoul(const char* s, char** end, unsigned int base) {
+    while (*s == ' ')
+        s++;
+    if (!base) {
+        base = 10;
+        if (s[0] == '0') {
+            base = 8;
+            if (s[1] == 'x' || s[1] == 'X') {
+                base = 16;
+                s += 2;
+            }
+        }
+    } else if (base == 16 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) {
+        s += 2;
+    }
+    unsigned long v = 0;
+    for (;; s++) {
+        int d;
+        if (*s >= '0' && *s <= '9') d = *s - '0';
+        else if (lower(*s) >= 'a' && lower(*s) <= 'z') d = lower(*s) - 'a' + 10;
+        else break;
+        if (d >= static_cast<int>(base))
+            break;
+        v = v * base + static_cast<unsigned long>(d);
+    }
+    if (end)
+        *end = const_cast<char*>(s);
+    return v;
+}
+
+int kstrtoul(const char* s, unsigned int base, unsigned long* res) {
+    char* end;
+    if (!*s)
+        return -EINVAL;
+    unsigned long v = simple_strtoul(s, &end, base);
+    if (*end == '\n')
+        end++;
+    if (*end)
+        return -EINVAL;
+    *res = v;
+    return 0;
+}
+
+int kstrtouint(const char* s, unsigned int base, unsigned int* res) {
+    unsigned long v;
+    int r = kstrtoul(s, base, &v);
+    if (r)
+        return r;
+    if (v > 0xFFFFFFFFul)
+        return -ERANGE;
+    *res = static_cast<unsigned int>(v);
+    return 0;
+}
+
+int kstrtoint(const char* s, unsigned int base, int* res) {
+    bool neg = *s == '-';
+    unsigned long v;
+    int r = kstrtoul(neg ? s + 1 : s, base, &v);
+    if (r)
+        return r;
+    if (v > 0x7FFFFFFFul)
+        return -ERANGE;
+    *res = neg ? -static_cast<int>(v) : static_cast<int>(v);
+    return 0;
+}
+
+// ======================= printing =======================
+
+int lkpi_vsnprintf(char* buf, size_t size, const char* fmt, va_list args) {
+    return sylux_vsnprintf(buf, size, fmt, args);
+}
+
+int lkpi_snprintf(char* buf, size_t size, const char* fmt, ...) {
+    va_list a;
+    va_start(a, fmt);
+    int n = sylux_vsnprintf(buf, size, fmt, a);
+    va_end(a);
+    return n;
+}
+
+int lkpi_scnprintf(char* buf, size_t size, const char* fmt, ...) {
+    va_list a;
+    va_start(a, fmt);
+    int n = sylux_vsnprintf(buf, size, fmt, a);
+    va_end(a);
+    if (!size)
+        return 0;
+    return n < static_cast<int>(size) ? n : static_cast<int>(size) - 1;
+}
+
+int lkpi_sprintf(char* buf, const char* fmt, ...) {
+    va_list a;
+    va_start(a, fmt);
+    int n = sylux_vsnprintf(buf, 4096, fmt, a); // Linux's sprintf is unbounded too
+    va_end(a);
+    return n;
+}
+
+char* kasprintf(gfp_t gfp, const char* fmt, ...) {
+    va_list a, b;
+    va_start(a, fmt);
+    va_copy(b, a);
+    int n = sylux_vsnprintf(nullptr, 0, fmt, a);
+    va_end(a);
+    char* s = static_cast<char*>(lkpi_kmalloc(static_cast<usize>(n) + 1, gfp));
+    if (s)
+        sylux_vsnprintf(s, static_cast<usize>(n) + 1, fmt, b);
+    va_end(b);
+    return s;
+}
+
+// Send one message to the kernel log at a Linux level ('0'..'7', 'c' = continuation).
+static void log_at(char level, char* buf) {
+    usize len = strlen(buf);
+    while (len && buf[len - 1] == '\n')
+        buf[--len] = 0;
+    if (level == 'c')
+        kprintf("%s", buf);
+    else if (level <= '3')
+        klog::error("%s", buf);
+    else if (level == '4')
+        klog::warn("%s", buf);
+    else if (level == '7')
+        klog::debug("%s", buf);
+    else
+        klog::info("%s", buf);
+}
+
+static char strip_level(const char** fmt) {
+    if ((*fmt)[0] == '\001' && (*fmt)[1]) {
+        char level = (*fmt)[1];
+        *fmt += 2;
+        return level;
+    }
+    return '6';
+}
+
+// printk: strip the KERN_<level> prefix and route to the kernel log.
+int vprintk(const char* fmt, va_list args) {
+    char level = strip_level(&fmt);
+    char buf[512];
+    int n = sylux_vsnprintf(buf, sizeof(buf), fmt, args);
+    log_at(level, buf);
+    return n;
+}
+
+int printk(const char* fmt, ...) {
+    va_list a;
+    va_start(a, fmt);
+    int n = vprintk(fmt, a);
+    va_end(a);
+    return n;
+}
+
+int lkpi_dev_printk(const char* level, const struct device* d, const char* fmt, ...) {
+    char msg[448];
+    va_list a;
+    va_start(a, fmt);
+    sylux_vsnprintf(msg, sizeof(msg), fmt, a);
+    va_end(a);
+    char line[512];
+    int n = lkpi_snprintf(line, sizeof(line), "%s: %s", d ? dev_name(d) : "(no device)", msg);
+    log_at(strip_level(&level), line);
+    return n;
+}
+
+void lkpi_bug(const char* file, int line) { panic("Linux driver BUG() at %s:%d", file, line); }
+void lkpi_warn(const char* file, int line, const char* cond) {
+    klog::warn("Linux driver WARN_ON(%s) at %s:%d", cond, file, line);
+}
+
+// ======================= locking =======================
+
+void spin_lock_init(spinlock_t* l) { new (l->opaque) IrqSpinlock(); }
+void lkpi_spin_lock(spinlock_t* l) { spin_of(l)->lock(); }
+void lkpi_spin_unlock(spinlock_t* l) { spin_of(l)->unlock(); }
+int lkpi_spin_trylock(spinlock_t* l) { return spin_of(l)->try_lock(); }
+
+void lkpi_local_irq_disable(void) { arch::cli(); }
+void lkpi_local_irq_enable(void) { arch::sti(); }
+unsigned long lkpi_local_irq_save(void) {
+    unsigned long f = arch::read_rflags();
+    arch::cli();
+    return f;
+}
+void lkpi_local_irq_restore(unsigned long f) {
+    if (f & 0x200)
+        arch::sti();
+}
+
+void synchronize_rcu(void) {
+    // Readers never sleep inside rcu_read_lock() sections; a short sleep lets
+    // every CPU pass through the scheduler at least once (1 kHz tick).
+    sched::sleep_ms(3);
+}
+
+void mutex_init(struct mutex* m) { memset(m, 0, sizeof(*m)); }
+void mutex_lock(struct mutex* m) { mutex_of(m)->lock(); }
+int mutex_lock_interruptible(struct mutex* m) {
+    mutex_of(m)->lock();
+    return 0;
+}
+int mutex_trylock(struct mutex* m) { return mutex_of(m)->try_lock(); }
+void mutex_unlock(struct mutex* m) { mutex_of(m)->unlock(); }
+int mutex_is_locked(struct mutex* m) {
+    sched::Mutex* mx = mutex_of(m);
+    if (mx->try_lock()) {
+        mx->unlock();
+        return 0;
+    }
+    return 1;
+}
+
+void sema_init(struct semaphore* s, int count) {
+    memset(s, 0, sizeof(*s));
+    auto* state = reinterpret_cast<volatile u32*>(reinterpret_cast<u8*>(s->opaque) + sizeof(sched::Semaphore));
+    new (s->opaque) sched::Semaphore(count);
+    __atomic_store_n(state, 2, __ATOMIC_RELEASE);
+}
+void down(struct semaphore* s) { sem_of(s)->wait(); }
+int down_interruptible(struct semaphore* s) {
+    sem_of(s)->wait();
+    return 0;
+}
+int down_trylock(struct semaphore* s) { return sem_of(s)->try_wait() ? 0 : 1; }
+int down_timeout(struct semaphore* s, long j) {
+    return sem_of(s)->wait_timeout(static_cast<u64>(j) * 1'000'000) ? 0 : -ETIME;
+}
+void up(struct semaphore* s) { sem_of(s)->signal(); }
+
+// ======================= wait queues / completions =======================
+
+void init_waitqueue_head(wait_queue_head_t* w) { memset(w, 0, sizeof(*w)); }
+
+void wake_up(wait_queue_head_t* w) {
+    __atomic_add_fetch(&w->seq, 1, __ATOMIC_SEQ_CST);
+    wq_of(w)->wake_all();
+}
+
+int lkpi_wait_sleep(wait_queue_head_t* w, unsigned int seen, unsigned long deadline, int interruptible) {
+    sched::WaitQueue* q = wq_of(w);
+    bool intr = false;
+    auto changed = [&] {
+        if (__atomic_load_n(&w->seq, __ATOMIC_SEQ_CST) != seen)
+            return true;
+        if (interruptible && signal::interrupted()) {
+            intr = true;
+            return true;
+        }
+        return false;
+    };
+    if (deadline) {
+        unsigned long now = clock::now_ms();
+        if (static_cast<long>(deadline - now) <= 0)
+            return 0;
+        q->wait_until_timeout(changed, (deadline - now) * 1'000'000);
+    } else {
+        q->wait_until(changed);
+    }
+    return intr ? -ERESTARTSYS : 0;
+}
+
+void init_completion(struct completion* c) { memset(c, 0, sizeof(*c)); }
+
+void complete(struct completion* c) {
+    if (c->done != 0x7FFFFFFF)
+        __atomic_add_fetch(&c->done, 1, __ATOMIC_SEQ_CST);
+    wake_up(&c->wait);
+}
+
+void complete_all(struct completion* c) {
+    __atomic_store_n(&c->done, 0x7FFFFFFFu, __ATOMIC_SEQ_CST);
+    wake_up(&c->wait);
+}
+
+bool try_wait_for_completion(struct completion* c) {
+    unsigned int d = __atomic_load_n(&c->done, __ATOMIC_SEQ_CST);
+    while (d) {
+        if (d == 0x7FFFFFFF)
+            return true; // complete_all: stays done
+        if (__atomic_compare_exchange_n(&c->done, &d, d - 1, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST))
+            return true;
+    }
+    return false;
+}
+
+bool completion_done(struct completion* c) { return __atomic_load_n(&c->done, __ATOMIC_SEQ_CST) != 0; }
+
+void wait_for_completion(struct completion* c) {
+    for (;;) {
+        unsigned int seq = __atomic_load_n(&c->wait.seq, __ATOMIC_SEQ_CST);
+        if (try_wait_for_completion(c))
+            return;
+        lkpi_wait_sleep(&c->wait, seq, 0, 0);
+    }
+}
+
+unsigned long wait_for_completion_timeout(struct completion* c, unsigned long timeout) {
+    unsigned long end = clock::now_ms() + timeout;
+    for (;;) {
+        unsigned int seq = __atomic_load_n(&c->wait.seq, __ATOMIC_SEQ_CST);
+        if (try_wait_for_completion(c)) {
+            long left = static_cast<long>(end - clock::now_ms());
+            return left > 0 ? static_cast<unsigned long>(left) : 1;
+        }
+        if (static_cast<long>(end - clock::now_ms()) <= 0)
+            return 0;
+        lkpi_wait_sleep(&c->wait, seq, end, 0);
+    }
+}
+
+int wait_for_completion_interruptible(struct completion* c) {
+    for (;;) {
+        unsigned int seq = __atomic_load_n(&c->wait.seq, __ATOMIC_SEQ_CST);
+        if (try_wait_for_completion(c))
+            return 0;
+        if (lkpi_wait_sleep(&c->wait, seq, 0, 1) < 0)
+            return -ERESTARTSYS;
+    }
+}
+
+long wait_for_completion_interruptible_timeout(struct completion* c, unsigned long timeout) {
+    unsigned long end = clock::now_ms() + timeout;
+    for (;;) {
+        unsigned int seq = __atomic_load_n(&c->wait.seq, __ATOMIC_SEQ_CST);
+        if (try_wait_for_completion(c)) {
+            long left = static_cast<long>(end - clock::now_ms());
+            return left > 0 ? left : 1;
+        }
+        if (static_cast<long>(end - clock::now_ms()) <= 0)
+            return 0;
+        if (lkpi_wait_sleep(&c->wait, seq, end, 1) < 0)
+            return -ERESTARTSYS;
+    }
+}
+
+// ======================= time =======================
+
+unsigned long lkpi_jiffies(void) { return clock::now_ms(); }
+u64 lkpi_ktime_ns(void) { return clock::now_ns(); }
+
+void udelay(unsigned long us) { clock::busy_wait_ns(us * 1000); }
+void ndelay(unsigned long ns) { clock::busy_wait_ns(ns); }
+void msleep(unsigned int ms) { sched::sleep_ms(ms ? ms : 1); }
+unsigned long msleep_interruptible(unsigned int ms) {
+    sched::sleep_ms(ms);
+    return 0;
+}
+void usleep_range(unsigned long min_us, unsigned long) {
+    if (min_us < 50)
+        clock::busy_wait_ns(min_us * 1000); // too short to be worth a context switch
+    else
+        sched::sleep_ns(min_us * 1000);
+}
+void schedule(void) { sched::yield(); }
+long schedule_timeout(long timeout) {
+    if (timeout == MAX_SCHEDULE_TIMEOUT) {
+        sched::yield();
+        return timeout;
+    }
+    sched::sleep_ms(timeout > 0 ? static_cast<u64>(timeout) : 0);
+    return 0;
+}
+
+// ======================= bit searching =======================
+
+unsigned long find_next_bit(const unsigned long* addr, unsigned long size, unsigned long offset) {
+    for (unsigned long i = offset; i < size; i++)
+        if (addr[i / BITS_PER_LONG] & (1ul << (i % BITS_PER_LONG)))
+            return i;
+    return size;
+}
+unsigned long find_next_zero_bit(const unsigned long* addr, unsigned long size, unsigned long offset) {
+    for (unsigned long i = offset; i < size; i++)
+        if (!(addr[i / BITS_PER_LONG] & (1ul << (i % BITS_PER_LONG))))
+            return i;
+    return size;
+}
+unsigned long find_first_bit(const unsigned long* addr, unsigned long size) { return find_next_bit(addr, size, 0); }
+unsigned long find_first_zero_bit(const unsigned long* addr, unsigned long size) {
+    return find_next_zero_bit(addr, size, 0);
+}
+
+} // extern "C"
+
+// ======================= timers =======================
+
+namespace {
+
+IrqSpinlock g_timer_lock;
+struct timer_list* g_timers = nullptr;   // pending timers (unsorted)
+struct timer_list* g_running_timer = nullptr;
+sched::WaitQueue g_timer_done;           // del_timer_sync waits here
+
+bool unlink_timer(struct timer_list* t) {
+    for (struct timer_list** link = &g_timers; *link; link = &(*link)->lkpi_next) {
+        if (*link == t) {
+            *link = t->lkpi_next;
+            t->lkpi_pending = 0;
+            return true;
+        }
+    }
+    return false;
+}
+
+void timer_thread(void*) {
+    for (;;) {
+        sched::sleep_ms(1);
+        unsigned long now = clock::now_ms();
+        for (;;) {
+            struct timer_list* due = nullptr;
+            {
+                LockGuard guard(g_timer_lock);
+                for (struct timer_list* t = g_timers; t; t = t->lkpi_next)
+                    if (static_cast<long>(now - t->expires) >= 0) {
+                        due = t;
+                        break;
+                    }
+                if (!due)
+                    break;
+                unlink_timer(due);
+                g_running_timer = due;
+            }
+            due->function(due);
+            {
+                LockGuard guard(g_timer_lock);
+                g_running_timer = nullptr;
+            }
+            g_timer_done.wake_all();
+        }
+    }
+}
+
+} // namespace
+
+extern "C" {
+
+void timer_setup(struct timer_list* t, void (*fn)(struct timer_list*), unsigned int flags) {
+    t->function = fn;
+    t->flags = flags;
+    t->expires = 0;
+    t->lkpi_next = nullptr;
+    t->lkpi_pending = 0;
+}
+
+int mod_timer(struct timer_list* t, unsigned long expires) {
+    LockGuard guard(g_timer_lock);
+    bool was = unlink_timer(t);
+    t->expires = expires;
+    t->lkpi_next = g_timers;
+    g_timers = t;
+    t->lkpi_pending = 1;
+    return was;
+}
+
+void add_timer(struct timer_list* t) { mod_timer(t, t->expires); }
+
+int del_timer(struct timer_list* t) {
+    LockGuard guard(g_timer_lock);
+    return unlink_timer(t);
+}
+
+int del_timer_sync(struct timer_list* t) {
+    int was = del_timer(t);
+    g_timer_done.wait_until([&] { return g_running_timer != t; });
+    return was;
+}
+
+int timer_pending(const struct timer_list* t) { return t->lkpi_pending; }
+
+} // extern "C"
+
+// ======================= workqueues =======================
+
+struct workqueue_struct {
+    char name[32];
+    IrqSpinlock lock;
+    struct work_struct* head = nullptr;
+    struct work_struct* tail = nullptr;
+    struct work_struct* running = nullptr;
+    sched::Semaphore pending;
+    sched::WaitQueue idle;
+    bool stopping = false;
+};
+
+namespace {
+
+constexpr int WORK_QUEUED = 1, WORK_RUNNING = 2;
+
+void worker(void* arg) {
+    auto* wq = static_cast<workqueue_struct*>(arg);
+    for (;;) {
+        wq->pending.wait();
+        struct work_struct* w;
+        {
+            LockGuard guard(wq->lock);
+            w = wq->head;
+            if (!w) {
+                if (wq->stopping)
+                    break;
+                continue;
+            }
+            wq->head = w->lkpi_next;
+            if (!wq->head)
+                wq->tail = nullptr;
+            w->lkpi_next = nullptr;
+            wq->running = w;
+            __atomic_fetch_and(&w->lkpi_state, ~WORK_QUEUED, __ATOMIC_SEQ_CST);
+            __atomic_fetch_or(&w->lkpi_state, WORK_RUNNING, __ATOMIC_SEQ_CST);
+        }
+        w->func(w); // may free or requeue w: don't touch it afterwards except by address
+        {
+            LockGuard guard(wq->lock);
+            if (wq->running == w)
+                wq->running = nullptr;
+        }
+        __atomic_fetch_and(&w->lkpi_state, ~WORK_RUNNING, __ATOMIC_SEQ_CST);
+        wq->idle.wake_all();
+    }
+}
+
+workqueue_struct* make_wq(const char* name) {
+    auto* wq = new workqueue_struct;
+    snprintf(wq->name, sizeof(wq->name), "%s", name);
+    sched::spawn(wq->name, worker, wq, -1, true);
+    return wq;
+}
+
+void delayed_work_timer(struct timer_list* t) {
+    auto* d = container_of(t, struct delayed_work, timer);
+    queue_work(d->wq ? d->wq : system_wq, &d->work);
+}
+
+} // namespace
+
+extern "C" {
+
+struct workqueue_struct* system_wq = nullptr;
+struct workqueue_struct* system_highpri_wq = nullptr;
+struct workqueue_struct* system_long_wq = nullptr;
+struct workqueue_struct* system_unbound_wq = nullptr;
+struct workqueue_struct* system_freezable_wq = nullptr;
+struct workqueue_struct* system_power_efficient_wq = nullptr;
+
+void lkpi_init_work(struct work_struct* w, work_func_t fn) {
+    w->func = fn;
+    w->lkpi_next = nullptr;
+    w->lkpi_wq = nullptr;
+    w->lkpi_state = 0;
+}
+
+void lkpi_init_delayed_work(struct delayed_work* d, work_func_t fn) {
+    lkpi_init_work(&d->work, fn);
+    timer_setup(&d->timer, delayed_work_timer, 0);
+    d->wq = nullptr;
+}
+
+struct workqueue_struct* alloc_workqueue(const char* fmt, unsigned int flags, int max_active, ...) {
+    (void)flags;
+    char name[32];
+    va_list a;
+    va_start(a, max_active);
+    sylux_vsnprintf(name, sizeof(name), fmt, a);
+    va_end(a);
+    return make_wq(name);
+}
+
+void flush_workqueue(struct workqueue_struct* wq) {
+    wq->idle.wait_until([&] { return wq->head == nullptr && wq->running == nullptr; });
+}
+
+void destroy_workqueue(struct workqueue_struct* wq) {
+    flush_workqueue(wq);
+    {
+        LockGuard guard(wq->lock);
+        wq->stopping = true;
+    }
+    wq->pending.signal();
+    // The worker exits on its own; the queue object is leaked on purpose
+    // (a few bytes) so a late wake can't touch freed memory.
+}
+
+bool queue_work(struct workqueue_struct* wq, struct work_struct* w) {
+    if (__atomic_fetch_or(&w->lkpi_state, WORK_QUEUED, __ATOMIC_SEQ_CST) & WORK_QUEUED)
+        return false; // already queued
+    {
+        LockGuard guard(wq->lock);
+        w->lkpi_wq = wq;
+        w->lkpi_next = nullptr;
+        if (wq->tail)
+            wq->tail->lkpi_next = w;
+        else
+            wq->head = w;
+        wq->tail = w;
+    }
+    wq->pending.signal();
+    return true;
+}
+
+bool queue_delayed_work(struct workqueue_struct* wq, struct delayed_work* d, unsigned long delay) {
+    if (work_pending(&d->work) || timer_pending(&d->timer))
+        return false;
+    d->wq = wq;
+    if (!delay)
+        return queue_work(wq, &d->work);
+    mod_timer(&d->timer, clock::now_ms() + delay);
+    return true;
+}
+
+bool mod_delayed_work(struct workqueue_struct* wq, struct delayed_work* d, unsigned long delay) {
+    bool was = del_timer(&d->timer);
+    d->wq = wq;
+    if (!delay)
+        return queue_work(wq, &d->work) || was;
+    if (!work_pending(&d->work))
+        mod_timer(&d->timer, clock::now_ms() + delay);
+    return was;
+}
+
+bool work_pending(const struct work_struct* w) { return __atomic_load_n(&w->lkpi_state, __ATOMIC_SEQ_CST) & WORK_QUEUED; }
+
+// Remove a queued (not yet running) item. Returns whether it was queued.
+static bool dequeue(struct work_struct* w) {
+    workqueue_struct* wq = w->lkpi_wq;
+    if (!wq)
+        return false;
+    LockGuard guard(wq->lock);
+    struct work_struct* prev = nullptr;
+    for (struct work_struct* c = wq->head; c; prev = c, c = c->lkpi_next) {
+        if (c != w)
+            continue;
+        if (prev)
+            prev->lkpi_next = c->lkpi_next;
+        else
+            wq->head = c->lkpi_next;
+        if (wq->tail == c)
+            wq->tail = prev;
+        c->lkpi_next = nullptr;
+        __atomic_fetch_and(&w->lkpi_state, ~WORK_QUEUED, __ATOMIC_SEQ_CST);
+        return true;
+    }
+    return false;
+}
+
+bool flush_work(struct work_struct* w) {
+    workqueue_struct* wq = w->lkpi_wq;
+    if (!wq)
+        return false;
+    bool busy = w->lkpi_state != 0;
+    wq->idle.wait_until([&] { return (__atomic_load_n(&w->lkpi_state, __ATOMIC_SEQ_CST) & (WORK_QUEUED | WORK_RUNNING)) == 0; });
+    return busy;
+}
+
+bool cancel_work(struct work_struct* w) { return dequeue(w); }
+
+bool cancel_work_sync(struct work_struct* w) {
+    bool was = dequeue(w);
+    workqueue_struct* wq = w->lkpi_wq;
+    if (wq)
+        wq->idle.wait_until([&] { return !(__atomic_load_n(&w->lkpi_state, __ATOMIC_SEQ_CST) & WORK_RUNNING); });
+    return was;
+}
+
+bool cancel_delayed_work(struct delayed_work* d) { return del_timer(&d->timer) | dequeue(&d->work); }
+
+bool cancel_delayed_work_sync(struct delayed_work* d) {
+    bool was = del_timer_sync(&d->timer);
+    return cancel_work_sync(&d->work) || was;
+}
+
+bool flush_delayed_work(struct delayed_work* d) {
+    if (del_timer_sync(&d->timer))
+        queue_work(d->wq ? d->wq : system_wq, &d->work);
+    return flush_work(&d->work);
+}
+
+} // extern "C"
+
+// ======================= startup =======================
+
+extern "C" lkpi_initcall_t __lkpi_initcalls_start[];
+extern "C" lkpi_initcall_t __lkpi_initcalls_end[];
+
+namespace linuxkpi {
+
+void init() {
+    sched::spawn("lkpi-timers", timer_thread, nullptr, -1, true);
+    system_wq = make_wq("lkpi-events");
+    system_highpri_wq = system_long_wq = system_unbound_wq = system_freezable_wq = system_power_efficient_wq = system_wq;
+    init_pci();
+    int count = 0, failed = 0;
+    for (lkpi_initcall_t* call = __lkpi_initcalls_start; call < __lkpi_initcalls_end; call++) {
+        count++;
+        if (int r = (*call)(); r != 0) {
+            failed++;
+            klog::warn("linuxkpi: a driver's module_init failed (%d)", r);
+        }
+    }
+    klog::ok("Linux driver layer (LinuxKPI): %d driver%s registered%s", count, count == 1 ? "" : "s",
+             failed ? " (some failed)" : "");
+}
+
+} // namespace linuxkpi
