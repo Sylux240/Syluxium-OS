@@ -163,7 +163,7 @@ $(TESTS_DIR)/%: userspace/%.c
 	@echo "  USER  $<"
 	@$(USER_CC) $(USER_CFLAGS) $< -o $@ -lm
 
-$(DEBIAN_STAMP): tools/debian-fetch.py
+$(DEBIAN_STAMP): tools/debian-fetch.py Makefile
 	@echo "  DEB   $(DEBIAN_PKGS) (+ dependencies, Debian $(DEBIAN_SUITE))"
 	@python3 tools/debian-fetch.py --suite $(DEBIAN_SUITE) --out $(DEBIAN_ROOT) --cache deps/debian $(DEBIAN_PKGS)
 	@touch $@

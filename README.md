@@ -104,6 +104,11 @@ tools/smoke-test.sh   headless QEMU boot: serial log + screenshot
       - [ ] 7c: USB in LinuxKPI, cfg80211/mac80211, then Wi-Fi drivers (need real hardware to test)
 - [ ] **Phase 8**: **audio**: ALSA-compatible kernel interface (so libasound, PipeWire and
       PulseAudio apps work), drivers for Intel HD Audio, USB audio, virtio-sound; volume control
+      - [x] 8a: ALSA core (/dev/snd, /proc/asound, full PCM + control ioctl ABI, mmap, poll),
+            Intel HD Audio (generic codec graph, mixer with dB scales), virtio-sound;
+            Debian aplay/arecord/amixer/speaker-test work (verified by WAV capture analysis)
+      - [ ] later: USB Audio (needs xHCI isochronous), SysV shm for dmix/PulseAudio/PipeWire,
+            HDA jack sensing + Realtek quirks, HDMI audio
 - [ ] **Phase 9**: Wayland compositor, GUI toolkit, Windows-style desktop (taskbar, start menu).
       Look: clean, glossy and rounded like Windows XP / Windows 7 (not Windows 11).
       - Right-click context menus everywhere: on files (Open, Open with, Extract Here / Extract
@@ -179,7 +184,7 @@ Legend: ✅ done · 🟡 partly done · ⬜ to do
 - ⬜ Wired network cards
 - ⬜ Linux driver compatibility layer (shared by Wi-Fi and GPU)
 - ⬜ Wi-Fi: Intel, Qualcomm, MediaTek, Realtek, Broadcom
-- ⬜ Audio: Intel HDA, USB audio, ALSA-compatible interface
+- 🟡 Audio: ALSA-compatible interface, Intel HDA, virtio-sound done; USB audio to do
 - ⬜ GPU: AMD + NVIDIA kernel drivers, DRM/KMS (resolution, refresh, multi-monitor, vsync,
      Vulkan/OpenGL via Mesa)
 
@@ -228,4 +233,4 @@ Legend: ✅ done · 🟡 partly done · ⬜ to do
 - ⬜ Power management: sleep, battery, CPU frequency scaling
 - ⬜ Updates and recovery
 
-Tally: 22 done · 9 partly done · 33 to do.
+Tally: 22 done · 10 partly done · 32 to do.
