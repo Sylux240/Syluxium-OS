@@ -217,17 +217,23 @@ $(INITRAMFS): $(DEBIAN_STAMP) $(DEBIAN_I386_STAMP) $(USER_PROGS) $(USER32_PROGS)
 # ---------------------------------------------------------------------------
 $(IMAGE): $(KERNEL) $(INITRAMFS) limine.conf $(LIMINE_DIR)/limine
 	@echo "  IMG   $@"
-	@rm -f $@
-	@dd if=/dev/zero of=$@ bs=1M count=64 status=none
-	@echo 'label: dos' | sfdisk --quiet $@
-	@echo 'start=2048, type=ef, bootable' | sfdisk --quiet --append $@
-	@mformat -i $@@@1M -F -v SYLUXIUM ::
-	@mmd   -i $@@@1M ::/EFI ::/EFI/BOOT ::/boot ::/boot/limine
-	@mcopy -i $@@@1M $(KERNEL) ::/boot/syluxium.elf
-	@mcopy -i $@@@1M $(INITRAMFS) ::/boot/initramfs.cpio
-	@mcopy -i $@@@1M limine.conf $(LIMINE_DIR)/limine-bios.sys ::/boot/limine
-	@mcopy -i $@@@1M $(LIMINE_DIR)/BOOTX64.EFI ::/EFI/BOOT
-	@$(LIMINE_DIR)/limine bios-install --quiet $@
+	@# Sized to fit: kernel + initramfs + 32 MiB headroom, at least 128 MiB.
+	@# Built as $@.tmp and renamed only on success, so a failed build never
+	@# leaves a broken image that make would consider up to date.
+	@set -e; tmp=$@.tmp; rm -f $$tmp; \
+	 mb=$$(( ($$(stat -c %s $(KERNEL)) + $$(stat -c %s $(INITRAMFS))) / 1048576 + 32 )); \
+	 [ $$mb -lt 128 ] && mb=128; \
+	 dd if=/dev/zero of=$$tmp bs=1M count=$$mb status=none; \
+	 echo 'label: dos' | sfdisk --quiet $$tmp; \
+	 echo 'start=2048, type=ef, bootable' | sfdisk --quiet --append $$tmp; \
+	 mformat -i $$tmp@@1M -F -v SYLUXIUM ::; \
+	 mmd   -i $$tmp@@1M ::/EFI ::/EFI/BOOT ::/boot ::/boot/limine; \
+	 mcopy -i $$tmp@@1M $(KERNEL) ::/boot/syluxium.elf; \
+	 mcopy -i $$tmp@@1M $(INITRAMFS) ::/boot/initramfs.cpio; \
+	 mcopy -i $$tmp@@1M limine.conf $(LIMINE_DIR)/limine-bios.sys ::/boot/limine; \
+	 mcopy -i $$tmp@@1M $(LIMINE_DIR)/BOOTX64.EFI ::/EFI/BOOT; \
+	 $(LIMINE_DIR)/limine bios-install --quiet $$tmp; \
+	 mv $$tmp $@
 
 # ---------------------------------------------------------------------------
 # Running

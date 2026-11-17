@@ -72,7 +72,10 @@ tools/smoke-test.sh   headless QEMU boot: serial log + screenshot
       PS/2 keyboard, VT100 console, interactive Debian bash shell
 - [x] **Phase 4c**: threads (clone/futex, per-thread signals, TLB shootdown per address space),
       /proc (processes, CPU/memory accounting, cpuinfo, meminfo, stat, ...), /sys (CPUs)
-- [ ] **Phase 4d** (before phase 10): 32-bit (ia32) program support, needed by Steam
+- [x] **Phase 4d**: 32-bit (ia32) program support, needed by Steam: int 0x80 compat syscall
+      table with struct translation, ELF32 + ld-linux.so.2, 32-bit TLS/signals; Debian i386
+      bash/busybox run
+
 - [ ] **Phase 5**: PCI, AHCI/NVMe, USB (xHCI) keyboard/mouse/storage, driver model with a
       device registry (every device: name, vendor, driver, status, resources), ext4 so files persist
       - [x] 5a: PCI + device registry + driver model, block layer + cache + partitions, AHCI, NVMe,
@@ -81,8 +84,8 @@ tools/smoke-test.sh   headless QEMU boot: serial log + screenshot
             xHCI host controller, hubs, HID keyboards/mice, mass storage (USB sticks as /dev/sdX),
             kernel log buffer (dmesg)
       - [x] 5c: exFAT read/write (long names, rename; fsck.exfat-clean), mount type auto-detection
-      - [ ] later: USB hot-plug, HID report parsing
-            (gamepads, tablets, media keys), USB 3 hubs
+      - [x] 5d: USB hot-plug (root ports + hubs), full HID report parser (gamepads, joysticks,
+            tablets, media keys, many-button mice), Xbox 360/One controllers, USB 3 hubs
 - [ ] **Phase 6**: wired networking: virtio-net/e1000/Realtek, Ethernet/ARP/IPv4/IPv6/UDP/TCP, DHCP, DNS
       - [x] 6a: Intel e1000/e1000e (82540EM, 82574L, I217-I219) and virtio-net drivers; Ethernet,
             ARP, IPv4, ICMP (ping), UDP, TCP (retransmission, RTT-based timeout, flow control,
@@ -170,7 +173,7 @@ Legend: ✅ done · 🟡 partly done · ⬜ to do
 - ⬜ Shared memory, Unix domain sockets
 - ✅ /proc (process list, per-process CPU/memory, cpuinfo, meminfo, stat) and /sys (CPUs;
      devices come with the phase 5 driver model)
-- ⬜ 32-bit (ia32) program support
+- ✅ 32-bit (ia32) program support
 - 🟡 High-resolution timers: ns clock done; precise timer interrupts to do
 
 **Drivers**
@@ -178,7 +181,7 @@ Legend: ✅ done · 🟡 partly done · ⬜ to do
 - ✅ PCI/PCIe enumeration (ECAM, BARs, MSI/MSI-X) + device registry (/sys/bus/pci, lspci works,
      /sys/kernel/syluxium/devices for the Device Manager)
 - ✅ PS/2 mouse (with wheel)
-- 🟡 USB (xHCI + hubs): keyboards, mice, storage work; gamepads (HID report parsing) and hot-plug to do
+- ✅ USB (xHCI, USB 2/3 hubs, hot-plug): keyboards, mice, tablets, gamepads, Xbox pads, storage
 - ✅ Input event interface (/dev/input/eventN, Linux evdev ABI) for games and the desktop
 - ✅ AHCI/SATA, NVMe (polled DMA; interrupts/NCQ later)
 - ⬜ Wired network cards
@@ -233,4 +236,4 @@ Legend: ✅ done · 🟡 partly done · ⬜ to do
 - ⬜ Power management: sleep, battery, CPU frequency scaling
 - ⬜ Updates and recovery
 
-Tally: 22 done · 10 partly done · 32 to do.
+Tally: 24 done · 9 partly done · 31 to do.
