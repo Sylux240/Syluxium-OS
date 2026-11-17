@@ -45,6 +45,14 @@ Memory* Memory::fork() {
         child->m_vmas.push_back(c); // same order as ours: already sorted
 
         u32 flags = prot_to_map_flags(v->prot);
+        if (v->kind == VMA_DEVICE) { // device memory stays shared with the child
+            for (uptr page = v->start; page < v->end; page += PAGE_SIZE) {
+                u64 phys;
+                if (m_as->translate(page, &phys))
+                    as->map(page, phys, flags);
+            }
+            continue;
+        }
         u32 shared_flags = flags & ~vmm::WRITE; // writes must fault so they can be copied
         for (uptr page = v->start; page < v->end; page += PAGE_SIZE) {
             u64 phys;
@@ -165,7 +173,7 @@ void Memory::remove_range(uptr start, uptr end) {
             split(v, end);
             next = m_vmas.next_of(v);
         }
-        unmap_pages(v->start, v->end);
+        unmap_pages(v->start, v->end, v->kind != VMA_DEVICE);
         m_vmas.remove(v);
         delete v;
         v = next;
@@ -208,6 +216,8 @@ long Memory::map(uptr addr, usize len, u32 prot, u32 flags, vfs::Inode* file, u6
     v->file_bytes = v->file ? min<u64>(file_bytes, len) : 0;
     if (flags & MAP_GROWSDOWN)
         v->kind = VMA_STACK;
+    if (v->file && !vfs::is_reg(v->file->mode))
+        v->kind = VMA_DEVICE; // sys_mmap only lets device files through when they support mmap_phys
     insert(v);
 
     if (flags & MAP_POPULATE)
@@ -293,6 +303,12 @@ long Memory::brk(uptr new_end) {
 }
 
 bool Memory::populate(Vma* v, uptr page) {
+    if (v->kind == VMA_DEVICE) {
+        u64 dev_phys;
+        if (v->file->mmap_phys(v->file_offset + (page - v->start), &dev_phys) < 0)
+            return false;
+        return m_as->map(page, dev_phys, prot_to_map_flags(v->prot));
+    }
     u64 phys = pmm::alloc_page(true);
     if (!phys)
         return false;
@@ -315,7 +331,7 @@ bool Memory::populate(Vma* v, uptr page) {
     return true;
 }
 
-void Memory::unmap_pages(uptr start, uptr end) {
+void Memory::unmap_pages(uptr start, uptr end, bool release) {
     constexpr usize BATCH = 64;
     u64 phys[BATCH];
     for (uptr chunk = start; chunk < end;) {
@@ -325,7 +341,7 @@ void Memory::unmap_pages(uptr start, uptr end) {
             phys[n++] = m_as->unmap(chunk);
         // No CPU may still reach these pages through its TLB once we free them.
         vmm::shootdown(chunk_start, n, m_as);
-        for (usize i = 0; i < n; i++) {
+        for (usize i = 0; i < n && release; i++) {
             if (phys[i]) {
                 vmm::release_user_page(phys[i]);
                 __atomic_sub_fetch(&m_rss, 1, __ATOMIC_RELAXED);
@@ -374,7 +390,7 @@ bool Memory::fault(uptr addr, bool write) {
     u64 phys;
     if (m_as->translate(page, &phys)) {
         // Present: a write to a page shared copy-on-write after fork().
-        if (write && (v->prot & PROT_WRITE))
+        if (write && (v->prot & PROT_WRITE) && v->kind != VMA_DEVICE)
             return copy_on_write(v, page);
         return false; // a real protection violation
     }
@@ -394,6 +410,8 @@ long Memory::prepare_locked(uptr addr, usize len, bool write) {
         if (!m_as->translate(page, &phys)) {
             if (!populate(v, page))
                 return -err::FAULT;
+        } else if (v->kind == VMA_DEVICE) {
+            continue; // shared device memory: never copied
         } else if (write && pmm::frame(phys)->refcount > 1) {
             // Kernel is about to write here on the process's behalf: break the sharing first.
             if (!copy_on_write(v, page))
@@ -430,8 +448,11 @@ long Memory::write_remote(uptr addr, const void* data, usize len) {
 
 void Memory::destroy() {
     LockGuard guard(m_lock);
-    while (Vma* v = m_vmas.pop_front())
+    while (Vma* v = m_vmas.pop_front()) {
+        if (v->kind == VMA_DEVICE && m_as)
+            unmap_pages(v->start, v->end, false); // destroy_user() must not free the driver's pages
         delete v;
+    }
     if (m_as) {
         m_as->destroy_user(); // frees every user page and page table
         delete m_as;

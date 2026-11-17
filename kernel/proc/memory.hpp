@@ -22,7 +22,9 @@ constexpr uptr MMAP_TOP      = 0x7ff000000000;     // mmap() allocates downwards
 constexpr uptr STACK_TOP     = 0x7ffffffff000;
 constexpr usize STACK_SIZE   = 8 * MiB;
 
-enum VmaKind : u8 { VMA_NORMAL, VMA_HEAP, VMA_STACK };
+// VMA_DEVICE: a MAP_SHARED mapping of device memory (Inode::mmap_phys). Its
+// pages belong to the driver: never copied on write, never freed by us.
+enum VmaKind : u8 { VMA_NORMAL, VMA_HEAP, VMA_STACK, VMA_DEVICE };
 
 struct Vma {
     uptr start = 0, end = 0;      // [start, end), page aligned
@@ -94,7 +96,7 @@ private:
     bool populate(Vma* v, uptr page);
     bool copy_on_write(Vma* v, uptr page);
     long prepare_locked(uptr addr, usize len, bool write);
-    void unmap_pages(uptr start, uptr end); // unmap, shoot down, then free
+    void unmap_pages(uptr start, uptr end, bool release = true); // unmap, shoot down, then free (if release)
 
     vmm::AddressSpace* m_as;
     IntrusiveList<Vma, &Vma::node> m_vmas; // sorted by address

@@ -19,6 +19,8 @@
 #include <drivers/usb/usb.hpp>
 #include <net/net.hpp>
 #include <drivers/storage/storage.hpp>
+#include <drivers/sound/sound_drivers.hpp>
+#include <sound/sound.hpp>
 #include <block/block.hpp>
 #include <fs/ext2.hpp>
 #include <fs/fat.hpp>
@@ -129,6 +131,8 @@ void discover_hardware() {
     net::init(); // loopback first: it becomes ifindex 1, like Linux
     e1000::register_driver();
     virtio_net::register_driver();
+    sound::init(); // phase 8: ALSA-compatible sound core
+    hda::register_driver();
     pci::init();
     dev::register_platform_devices(g_keyboard);
     dev::probe_all();
