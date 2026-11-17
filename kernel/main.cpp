@@ -134,6 +134,7 @@ void discover_hardware() {
     virtio_net::register_driver();
     sound::init(); // phase 8: ALSA-compatible sound core
     hda::register_driver();
+    virtio_snd::register_driver();
     linuxkpi::init(); // Linux drivers register themselves (module_init) here
     pci::init();
     dev::register_platform_devices(g_keyboard);

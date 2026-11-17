@@ -4,3 +4,7 @@
 namespace hda {
 void register_driver(); // Intel High Definition Audio controllers (PCI class 0x0403)
 }
+
+namespace virtio_snd {
+void register_driver(); // virtio-sound (QEMU/KVM paravirtual sound card)
+}

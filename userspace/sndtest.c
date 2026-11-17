@@ -222,12 +222,16 @@ static int cmd_abi(void) {
         usleep(30000);
         ioctl(fd, SNDRV_PCM_IOCTL_HWSYNC);
         CHECK(status->state == SNDRV_PCM_STATE_RUNNING && status->hw_ptr > 0, "running, hw_ptr advances (%lu)", (unsigned long)status->hw_ptr);
-        CHECK(ioctl(fd, SNDRV_PCM_IOCTL_PAUSE, 1) == 0 && status->state == SNDRV_PCM_STATE_PAUSED, "PAUSE");
-        unsigned long hw = status->hw_ptr;
-        usleep(30000);
-        ioctl(fd, SNDRV_PCM_IOCTL_HWSYNC);
-        CHECK(status->hw_ptr == hw, "hw_ptr frozen while paused");
-        CHECK(ioctl(fd, SNDRV_PCM_IOCTL_PAUSE, 0) == 0 && status->state == SNDRV_PCM_STATE_RUNNING, "resume");
+        if (ioctl(fd, SNDRV_PCM_IOCTL_PAUSE, 1) < 0 && errno == ENOSYS) {
+            printf("  [SKIP] PAUSE: not supported by this device (ENOSYS)\n");
+        } else {
+            CHECK(status->state == SNDRV_PCM_STATE_PAUSED, "PAUSE");
+            unsigned long hw = status->hw_ptr;
+            usleep(30000);
+            ioctl(fd, SNDRV_PCM_IOCTL_HWSYNC);
+            CHECK(status->hw_ptr == hw, "hw_ptr frozen while paused");
+            CHECK(ioctl(fd, SNDRV_PCM_IOCTL_PAUSE, 0) == 0 && status->state == SNDRV_PCM_STATE_RUNNING, "resume");
+        }
         usleep(250000); // let it run dry
         CHECK(pcm_state(fd) == SNDRV_PCM_STATE_XRUN, "underrun detected (state XRUN)");
         snd_pcm_sframes_t delay;
