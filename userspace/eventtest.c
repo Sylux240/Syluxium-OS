@@ -138,7 +138,9 @@ int main(void) {
     int status;
     CHECK(waitpid(child, &status, 0) == child && WEXITSTATUS(status) == 7, "child reaped after signalfd");
 
-    // epoll_pwait with a temporary mask that unblocks SIGUSR1
+    // epoll_pwait with a temporary mask that unblocks SIGUSR1 (signalfd out of
+    // the set first: the child's exit would otherwise make it readable)
+    epoll_ctl(ep, EPOLL_CTL_DEL, sfd, NULL);
     signal(SIGUSR1, SIG_DFL);
     sigset_t block_usr1, empty;
     sigemptyset(&block_usr1);

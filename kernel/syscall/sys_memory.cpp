@@ -1,5 +1,6 @@
 // Memory management system calls.
 
+#include <fs/ramfs.hpp>
 #include <mm/layout.hpp>
 #include <proc/process.hpp>
 #include <syscall/syscall.hpp>
@@ -45,12 +46,35 @@ long sys_mmap(SYSCALL_ARGS) {
         }
         file = f->inode;
     }
-    // MAP_SHARED file mappings are treated as private copies for now; with
-    // a single process there's nobody to share writes with yet.
+    // A sealed memfd can't get new writable shared mappings.
+    if (file && (flags & MAP_SHARED) && (prot & PROT_WRITE) && file->shared_mappable()) {
+        long seals = file->seals(false, 0);
+        if (seals > 0 && (seals & (ramfs::RegularFile::F_SEAL_WRITE | ramfs::RegularFile::F_SEAL_FUTURE_WRITE))) {
+            vfs::file_put(f);
+            return -err::PERM;
+        }
+    }
+    // Anonymous shared memory (shared with fork()ed children): backed by a
+    // hidden tmpfs file, so it uses the same shared-page machinery.
+    if ((flags & MAP_ANONYMOUS) && (flags & MAP_SHARED)) {
+        auto* anon = new ramfs::RegularFile;
+        anon->nlink = 0; // no directory entry: lives exactly as long as its mappings
+        anon->truncate(align_up<u64>(len, 4096));
+        file = anon;
+        flags &= ~MAP_ANONYMOUS;
+        offset = 0;
+        uptr result;
+        long r = p->mem->map(addr, len, prot, flags, file, offset, ~0ull, &result);
+        if (r < 0)
+            anon->mmap_ref(0); // never mapped: nobody refers to it (frees it)
+        return r < 0 ? r : static_cast<long>(result);
+    }
+    // MAP_SHARED of ramfs/tmpfs/memfd files shares pages between processes;
+    // MAP_SHARED of disk files (ext2, FAT) is still a private copy.
     uptr result;
     long r = p->mem->map(addr, len, prot, flags, file, offset, ~0ull, &result);
     if (f)
-        vfs::file_put(f); // TODO: keep the inode alive for the mapping's lifetime
+        vfs::file_put(f); // the mapping keeps its own reference (Inode::mmap_ref)
     return r < 0 ? r : static_cast<long>(result);
 }
 

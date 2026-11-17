@@ -439,6 +439,20 @@ long sys_fcntl(SYSCALL_ARGS) {
         f->flags = (f->flags & ~changeable) | (static_cast<u32>(a2) & changeable);
         return 0;
     }
+    case 1033: // F_ADD_SEALS (memfd)
+        return f->inode->seals(true, static_cast<u32>(a2));
+    case 1034: // F_GET_SEALS
+        return f->inode->seals(false, 0);
+    case 5:  // F_GETLK: advisory locks always succeed (single-user system):
+    case 36: { // F_OFD_GETLK  report "unlocked" (l_type = F_UNLCK)
+        i16 unlocked = 2;
+        return uaccess::put(reinterpret_cast<i16*>(a2), unlocked);
+    }
+    case 6: case 7: case 37: case 38: // F_SETLK, F_SETLKW, F_OFD_SETLK, F_OFD_SETLKW
+        return 0;
+    case 1031: // F_SETPIPE_SZ
+    case 1032: // F_GETPIPE_SZ
+        return 64 * 1024;
     default:
         return -err::INVAL;
     }

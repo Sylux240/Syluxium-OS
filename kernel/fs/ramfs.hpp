@@ -1,6 +1,7 @@
 #pragma once
 
 #include <fs/vfs.hpp>
+#include <sched/sync.hpp>
 
 // In-memory filesystem: the root filesystem, filled from the initramfs.
 namespace ramfs {
@@ -37,6 +38,13 @@ private:
     Spinlock m_lock;
 };
 
+// A file in RAM, stored as an array of physical pages. Because its pages
+// are real pages it can be mapped MAP_SHARED by many processes at once: the
+// backing store for /tmp, /dev/shm (POSIX shm), memfd_create, System V
+// shared memory and anonymous shared mappings, like Linux's tmpfs.
+//
+// Lifetime: the inode lives while a directory entry, an open file or a
+// mapping refers to it, and frees itself (and its pages) after the last.
 class RegularFile : public vfs::Inode {
 public:
     RegularFile();
@@ -44,12 +52,33 @@ public:
     isize read(u64 offset, void* buf, usize count) override;
     isize write(u64 offset, const void* buf, usize count) override;
     long truncate(u64 new_size) override;
+    long mmap_phys(u64 offset, u64* phys) override;
+    bool shared_mappable() const override { return true; }
+    void mmap_ref(int delta) override;
+    long seals(bool add, u32 bits) override;
+    void on_open(vfs::File* f) override;
+    void on_release(vfs::File* f) override;
+    void unlinked() override { maybe_free(); }
+
+    // memfd_create: allow seals (F_ADD_SEALS); otherwise only F_SEAL_SEAL is set.
+    void allow_sealing() { m_seals = 0; }
+    u32 seal_bits() const { return m_seals; }
+    u32 mapping_count() const { return __atomic_load_n(&m_maps, __ATOMIC_ACQUIRE); }
+
+    static constexpr u32 F_SEAL_SEAL = 1, F_SEAL_SHRINK = 2, F_SEAL_GROW = 4, F_SEAL_WRITE = 8,
+                         F_SEAL_FUTURE_WRITE = 0x10;
 
 private:
-    long reserve(u64 capacity);
-    u8* m_data = nullptr;
-    u64 m_capacity = 0;
-    Spinlock m_lock;
+    u64 page(u64 index, bool allocate); // physical address of page `index` (0 = hole)
+    void free_pages_from(u64 first);
+    void maybe_free();
+
+    u64* m_pages = nullptr;   // physical page addresses, 0 = not allocated (reads as zeros)
+    u64 m_slots = 0;          // entries in m_pages
+    IrqSpinlock m_pages_lock; // m_pages/m_slots (taken by the page-fault path)
+    sched::Mutex m_io;        // serializes read/write/truncate; pages aren't freed under a copy
+    u32 m_opens = 0, m_maps = 0;
+    u32 m_seals = F_SEAL_SEAL;
 };
 
 class Symlink : public vfs::Inode {

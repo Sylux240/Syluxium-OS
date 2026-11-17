@@ -1,4 +1,6 @@
 #include <fs/ramfs.hpp>
+#include <mm/layout.hpp>
+#include <mm/pmm.hpp>
 #include <lib/string.hpp>
 #include <mm/heap.hpp>
 
@@ -128,11 +130,14 @@ long Dir::unlink(const char* name, usize len, bool remove_dir) {
         m_count--;
         if (dir)
             nlink--;
-        // The inode itself is kept: open files may still use it.
-        // TODO: free it once both nlink and open references reach zero.
-        c->inode->nlink = c->inode->nlink ? c->inode->nlink - 1 : 0;
+        // The inode lives on while open files or mappings use it; files
+        // free themselves after the last of those goes (unlinked()).
+        vfs::Inode* gone = c->inode;
+        gone->nlink = gone->nlink ? gone->nlink - 1 : 0;
         kfree(c->name);
         kfree(c);
+        if (gone->nlink == 0 && !dir)
+            gone->unlinked();
         mtime = ctime = vfs::now();
         return 0;
     }
@@ -198,57 +203,151 @@ long Dir::readdir(u64 index, DirEntry* out) {
 
 // ---- RegularFile ----
 
+using mm::PAGE_SIZE;
+
 RegularFile::RegularFile() {
     ino = next_ino();
     mode = S_IFREG | 0644;
     touch(this);
 }
 
-RegularFile::~RegularFile() { kfree(m_data); }
+RegularFile::~RegularFile() {
+    free_pages_from(0);
+    kfree(m_pages);
+}
 
-long RegularFile::reserve(u64 capacity) {
-    if (capacity <= m_capacity)
-        return 0;
-    u64 new_cap = max<u64>(capacity, m_capacity * 2);
-    new_cap = max<u64>(new_cap, 256);
-    auto* p = static_cast<u8*>(krealloc(m_data, new_cap));
-    if (!p)
-        return -err::NOSPC;
-    memset(p + m_capacity, 0, new_cap - m_capacity);
-    m_data = p;
-    m_capacity = new_cap;
-    return 0;
+u64 RegularFile::page(u64 index, bool allocate) {
+    LockGuard guard(m_pages_lock);
+    if (index >= m_slots) {
+        if (!allocate)
+            return 0;
+        u64 slots = max<u64>(index + 1, max<u64>(m_slots * 2, 16));
+        auto* grown = static_cast<u64*>(kzalloc(slots * sizeof(u64)));
+        if (!grown)
+            return 0;
+        if (m_pages)
+            memcpy(grown, m_pages, m_slots * sizeof(u64));
+        kfree(m_pages);
+        m_pages = grown;
+        m_slots = slots;
+    }
+    if (!m_pages[index] && allocate)
+        m_pages[index] = pmm::alloc_page(true);
+    return m_pages[index];
+}
+
+void RegularFile::free_pages_from(u64 first) {
+    LockGuard guard(m_pages_lock);
+    for (u64 i = first; i < m_slots; i++) {
+        if (m_pages[i]) {
+            pmm::free_page(m_pages[i]);
+            m_pages[i] = 0;
+        }
+    }
 }
 
 isize RegularFile::read(u64 offset, void* buf, usize count) {
-    LockGuard guard(m_lock);
+    LockGuard guard(m_io);
     if (offset >= size)
         return 0;
     usize n = min<u64>(count, size - offset);
-    memcpy(buf, m_data + offset, n);
+    auto* out = static_cast<u8*>(buf);
+    for (usize done = 0; done < n;) {
+        u64 pos = offset + done;
+        usize in_page = pos % PAGE_SIZE;
+        usize chunk = min<usize>(n - done, PAGE_SIZE - in_page);
+        u64 phys = page(pos / PAGE_SIZE, false);
+        if (phys)
+            memcpy(out + done, mm::phys_to_virt<u8>(phys) + in_page, chunk);
+        else
+            memset(out + done, 0, chunk);
+        done += chunk;
+    }
     return static_cast<isize>(n);
 }
 
 isize RegularFile::write(u64 offset, const void* buf, usize count) {
-    LockGuard guard(m_lock);
-    if (long r = reserve(offset + count); r < 0)
-        return r;
-    memcpy(m_data + offset, buf, count);
+    LockGuard guard(m_io);
+    if (m_seals & (F_SEAL_WRITE | F_SEAL_FUTURE_WRITE))
+        return -err::PERM;
+    if ((m_seals & F_SEAL_GROW) && offset + count > size)
+        return -err::PERM;
+    auto* in = static_cast<const u8*>(buf);
+    for (usize done = 0; done < count;) {
+        u64 pos = offset + done;
+        usize in_page = pos % PAGE_SIZE;
+        usize chunk = min<usize>(count - done, PAGE_SIZE - in_page);
+        u64 phys = page(pos / PAGE_SIZE, true);
+        if (!phys)
+            return done ? static_cast<isize>(done) : -err::NOSPC;
+        memcpy(mm::phys_to_virt<u8>(phys) + in_page, in + done, chunk);
+        done += chunk;
+    }
     size = max<u64>(size, offset + count);
     mtime = ctime = vfs::now();
     return static_cast<isize>(count);
 }
 
 long RegularFile::truncate(u64 new_size) {
-    LockGuard guard(m_lock);
-    if (new_size > size) {
-        if (long r = reserve(new_size); r < 0)
-            return r;
-        memset(m_data + size, 0, new_size - size);
+    LockGuard guard(m_io);
+    if ((m_seals & F_SEAL_SHRINK) && new_size < size)
+        return -err::PERM;
+    if ((m_seals & F_SEAL_GROW) && new_size > size)
+        return -err::PERM;
+    if (new_size < size) {
+        // Zero the tail of the last kept page, so a later grow reads zeros.
+        if (u64 in_page = new_size % PAGE_SIZE) {
+            u64 phys = page(new_size / PAGE_SIZE, false);
+            if (phys)
+                memset(mm::phys_to_virt<u8>(phys) + in_page, 0, PAGE_SIZE - in_page);
+        }
+        // Pages still mapped somewhere stay until the file goes away.
+        if (!__atomic_load_n(&m_maps, __ATOMIC_ACQUIRE))
+            free_pages_from(align_up<u64>(new_size, PAGE_SIZE) / PAGE_SIZE);
     }
     size = new_size;
     mtime = ctime = vfs::now();
     return 0;
+}
+
+long RegularFile::mmap_phys(u64 offset, u64* phys) {
+    if (offset >= align_up<u64>(size, PAGE_SIZE))
+        return -err::FAULT; // beyond the end of the file (Linux sends SIGBUS)
+    u64 p = page(offset / PAGE_SIZE, true);
+    if (!p)
+        return -err::NOMEM;
+    *phys = p;
+    return 0;
+}
+
+void RegularFile::mmap_ref(int delta) {
+    if (__atomic_add_fetch(&m_maps, static_cast<u32>(delta), __ATOMIC_ACQ_REL) == 0)
+        maybe_free();
+}
+
+void RegularFile::on_open(vfs::File*) { __atomic_add_fetch(&m_opens, 1, __ATOMIC_ACQ_REL); }
+
+void RegularFile::on_release(vfs::File*) {
+    if (__atomic_sub_fetch(&m_opens, 1, __ATOMIC_ACQ_REL) == 0)
+        maybe_free();
+}
+
+long RegularFile::seals(bool add, u32 bits) {
+    LockGuard guard(m_io);
+    if (!add)
+        return m_seals;
+    if (m_seals & F_SEAL_SEAL)
+        return -err::PERM;
+    if ((bits & F_SEAL_WRITE) && __atomic_load_n(&m_maps, __ATOMIC_ACQUIRE))
+        return -err::BUSY; // Linux: writable shared mappings exist (we can't tell them apart)
+    m_seals |= bits & (F_SEAL_SEAL | F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_WRITE | F_SEAL_FUTURE_WRITE);
+    return 0;
+}
+
+void RegularFile::maybe_free() {
+    if (nlink == 0 && __atomic_load_n(&m_opens, __ATOMIC_ACQUIRE) == 0 &&
+        __atomic_load_n(&m_maps, __ATOMIC_ACQUIRE) == 0)
+        delete this;
 }
 
 // ---- Symlink ----

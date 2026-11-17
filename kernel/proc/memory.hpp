@@ -64,6 +64,8 @@ public:
     long map(uptr addr, usize len, u32 prot, u32 flags, vfs::Inode* file, u64 offset, u64 file_bytes,
              uptr* out);
     long unmap(uptr addr, usize len);
+    // The file-backed mapping that starts exactly at `addr` (shmdt): its file and length.
+    bool mapping_at(uptr addr, vfs::Inode** file, usize* len);
     long protect(uptr addr, usize len, u32 prot);
     long brk(uptr new_end);  // returns the (possibly unchanged) break
     void set_brk_base(uptr base) { m_brk_base = m_brk = base; }

@@ -73,6 +73,16 @@ public:
     // as the inode exists; it's mapped as is (no copy-on-write, never freed
     // by the address space). -ENODEV: this inode can't be mapped.
     virtual long mmap_phys(u64 offset, u64* phys) { return -err::NODEV; }
+    // Regular files whose pages can be mapped MAP_SHARED (ramfs/tmpfs): the
+    // mapping uses mmap_phys() and writes are seen by every process.
+    virtual bool shared_mappable() const { return false; }
+    // A mapping (VMA) referring to this inode was created (+1) or removed (-1):
+    // keeps unlinked-but-mapped files alive.
+    virtual void mmap_ref(int delta) {}
+    // memfd seals (fcntl F_ADD_SEALS / F_GET_SEALS): returns the seal set or -errno.
+    virtual long seals(bool add, u32 bits) { return -err::INVAL; }
+    // The last directory entry naming this inode was removed.
+    virtual void unlinked() {}
     // Change access/modification times (utimensat). Disk file systems persist them.
     virtual long set_times(Timespec access, Timespec modify) {
         atime = access;

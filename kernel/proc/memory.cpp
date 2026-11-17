@@ -43,6 +43,8 @@ Memory* Memory::fork() {
         c->file = v->file;
         c->file_offset = v->file_offset;
         c->file_bytes = v->file_bytes;
+        if (c->file)
+            c->file->mmap_ref(+1);
         child->m_vmas.push_back(c); // same order as ours: already sorted
 
         u32 flags = prot_to_map_flags(v->prot);
@@ -150,6 +152,8 @@ Vma* Memory::split(Vma* v, uptr at) {
     n->prot = v->prot;
     n->kind = v->kind;
     n->file = v->file;
+    if (n->file)
+        n->file->mmap_ref(+1);
     u64 delta = at - v->start;
     n->file_offset = v->file_offset + delta;
     n->file_bytes = v->file_bytes > delta ? v->file_bytes - delta : 0;
@@ -176,6 +180,8 @@ void Memory::remove_range(uptr start, uptr end) {
         }
         unmap_pages(v->start, v->end, v->kind != VMA_DEVICE);
         m_vmas.remove(v);
+        if (v->file)
+            v->file->mmap_ref(-1); // may free an unlinked file (its pages are already unmapped)
         delete v;
         v = next;
     }
@@ -219,14 +225,34 @@ long Memory::map(uptr addr, usize len, u32 prot, u32 flags, vfs::Inode* file, u6
     v->file_bytes = v->file ? min<u64>(file_bytes, len) : 0;
     if (flags & MAP_GROWSDOWN)
         v->kind = VMA_STACK;
-    if (v->file && !vfs::is_reg(v->file->mode))
-        v->kind = VMA_DEVICE; // sys_mmap only lets device files through when they support mmap_phys
+    // Shared pages: device memory, or MAP_SHARED of a file whose pages can be
+    // shared (ramfs/tmpfs, memfd, shm). Other MAP_SHARED files get a private copy.
+    if (v->file && (!vfs::is_reg(v->file->mode) || ((flags & MAP_SHARED) && v->file->shared_mappable())))
+        v->kind = VMA_DEVICE;
+    if (v->file)
+        v->file->mmap_ref(+1);
     insert(v);
 
     if (flags & MAP_POPULATE)
         prepare_locked(addr, len, false);
     *out = addr;
     return 0;
+}
+
+bool Memory::mapping_at(uptr addr, vfs::Inode** file, usize* len) {
+    LockGuard guard(m_lock);
+    for (Vma* v : m_vmas) {
+        if (v->start == addr && v->file) {
+            *file = v->file;
+            // Adjacent pieces of the same mapping (split by mprotect) count too.
+            uptr end = v->end;
+            for (Vma* n = m_vmas.next_of(v); n && n->start == end && n->file == v->file; n = m_vmas.next_of(n))
+                end = n->end;
+            *len = end - addr;
+            return true;
+        }
+    }
+    return false;
 }
 
 long Memory::unmap(uptr addr, usize len) {
@@ -457,7 +483,9 @@ void Memory::destroy() {
     LockGuard guard(m_lock);
     while (Vma* v = m_vmas.pop_front()) {
         if (v->kind == VMA_DEVICE && m_as)
-            unmap_pages(v->start, v->end, false); // destroy_user() must not free the driver's pages
+            unmap_pages(v->start, v->end, false); // destroy_user() must not free shared/driver pages
+        if (v->file)
+            v->file->mmap_ref(-1);
         delete v;
     }
     if (m_as) {

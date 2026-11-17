@@ -27,6 +27,7 @@ void register_process();
 void register_time();
 void register_net();
 void register_events();
+void register_ipc();
 void register_compat(); // 32-bit (ia32) table + int $0x80 gate (compat32.cpp)
 
 } // namespace syscall
