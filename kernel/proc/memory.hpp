@@ -61,7 +61,8 @@ public:
     void set_brk_base(uptr base) { m_brk_base = m_brk = base; }
 
     // Resolve a page fault. False means the access is invalid (segfault).
-    bool fault(uptr addr, bool write);
+    // was_present: the CPU saw a present page (a protection fault, error code P=1).
+    bool fault(uptr addr, bool write, bool was_present = false);
 
     // Make sure [addr, addr+len) is mapped with the needed access, faulting
     // pages in as required. 0 or -EFAULT.

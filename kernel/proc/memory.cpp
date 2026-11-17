@@ -379,7 +379,7 @@ void Memory::for_each_vma(void (*fn)(const Vma&, void*), void* ctx) {
         fn(*v, ctx);
 }
 
-bool Memory::fault(uptr addr, bool write) {
+bool Memory::fault(uptr addr, bool write, bool was_present) {
     LockGuard guard(m_lock);
     Vma* v = find(addr);
     if (!v || v->prot == PROT_NONE)
@@ -392,6 +392,10 @@ bool Memory::fault(uptr addr, bool write) {
         // Present: a write to a page shared copy-on-write after fork().
         if (write && (v->prot & PROT_WRITE) && v->kind != VMA_DEVICE)
             return copy_on_write(v, page);
+        // Not present when the CPU looked, present now: another thread of
+        // this process faulted the same page in meanwhile. Just retry.
+        if (!was_present)
+            return true;
         return false; // a real protection violation
     }
     return populate(v, page);
