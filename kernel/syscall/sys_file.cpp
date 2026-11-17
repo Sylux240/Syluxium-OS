@@ -1,6 +1,10 @@
 // File and filesystem system calls.
 
+#include <block/block.hpp>
+#include <fs/ext2.hpp>
+#include <fs/fat.hpp>
 #include <fs/pipe.hpp>
+#include <fs/ramfs.hpp>
 #include <fs/poll.hpp>
 #include <fs/vfs.hpp>
 #include <lib/format.hpp>
@@ -102,7 +106,7 @@ long dir_for(Process* p, long dirfd, const char* path, Inode** out) {
 
 void fill_stat(const Inode* n, LinuxStat* st) {
     memset(st, 0, sizeof(*st));
-    st->st_dev = 1;
+    st->st_dev = n->dev;
     st->st_ino = n->ino;
     st->st_nlink = n->nlink;
     st->st_mode = n->mode;
@@ -976,6 +980,197 @@ long sys_fchmodat(SYSCALL_ARGS) {
 long sys_socket(SYSCALL_ARGS) { SYSCALL_UNUSED; return -97; /* EAFNOSUPPORT */ }
 long sys_not_socket(SYSCALL_ARGS) { SYSCALL_UNUSED; return -88; /* ENOTSOCK */ }
 
+// ---- statfs ----
+
+struct LinuxStatfs {
+    i64 f_type, f_bsize;
+    u64 f_blocks, f_bfree, f_bavail, f_files, f_ffree;
+    i32 f_fsid[2];
+    i64 f_namelen, f_frsize, f_flags;
+    i64 f_spare[4];
+};
+static_assert(sizeof(LinuxStatfs) == 120);
+
+// Any inode can report the numbers for the file system it lives on.
+long fill_statfs(Inode* n, u64 user_buf) {
+    Inode::FsStats st{};
+    if (long r = n->statfs(&st); r < 0)
+        return r;
+    LinuxStatfs out{};
+    out.f_type = static_cast<i64>(st.type);
+    out.f_bsize = out.f_frsize = static_cast<i64>(st.block_size);
+    out.f_blocks = st.blocks;
+    out.f_bfree = out.f_bavail = st.blocks_free;
+    out.f_files = st.files;
+    out.f_ffree = st.files_free;
+    out.f_namelen = 255;
+    return uaccess::put(reinterpret_cast<LinuxStatfs*>(user_buf), out);
+}
+
+long sys_statfs(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    UserPath path(a0);
+    if (path.error())
+        return path.error();
+    Inode* n;
+    if (long r = resolve(path.c_str(), proc::current()->cwd, true, &n); r < 0)
+        return r;
+    return fill_statfs(n, a1);
+}
+
+long sys_fstatfs(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    FileRef f(proc::current(), static_cast<long>(a0));
+    return f ? fill_statfs(f->inode, a1) : -err::BADF;
+}
+
+// ---- timestamps ----
+
+long do_utimensat(long dirfd, u64 user_path, u64 user_times, u32 flags) {
+    constexpr i64 UTIME_NOW = (1l << 30) - 1, UTIME_OMIT = (1l << 30) - 2;
+    Process* p = proc::current();
+    Inode* inode;
+    if (user_path) {
+        UserPath path(user_path);
+        if (path.error())
+            return path.error();
+        Inode* base;
+        if (long r = dir_for(p, dirfd, path.c_str(), &base); r < 0)
+            return r;
+        if (long r = resolve(path.c_str(), base, !(flags & AT_SYMLINK_NOFOLLOW), &inode); r < 0)
+            return r;
+    } else { // futimens(fd, ...)
+        FileRef f(p, dirfd);
+        if (!f)
+            return -err::BADF;
+        inode = f->inode;
+    }
+    Timespec now = vfs::now(), access = now, modify = now;
+    if (user_times) {
+        struct { i64 sec, nsec; } ts[2];
+        if (long r = uaccess::copy_from(ts, reinterpret_cast<void*>(user_times), sizeof(ts)); r < 0)
+            return r;
+        access = ts[0].nsec == UTIME_NOW ? now : ts[0].nsec == UTIME_OMIT ? inode->atime : Timespec{ts[0].sec, ts[0].nsec};
+        modify = ts[1].nsec == UTIME_NOW ? now : ts[1].nsec == UTIME_OMIT ? inode->mtime : Timespec{ts[1].sec, ts[1].nsec};
+    }
+    return inode->set_times(access, modify);
+}
+
+long sys_utimensat(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    return do_utimensat(static_cast<i32>(a0), a1, a2, static_cast<u32>(a3));
+}
+
+long sys_utimes(SYSCALL_ARGS) { // utimes(path, timeval[2])
+    SYSCALL_UNUSED;
+    if (!a1)
+        return do_utimensat(AT_FDCWD, a0, 0, 0);
+    struct { i64 sec, usec; } tv[2];
+    if (long r = uaccess::copy_from(tv, reinterpret_cast<void*>(a1), sizeof(tv)); r < 0)
+        return r;
+    UserPath path(a0);
+    if (path.error())
+        return path.error();
+    Inode* inode;
+    if (long r = resolve(path.c_str(), proc::current()->cwd, true, &inode); r < 0)
+        return r;
+    return inode->set_times(Timespec{tv[0].sec, tv[0].usec * 1000}, Timespec{tv[1].sec, tv[1].usec * 1000});
+}
+
+// ---- rename ----
+
+long do_renameat(long olddirfd, u64 old_user, long newdirfd, u64 new_user, u32 flags) {
+    constexpr u32 RENAME_NOREPLACE = 1;
+    if (flags & ~RENAME_NOREPLACE)
+        return -err::INVAL; // RENAME_EXCHANGE / WHITEOUT: not yet
+    Process* p = proc::current();
+    UserPath oldp(old_user), newp(new_user);
+    if (oldp.error()) return oldp.error();
+    if (newp.error()) return newp.error();
+    Inode *obase, *nbase;
+    if (long r = dir_for(p, olddirfd, oldp.c_str(), &obase); r < 0) return r;
+    if (long r = dir_for(p, newdirfd, newp.c_str(), &nbase); r < 0) return r;
+    Inode *odir, *ndir;
+    const char *oname, *nname;
+    usize olen, nlen;
+    if (long r = resolve_parent(oldp.c_str(), obase, &odir, &oname, &olen); r < 0) return r;
+    if (long r = resolve_parent(newp.c_str(), nbase, &ndir, &nname, &nlen); r < 0) return r;
+    if ((flags & RENAME_NOREPLACE) && ndir->lookup(nname, nlen))
+        return -err::EXIST;
+    return odir->rename(oname, olen, ndir, nname, nlen);
+}
+
+long sys_rename(SYSCALL_ARGS) { SYSCALL_UNUSED; return do_renameat(AT_FDCWD, a0, AT_FDCWD, a1, 0); }
+long sys_renameat(SYSCALL_ARGS) { SYSCALL_UNUSED; return do_renameat(static_cast<i32>(a0), a1, static_cast<i32>(a2), a3, 0); }
+long sys_renameat2(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    return do_renameat(static_cast<i32>(a0), a1, static_cast<i32>(a2), a3, static_cast<u32>(a4));
+}
+
+// ---- sync / mount ----
+
+long sys_sync(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    block::sync_all();
+    return 0;
+}
+
+long sys_mount(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    UserPath source(a0), target(a1), type(a2);
+    if (target.error()) return target.error();
+    if (type.error()) return type.error();
+    char abs[512];
+    join_path(proc::current()->cwd_path, target.c_str(), abs, sizeof(abs));
+
+    const char* t = type.c_str();
+    if (strcmp(t, "vfat") == 0 || strcmp(t, "fat") == 0 || strcmp(t, "msdos") == 0) {
+        if (source.error()) return source.error();
+        const char* src = source.c_str();
+        if (strncmp(src, "/dev/", 5) == 0)
+            src += 5;
+        block::Device* dev = block::find(src);
+        if (!dev)
+            return -err::NODEV;
+        Inode* root;
+        if (long r = fat::mount(dev, &root); r < 0)
+            return r;
+        return vfs::mount_at(abs, root, source.c_str(), "vfat");
+    }
+    if (strcmp(t, "ext2") == 0 || strcmp(t, "ext3") == 0 || strcmp(t, "ext4") == 0) {
+        if (source.error()) return source.error();
+        const char* src = source.c_str();
+        if (strncmp(src, "/dev/", 5) == 0)
+            src += 5;
+        block::Device* dev = block::find(src);
+        if (!dev)
+            return -err::NODEV;
+        Inode* root;
+        bool ro;
+        const char* kind;
+        if (long r = ext2::mount(dev, &root, &ro, &kind); r < 0)
+            return r;
+        return vfs::mount_at(abs, root, source.c_str(), kind);
+    }
+    if (strcmp(t, "tmpfs") == 0 || strcmp(t, "ramfs") == 0) {
+        auto* root = new ramfs::Dir;
+        root->mode = S_IFDIR | 01777;
+        return vfs::mount_at(abs, root, "tmpfs", "tmpfs");
+    }
+    return -err::NODEV; // unknown file system type
+}
+
+long sys_umount2(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    UserPath target(a0);
+    if (target.error())
+        return target.error();
+    char abs[512];
+    join_path(proc::current()->cwd_path, target.c_str(), abs, sizeof(abs));
+    block::sync_all();
+    return vfs::unmount(abs);
+}
+
 // Ownership: accepted (single root user for now).
 long sys_ok(SYSCALL_ARGS) { SYSCALL_UNUSED; return 0; }
 
@@ -1001,12 +1196,22 @@ void register_file() {
     set(32, sys_dup, "dup");
     set(33, sys_dup2, "dup2");
     set(72, sys_fcntl, "fcntl");
-    set(74, sys_ok, "fsync");
-    set(75, sys_ok, "fdatasync");
+    set(74, sys_sync, "fsync");
+    set(75, sys_sync, "fdatasync");
+    set(165, sys_mount, "mount");
+    set(166, sys_umount2, "umount2");
+    set(306, sys_sync, "syncfs");
     set(76, sys_truncate, "truncate");
     set(77, sys_ftruncate, "ftruncate");
     set(79, sys_getcwd, "getcwd");
     set(80, sys_chdir, "chdir");
+    set(82, sys_rename, "rename");
+    set(137, sys_statfs, "statfs");
+    set(138, sys_fstatfs, "fstatfs");
+    set(235, sys_utimes, "utimes");
+    set(280, sys_utimensat, "utimensat");
+    set(264, sys_renameat, "renameat");
+    set(316, sys_renameat2, "renameat2");
     set(83, sys_mkdir, "mkdir");
     set(84, sys_rmdir, "rmdir");
     set(85, sys_creat, "creat");
@@ -1028,7 +1233,7 @@ void register_file() {
     set(93, sys_ok, "fchown");
     set(94, sys_ok, "lchown");
     set(95, sys_umask, "umask");
-    set(162, sys_ok, "sync");
+    set(162, sys_sync, "sync");
     set(217, sys_getdents64, "getdents64");
     set(257, sys_openat, "openat");
     set(258, sys_mkdirat, "mkdirat");

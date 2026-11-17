@@ -13,5 +13,6 @@ void init(); // mount /proc (needs vfs + processes)
 namespace sysfs {
 
 void init(); // build /sys (call once all CPUs are online)
+void populate_devices(); // /sys/bus/pci + /sys/kernel/syluxium/devices (after drivers probed)
 
 } // namespace sysfs

@@ -11,7 +11,14 @@
 #include <core/log.hpp>
 #include <core/panic.hpp>
 #include <cxx/runtime.hpp>
+#include <dev/device.hpp>
+#include <dev/platform.hpp>
+#include <drivers/pci/pci.hpp>
 #include <drivers/ps2kbd.hpp>
+#include <drivers/storage/storage.hpp>
+#include <block/block.hpp>
+#include <fs/ext2.hpp>
+#include <fs/fat.hpp>
 #include <drivers/serial.hpp>
 #include <drivers/tty.hpp>
 #include <fs/devices.hpp>
@@ -105,6 +112,66 @@ void print_memory_map() {
             usable += e->length;
     }
     klog::info("Usable RAM: %lu MiB", usable / MiB);
+}
+
+bool g_keyboard = false;
+bool g_data_mounted = false;
+
+// Phase 5: find the hardware, bind drivers, publish it all in /sys.
+void discover_hardware() {
+    block::init();
+    ahci::register_driver();
+    nvme::register_driver();
+    pci::init();
+    dev::register_platform_devices(g_keyboard);
+    dev::probe_all();
+    sysfs::populate_devices();
+
+    // The EFI system partition (FAT32) appears at /boot/efi, as on Linux.
+    block::for_each([](block::Device* d, void*) {
+        vfs::Inode* existing;
+        if (vfs::resolve("/boot/efi", nullptr, false, &existing) == 0 && existing->mode != 0 &&
+            vfs::is_dir(existing->mode) && existing->lookup("EFI", 3))
+            return; // already mounted one
+        if (!fat::probe(d))
+            return;
+        vfs::Inode* root;
+        if (fat::mount(d, &root) != 0)
+            return;
+        vfs::mkdir_p("/boot/efi");
+        char source[32];
+        snprintf(source, sizeof(source), "/dev/%s", d->name);
+        if (vfs::mount_at("/boot/efi", root, source, "vfat") == 0)
+            klog::ok("Mounted %s (FAT32) on /boot/efi", source);
+    }, nullptr);
+
+    // The first Linux (ext2/3/4) volume becomes /data: persistent storage.
+    block::for_each([](block::Device* d, void* ctx) {
+        auto* done = static_cast<bool*>(ctx);
+        if (*done || !ext2::probe(d))
+            return;
+        vfs::Inode* root;
+        bool ro;
+        const char* kind;
+        if (ext2::mount(d, &root, &ro, &kind) != 0)
+            return;
+        vfs::mkdir_p("/data");
+        char source[32];
+        snprintf(source, sizeof(source), "/dev/%s", d->name);
+        if (vfs::mount_at("/data", root, source, kind) == 0) {
+            klog::ok("Mounted %s on /data%s", source, ro ? " (read-only)" : "");
+            *done = true;
+        }
+    }, &g_data_mounted);
+    u32 counts[2] = {}; // [with driver, without]
+    dev::for_each([](dev::Device* d, void* arg) {
+        static_cast<u32*>(arg)[d->status == dev::Status::Ok ? 0 : 1]++;
+    }, counts);
+    klog::ok("Hardware: %u PCI functions, %u devices total (%u with drivers)", pci::count(), dev::count(), counts[0]);
+    dev::for_each([](dev::Device* d, void*) {
+        kprintf_serial("    %-14s %04x:%04x  %-22s %-10s %s\n", d->bus_id, d->vendor, d->device,
+                       dev::category_name(d->category), d->driver_name ? d->driver_name : "-", d->name);
+    }, nullptr);
 }
 
 void mount_initramfs() {
@@ -238,6 +305,7 @@ void kernel_main_thread(void*) {
 
     // Every CPU is now off the bootloader's stacks and page tables.
     sysfs::init(); // needs the final CPU count
+    discover_hardware();
     u64 reclaimed = pmm::reclaim_bootloader_memory();
     klog::ok("Reclaimed %lu KiB of bootloader memory", reclaimed / KiB);
 
@@ -344,12 +412,14 @@ extern "C" [[noreturn]] void kmain() {
     // ---- Phase 4: files, devices, processes --------------------------------
     vfs::init();
     tty::init();
-    bool keyboard = ps2kbd::init();
+    g_keyboard = ps2kbd::init();
     devices::init();
     proc::init();
     mount_initramfs(); // before bootloader memory is reclaimed (the module list lives there)
     procfs::init();
-    klog::ok("Files, devices and processes ready (keyboard: %s)", keyboard ? "PS/2" : "none, serial only");
+    vfs::mkdir_p("/mnt");   // mount points Debian's base layout no longer ships
+    vfs::mkdir_p("/media");
+    klog::ok("Files, devices and processes ready (keyboard: %s)", g_keyboard ? "PS/2" : "none, serial only");
 
     sched::init();
     sched::spawn("kmain", kernel_main_thread, nullptr);

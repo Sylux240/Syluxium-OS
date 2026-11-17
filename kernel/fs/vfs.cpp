@@ -1,7 +1,9 @@
 #include <fs/ramfs.hpp>
 #include <fs/vfs.hpp>
+#include <lib/format.hpp>
 #include <lib/string.hpp>
 #include <mm/heap.hpp>
+#include <mm/pmm.hpp>
 #include <time/clock.hpp>
 #include <time/rtc.hpp>
 
@@ -80,6 +82,18 @@ long resolve_impl(const char* path, Inode* cwd, bool follow_last, Inode** out, i
 }
 
 } // namespace
+
+long Inode::statfs(FsStats* out) {
+    // RAM-backed: report system memory, like tmpfs.
+    auto st = pmm::stats();
+    *out = FsStats{0x858458f6 /* RAMFS_MAGIC */, 4096, st.total_pages, st.free_pages, 1u << 20, 1u << 20};
+    return 0;
+}
+
+u64 next_fs_dev() {
+    static u64 next = 0x10;
+    return __atomic_fetch_add(&next, 1, __ATOMIC_RELAXED);
+}
 
 u64 next_ino() { return __atomic_fetch_add(&g_next_ino, 1, __ATOMIC_RELAXED); }
 
@@ -220,6 +234,76 @@ void file_put(File* f) {
         kfree(f->path);
         delete f;
     }
+}
+
+// ---- Mounts ----
+
+namespace {
+
+struct Mount {
+    char path[256];
+    char source[64];
+    char type[16];
+    Inode* root;
+    Inode* covered; // the directory that was there before
+};
+
+constexpr usize MAX_MOUNTS = 32;
+Mount g_mounts[MAX_MOUNTS];
+usize g_mount_count = 0;
+IrqSpinlock g_mount_lock;
+
+} // namespace
+
+long mount_at(const char* path, Inode* fs_root, const char* source, const char* type) {
+    Inode* parent;
+    const char* name;
+    usize len;
+    if (long r = resolve_parent(path, nullptr, &parent, &name, &len); r < 0)
+        return r;
+    Inode* target = parent->lookup(name, len);
+    if (!target)
+        return -err::NOENT;
+    if (!is_dir(target->mode))
+        return -err::NOTDIR;
+    LockGuard guard(g_mount_lock);
+    if (g_mount_count >= MAX_MOUNTS)
+        return -err::NOMEM;
+    // Only directories inside the RAM root file system can be covered for now.
+    auto* dir = static_cast<ramfs::Dir*>(parent);
+    if (!dir->replace(name, len, fs_root))
+        return -err::INVAL;
+    Mount& m = g_mounts[g_mount_count++];
+    snprintf(m.path, sizeof(m.path), "%s", path);
+    snprintf(m.source, sizeof(m.source), "%s", source);
+    snprintf(m.type, sizeof(m.type), "%s", type);
+    m.root = fs_root;
+    m.covered = target;
+    return 0;
+}
+
+long unmount(const char* path) {
+    LockGuard guard(g_mount_lock);
+    for (usize i = g_mount_count; i-- > 0;) {
+        if (strcmp(g_mounts[i].path, path) != 0)
+            continue;
+        Inode* parent;
+        const char* name;
+        usize len;
+        if (long r = resolve_parent(path, nullptr, &parent, &name, &len); r < 0)
+            return r;
+        static_cast<ramfs::Dir*>(parent)->replace(name, len, g_mounts[i].covered);
+        g_mounts[i] = g_mounts[--g_mount_count];
+        return 0;
+    }
+    return -err::INVAL;
+}
+
+void for_each_mount(void (*fn)(const char*, const char*, const char*, void*), void* ctx) {
+    fn("ramfs", "/", "ramfs", ctx); // not "rootfs": tools like df skip entries by that name
+    LockGuard guard(g_mount_lock);
+    for (usize i = 0; i < g_mount_count; i++)
+        fn(g_mounts[i].source, g_mounts[i].path, g_mounts[i].type, ctx);
 }
 
 } // namespace vfs

@@ -40,6 +40,8 @@ struct DirEntry {
 
 struct File;
 
+Timespec now();
+
 class Inode {
 public:
     virtual ~Inode() = default;
@@ -51,6 +53,7 @@ public:
     u32 gid = 0;
     u64 size = 0;
     u64 rdev = 0;  // device number for device nodes
+    u64 dev = 1;   // which file system this inode lives on (st_dev); 1 = the RAM root
     Timespec atime, mtime, ctime;
     Inode* parent = nullptr; // directories: for ".."
 
@@ -59,6 +62,13 @@ public:
     virtual isize write(u64 offset, const void* buf, usize count) { return -err::INVAL; }
     virtual long truncate(u64 new_size) { return -err::INVAL; }
     virtual long ioctl(u64 request, u64 arg) { return -err::NOTTY; }
+    // Change access/modification times (utimensat). Disk file systems persist them.
+    virtual long set_times(Timespec access, Timespec modify) {
+        atime = access;
+        mtime = modify;
+        ctime = vfs::now();
+        return 0;
+    }
     virtual bool seekable() const { return true; }
 
     // Reads/writes through an open file. Most inodes only care about the
@@ -85,6 +95,23 @@ public:
     virtual long unlink(const char* name, usize len, bool remove_dir) { return -err::NOTDIR; }
     // Fill entry #index (".", ".." included). Returns 1, or 0 at the end.
     virtual long readdir(u64 index, DirEntry* out) { return -err::NOTDIR; }
+    // Move entry `old_name` of this directory to `new_name` in `new_dir`
+    // (same file system), replacing an existing target like POSIX rename.
+    virtual long rename(const char* old_name, usize old_len, Inode* new_dir, const char* new_name, usize new_len) {
+        return -err::PERM;
+    }
+
+    // File system usage for statfs/df (filled in for the root of a mount).
+    struct FsStats {
+        u64 type;          // Linux f_type magic
+        u64 block_size;
+        u64 blocks, blocks_free;
+        u64 files, files_free;
+    };
+    virtual long statfs(FsStats* out);
+
+    // True for directories of the RAM file system (rename between them is possible).
+    virtual bool is_ramfs_dir() const { return false; }
 
     // ---- Symlinks ----
     virtual isize readlink(char* buf, usize bufsize) { return -err::INVAL; }
@@ -131,5 +158,13 @@ void file_put(File* f);
 
 u64 next_ino();
 Timespec now();
+u64 next_fs_dev(); // a fresh st_dev for a newly mounted file system
+
+// ---- Mounts ----
+// Attach a file system's root over the directory at `path` (which must live
+// in the RAM root file system). source/type are what /proc/mounts shows.
+long mount_at(const char* path, Inode* fs_root, const char* source, const char* type);
+long unmount(const char* path);
+void for_each_mount(void (*fn)(const char* source, const char* path, const char* type, void* ctx), void* ctx);
 
 } // namespace vfs

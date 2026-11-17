@@ -454,6 +454,10 @@ long PidDir::readdir(u64 index, vfs::DirEntry* out) {
 
 class ProcRoot : public ramfs::Dir {
 public:
+    long statfs(FsStats* out) override {
+        *out = FsStats{0x9fa0 /* PROC_SUPER_MAGIC */, 4096, 0, 0, 0, 0};
+        return 0;
+    }
     vfs::Inode* lookup(const char* name, usize len) override {
         int pid;
         if (parse_number(name, len, &pid))
@@ -600,6 +604,16 @@ bool gen_cpuinfo(TextBuffer& out, const void*) {
     return true;
 }
 
+bool gen_mounts(TextBuffer& out, const void*) {
+    vfs::for_each_mount([](const char* source, const char* path, const char* type, void* arg) {
+        auto* o = static_cast<TextBuffer*>(arg);
+        o->printf("%s %s %s rw,relatime 0 0\n", source, path, type);
+    }, &out);
+    out.append("proc /proc proc rw,nosuid,nodev,noexec 0 0\nsysfs /sys sysfs rw,nosuid,nodev,noexec 0 0\n"
+               "devtmpfs /dev devtmpfs rw 0 0\n");
+    return true;
+}
+
 bool link_self(char* out, usize size, const void*) {
     Process* p = proc::current();
     if (!p)
@@ -624,6 +638,7 @@ void init() {
     root->unlink("proc", 4, true);
     auto* procroot = new ProcRoot;
     procroot->mode = vfs::S_IFDIR | 0555;
+    procroot->dev = 4; // its own st_dev, so tools see /proc as a separate mount
     static_cast<ramfs::Dir*>(root)->attach("proc", 4, procroot);
 
     auto add = [&](const char* name, vfs::Inode* node) { procroot->attach(name, strlen(name), node); };
@@ -639,9 +654,7 @@ void init() {
                        "Linux version 6.12.0-syluxium (syluxium@build) (clang) #1 SMP Syluxium " __DATE__ "\n");
     genfs::static_file("/proc/cmdline", "\n");
     genfs::static_file("/proc/filesystems", "nodev\tramfs\nnodev\tproc\nnodev\tsysfs\nnodev\tdevtmpfs\n");
-    genfs::static_file("/proc/mounts",
-                       "rootfs / ramfs rw 0 0\nproc /proc proc rw,nosuid,nodev,noexec 0 0\n"
-                       "sysfs /sys sysfs rw,nosuid,nodev,noexec 0 0\ndevtmpfs /dev devtmpfs rw 0 0\n");
+    add("mounts", new GeneratedFile(gen_mounts, nullptr));
     vfs::mkdir_p("/proc/sys/kernel");
     genfs::static_file("/proc/sys/kernel/hostname", "syluxium\n");
     genfs::static_file("/proc/sys/kernel/ostype", "Linux\n");
@@ -686,6 +699,12 @@ void init() {
         genfs::static_file(path, "1\n");
     }
     genfs::static_file("/sys/kernel/hostname", "syluxium\n");
+    // Separate st_dev values so tools (df, findmnt) tell these mounts apart from /.
+    vfs::Inode* n;
+    if (vfs::resolve("/sys", nullptr, true, &n) == 0)
+        n->dev = 5;
+    if (vfs::resolve("/dev", nullptr, true, &n) == 0)
+        n->dev = 6;
 }
 
 } // namespace sysfs

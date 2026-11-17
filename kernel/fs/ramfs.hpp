@@ -12,12 +12,18 @@ public:
     long create(const char* name, usize len, u32 mode, const char* target, vfs::Inode** out) override;
     long unlink(const char* name, usize len, bool remove_dir) override;
     long readdir(u64 index, vfs::DirEntry* out) override;
+    long rename(const char* old_name, usize old_len, vfs::Inode* new_dir, const char* new_name,
+                usize new_len) override;
     isize read(u64, void*, usize) override { return -err::ISDIR; }
     isize write(u64, const void*, usize) override { return -err::ISDIR; }
+
+    bool is_ramfs_dir() const override { return true; }
 
     // Attach an existing inode under `name`.
     long attach(const char* name, usize len, vfs::Inode* node);
     usize child_count() const { return m_count; }
+    // Swap the inode an existing entry points to (mount/umount); returns the old one.
+    vfs::Inode* replace(const char* name, usize len, vfs::Inode* node);
 
 private:
     struct Child {

@@ -421,6 +421,38 @@ long sys_sysinfo(SYSCALL_ARGS) {
     return uaccess::put(reinterpret_cast<SysInfo*>(a0), info);
 }
 
+long sys_prctl(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    constexpr int PR_SET_PDEATHSIG = 1, PR_GET_PDEATHSIG = 2, PR_GET_DUMPABLE = 3, PR_SET_DUMPABLE = 4,
+                  PR_SET_NAME = 15, PR_GET_NAME = 16, PR_SET_NO_NEW_PRIVS = 38, PR_GET_NO_NEW_PRIVS = 39;
+    sched::Thread* t = sched::current();
+    switch (static_cast<int>(a0)) {
+    case PR_SET_NAME: { // thread name (shown in /proc/<pid>/task/<tid>/comm, Task Manager)
+        char name[16];
+        long n = uaccess::string_from(reinterpret_cast<const char*>(a1), name, sizeof(name));
+        if (n == -err::NAMETOOLONG) { // longer names are truncated, not an error
+            if (uaccess::copy_from(name, reinterpret_cast<const void*>(a1), 15) < 0)
+                return -err::FAULT;
+            name[15] = 0;
+        } else if (n < 0) {
+            return n;
+        }
+        snprintf(t->name, sizeof(t->name), "%s", name);
+        return 0;
+    }
+    case PR_GET_NAME: {
+        char name[16] = {};
+        snprintf(name, sizeof(name), "%s", t->name);
+        return uaccess::copy_to(reinterpret_cast<void*>(a1), name, 16);
+    }
+    case PR_GET_DUMPABLE: return 1;
+    case PR_SET_DUMPABLE: case PR_SET_PDEATHSIG: case PR_SET_NO_NEW_PRIVS: return 0;
+    case PR_GET_PDEATHSIG: return uaccess::put(reinterpret_cast<i32*>(a1), 0);
+    case PR_GET_NO_NEW_PRIVS: return 0;
+    default: return -err::INVAL;
+    }
+}
+
 long sys_getcpu(SYSCALL_ARGS) {
     SYSCALL_UNUSED;
     u32 cpu = this_cpu()->index;
@@ -540,6 +572,7 @@ void register_process() {
     set(302, sys_prlimit64, "prlimit64");
     set(318, sys_getrandom, "getrandom");
     set(309, sys_getcpu, "getcpu");
+    set(157, sys_prctl, "prctl");
     set(334, sys_quiet_nosys, "rseq");
 }
 

@@ -36,7 +36,7 @@ USER_PROGS  := $(patsubst userspace/%.c,$(TESTS_DIR)/%,$(wildcard userspace/*.c)
 
 # Official Debian packages (and their dependencies) that make up the userland.
 DEBIAN_SUITE := trixie
-DEBIAN_PKGS  := bash busybox hello ncurses-base
+DEBIAN_PKGS  := bash busybox hello ncurses-base pciutils pci.ids
 DEBIAN_ROOT  := $(BUILD)/rootfs-debian
 DEBIAN_STAMP := $(DEBIAN_ROOT)/.fetched
 

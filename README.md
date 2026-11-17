@@ -75,6 +75,10 @@ tools/smoke-test.sh   headless QEMU boot: serial log + screenshot
 - [ ] **Phase 4d** (before phase 10): 32-bit (ia32) program support, needed by Steam
 - [ ] **Phase 5**: PCI, AHCI/NVMe, USB (xHCI) keyboard/mouse/storage, driver model with a
       device registry (every device: name, vendor, driver, status, resources), ext4 so files persist
+      - [x] 5a: PCI + device registry + driver model, block layer + cache + partitions, AHCI, NVMe,
+            FAT32 (rw), ext2 (rw) / ext3 / ext4 (ro), mount/umount/rename/statfs/utimensat
+      - [ ] 5b: PS/2 mouse, input events (/dev/input), USB (xHCI): HID keyboard/mouse, mass storage
+      - [ ] 5c: ext4 writes, exFAT
 - [ ] **Phase 6**: wired networking: virtio-net/e1000/Realtek, Ethernet/ARP/IPv4/IPv6/UDP/TCP, DHCP, DNS
 - [ ] **Phase 7**: Linux driver compatibility layer (LinuxKPI) + **Wi-Fi** for many chips: Intel
       (iwlwifi), Qualcomm/Atheros (ath9k/10k/11k/12k), MediaTek (mt76), Realtek (rtw88/rtw89),
@@ -130,11 +134,12 @@ Legend: ✅ done · 🟡 partly done · ⬜ to do
 
 **Drivers**
 - ✅ Serial, PS/2 keyboard, firmware framebuffer
-- ⬜ PCI/PCIe enumeration + device registry (for Device Manager)
+- ✅ PCI/PCIe enumeration (ECAM, BARs, MSI/MSI-X) + device registry (/sys/bus/pci, lspci works,
+     /sys/kernel/syluxium/devices for the Device Manager)
 - ⬜ PS/2 mouse
 - ⬜ USB (xHCI): keyboards, mice, gamepads, storage
 - ⬜ Input event interface (/dev/input): raw mouse + gamepads for games and the desktop
-- ⬜ AHCI/SATA, NVMe
+- ✅ AHCI/SATA, NVMe (polled DMA; interrupts/NCQ later)
 - ⬜ Wired network cards
 - ⬜ Linux driver compatibility layer (shared by Wi-Fi and GPU)
 - ⬜ Wi-Fi: Intel, Qualcomm, MediaTek, Realtek, Broadcom
@@ -144,9 +149,10 @@ Legend: ✅ done · 🟡 partly done · ⬜ to do
 
 **Storage**
 - ✅ VFS, RAM filesystem, initramfs
-- ⬜ ext4 (installs survive reboot)
-- ⬜ FAT32 / exFAT (USB sticks, sharing with Windows)
-- ⬜ Disk cache
+- 🟡 ext2/3/4: reads all three (extents, 64-bit); writes ext2-style volumes (e2fsck-clean);
+     ext4 writing (extents, metadata checksums) to do
+- 🟡 FAT32 read/write with long file names, mounted at /boot/efi; exFAT to do
+- ✅ Disk cache (4 KiB blocks, write-back every 5 s and on sync), MBR + GPT partitions
 
 **Networking**
 - ⬜ TCP/IP stack: Ethernet, ARP, IPv4/IPv6, UDP, TCP
@@ -177,4 +183,4 @@ Legend: ✅ done · 🟡 partly done · ⬜ to do
 - ⬜ Power management: sleep, battery, CPU frequency scaling
 - ⬜ Updates and recovery
 
-Tally: 14 done · 6 partly done · 37 to do.
+Tally: 17 done · 8 partly done · 32 to do.

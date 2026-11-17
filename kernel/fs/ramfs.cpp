@@ -78,6 +78,18 @@ long Dir::attach(const char* name, usize len, Inode* node) {
     return 0;
 }
 
+vfs::Inode* Dir::replace(const char* name, usize len, Inode* node) {
+    LockGuard guard(m_lock);
+    Child* c = find(name, len);
+    if (!c)
+        return nullptr;
+    Inode* old = c->inode;
+    c->inode = node;
+    if (is_dir(node->mode))
+        node->parent = this;
+    return old;
+}
+
 long Dir::create(const char* name, usize len, u32 new_mode, const char* target, Inode** out) {
     Inode* node;
     switch (new_mode & S_IFMT) {
@@ -124,6 +136,41 @@ long Dir::unlink(const char* name, usize len, bool remove_dir) {
         return 0;
     }
     return -err::NOENT;
+}
+
+long Dir::rename(const char* old_name, usize old_len, Inode* new_dir_inode, const char* new_name, usize new_len) {
+    if (!new_dir_inode || !new_dir_inode->is_ramfs_dir())
+        return -err::XDEV;
+    auto* target_dir = static_cast<Dir*>(new_dir_inode);
+    Inode* moving = lookup(old_name, old_len);
+    if (!moving)
+        return -err::NOENT;
+    if (Inode* existing = target_dir->lookup(new_name, new_len)) {
+        if (existing == moving)
+            return 0;
+        bool existing_dir = is_dir(existing->mode);
+        if (existing_dir != is_dir(moving->mode))
+            return existing_dir ? -err::ISDIR : -err::NOTDIR;
+        if (long r = target_dir->unlink(new_name, new_len, existing_dir); r < 0)
+            return r;
+    }
+    if (long r = target_dir->attach(new_name, new_len, moving); r < 0)
+        return r;
+    // Detach from here without dropping the link count (it moved, it wasn't deleted).
+    LockGuard guard(m_lock);
+    Child** link = &m_children;
+    for (Child* c = m_children; c; link = &c->next, c = c->next) {
+        if (c->inode == moving && strlen(c->name) == old_len && memcmp(c->name, old_name, old_len) == 0) {
+            *link = c->next;
+            m_count--;
+            if (is_dir(moving->mode))
+                nlink--;
+            kfree(c->name);
+            kfree(c);
+            break;
+        }
+    }
+    return 0;
 }
 
 long Dir::readdir(u64 index, DirEntry* out) {

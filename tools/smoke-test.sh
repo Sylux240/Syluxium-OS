@@ -27,8 +27,11 @@ PPM="$OUT/screen-$MODE.ppm"
 rm -f "$SOCK" "$LOG" "$PPM"
 
 # Boot a private copy so this works even while `make run` has the image open.
+# KEEP_DISK=1 reuses the copy from the previous run (persistence tests).
 DISK="$OUT/disk-$MODE.img"
-cp "$IMAGE" "$DISK"
+if [[ -z ${KEEP_DISK:-} || ! -f $DISK ]]; then
+    cp "$IMAGE" "$DISK"
+fi
 
 args=(-M q35 -m 2G -smp 4 -cpu max
       -drive "file=$DISK,format=raw,if=ide"
