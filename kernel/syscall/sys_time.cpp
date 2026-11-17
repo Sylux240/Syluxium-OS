@@ -28,6 +28,18 @@ constexpr int CLOCK_REALTIME = 0, CLOCK_MONOTONIC = 1, CLOCK_PROCESS_CPUTIME_ID 
               CLOCK_MONOTONIC_COARSE = 6, CLOCK_BOOTTIME = 7, CLOCK_TAI = 11;
 constexpr u32 TIMER_ABSTIME = 1;
 
+// CPU time from the scheduler's tick accounting (1 kHz: 1 tick = 1 ms).
+constexpr u64 NS_PER_TICK = 1'000'000;
+
+void process_cpu_ticks(proc::Process* p, u64* user, u64* sys) {
+    *user = *sys = 0;
+    LockGuard guard(p->thread_lock);
+    for (sched::Thread* t : p->threads) {
+        *user += t->utime_ticks;
+        *sys += t->stime_ticks;
+    }
+}
+
 long clock_ns(int id, u64* out) {
     switch (id) {
     case CLOCK_REALTIME:
@@ -39,10 +51,19 @@ long clock_ns(int id, u64* out) {
     case CLOCK_MONOTONIC_RAW:
     case CLOCK_MONOTONIC_COARSE:
     case CLOCK_BOOTTIME:
-    case CLOCK_PROCESS_CPUTIME_ID: // TODO: real per-process CPU accounting
-    case CLOCK_THREAD_CPUTIME_ID:
         *out = clock::now_ns();
         return 0;
+    case CLOCK_PROCESS_CPUTIME_ID: { // CPU time actually used (all threads), not wall time
+        u64 user, sys;
+        process_cpu_ticks(proc::current(), &user, &sys);
+        *out = (user + sys) * NS_PER_TICK;
+        return 0;
+    }
+    case CLOCK_THREAD_CPUTIME_ID: {
+        sched::Thread* t = sched::current();
+        *out = (t->utime_ticks + t->stime_ticks) * NS_PER_TICK;
+        return 0;
+    }
     default:
         return -err::INVAL;
     }
@@ -213,7 +234,50 @@ long sys_alarm(SYSCALL_ARGS) {
 
 } // namespace
 
+// getrusage(who, usage): CPU times and peak memory.
+long sys_getrusage(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    struct Rusage {
+        i64 utime_sec, utime_usec, stime_sec, stime_usec;
+        i64 maxrss, ixrss, idrss, isrss, minflt, majflt, nswap, inblock, oublock, msgsnd, msgrcv, nsignals, nvcsw,
+            nivcsw;
+    } ru{};
+    static_assert(sizeof(Rusage) == 144);
+    int who = static_cast<int>(a0);
+    u64 user = 0, sys = 0;
+    if (who == 0) { // RUSAGE_SELF
+        process_cpu_ticks(proc::current(), &user, &sys);
+    } else if (who == 1) { // RUSAGE_THREAD
+        user = sched::current()->utime_ticks;
+        sys = sched::current()->stime_ticks;
+    } else if (who != -1) { // RUSAGE_CHILDREN: not accumulated yet (0)
+        return -err::INVAL;
+    }
+    ru.utime_sec = static_cast<i64>(user / 1000);
+    ru.utime_usec = static_cast<i64>(user % 1000 * 1000);
+    ru.stime_sec = static_cast<i64>(sys / 1000);
+    ru.stime_usec = static_cast<i64>(sys % 1000 * 1000);
+    if (who != -1)
+        ru.maxrss = static_cast<i64>(proc::current()->mem->rss_pages() * 4); // KiB (current, not peak)
+    return uaccess::put(reinterpret_cast<Rusage*>(a1), ru);
+}
+
+// times(buf): CPU times in clock ticks (USER_HZ = 100); returns ticks since boot.
+long sys_times(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    if (a0) {
+        u64 user, sys;
+        process_cpu_ticks(proc::current(), &user, &sys);
+        i64 tms[4] = {static_cast<i64>(user / 10), static_cast<i64>(sys / 10), 0, 0};
+        if (long r = uaccess::copy_to(reinterpret_cast<void*>(a0), tms, sizeof(tms)); r < 0)
+            return r;
+    }
+    return static_cast<long>(clock::now_ns() / 10'000'000);
+}
+
 void register_time() {
+    set(98, sys_getrusage, "getrusage");
+    set(100, sys_times, "times");
     set(36, sys_getitimer, "getitimer");
     set(37, sys_alarm, "alarm");
     set(38, sys_setitimer, "setitimer");
