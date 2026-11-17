@@ -1,0 +1,3 @@
+# One desktop (no virtual-desktop switching), like Windows.
+[Desktops]
+Number=1

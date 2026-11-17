@@ -1,0 +1,47 @@
+# Syluxium defaults for the TDE panel (Kicker): an XP/7-style green
+# "Start" button instead of TDE's plain K-menu icon.
+# Panel contents: Start, Home and Web Browser buttons, task list, system
+# tray, clock. No desktop pager (Syluxium uses a single desktop).
+[General]
+Applets2=KMenuButton_1,ServiceButton_1,ServiceButton_2,Applet_2,Applet_3,Applet_4
+
+[KMenuButton_1]
+FreeSpace2=0
+
+[ServiceButton_1]
+DesktopFile[$e]=/opt/trinity/share/applications/tde/Home.desktop
+FreeSpace2=0
+StorageId[$e]=tde-Home.desktop
+
+[ServiceButton_2]
+DesktopFile[$e]=/opt/trinity/share/applications/tde/konqbrowser.desktop
+FreeSpace2=0
+StorageId[$e]=tde-konqbrowser.desktop
+
+[Applet_2]
+ConfigFile=taskbar_panelappletrc
+DesktopFile=taskbarapplet.desktop
+FreeSpace2=0
+
+[Applet_3]
+ConfigFile=systemtray_panelappletrc
+DesktopFile=systemtrayapplet.desktop
+FreeSpace2=1
+
+[Applet_4]
+ConfigFile=clock_panelappletrc
+DesktopFile=clockapplet.desktop
+FreeSpace2=1
+
+[KMenu]
+ShowText=true
+Text=Start
+
+[button_tiles]
+EnableKMenuTiles=true
+KMenuTile=syluxium_green
+
+[buttons]
+EnableTileBackground=true
+Font=DejaVu Sans,10,-1,5,75,0,0,0,0,0
+TextColor=255,255,255

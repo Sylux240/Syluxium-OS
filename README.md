@@ -123,7 +123,10 @@ tools/smoke-test.sh   headless QEMU boot: serial log + screenshot
             konqueror, konsole, kcontrol, ksmserver), D-Bus system + session buses, ld.so.cache,
             `starttde-test` session script (aRts sound server off; ALSA is used directly)
       - [ ] 9-boot: boot from a disk root filesystem instead of a 350 MB initramfs; a login/session
-      - [ ] 9b: "Start" button, XP/7 theme, DRM/KMS driver for display settings
+      - [x] 9b (first part): green glossy **"Start"** button (Syluxium's own tiles,
+            tools/make-start-tiles.py), no desktop pager, a single desktop (/etc/trinity defaults)
+      - [ ] 9b: XP/7 theme (taskbar, window decorations, colors), skip the first-run license
+            window, DRM/KMS driver for display settings
       Look: clean, glossy and rounded like Windows XP / Windows 7 (not Windows 11).
       - Right-click context menus everywhere: on files (Open, Open with, Extract Here / Extract
         to..., Compress, Rename, Delete, Properties, Change icon), on folders and empty space
