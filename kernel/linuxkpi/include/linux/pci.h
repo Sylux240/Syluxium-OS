@@ -27,6 +27,11 @@ LKPI_EXTERN_C_BEGIN
 #define PCI_VENDOR_ID_QCOM 0x17cb
 #define PCI_VENDOR_ID_MEDIATEK 0x14c3
 #define PCI_VENDOR_ID_REDHAT_QUMRANET 0x1af4
+#define PCI_DEVICE_ID_REALTEK_8139 0x8139
+#define PCI_DEVICE_ID_TTTECH_MC322 0x000a
+#define PCI_VENDOR_ID_DLINK 0x1186
+#define PCI_VENDOR_ID_TTTECH 0x0357
+#define PCI_VENDOR_ID_SIEMENS 0x110a
 
 #define DEVICE_COUNT_RESOURCE 6
 #define IORESOURCE_IO 0x100
@@ -130,6 +135,14 @@ static inline void* pci_get_drvdata(struct pci_dev* d) { return dev_get_drvdata(
 static inline const char* pci_name(const struct pci_dev* d) { return dev_name(&d->dev); }
 #define pci_dev_get(d) (d)
 #define pci_dev_put(d) do { (void)(d); } while (0)
+#define PCI_D0 0
+#define PCI_D3hot 3
+#define PCI_D3cold 4
+#define pci_enable_wake(d, state, en) 0
+#define pci_set_mwi(d) 0
+#define pci_try_set_mwi(d) 0
+#define pci_clear_mwi(d) do { (void)(d); } while (0)
+#define pci_choose_state(d, m) PCI_D3hot
 #define pci_save_state(d) 0
 #define pci_restore_state(d) do { (void)(d); } while (0)
 #define pci_set_power_state(d, s) 0

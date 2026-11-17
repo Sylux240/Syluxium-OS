@@ -3,12 +3,14 @@
 
 #include <linux/atomic.h>
 #include <linux/kernel.h>
+#include <linux/pm.h>
 
 LKPI_EXTERN_C_BEGIN
 
 struct device_driver {
     const char* name;
     void* owner;
+    const struct dev_pm_ops* pm;
 };
 
 /* The common part of every device (struct pci_dev embeds one). */
@@ -29,6 +31,9 @@ static inline void* dev_get_drvdata(const struct device* d) { return d->driver_d
 static inline void dev_set_drvdata(struct device* d, void* data) { d->driver_data = data; }
 static inline const char* dev_name(const struct device* d) { return d->init_name ? d->init_name : d->lkpi_name; }
 #define get_device(d) (d)
+#define device_set_wakeup_enable(d, e) 0
+#define device_set_wakeup_capable(d, e) do { (void)(d); } while (0)
+#define device_may_wakeup(d) 0
 #define put_device(d) do { (void)(d); } while (0)
 
 int lkpi_dev_printk(const char* level, const struct device* d, const char* fmt, ...) __printf(3, 4);

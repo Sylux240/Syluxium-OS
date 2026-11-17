@@ -11,11 +11,19 @@
 typedef uint8_t u8;
 typedef uint16_t u16;
 typedef uint32_t u32;
-typedef uint64_t u64;
+#ifdef __cplusplus
+typedef uint64_t u64;   /* matches Syluxium's own u64 in C++ code */
+#else
+typedef unsigned long long u64; /* as in Linux, so printk's %llu is right */
+#endif
 typedef int8_t s8;
 typedef int16_t s16;
 typedef int32_t s32;
+#ifdef __cplusplus
 typedef int64_t s64;
+#else
+typedef long long s64;
+#endif
 typedef u8 __u8;
 typedef u16 __u16;
 typedef u32 __u32;

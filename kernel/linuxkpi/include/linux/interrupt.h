@@ -12,6 +12,7 @@ typedef enum irqreturn {
     IRQ_WAKE_THREAD = 2,
 } irqreturn_t;
 typedef irqreturn_t (*irq_handler_t)(int irq, void* dev_id);
+#define IRQ_RETVAL(x) ((x) ? IRQ_HANDLED : IRQ_NONE)
 
 #define IRQF_SHARED 0x80
 #define IRQF_ONESHOT 0x2000
