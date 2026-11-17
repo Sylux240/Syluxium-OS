@@ -130,6 +130,7 @@ void discover_hardware() {
     net::init(); // loopback first: it becomes ifindex 1, like Linux
     e1000::register_driver();
     virtio_net::register_driver();
+    r8169::register_driver();
     linuxkpi::init(); // Linux drivers register themselves (module_init) here
     pci::init();
     dev::register_platform_devices(g_keyboard);
