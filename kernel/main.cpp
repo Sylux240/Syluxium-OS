@@ -130,6 +130,7 @@ void discover_hardware() {
     net::init(); // loopback first: it becomes ifindex 1, like Linux
     e1000::register_driver();
     virtio_net::register_driver();
+    r8169::register_driver();
     linuxkpi::init(); // Linux drivers register themselves (module_init) here
     pci::init();
     dev::register_platform_devices(g_keyboard);
@@ -241,7 +242,11 @@ void run_userspace_tests() {
     static const char* const crash[] = {"/opt/syluxium/tests/crashtest", nullptr};
     static const char* const threads[] = {"/opt/syluxium/tests/threadtest", nullptr};
     static const char* const nettest[] = {"/opt/syluxium/tests/nettest", nullptr};
-    const Test sequential[] = {{hello, 0}, {systest, 0}, {crash, 11 /* SIGSEGV */}, {threads, 0}, {nettest, 0}};
+    static const char* const unixtest[] = {"/opt/syluxium/tests/unixtest", nullptr};
+    static const char* const nltest[] = {"/opt/syluxium/tests/nltest", nullptr};
+    static const char* const ip6test[] = {"/opt/syluxium/tests/ip6test", nullptr};
+    const Test sequential[] = {{hello, 0},   {systest, 0},  {crash, 11 /* SIGSEGV */}, {threads, 0},
+                               {nettest, 0}, {unixtest, 0}, {nltest, 0},              {ip6test, 0}};
 
     for (const Test& t : sequential) {
         int status = run_program(t.argv);

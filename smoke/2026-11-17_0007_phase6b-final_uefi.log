@@ -1,0 +1,349 @@
+[=3hBdsDxe: loading Boot0002 "UEFI QEMU HARDDISK QM00001 " from PciRoot(0x0)/Pci(0x1F,0x2)/Sata(0x0,0xFFFF,0x0)
+BdsDxe: starting Boot0002 "UEFI QEMU HARDDISK QM00001 " from PciRoot(0x0)/Pci(0x1F,0x2)/Sata(0x0,0xFFFF,0x0)
+   ____         _              _
+  / ___| _   _ | | _   _ __  _(_)_   _ _ __ ___
+  \___ \| | | || || | | |\ \/ / | | | | '_ ` _ \
+   ___) | |_| || || |_| | >  <| | |_| | | | | | |
+  |____/ \__, ||_| \__,_|/_/\_\_|\__,_|_| |_| |_|
+         |___/
+  x86_64 kernel, built Nov 17 2026 00:07:00
+
+[  OK   ] GDT and TSS loaded
+[  OK   ] IDT loaded (256 vectors)
+[  OK   ] Legacy PIC remapped and masked
+[ DEBUG ] breakpoint hit at rip=0xffffffff80055e90
+[  OK   ] Interrupt round-trip works
+[ INFO  ] CPU: AMD Ryzen 7 5800X 8-Core Processor              (AuthenticAMD), 4 logical processor(s)
+[ INFO  ] Kernel loaded at phys 0x79962000, virt 0xffffffff80000000
+[ INFO  ] Memory map: 40 entries (details on serial)
+    0000000000000000 - 0000000000001000         4 KiB  usable
+    0000000000001000 - 0000000000002000         4 KiB  bootloader reclaimable
+    0000000000002000 - 0000000000087000       532 KiB  usable
+    0000000000087000 - 0000000000088000         4 KiB  bootloader reclaimable
+    0000000000088000 - 00000000000a0000        96 KiB  usable
+    0000000000100000 - 0000000000800000      7168 KiB  usable
+    0000000000800000 - 0000000000808000        32 KiB  ACPI NVS
+    0000000000808000 - 000000000080b000        12 KiB  usable
+    000000000080b000 - 000000000080c000         4 KiB  ACPI NVS
+    000000000080c000 - 0000000000812000        24 KiB  usable
+    0000000000812000 - 0000000000813000         4 KiB  reserved (mapped)
+    0000000000813000 - 0000000000814000         4 KiB  usable
+    0000000000814000 - 0000000000900000       944 KiB  ACPI NVS
+    0000000000900000 - 0000000001780000     14848 KiB  bootloader reclaimable
+    0000000001780000 - 000000007734d000   1929012 KiB  usable
+    000000007734d000 - 0000000079912000     38676 KiB  kernel/modules
+    0000000079912000 - 0000000079913000         4 KiB  bootloader reclaimable
+    0000000079913000 - 0000000079951000       248 KiB  usable
+    0000000079951000 - 0000000079962000        68 KiB  bootloader reclaimable
+    0000000079962000 - 0000000079a6d000      1068 KiB  kernel/modules
+    0000000079a6d000 - 0000000079cb0000      2316 KiB  bootloader reclaimable
+    0000000079cb0000 - 000000007bebe000     34872 KiB  usable
+    000000007bebe000 - 000000007bee2000       144 KiB  bootloader reclaimable
+    000000007bee2000 - 000000007bee6000        16 KiB  usable
+    000000007bee6000 - 000000007bf38000       328 KiB  bootloader reclaimable
+    000000007bf38000 - 000000007dd23000     30636 KiB  usable
+    000000007dd23000 - 000000007eb3f000     14448 KiB  bootloader reclaimable
+    000000007eb3f000 - 000000007ec00000       772 KiB  reserved (mapped)
+    000000007ec00000 - 000000007fbc2000     16136 KiB  bootloader reclaimable
+    000000007fbc2000 - 000000007fdc2000      2048 KiB  reserved (mapped)
+    000000007fdc2000 - 000000007fe42000       512 KiB  reserved
+    000000007fe42000 - 000000007fe54000        72 KiB  ACPI reclaimable
+    000000007fe54000 - 000000007fed4000       512 KiB  ACPI NVS
+    000000007fed4000 - 000000007fedc000        32 KiB  bootloader reclaimable
+    000000007fedc000 - 000000007ff60000       528 KiB  reserved (mapped)
+    000000007ff60000 - 0000000080000000       640 KiB  ACPI NVS
+    0000000080000000 - 00000000803e8000      4000 KiB  framebuffer
+    00000000e0000000 - 00000000f0000000    262144 KiB  reserved
+    00000000feffc000 - 00000000ff000000        16 KiB  reserved
+    000000fd00000000 - 0000010000000000  12582912 KiB  reserved
+[ INFO  ] Usable RAM: 1955 MiB
+[  OK   ] Physical memory manager: 1943 MiB managed, page database 12284 KiB
+[  OK   ] Kernel page tables active (NX on, 1 GiB pages on, 276 table pages)
+[ INFO  ] Running memory self-tests...
+[  OK   ]   pmm: 2000 page alloc/free, 4 MiB aligned block, buddy merging
+[  OK   ]   vmm: map/translate/unmap, aliasing, double-map rejection
+[  OK   ]   vmalloc: 6 MiB block, guard page, physical mapping
+[  OK   ]   heap: 6000 random kmalloc/krealloc/kfree, no leaks
+[  OK   ]   c++: new/delete, virtual destructors, arrays, alignas(64)
+[  OK   ] All memory self-tests passed
+[  OK   ] User mode support: XSAVE (SSE, AVX) state, SYSCALL entry, Linux syscall table
+    ACPI tables: FACP APIC HPET MCFG WAET BGRT
+[  OK   ] ACPI 2.0+: 4 CPU(s), 1 I/O APIC(s), 5 interrupt override(s), HPET
+[  OK   ] Local APIC enabled (x2APIC mode, id 0); 1 I/O APIC(s) masked
+[  OK   ] Clock: HPET, TSC at 3791 MHz
+[  OK   ] APIC timer: 62564 ticks/ms, scheduler tick 1000 Hz
+[  OK   ] Initramfs: 480 files, 84 directories, 297 symlinks (38553 KiB)
+[  OK   ] Files, devices and processes ready (keyboard: PS/2)
+[  OK   ] SMP: 4 CPU(s) online, scheduler running on all of them
+[  OK   ] Linux driver layer (LinuxKPI): 1 driver registered
+[  OK   ] Network: eth0, MAC 52:54:00:12:34:56, link up
+[ INFO  ] 0000:00:03.0: QEMU edu device, version 1.0, BAR0 at 0x81000000 (1024 KiB)
+[ INFO  ] 0000:00:03.0: [ ok ] identification register (MMIO read)
+[ INFO  ] 0000:00:03.0: [ ok ] liveness register (MMIO write/read)
+[ INFO  ] 0000:00:03.0: [ ok ] MSI interrupt vector allocated
+[ INFO  ] 0000:00:03.0: [ ok ] request_irq
+[ INFO  ] 0000:00:03.0: [ ok ] factorial 10! = 3628800 computed, interrupt delivered
+[ INFO  ] 0000:00:03.0: [ ok ] DMA round trip of 4 KiB (coherent buffers, completion interrupts)
+[ INFO  ] 0000:00:03.0: [ ok ] workqueue item ran (in process context, could sleep)
+[ INFO  ] 0000:00:03.0: [ ok ] kernel timer fired after 20 ms
+[ INFO  ] 0000:00:03.0: [ ok ] request_firmware(syluxium-test.bin): 5000 bytes, checksum ok
+[ INFO  ] 0000:00:03.0: LinuxKPI self-test: 9 passed, 0 failed (3 interrupts)
+[  OK   ] Disk sda: QEMU HARDDISK, 64 MiB
+[ INFO  ]   sda: 1 partition(s)
+[  OK   ] FAT32 on sda1: 127006 clusters of 512 bytes (62 MiB)
+[  OK   ] Mounted /dev/sda1 (FAT32) on /boot/efi
+[  OK   ] Hardware: 7 PCI functions, 19 devices total (15 with drivers)
+    0000:00:00.0   8086:29c0  Bridges                -          Host bridge
+    0000:00:01.0   1234:1111  Display adapters       -          VGA compatible display adapter
+    0000:00:02.0   8086:10d3  Network adapters       e1000      Intel 82574L Gigabit Ethernet (10d3)
+    0000:00:03.0   1234:11e8  System devices         edu        Unclassified device
+    0000:00:1f.0   8086:2918  Bridges                -          ISA bridge
+    0000:00:1f.2   8086:2922  Storage controllers    ahci       SATA AHCI controller (AHCI 1.0, 1 disk)
+    0000:00:1f.3   8086:2930  System devices         -          SMBus controller
+    cpu0           0000:0000  Processors             sched      AMD Ryzen 7 5800X 8-Core Processor             
+    cpu1           0000:0000  Processors             sched      AMD Ryzen 7 5800X 8-Core Processor             
+    cpu2           0000:0000  Processors             sched      AMD Ryzen 7 5800X 8-Core Processor             
+    cpu3           0000:0000  Processors             sched      AMD Ryzen 7 5800X 8-Core Processor             
+    lapic          0000:0000  System devices         apic       Local APIC (x2APIC mode)
+    ioapic0        0000:0000  System devices         ioapic     I/O APIC
+    hpet           0000:0000  System devices         clock      High Precision Event Timer
+    rtc            0000:0000  System devices         rtc        CMOS real-time clock
+    serial0        0000:0000  Ports (COM)            serial     Communications port (COM1)
+    i8042          0000:0000  Keyboards and mice     ps2kbd     PS/2 keyboard
+    i8042-aux      0000:0000  Keyboards and mice     ps2mouse   PS/2 mouse (wheel)
+    fb0            0000:0000  Display adapters       fbcon      Firmware framebuffer (1280x800)
+[ INFO  ] Network: eth0 IPv6 link-local address fe80::5054:ff:fe12:3456
+[  OK   ] DHCP: eth0 is 10.0.2.15/24, gateway 10.0.2.2, DNS 10.0.2.3, lease 86400s
+[  OK   ] Reclaimed 48332 KiB of bootloader memory
+[ INFO  ] Running scheduler self-tests...
+[  OK   ]   spawn/join: 32 threads, exit codes collected
+[  OK   ]   mutex: 8 threads x 20000 locked increments, exact; ran on 4 CPU(s)
+[  OK   ] Network: eth0 IPv6 address fec0::5054:ff:fe12:3456/64 (SLAAC)
+[  OK   ]   preemption: 2 non-yielding threads on CPU 1 switched 62 times in 300 ms
+[  OK   ]   sleep: 50 ms sleep took 51 ms; 20 ms wait timeout took 21 ms
+[  OK   ]   semaphores: 2000 ping-pong round trips in 275 us
+[  OK   ]   swarm: 300 detached threads ran and were reaped
+[  OK   ] All scheduler self-tests passed (memory back to within 3 pages)
+[ INFO  ] Running static test programs (host gcc + glibc)...
+Hello from user space! I'm pid 1, running on Linux 6.12.0-syluxium (x86_64).
+[  OK   ]   /opt/syluxium/tests/hello: exit code 0
+systest: pid 2, argc 3
+  [PASS] argv
+  [PASS] environment (PATH)
+  [PASS] uname
+  [PASS] open(O_CREAT) + write
+  [PASS] lseek + read back
+  [PASS] fstat
+  [PASS] stdio append
+  [PASS] unlink
+  [PASS] opendir/readdir /bin
+  [PASS] chdir + getcwd
+  [PASS] malloc: 1000 small + one 8 MiB
+  [PASS] mmap / mprotect / munmap
+  [PASS] nanosleep(50 ms) measured with CLOCK_MONOTONIC
+  wall clock: 2026-11-17 06:07:21 UTC
+  [PASS] wall clock from the RTC
+  [PASS] getrandom
+  [PASS] /dev/zero
+  [PASS] stdout is a terminal (TCGETS)
+  float checksum: 11531.016122
+  [PASS] floating point math (matches the host result)
+systest: 18 passed, 0 failed
+[  OK   ]   /opt/syluxium/tests/systest: exit code 0
+crashtest: about to write through a NULL pointer...
+[ ERROR ] crashtest[3]: segmentation fault at 0x0, ip 0x40370c - killed (signal 11)
+[  OK   ]   /opt/syluxium/tests/crashtest: killed by signal 11 (expected)
+threadtest: pid 4
+  [PASS] mutex: 8 threads x 100000 increments (ran on 4 CPUs)
+  [PASS] condition variables: producer + 3 consumers
+  [PASS] thread-local storage (__thread)
+  [PASS] gettid: distinct per thread
+  [PASS] pthread_cond_timedwait times out (futex + timeout)
+  [PASS] semaphores
+  [PASS] pthread_kill: handler runs in the target thread
+  [PASS] exit() from a thread ends the whole process
+threadtest: 8 passed, 0 failed
+[  OK   ]   /opt/syluxium/tests/threadtest: exit code 0
+nettest: loopback sockets
+  [ ok ] bind 127.0.0.1:7001
+  [ ok ] listen
+  [ ok ] accept from 127.0.0.1
+  [ ok ] 1 MiB transferred intact, then EOF
+  [ ok ] reply after peer's half-close
+  [ ok ] client saw the reply
+  [ ok ] connect to a closed port: ECONNREFUSED
+  [ ok ] non-blocking connect returns EINPROGRESS
+  [ ok ] poll says writable, SO_ERROR is 0
+  [ ok ] accept the non-blocking client
+  [ ok ] UDP bind
+  [ ok ] UDP sendto
+  [ ok ] UDP recvfrom with sender address
+nettest: all passed (0 failures)
+[  OK   ]   /opt/syluxium/tests/nettest: exit code 0
+unixtest: AF_UNIX sockets
+  [ ok ] socketpair(SOCK_STREAM)
+  [ ok ] socketpair: data flows 0 -> 1
+  [ ok ] socketpair: data flows 1 -> 0
+  [ ok ] SO_PEERCRED names our pid
+  [ ok ] SO_DOMAIN = AF_UNIX
+  [ ok ] poll: POLLIN|POLLHUP after close
+  [ ok ] queued data still readable after peer close
+  [ ok ] then EOF
+  [ ok ] send to closed peer: EPIPE
+  [ ok ] socketpair(SOCK_NONBLOCK)
+  [ ok ] empty non-blocking read: EAGAIN
+  [ ok ] full queue: write gives EAGAIN
+  [ ok ] full queue: no POLLOUT
+  [ ok ] everything written is read back
+  [ ok ] drained: POLLOUT again
+  [ ok ] bind /tmp/unixtest.sock
+  [ ok ] the path is a socket file
+  [ ok ] second bind: EADDRINUSE
+  [ ok ] listen
+  [ ok ] getsockname returns the path
+  [ ok ] accept
+  [ ok ] accepted peer is unnamed
+  [ ok ] SO_PEERCRED = client pid
+  [ ok ] 300 KiB stream intact, then EOF on SHUT_WR
+  [ ok ] reply after half-close
+  [ ok ] client saw the server's address and reply
+  [ ok ] /proc/net/unix lists the listener
+  [ ok ] listener closed: ECONNREFUSED
+  [ ok ] unlink the socket file
+  [ ok ] after unlink: ENOENT
+  [ ok ] bind+listen abstract @syluxium-test
+  [ ok ] connect to abstract name (non-blocking connects at once)
+  [ ok ] listener polls readable
+  [ ok ] abstract stream echo
+  [ ok ] accepted socket's name is the abstract listener name
+  [ ok ] autobind gives a 5-digit abstract name
+  [ ok ] bind two datagram sockets
+  [ ok ] sendto twice
+  [ ok ] datagram boundaries kept, sender address reported
+  [ ok ] short read of a datagram
+  [ ok ] rest of truncated datagram discarded
+  [ ok ] connected datagram socket
+  [ ok ] unnamed sender: empty address
+  [ ok ] peer closed: ECONNREFUSED
+  [ ok ] socketpair(SOCK_SEQPACKET)
+  [ ok ] seqpacket keeps records
+  [ ok ] MSG_TRUNC returns the full record length
+  [ ok ] seqpacket EOF
+  [ ok ] sendmsg with SCM_RIGHTS (pipe + file)
+  [ ok ] child wrote through the passed pipe
+  [ ok ] child read the passed file at the shared offset
+  [ ok ] pipe EOF: every passed copy closed
+  [ ok ] read() of a message carrying fds
+  [ ok ] the discarded fd was closed (pipe EOF)
+  [ ok ] SO_PASSCRED
+  [ ok ] SCM_CREDENTIALS carries the sender's pid
+unixtest: all passed (0 failures)
+[  OK   ]   /opt/syluxium/tests/unixtest: exit code 0
+nltest: netlink
+  [ ok ] getifaddrs()
+         lo     family 17 flags 0x10049 -
+         eth0   family 17 flags 0x11043 -
+         lo     family  2 flags 0x10049 127.0.0.1
+         eth0   family  2 flags 0x11043 10.0.2.15
+         lo     family 10 flags 0x10049 ::1
+         eth0   family 10 flags 0x11043 fe80::5054:ff:fe12:3456
+         eth0   family 10 flags 0x11043 fec0::5054:ff:fe12:3456
+  [ ok ] lo has 127.0.0.1
+  [ ok ] AF_PACKET (link) entries present
+  [ ok ] lo has ::1
+  [ ok ] if_nameindex() / if_nametoindex("lo")
+  [ ok ] socket(AF_NETLINK, NETLINK_ROUTE)
+  [ ok ] bind netlink
+  [ ok ] kernel assigned a port id
+  [ ok ] send RTM_GETROUTE dump
+         2 IPv4 route(s), 1 default
+  [ ok ] route dump ends with NLMSG_DONE
+  [ ok ] NLMSG_ERROR for an unsupported request
+nltest: all passed (0 failures)
+[  OK   ]   /opt/syluxium/tests/nltest: exit code 0
+ip6test: IPv6 and fragmentation
+         00000000000000000000000000000001 01 80 10 80       lo
+         fe80000000000000505400fffe123456 02 40 20 80     eth0
+         fec0000000000000505400fffe123456 02 40 00 00     eth0
+  [ ok ] ::1 on lo
+  [ ok ] a link-local fe80:: address on the network card
+  [ ok ] TCP listen on [::1]:7101
+  [ ok ] accept from ::1
+  [ ok ] 512 KiB over IPv6 loopback intact
+  [ ok ] TCP listen on [::]:7102
+  [ ok ] IPv4 client connects to the IPv6 wildcard listener
+  [ ok ] peer reported as ::ffff:127.0.0.1
+  [ ok ] data over the v4-mapped connection
+  [ ok ] IPV6_V6ONLY
+  [ ok ] v6only listener: IPv4 refused
+  [ ok ] ICMPv6 ping socket
+  [ ok ] echo reply from ::1
+  [ ok ] IPv6 UDP datagram of 1000 bytes
+  [ ok ] IPv4 fragmented UDP datagram of 20000 bytes
+  [ ok ] IPv6 fragmented UDP datagram of 30000 bytes
+ip6test: all passed (0 failures)
+[  OK   ]   /opt/syluxium/tests/ip6test: exit code 0
+[  OK   ]   fpustress x6 in parallel: 6/6 correct
+[  OK   ] All user programs behaved correctly (memory difference: 4 pages)
+[ INFO  ] Running the shell self-test (Debian busybox sh, bash, GNU hello)...
+selftest: running as pid 40 in BusyBox v1.37.0
+  [PASS] GNU hello from Debian's .deb
+  [PASS] bash runs (dynamically linked)
+  [PASS] bash arrays and [[ ]]
+  [PASS] command substitution
+  [PASS] exit status through wait()
+  [PASS] 50 fork+exec+wait in a row
+  [PASS] background job + wait
+  [PASS] static binary exec'd from a shell
+  [PASS] pipe: echo | tr | grep
+  [PASS] pipe: 1000 lines through wc
+  [PASS] pipe: 1 MiB through cat
+  [PASS] redirect > and >>
+  [PASS] shebang script
+  [PASS] ls /usr/bin finds programs
+  [PASS] trap a signal (handler + sigreturn)
+  [PASS] signal handler output
+  [PASS] kill a sleeping process (SIGTERM)
+  [PASS] SIGPIPE when the reader is gone
+  [PASS] /proc/self/exe points at the program
+  [PASS] /proc/cpuinfo lists every CPU
+  [PASS] /proc/meminfo has MemTotal
+  [PASS] ps sees this shell
+  [PASS] /proc/<pid>/cmdline
+  [PASS] /proc/<pid>/fd lists open files
+  [PASS] free / uptime work
+  [PASS] /sys/devices/system/cpu/online
+selftest: 26 passed, 0 failed
+[  OK   ] Shell self-test passed
+[ INFO  ] Memory: 1938 MiB free of 1990 MiB; 13 kernel threads
+    CPU 0 (LAPIC 0): 1462 timer ticks, 25838 context switches
+    CPU 1 (LAPIC 1): 1522 timer ticks, 23798 context switches
+    CPU 2 (LAPIC 2): 1544 timer ticks, 23880 context switches
+    CPU 3 (LAPIC 3): 1565 timer ticks, 15156 context switches
+[  OK   ] Phase 4b complete. Starting an interactive shell on the console.
+
+Welcome to Syluxium (Debian userland: bash, busybox, GNU hello).
+Type commands at the prompt. Ctrl+C interrupts, "exit" restarts the shell.
+
+[?2004hroot@syluxium:/# busybox wget -O /tmp/b6 http://[fec0::2]:18632/big.bin; md5sum /tmp/b6; rm /tmp/b6
+[?2004lConnecting to [fec0::2]:18632 ([fec0::2]:18632)
+saving to '/tmp/b6'
+bb6                   u 10% |************                                                                                                    | 5597k  0:00:08 ETAsybox ip -6b6                   100% |****************************************************************************************************************| 50.0M  0:00:00 ETA
+'/tmp/b6' saved
+ 5a0904c9ea3a2214270f474440d066c4  /tmp/b6
+[?2004hroot@syluxium:/# busybox ip -6 addr add fec0::99/64 dev eth0
+[?2004l[?2004hroot@syluxium:/# ping6 -c 1 fec0::99
+[?2004lPING fec0::99 (fec0::99): 56 data bytes
+64 bytes from fec0::99: seq=0 ttl=-1 time=0.038 ms
+
+--- fec0::99 ping statistics ---
+1 packets transmitted, 1 packets received, 0% packet loss
+round-trip min/avg/max = 0.038/0.038/0.038 ms
+[?2004hroot@syluxium:/# busybox ip -6 addr show eth0
+[?2004l2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc pfifo_fast qlen 1000
+    inet6 fe80::5054:ff:fe12:3456/64 scope link 
+    inet6 fec0::5054:ff:fe12:3456/64 scope global dynamic 
+    inet6 fec0::99/64 scope global 
+[?2004hroot@syluxium:/# cat /proc/net/tcp6 | head -3
+[?2004l  sl  local_address                         remote_address                        st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
+[?2004hroot@syluxium:/# 

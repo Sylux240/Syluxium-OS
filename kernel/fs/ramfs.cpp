@@ -18,6 +18,7 @@ u8 dtype_of(u32 mode) {
     case S_IFCHR: return DT_CHR;
     case S_IFBLK: return DT_BLK;
     case S_IFIFO: return DT_FIFO;
+    case S_IFSOCK: return 12; // DT_SOCK
     default:      return DT_UNKNOWN;
     }
 }
