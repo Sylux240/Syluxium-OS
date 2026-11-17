@@ -73,7 +73,7 @@ public:
     uptr task_end() const { return m_compat ? COMPAT_TASK_END : mm::USER_END; }
 
     // Resolve a page fault. False means the access is invalid (segfault).
-    bool fault(uptr addr, bool write, bool exec = false);
+    bool fault(uptr addr, bool write);
 
     // Make sure [addr, addr+len) is mapped with the needed access, faulting
     // pages in as required. 0 or -EFAULT.
