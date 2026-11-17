@@ -1,6 +1,6 @@
 // BSD socket API (Linux ABI): socket, bind, connect, listen, accept,
-// send/recv families, socket options, and the interface ioctls that
-// ifconfig/route use.
+// send/recv families (with control messages), socket options, and the
+// interface ioctls that ifconfig/route use.
 
 #include <core/log.hpp>
 #include <fs/poll.hpp>
@@ -21,7 +21,7 @@ constexpr long EOPNOTSUPP = 95;
 
 } // namespace
 
-Socket::Socket(int t, int p) : type(t), protocol(p) {
+Socket::Socket(int t, int p, u16 d) : type(t), protocol(p), domain(d) {
     ino = vfs::next_ino();
     mode = vfs::S_IFSOCK | 0777;
     atime = mtime = ctime = vfs::now();
@@ -38,13 +38,161 @@ void Socket::wake() {
     poll::notify();
 }
 
+// ---- address translation ----
+
+long sockaddr_to_endpoint(const SockAddr& sa, Endpoint* out, u16 domain) {
+    *out = Endpoint{};
+    if (domain == AF_INET6) {
+        if (sa.family() != AF_INET6)
+            return -EAFNOSUPPORT;
+        if (sa.len < 24) // sin6_scope_id is optional (RFC 2133 layout)
+            return -err::INVAL;
+        SockAddrIn6 in6{};
+        memcpy(&in6, sa.data, min<u32>(sa.len, sizeof(in6)));
+        out->port = be16(in6.port);
+        if (ip6::is_v4mapped(in6.addr)) {
+            out->addr = get32(in6.addr + 12);
+        } else {
+            out->v6 = true;
+            memcpy(out->addr6, in6.addr, 16);
+            out->scope = sa.len >= sizeof(in6) ? in6.scope_id : 0;
+        }
+        return 0;
+    }
+    if (sa.family() != AF_INET)
+        return -EAFNOSUPPORT;
+    if (sa.len < sizeof(SockAddrIn))
+        return -err::INVAL;
+    SockAddrIn in;
+    memcpy(&in, sa.data, sizeof(in));
+    out->addr = be32(in.addr);
+    out->port = be16(in.port);
+    return 0;
+}
+
+void endpoint_to_sockaddr(const Endpoint& ep, SockAddr* out, u16 domain) {
+    memset(out->data, 0, sizeof(out->data));
+    if (domain == AF_INET6) {
+        SockAddrIn6 in6{};
+        in6.family = AF_INET6;
+        in6.port = be16(ep.port);
+        if (ep.v6) {
+            memcpy(in6.addr, ep.addr6, 16);
+            in6.scope_id = ip6::is_link_local(ep.addr6) ? ep.scope : 0;
+        } else if (ep.addr) { // v4-mapped; 0.0.0.0 stays ::
+            in6.addr[10] = in6.addr[11] = 0xFF;
+            put32(in6.addr + 12, ep.addr);
+        }
+        memcpy(out->data, &in6, sizeof(in6));
+        out->len = sizeof(in6);
+        return;
+    }
+    SockAddrIn in{};
+    in.family = AF_INET;
+    in.port = be16(ep.port);
+    in.addr = be32(ep.addr);
+    memcpy(out->data, &in, sizeof(in));
+    out->len = sizeof(in);
+}
+
+bool local_accepts(const Socket* s, const Endpoint& dst) {
+    if (dst.v6 && s->domain != AF_INET6)
+        return false;
+    if (!dst.v6 && s->domain == AF_INET6 && s->v6only)
+        return false;
+    if (s->local.any()) // a v4-mapped wildcard (::ffff:0.0.0.0) only takes IPv4
+        return !(dst.v6 && !s->local.v6);
+    return s->local.same_addr(dst);
+}
+
+bool bindings_overlap(const Endpoint& a, const Endpoint& b) {
+    if (a.any() || b.any())
+        return true;
+    return a.same_addr(b);
+}
+
+// ---- default (Internet) implementations of the generic entry points ----
+
+long Socket::bind_addr(const SockAddr& sa) {
+    Endpoint ep;
+    if (long r = sockaddr_to_endpoint(sa, &ep, domain); r < 0)
+        return r;
+    return bind(ep);
+}
+
+long Socket::connect_addr(const SockAddr& sa, bool nonblock) {
+    Endpoint ep;
+    if (sa.family() == AF_UNSPEC) // dissolve a datagram association
+        return connect(Endpoint{}, nonblock);
+    if (long r = sockaddr_to_endpoint(sa, &ep, domain); r < 0)
+        return r;
+    return connect(ep, nonblock);
+}
+
+long Socket::get_name(SockAddr* out, bool peer) {
+    if (peer) {
+        if (!connected)
+            return -ENOTCONN;
+        endpoint_to_sockaddr(remote, out, domain);
+        return 0;
+    }
+    Endpoint ep = local;
+    if (ep.any() && connected) {
+        LockGuard guard(g_lock);
+        Endpoint src;
+        if (source_endpoint(remote, &src)) {
+            src.port = ep.port;
+            ep = src;
+        }
+    }
+    endpoint_to_sockaddr(ep, out, domain);
+    return 0;
+}
+
+isize Socket::send_msg(const u8* data, usize len, int flags, const SockAddr* to, Control*, bool nonblock) {
+    Endpoint ep;
+    if (to) {
+        if (long r = sockaddr_to_endpoint(*to, &ep, domain); r < 0)
+            return r;
+    }
+    return send(data, len, flags, to ? &ep : nullptr, nonblock);
+}
+
+isize Socket::recv_msg(u8* buf, usize len, int flags, SockAddr* from, Control*, bool nonblock, usize* full_len) {
+    Endpoint ep = remote;
+    isize r = recv(buf, len, flags, &ep, nonblock, full_len);
+    if (r >= 0 && from)
+        endpoint_to_sockaddr(ep, from, domain);
+    return r;
+}
+
+// ---- control messages ----
+
+void release_control(Control& c) {
+    for (int i = 0; i < c.nfiles; i++)
+        if (c.files[i])
+            vfs::file_put(c.files[i]);
+    kfree(c.files);
+    c.files = nullptr;
+    c.nfiles = 0;
+}
+
+Ucred current_cred() {
+    Ucred c;
+    c.pid = proc::current() ? proc::current()->pid : 0;
+    c.uid = c.gid = 0; // everything runs as root for now
+    return c;
+}
+
+// ---- read()/write() on a socket = recv/send without flags ----
+
 isize Socket::read_file(vfs::File* f, u64, void* buf, usize count) {
     usize n = min(count, CHUNK);
     u8* k = static_cast<u8*>(kmalloc(n ? n : 1));
     if (!k)
         return -err::NOMEM;
     usize full;
-    isize r = recv(k, n, 0, nullptr, f->flags & vfs::O_NONBLOCK, &full);
+    isize r = recv_msg(k, n, 0, nullptr, nullptr, f->flags & vfs::O_NONBLOCK, &full);
     if (r > 0)
         memcpy(buf, k, static_cast<usize>(r));
     kfree(k);
@@ -59,7 +207,7 @@ isize Socket::write_file(vfs::File* f, u64, const void* buf, usize count) {
     while (done < count || count == 0) {
         usize n = min(count - done, CHUNK);
         memcpy(k, static_cast<const u8*>(buf) + done, n);
-        isize r = send(k, n, 0, nullptr, f->flags & vfs::O_NONBLOCK);
+        isize r = send_msg(k, n, 0, nullptr, nullptr, f->flags & vfs::O_NONBLOCK);
         if (r < 0) {
             kfree(k);
             return done ? static_cast<isize>(done) : r;
@@ -208,14 +356,13 @@ namespace syscall {
 
 namespace {
 
-using net::Endpoint;
-using net::SockAddrIn;
 using net::Socket;
 using namespace net;
 
-constexpr long EAFNOSUPPORT = 97, EPROTONOSUPPORT = 93, ENOTSOCK = 88, EOPNOTSUPP = 95, ENOPROTOOPT = 92;
+constexpr long EPROTONOSUPPORT = 93, ENOTSOCK = 88, EOPNOTSUPP = 95;
 constexpr u32 SOCK_NONBLOCK = 04000, SOCK_CLOEXEC = 02000000;
 constexpr usize CHUNK_SIZE = 64 * 1024;
+constexpr int MAX_PASSED_FDS = 253; // Linux's SCM_MAX_FD
 
 class SockRef {
 public:
@@ -237,39 +384,30 @@ private:
     Socket* m_sock = nullptr;
 };
 
-long read_addr(u64 uaddr, u64 len, Endpoint* out, u16* family = nullptr) {
-    if (len < 2)
+// Copy a user sockaddr in as-is; the socket interprets it.
+long read_addr(u64 uaddr, u64 len, SockAddr* out) {
+    if (len > sizeof(out->data))
+        len = sizeof(out->data); // longer sockaddr_storage: the tail is padding
+    if (len < 2 && len != 0)
         return -err::INVAL;
-    SockAddrIn sa{};
-    if (long r = uaccess::copy_from(&sa, reinterpret_cast<void*>(uaddr), min<u64>(len, sizeof(sa))); r < 0)
+    *out = SockAddr{};
+    if (long r = uaccess::copy_from(out->data, reinterpret_cast<void*>(uaddr), len); r < 0)
         return r;
-    if (family)
-        *family = sa.family;
-    if (sa.family == AF_UNSPEC && family)
-        return 0;
-    if (sa.family != AF_INET)
-        return -EAFNOSUPPORT;
-    if (len < sizeof(sa))
-        return -err::INVAL;
-    out->addr = be32(sa.addr);
-    out->port = be16(sa.port);
+    out->len = static_cast<u32>(len);
     return 0;
 }
 
-long write_addr(const Endpoint& ep, u64 uaddr, u64 ulen_ptr) {
+// Store an address for the caller, truncated to its buffer; *ulen gets the
+// real length (as Linux does).
+long write_addr(const SockAddr& sa, u64 uaddr, u64 ulen_ptr) {
     if (!uaddr || !ulen_ptr)
         return 0;
     u32 len;
     if (long r = uaccess::get(&len, reinterpret_cast<u32*>(ulen_ptr)); r < 0)
         return r;
-    SockAddrIn sa{};
-    sa.family = AF_INET;
-    sa.port = be16(ep.port);
-    sa.addr = be32(ep.addr);
-    if (long r = uaccess::copy_to(reinterpret_cast<void*>(uaddr), &sa, min<u32>(len, sizeof(sa))); r < 0)
+    if (long r = uaccess::copy_to(reinterpret_cast<void*>(uaddr), sa.data, min<u32>(len, sa.len)); r < 0)
         return r;
-    u32 out = sizeof(sa);
-    return uaccess::put(reinterpret_cast<u32*>(ulen_ptr), out);
+    return uaccess::put(reinterpret_cast<u32*>(ulen_ptr), sa.len);
 }
 
 long install(Socket* s, u32 flags) {
@@ -288,17 +426,43 @@ long sys_socket(SYSCALL_ARGS) {
     int domain = static_cast<int>(a0);
     int type = static_cast<int>(a1 & 0xF);
     int protocol = static_cast<int>(a2);
-    if (domain != AF_INET)
-        return -EAFNOSUPPORT; // IPv6, Unix and netlink sockets come later
     Socket* s = nullptr;
-    if (type == SOCK_STREAM && (protocol == 0 || protocol == PROTO_TCP))
-        s = create_tcp();
-    else if (type == SOCK_DGRAM && (protocol == 0 || protocol == PROTO_UDP))
-        s = create_udp(type, PROTO_UDP);
-    else if ((type == SOCK_DGRAM || type == SOCK_RAW) && protocol == PROTO_ICMP)
-        s = create_icmp(type);
-    else
-        return -EPROTONOSUPPORT;
+    switch (domain) {
+    case AF_UNIX:
+        if (type != SOCK_STREAM && type != SOCK_DGRAM && type != SOCK_SEQPACKET)
+            return -EPROTONOSUPPORT;
+        if (protocol != 0 && protocol != AF_UNIX)
+            return -EPROTONOSUPPORT;
+        s = create_unix(type);
+        break;
+    case AF_NETLINK:
+        if (type != SOCK_RAW && type != SOCK_DGRAM)
+            return -EPROTONOSUPPORT;
+        s = create_netlink(type, protocol);
+        break;
+    case AF_INET:
+        if (type == SOCK_STREAM && (protocol == 0 || protocol == PROTO_TCP))
+            s = create_tcp();
+        else if (type == SOCK_DGRAM && (protocol == 0 || protocol == PROTO_UDP))
+            s = create_udp(type, PROTO_UDP);
+        else if ((type == SOCK_DGRAM || type == SOCK_RAW) && protocol == PROTO_ICMP)
+            s = create_icmp(type);
+        else
+            return -EPROTONOSUPPORT;
+        break;
+    case AF_INET6:
+        if (type == SOCK_STREAM && (protocol == 0 || protocol == PROTO_TCP))
+            s = create_tcp(AF_INET6);
+        else if (type == SOCK_DGRAM && (protocol == 0 || protocol == PROTO_UDP))
+            s = create_udp(type, PROTO_UDP, AF_INET6);
+        else if ((type == SOCK_DGRAM || type == SOCK_RAW) && protocol == PROTO_ICMPV6)
+            s = create_icmp6(type);
+        else
+            return -EPROTONOSUPPORT;
+        break;
+    default:
+        return -EAFNOSUPPORT;
+    }
     if (!s)
         return -err::NOMEM;
     return install(s, static_cast<u32>(a1));
@@ -306,30 +470,56 @@ long sys_socket(SYSCALL_ARGS) {
 
 long sys_socketpair(SYSCALL_ARGS) {
     SYSCALL_UNUSED;
-    return -EOPNOTSUPP; // needs AF_UNIX
+    int type = static_cast<int>(a1 & 0xF);
+    if (a0 != AF_UNIX)
+        return a0 == AF_INET ? -EOPNOTSUPP : -EAFNOSUPPORT;
+    if (a2 != 0 && a2 != AF_UNIX)
+        return -EPROTONOSUPPORT;
+    Socket *x, *y;
+    if (long r = unix_socketpair(type, &x, &y); r < 0)
+        return r;
+    // install() closes the socket itself when it fails.
+    long fx = install(x, static_cast<u32>(a1));
+    if (fx < 0) {
+        y->close();
+        return fx;
+    }
+    long fy = install(y, static_cast<u32>(a1));
+    if (fy < 0) {
+        proc::fd_close(proc::current(), static_cast<int>(fx));
+        return fy;
+    }
+    i32 fds[2] = {static_cast<i32>(fx), static_cast<i32>(fy)};
+    if (long r = uaccess::copy_to(reinterpret_cast<void*>(a3), fds, sizeof(fds)); r < 0) {
+        proc::fd_close(proc::current(), static_cast<int>(fx));
+        proc::fd_close(proc::current(), static_cast<int>(fy));
+        return r;
+    }
+    return 0;
 }
 
 long sys_bind(SYSCALL_ARGS) {
     SYSCALL_UNUSED;
     SockRef s(static_cast<long>(a0));
     if (long e = s.error()) return e;
-    Endpoint ep;
-    if (long r = read_addr(a1, a2, &ep); r < 0)
+    SockAddr sa;
+    if (long r = read_addr(a1, a2, &sa); r < 0)
         return r;
-    return s->bind(ep);
+    if (sa.len < 2)
+        return -err::INVAL;
+    return s->bind_addr(sa);
 }
 
 long sys_connect(SYSCALL_ARGS) {
     SYSCALL_UNUSED;
     SockRef s(static_cast<long>(a0));
     if (long e = s.error()) return e;
-    Endpoint ep;
-    u16 family = AF_INET;
-    if (long r = read_addr(a1, a2, &ep, &family); r < 0)
+    SockAddr sa;
+    if (long r = read_addr(a1, a2, &sa); r < 0)
         return r;
-    if (family == AF_UNSPEC)
-        ep = Endpoint{};
-    return s->connect(ep, s.nonblock());
+    if (sa.len < 2)
+        return -err::INVAL;
+    return s->connect_addr(sa, s.nonblock());
 }
 
 long sys_listen(SYSCALL_ARGS) {
@@ -346,10 +536,13 @@ long sys_accept4(SYSCALL_ARGS) {
     Socket* child;
     if (long r = s->accept(&child, s.nonblock()); r < 0)
         return r;
+    SockAddr peer;
+    if (child->get_name(&peer, true) < 0)
+        peer = SockAddr{};
     long fd = install(child, static_cast<u32>(a3));
     if (fd < 0)
         return fd;
-    write_addr(child->remote, a1, a2);
+    write_addr(peer, a1, a2);
     return fd;
 }
 
@@ -359,24 +552,28 @@ long sys_getsockname(SYSCALL_ARGS) {
     SYSCALL_UNUSED;
     SockRef s(static_cast<long>(a0));
     if (long e = s.error()) return e;
-    Endpoint ep = s->local;
-    if (!ep.addr && s->connected) {
-        LockGuard guard(g_lock);
-        ep.addr = source_for(s->remote.addr);
-    }
-    return write_addr(ep, a1, a2);
+    SockAddr sa;
+    if (long r = s->get_name(&sa, false); r < 0)
+        return r;
+    return write_addr(sa, a1, a2);
 }
 
 long sys_getpeername(SYSCALL_ARGS) {
     SYSCALL_UNUSED;
     SockRef s(static_cast<long>(a0));
     if (long e = s.error()) return e;
-    if (!s->connected)
-        return -ENOTCONN;
-    return write_addr(s->remote, a1, a2);
+    SockAddr sa;
+    if (long r = s->get_name(&sa, true); r < 0)
+        return r;
+    return write_addr(sa, a1, a2);
 }
 
-isize do_send(Socket* s, bool nonblock, const u8* user_buf, usize len, int flags, const Endpoint* to) {
+void maybe_sigpipe(isize r, int flags) {
+    if (r == -err::PIPE && !(flags & MSG_NOSIGNAL))
+        signal::send_thread(sched::current(), 13); // SIGPIPE
+}
+
+isize do_send(Socket* s, bool nonblock, const u8* user_buf, usize len, int flags, const SockAddr* to) {
     usize done = 0;
     u8* k = static_cast<u8*>(kmalloc(min(len, CHUNK_SIZE) ? min(len, CHUNK_SIZE) : 1));
     if (!k)
@@ -387,11 +584,10 @@ isize do_send(Socket* s, bool nonblock, const u8* user_buf, usize len, int flags
             kfree(k);
             return r;
         }
-        isize r = s->send(k, n, flags, to, nonblock || (flags & MSG_DONTWAIT));
+        isize r = s->send_msg(k, n, flags, to, nullptr, nonblock || (flags & MSG_DONTWAIT));
         if (r < 0) {
             kfree(k);
-            if (r == -err::PIPE && !(flags & MSG_NOSIGNAL))
-                signal::send_thread(sched::current(), 13); // SIGPIPE
+            maybe_sigpipe(r, flags);
             return done ? static_cast<isize>(done) : r;
         }
         done += static_cast<usize>(r);
@@ -406,8 +602,8 @@ long sys_sendto(SYSCALL_ARGS) {
     SYSCALL_UNUSED;
     SockRef s(static_cast<long>(a0));
     if (long e = s.error()) return e;
-    Endpoint to;
-    bool have_to = a4 != 0;
+    SockAddr to;
+    bool have_to = a4 != 0 && a5 != 0;
     if (have_to)
         if (long r = read_addr(a4, a5, &to); r < 0)
             return r;
@@ -415,12 +611,12 @@ long sys_sendto(SYSCALL_ARGS) {
                    have_to ? &to : nullptr);
 }
 
-isize do_recv(Socket* s, bool nonblock, u8* user_buf, usize len, int flags, Endpoint* from, usize* full) {
+isize do_recv(Socket* s, bool nonblock, u8* user_buf, usize len, int flags, SockAddr* from, usize* full) {
     usize n = min(len, CHUNK_SIZE);
     u8* k = static_cast<u8*>(kmalloc(n ? n : 1));
     if (!k)
         return -err::NOMEM;
-    isize r = s->recv(k, n, flags, from, nonblock || (flags & MSG_DONTWAIT), full);
+    isize r = s->recv_msg(k, n, flags, from, nullptr, nonblock || (flags & MSG_DONTWAIT), full);
     if (r > 0)
         if (long e = uaccess::copy_to(user_buf, k, static_cast<usize>(r)); e < 0)
             r = e;
@@ -432,7 +628,7 @@ long sys_recvfrom(SYSCALL_ARGS) {
     SYSCALL_UNUSED;
     SockRef s(static_cast<long>(a0));
     if (long e = s.error()) return e;
-    Endpoint from = s->remote;
+    SockAddr from;
     usize full = 0;
     isize r = do_recv(s.get(), s.nonblock(), reinterpret_cast<u8*>(a1), a2, static_cast<int>(a3), &from, &full);
     if (r < 0)
@@ -459,6 +655,13 @@ struct IoVec {
     u64 base;
     u64 len;
 };
+struct CmsgHdr {
+    u64 len;
+    i32 level;
+    i32 type;
+};
+constexpr int SOL_SOCKET = 1, SCM_RIGHTS = 1, SCM_CREDENTIALS = 2;
+constexpr u64 cmsg_align(u64 n) { return (n + 7) & ~7ull; }
 
 // Gather a message's iovecs into one kernel buffer.
 long gather(const MsgHdr& m, u8** out, usize* out_len) {
@@ -506,22 +709,123 @@ long scatter(const MsgHdr& m, const u8* data, usize len) {
     return 0;
 }
 
+// Parse sendmsg control messages: SCM_RIGHTS (take a reference on every
+// file) and SCM_CREDENTIALS. Unknown messages are ignored, as Linux does
+// for levels it doesn't know.
+long parse_control(const MsgHdr& m, Control* ctl) {
+    if (!m.control || m.controllen < sizeof(CmsgHdr))
+        return 0;
+    if (m.controllen > 64 * 1024)
+        return -ENOBUFS;
+    u64 pos = 0;
+    while (pos + sizeof(CmsgHdr) <= m.controllen) {
+        CmsgHdr h;
+        if (long r = uaccess::get(&h, reinterpret_cast<CmsgHdr*>(m.control + pos)); r < 0)
+            return r;
+        if (h.len < sizeof(CmsgHdr) || pos + h.len > m.controllen)
+            return -err::INVAL;
+        u64 data = m.control + pos + sizeof(CmsgHdr);
+        u64 dlen = h.len - sizeof(CmsgHdr);
+        if (h.level == SOL_SOCKET && h.type == SCM_RIGHTS) {
+            int n = static_cast<int>(dlen / 4);
+            if (ctl->nfiles + n > MAX_PASSED_FDS)
+                return -err::INVAL;
+            auto** files = static_cast<vfs::File**>(kmalloc(sizeof(vfs::File*) * (ctl->nfiles + n + 1)));
+            if (!files)
+                return -err::NOMEM;
+            for (int i = 0; i < ctl->nfiles; i++)
+                files[i] = ctl->files[i];
+            kfree(ctl->files);
+            ctl->files = files;
+            for (int i = 0; i < n; i++) {
+                i32 fd;
+                if (long r = uaccess::get(&fd, reinterpret_cast<i32*>(data) + i); r < 0)
+                    return r;
+                vfs::File* f = fd >= 0 ? proc::fd_get(proc::current(), fd) : nullptr;
+                if (!f)
+                    return -err::BADF;
+                ctl->files[ctl->nfiles++] = f;
+            }
+        } else if (h.level == SOL_SOCKET && h.type == SCM_CREDENTIALS) {
+            if (dlen < sizeof(Ucred))
+                return -err::INVAL;
+            if (long r = uaccess::copy_from(&ctl->cred, reinterpret_cast<void*>(data), sizeof(Ucred)); r < 0)
+                return r;
+            ctl->has_cred = true;
+        }
+        pos += cmsg_align(h.len);
+    }
+    return 0;
+}
+
+// Write received control messages into the caller's buffer: credentials
+// first, then the passed files, each installed as a new descriptor. Files
+// that don't fit are closed and MSG_CTRUNC is reported, like Linux.
+long emit_control(const MsgHdr& m, Control& ctl, int flags, u64* used_out, int* msg_flags) {
+    u64 used = 0;
+    u64 room = m.control ? m.controllen : 0;
+    if (ctl.has_cred) {
+        u64 need = sizeof(CmsgHdr) + sizeof(Ucred);
+        if (used + need <= room) {
+            CmsgHdr h{need, SOL_SOCKET, SCM_CREDENTIALS};
+            uaccess::put(reinterpret_cast<CmsgHdr*>(m.control + used), h);
+            uaccess::copy_to(reinterpret_cast<void*>(m.control + used + sizeof(h)), &ctl.cred, sizeof(Ucred));
+            used += cmsg_align(need);
+        } else {
+            *msg_flags |= MSG_CTRUNC;
+        }
+    }
+    if (ctl.nfiles) {
+        int fit = room >= used + sizeof(CmsgHdr) ? static_cast<int>((room - used - sizeof(CmsgHdr)) / 4) : 0;
+        if (fit > ctl.nfiles)
+            fit = ctl.nfiles;
+        int installed = 0;
+        for (int i = 0; i < fit; i++) {
+            long fd = proc::fd_install(proc::current(), ctl.files[i], 0, flags & MSG_CMSG_CLOEXEC);
+            if (fd < 0)
+                break;
+            ctl.files[i] = nullptr; // the descriptor table owns it now
+            i32 v = static_cast<i32>(fd);
+            uaccess::put(reinterpret_cast<i32*>(m.control + used + sizeof(CmsgHdr)) + installed, v);
+            installed++;
+        }
+        if (installed) {
+            CmsgHdr h{sizeof(CmsgHdr) + 4ull * installed, SOL_SOCKET, SCM_RIGHTS};
+            uaccess::put(reinterpret_cast<CmsgHdr*>(m.control + used), h);
+            used += cmsg_align(h.len);
+        }
+        if (installed < ctl.nfiles)
+            *msg_flags |= MSG_CTRUNC;
+    }
+    release_control(ctl); // whatever wasn't installed
+    *used_out = used;
+    return 0;
+}
+
 long send_one_msg(Socket* s, bool nonblock, u64 umsg, int flags) {
     MsgHdr m;
     if (long r = uaccess::get(&m, reinterpret_cast<MsgHdr*>(umsg)); r < 0)
         return r;
-    Endpoint to;
-    if (m.name && m.namelen)
+    SockAddr to;
+    bool have_to = m.name && m.namelen;
+    if (have_to)
         if (long r = read_addr(m.name, m.namelen, &to); r < 0)
             return r;
+    Control ctl;
+    if (long r = parse_control(m, &ctl); r < 0) {
+        release_control(ctl);
+        return r;
+    }
     u8* buf;
     usize len;
-    if (long r = gather(m, &buf, &len); r < 0)
+    if (long r = gather(m, &buf, &len); r < 0) {
+        release_control(ctl);
         return r;
-    isize r = s->send(buf, len, flags, m.name && m.namelen ? &to : nullptr, nonblock || (flags & MSG_DONTWAIT));
+    }
+    isize r = s->send_msg(buf, len, flags, have_to ? &to : nullptr, &ctl, nonblock || (flags & MSG_DONTWAIT));
     kfree(buf);
-    if (r == -err::PIPE && !(flags & MSG_NOSIGNAL))
-        signal::send_thread(sched::current(), 13);
+    release_control(ctl); // files the socket didn't take
+    maybe_sigpipe(r, flags);
     return r;
 }
 
@@ -540,30 +844,34 @@ long recv_one_msg(Socket* s, bool nonblock, u64 umsg, int flags) {
     u8* buf = static_cast<u8*>(kmalloc(total ? total : 1));
     if (!buf)
         return -err::NOMEM;
-    Endpoint from = s->remote;
+    SockAddr from;
+    Control ctl;
     usize full = 0;
-    isize r = s->recv(buf, total, flags, &from, nonblock || (flags & MSG_DONTWAIT), &full);
+    isize r = s->recv_msg(buf, total, flags, &from, &ctl, nonblock || (flags & MSG_DONTWAIT), &full);
     if (r >= 0) {
         if (long e = scatter(m, buf, static_cast<usize>(r)); e < 0)
             r = e;
     }
     kfree(buf);
-    if (r < 0)
+    if (r < 0) {
+        release_control(ctl);
         return r;
+    }
     MsgHdr out = m;
-    out.controllen = 0; // no ancillary data
-    out.flags = (s->type != SOCK_STREAM && full > static_cast<usize>(r)) ? MSG_TRUNC : 0;
-    if (m.name && m.namelen >= sizeof(SockAddrIn)) {
-        SockAddrIn sa{};
-        sa.family = AF_INET;
-        sa.port = be16(from.port);
-        sa.addr = be32(from.addr);
-        uaccess::copy_to(reinterpret_cast<void*>(m.name), &sa, sizeof(sa));
-        out.namelen = sizeof(sa);
+    int msg_flags = (s->type != SOCK_STREAM && full > static_cast<usize>(r)) ? MSG_TRUNC : 0;
+    u64 used = 0;
+    emit_control(m, ctl, flags, &used, &msg_flags);
+    out.controllen = used;
+    out.flags = msg_flags;
+    if (m.name && m.namelen) {
+        uaccess::copy_to(reinterpret_cast<void*>(m.name), from.data, min<u32>(m.namelen, from.len));
+        out.namelen = from.len;
     } else {
         out.namelen = 0;
     }
     uaccess::put(reinterpret_cast<MsgHdr*>(umsg), out);
+    if ((flags & MSG_TRUNC) && s->type != SOCK_STREAM)
+        return static_cast<long>(full);
     return r;
 }
 
@@ -627,24 +935,30 @@ long sys_shutdown(SYSCALL_ARGS) {
     return s->shutdown(static_cast<int>(a1));
 }
 
-constexpr int SOL_SOCKET = 1, IPPROTO_IP = 0, IPPROTO_TCP = 6;
+constexpr int IPPROTO_IP = 0, IPPROTO_TCP = 6, IPPROTO_UDP = 17, IPPROTO_IPV6 = 41, IPPROTO_ICMPV6 = 58;
+constexpr int IPV6_V6ONLY = 26;
 
 long sys_setsockopt(SYSCALL_ARGS) {
     SYSCALL_UNUSED;
     SockRef s(static_cast<long>(a0));
     if (long e = s.error()) return e;
     int level = static_cast<int>(a1), name = static_cast<int>(a2);
-    i32 value = 0;
-    if (a3 && a4 >= 4)
-        if (long r = uaccess::get(&value, reinterpret_cast<i32*>(a3)); r < 0)
+    u8 raw[64] = {};
+    u32 rlen = static_cast<u32>(min<u64>(a4, sizeof(raw)));
+    if (a3 && rlen)
+        if (long r = uaccess::copy_from(raw, reinterpret_cast<void*>(a3), rlen); r < 0)
             return r;
+    if (long r = s->set_option(level, name, raw, rlen); r != OPT_UNHANDLED)
+        return r;
+    i32 value = 0;
+    if (rlen >= 4)
+        memcpy(&value, raw, 4);
     if (level == SOL_SOCKET) {
         switch (name) {
         case 2: s->reuse_addr = value; return 0;          // SO_REUSEADDR
         case 20: case 21: {                                // SO_RCVTIMEO / SO_SNDTIMEO (struct timeval)
             i64 tv[2] = {};
-            if (long r = uaccess::copy_from(tv, reinterpret_cast<void*>(a3), min<u64>(a4, 16)); r < 0)
-                return r;
+            memcpy(tv, raw, min<u32>(rlen, 16));
             u64 ns = static_cast<u64>(tv[0]) * 1'000'000'000ull + static_cast<u64>(tv[1]) * 1000;
             (name == 20 ? s->rcv_timeout_ns : s->snd_timeout_ns) = ns;
             return 0;
@@ -652,8 +966,17 @@ long sys_setsockopt(SYSCALL_ARGS) {
         default: return 0; // SO_KEEPALIVE, SO_BROADCAST, buffer sizes, ...: accepted
         }
     }
-    if (level == IPPROTO_TCP || level == IPPROTO_IP)
-        return 0; // TCP_NODELAY (we never delay), IP_TOS, IP_RECVERR, ...
+    if (s->domain == AF_INET6 && level == IPPROTO_IPV6 && name == IPV6_V6ONLY) {
+        if (s->bound)
+            return -err::INVAL;
+        s->v6only = value != 0;
+        return 0;
+    }
+    bool inet = s->domain == AF_INET || s->domain == AF_INET6;
+    // TCP_NODELAY (we never delay), IP_TOS, IP_RECVERR, IPV6_RECVHOPLIMIT, ICMP6_FILTER, ...: accepted
+    if (inet && (level == IPPROTO_TCP || level == IPPROTO_IP || level == IPPROTO_UDP ||
+                 (s->domain == AF_INET6 && (level == IPPROTO_IPV6 || level == IPPROTO_ICMPV6))))
+        return 0;
     return -ENOPROTOOPT;
 }
 
@@ -662,26 +985,37 @@ long sys_getsockopt(SYSCALL_ARGS) {
     SockRef s(static_cast<long>(a0));
     if (long e = s.error()) return e;
     int level = static_cast<int>(a1), name = static_cast<int>(a2);
-    i32 value = 0;
-    if (level == SOL_SOCKET) {
-        switch (name) {
-        case 3: value = s->type; break;                 // SO_TYPE
-        case 4: value = s->error; s->error = 0; break;  // SO_ERROR
-        case 2: value = s->reuse_addr; break;           // SO_REUSEADDR
-        case 7: case 8: value = 65536; break;           // SO_SNDBUF / SO_RCVBUF
-        case 30: value = 1; break;                      // SO_ACCEPTCONN-ish answers are harmless
-        case 38: value = s->protocol; break;            // SO_PROTOCOL
-        case 39: value = AF_INET; break;                // SO_DOMAIN
-        default: value = 0; break;
-        }
-    } else if (level == IPPROTO_TCP && name == 2) {     // TCP_MAXSEG
-        value = 1460;
-    }
     u32 len;
     if (long r = uaccess::get(&len, reinterpret_cast<u32*>(a4)); r < 0)
         return r;
-    u32 n = min<u32>(len, 4);
-    if (long r = uaccess::copy_to(reinterpret_cast<void*>(a3), &value, n); r < 0)
+    u8 raw[64] = {};
+    u32 rlen = sizeof(raw);
+    long hr = s->get_option(level, name, raw, &rlen);
+    if (hr != OPT_UNHANDLED) {
+        if (hr < 0)
+            return hr;
+    } else {
+        i32 value = 0;
+        if (level == SOL_SOCKET) {
+            switch (name) {
+            case 3: value = s->type; break;                 // SO_TYPE
+            case 4: value = s->error; s->error = 0; break;  // SO_ERROR
+            case 2: value = s->reuse_addr; break;           // SO_REUSEADDR
+            case 7: case 8: value = 212992; break;          // SO_SNDBUF / SO_RCVBUF
+            case 38: value = s->protocol; break;            // SO_PROTOCOL
+            case 39: value = s->domain; break;              // SO_DOMAIN
+            default: value = 0; break;
+            }
+        } else if (level == IPPROTO_TCP && name == 2) {     // TCP_MAXSEG
+            value = s->domain == AF_INET6 ? 1440 : 1460;
+        } else if (level == IPPROTO_IPV6 && name == IPV6_V6ONLY) {
+            value = s->v6only;
+        }
+        memcpy(raw, &value, 4);
+        rlen = 4;
+    }
+    u32 n = min<u32>(len, rlen);
+    if (long r = uaccess::copy_to(reinterpret_cast<void*>(a3), raw, n); r < 0)
         return r;
     return uaccess::put(reinterpret_cast<u32*>(a4), n);
 }

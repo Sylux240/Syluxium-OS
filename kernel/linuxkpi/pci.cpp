@@ -58,8 +58,29 @@ struct IrqAction {
     volatile bool in_handler = false;
 };
 
-IrqAction g_irqs[256];
+// irq numbers 1..255 are real interrupt vectors (MSI/MSI-X); numbers from
+// POLLED_BASE up are devices with only legacy INTx, whose handlers a 1 ms
+// poller calls (until ACPI _PRT interrupt routing exists).
+constexpr unsigned POLLED_BASE = 256, MAX_IRQ = 320;
+IrqAction g_irqs[MAX_IRQ];
+unsigned g_next_polled = POLLED_BASE;
 volatile int g_irq_depth = 0;
+
+void irq_poller(void*) {
+    for (;;) {
+        sched::sleep_ms(1);
+        for (unsigned irq = POLLED_BASE; irq < g_next_polled; irq++) {
+            IrqAction& a = g_irqs[irq];
+            if (!a.handler || a.disabled)
+                continue;
+            a.in_handler = true;
+            irqreturn_t r = a.handler(static_cast<int>(irq), a.dev_id);
+            a.in_handler = false;
+            if (r == IRQ_WAKE_THREAD && a.thread_wake)
+                a.thread_wake->signal();
+        }
+    }
+}
 
 void irq_trampoline(interrupts::Frame* frame) {
     u8 vector = static_cast<u8>(frame->vector);
@@ -87,13 +108,26 @@ void irq_thread(void* arg) {
 
 irqreturn_t default_hardirq(int, void*) { return IRQ_WAKE_THREAD; }
 
+// Give a legacy-only device a polled irq number (once).
+void setup_polled(struct pci_dev* pdev) {
+    if (pdev->irq || g_next_polled >= MAX_IRQ)
+        return;
+    static bool started = false;
+    if (!started) {
+        started = true;
+        sched::spawn("lkpi-irqpoll", irq_poller, nullptr, -1, true);
+    }
+    pdev->irq = g_next_polled++;
+    dev_info(&pdev->dev, "no MSI: interrupt handler polled every 1 ms (irq %u)", pdev->irq);
+}
+
 // Allocate an MSI/MSI-X vector for the device (once).
 int setup_msi(struct pci_dev* pdev) {
     if (pdev->irq)
         return 0;
     auto* f = static_cast<pci::Function*>(pdev->lkpi_function);
     if (!f->msi_cap && !f->msix_cap)
-        return -ENOSPC; // legacy INTx routing (ACPI _PRT) isn't supported yet
+        return -ENOSPC; // legacy INTx only
     u8 vector = interrupts::allocate_vector();
     interrupts::set_handler(vector, irq_trampoline);
     if (!pci::enable_msi(*f, vector))
@@ -180,7 +214,7 @@ int lkpi_in_interrupt(void) { return __atomic_load_n(&g_irq_depth, __ATOMIC_RELA
 
 int request_threaded_irq(unsigned int irq, irq_handler_t handler, irq_handler_t thread_fn, unsigned long,
                          const char* name, void* dev_id) {
-    if (irq == 0 || irq > 255)
+    if (irq == 0 || irq >= MAX_IRQ)
         return -EINVAL;
     IrqAction& a = g_irqs[irq];
     if (a.handler)
@@ -205,14 +239,14 @@ int request_irq(unsigned int irq, irq_handler_t handler, unsigned long flags, co
 }
 
 void free_irq(unsigned int irq, void*) {
-    if (irq > 255)
+    if (irq >= MAX_IRQ)
         return;
     g_irqs[irq].handler = nullptr;
     synchronize_irq(irq);
 }
 
 void disable_irq_nosync(unsigned int irq) {
-    if (irq <= 255)
+    if (irq < MAX_IRQ)
         g_irqs[irq].disabled = true;
 }
 void disable_irq(unsigned int irq) {
@@ -220,11 +254,11 @@ void disable_irq(unsigned int irq) {
     synchronize_irq(irq);
 }
 void enable_irq(unsigned int irq) {
-    if (irq <= 255)
+    if (irq < MAX_IRQ)
         g_irqs[irq].disabled = false;
 }
 void synchronize_irq(unsigned int irq) {
-    if (irq > 255)
+    if (irq >= MAX_IRQ)
         return;
     while (g_irqs[irq].in_handler)
         __builtin_ia32_pause();
@@ -270,8 +304,12 @@ void pci_unregister_driver(struct pci_driver*) {
     // Built-in drivers stay registered; unbinding comes with hot-unplug support.
 }
 
+// Like Linux, pdev->irq is usable right after enabling: MSI if the device
+// has it, else a polled legacy interrupt.
 int pci_enable_device(struct pci_dev* p) {
     pci::enable(fn(p));
+    if (!p->irq && setup_msi(p) != 0)
+        setup_polled(p);
     return 0;
 }
 void pci_disable_device(struct pci_dev* p) { pci::write16(fn(p), PCI_COMMAND, pci::read16(fn(p), PCI_COMMAND) & ~0x7); }
@@ -354,10 +392,15 @@ int pcie_capability_clear_and_set_word(struct pci_dev* p, int pos, u16 clear, u1
 int pci_alloc_irq_vectors(struct pci_dev* p, unsigned int min_vecs, unsigned int, unsigned int flags) {
     if (min_vecs > 1)
         return -ENOSPC; // one vector per device for now
-    if (!(flags & (PCI_IRQ_MSI | PCI_IRQ_MSIX)))
-        return -ENOSPC;
-    int r = setup_msi(p);
-    return r ? r : 1;
+    if (p->irq)
+        return 1;
+    if ((flags & (PCI_IRQ_MSI | PCI_IRQ_MSIX)) && setup_msi(p) == 0)
+        return 1;
+    if (flags & PCI_IRQ_LEGACY) {
+        setup_polled(p);
+        return p->irq ? 1 : -ENOSPC;
+    }
+    return -ENOSPC;
 }
 void pci_free_irq_vectors(struct pci_dev*) {}
 int pci_irq_vector(struct pci_dev* p, unsigned int nr) { return nr == 0 && p->irq ? static_cast<int>(p->irq) : -EINVAL; }

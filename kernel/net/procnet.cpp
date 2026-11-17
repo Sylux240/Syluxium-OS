@@ -56,6 +56,8 @@ bool gen_tcp(TextBuffer& out, const void*) {
     } ctx{&out, 0};
     for_each_tcp([](Socket* s, int state, void* p) {
         auto* c = static_cast<Ctx*>(p);
+        if (s->domain != AF_INET)
+            return;
         c->out->printf("%4d: %08X:%04X %08X:%04X %02X 00000000:00000000 00:00000000 00000000     0        0 %lu\n",
                        c->n++, be32(s->local.addr), s->local.port, be32(s->remote.addr), s->remote.port, state, s->ino);
     }, &ctx);
@@ -71,12 +73,79 @@ bool gen_udp(TextBuffer& out, const void*) {
     } ctx{&out, 0};
     for_each_udp([](Socket* s, void* p) {
         auto* c = static_cast<Ctx*>(p);
-        if (!s->bound)
+        if (!s->bound || s->domain != AF_INET)
             return;
         c->out->printf("%4d: %08X:%04X %08X:%04X %02X 00000000:00000000 00:00000000 00000000     0        0 %lu\n",
                        c->n++, be32(s->local.addr), s->local.port, be32(s->remote.addr), s->remote.port,
                        s->connected ? 1 : 7, s->ino);
     }, &ctx);
+    return true;
+}
+
+// An endpoint as /proc/net/tcp6 shows it: four 32-bit words, each the
+// network-order bytes read as a little-endian number; IPv4 as v4-mapped.
+void put_addr6(TextBuffer& out, const Endpoint& ep) {
+    u8 a[16] = {};
+    if (ep.v6) {
+        memcpy(a, ep.addr6, 16);
+    } else if (ep.addr) {
+        a[10] = a[11] = 0xFF;
+        put32(a + 12, ep.addr);
+    }
+    for (int i = 0; i < 4; i++)
+        out.printf("%02X%02X%02X%02X", a[4 * i + 3], a[4 * i + 2], a[4 * i + 1], a[4 * i]);
+    out.printf(":%04X", ep.port);
+}
+
+struct Ctx6 {
+    TextBuffer* out;
+    int n;
+};
+
+void line6(Ctx6* c, Socket* s, int state) {
+    c->out->printf("%4d: ", c->n++);
+    put_addr6(*c->out, s->local);
+    c->out->printf(" ");
+    put_addr6(*c->out, s->remote);
+    c->out->printf(" %02X 00000000:00000000 00:00000000 00000000     0        0 %lu\n", state, s->ino);
+}
+
+const char* const HEADER6 = "  sl  local_address                         remote_address                        st "
+                            "tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n";
+
+bool gen_tcp6(TextBuffer& out, const void*) {
+    out.printf("%s", HEADER6);
+    LockGuard guard(g_lock);
+    Ctx6 ctx{&out, 0};
+    for_each_tcp([](Socket* s, int state, void* p) {
+        if (s->domain == AF_INET6)
+            line6(static_cast<Ctx6*>(p), s, state);
+    }, &ctx);
+    return true;
+}
+
+bool gen_udp6(TextBuffer& out, const void*) {
+    out.printf("%s", HEADER6);
+    LockGuard guard(g_lock);
+    Ctx6 ctx{&out, 0};
+    for_each_udp([](Socket* s, void* p) {
+        if (s->domain == AF_INET6 && s->bound)
+            line6(static_cast<Ctx6*>(p), s, s->connected ? 1 : 7);
+    }, &ctx);
+    return true;
+}
+
+// /proc/net/if_inet6: what ifconfig reads to show IPv6 addresses.
+bool gen_if_inet6(TextBuffer& out, const void*) {
+    LockGuard guard(g_lock);
+    for_each_addr6([](const Addr6& a, void* p) {
+        auto* o = static_cast<TextBuffer*>(p);
+        for (u8 b : a.addr)
+            o->printf("%02x", b);
+        Interface* f = interface_by_index(a.ifindex);
+        u8 scope = a.scope == 254 ? 0x10 : a.scope == 253 ? 0x20 : 0x00;
+        o->printf(" %02x %02x %02x %02x %8s\n", a.ifindex, a.prefix_len, scope, a.flags, f ? f->name : "?");
+    }, &out);
     return true;
 }
 
@@ -87,6 +156,17 @@ bool gen_resolv(TextBuffer& out, const void*) {
         char ip[16];
         format_ip(dns, ip, sizeof(ip));
         out.printf("nameserver %s\n", ip);
+    }
+    u8 dns6[16];
+    bool have6;
+    {
+        LockGuard guard(g_lock);
+        have6 = dns_server6(dns6);
+    }
+    if (have6) {
+        char ip6[48];
+        format_ip6(dns6, ip6, sizeof(ip6));
+        out.printf("nameserver %s\n", ip6);
     }
     return true;
 }
@@ -99,9 +179,10 @@ void proc_net_init() {
     vfs::add_node("/proc/net/route", new genfs::GeneratedFile(gen_route, nullptr));
     vfs::add_node("/proc/net/tcp", new genfs::GeneratedFile(gen_tcp, nullptr));
     vfs::add_node("/proc/net/udp", new genfs::GeneratedFile(gen_udp, nullptr));
-    genfs::static_file("/proc/net/tcp6", "  sl  local_address                         remote_address                        st\n");
-    genfs::static_file("/proc/net/udp6", "  sl  local_address                         remote_address                        st\n");
-    genfs::static_file("/proc/net/unix", "Num       RefCount Protocol Flags    Type St Inode Path\n");
+    vfs::add_node("/proc/net/tcp6", new genfs::GeneratedFile(gen_tcp6, nullptr));
+    vfs::add_node("/proc/net/udp6", new genfs::GeneratedFile(gen_udp6, nullptr));
+    vfs::add_node("/proc/net/if_inet6", new genfs::GeneratedFile(gen_if_inet6, nullptr));
+    unix_proc_init();
     vfs::mkdir_p("/etc");
     vfs::add_node("/etc/resolv.conf", new genfs::GeneratedFile(gen_resolv, nullptr, 0644));
 }

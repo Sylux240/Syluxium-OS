@@ -74,7 +74,7 @@ CFLAGS := \
     --target=x86_64-unknown-none-elf \
     -std=gnu11 \
     -O2 -g \
-    -Wall -Wextra -Wno-unused-parameter -Wno-sign-compare -Wno-missing-field-initializers \
+    -Wall -Wextra -Wno-unused-parameter -Wno-sign-compare -Wno-missing-field-initializers -Wno-pointer-sign \
     -ffreestanding -fno-stack-protector -fno-stack-check -fno-pic -fno-pie \
     -fno-omit-frame-pointer -fno-strict-aliasing \
     -nostdlibinc -mcmodel=kernel -mno-red-zone \

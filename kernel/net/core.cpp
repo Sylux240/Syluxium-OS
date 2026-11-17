@@ -36,7 +36,7 @@ struct ArpEntry {
     Interface* iface = nullptr;
     u64 updated_ms = 0, last_request_ms = 0;
     int requests = 0;
-    PendingPacket pending[4] = {};
+    PendingPacket pending[16] = {}; // room for a fragmented datagram
     int pending_count = 0;
 };
 
@@ -64,27 +64,6 @@ ArpEntry* arp_slot(u32 ip) {
         kfree(oldest->pending[i].data);
     *oldest = ArpEntry{};
     return oldest;
-}
-
-void eth_send(Interface* iface, const u8* dst_mac, u16 type, const u8* payload, usize len) {
-    u8 frame[MAX_FRAME];
-    if (len > MAX_FRAME - 14)
-        return;
-    memcpy(frame, dst_mac, 6);
-    memcpy(frame + 6, iface->mac, 6);
-    put16(frame + 12, type);
-    memcpy(frame + 14, payload, len);
-    usize total = 14 + len;
-    if (total < 60) { // minimum Ethernet frame
-        memset(frame + total, 0, 60 - total);
-        total = 60;
-    }
-    if (iface->transmit(frame, total) == 0) {
-        iface->tx_packets++;
-        iface->tx_bytes += total;
-    } else {
-        iface->tx_errors++;
-    }
 }
 
 void arp_send(Interface* iface, u16 op, const u8* target_mac, u32 target_ip) {
@@ -221,6 +200,8 @@ Interface* route(u32 dst, u32* next_hop) {
     return nullptr;
 }
 
+void reassemble4(Interface* iface, const u8* p, usize hl, const u8* data, usize dlen);
+
 void ip_input(Interface* iface, const u8* p, usize len) {
     if (len < 20 || (p[0] >> 4) != 4)
         return;
@@ -230,11 +211,6 @@ void ip_input(Interface* iface, const u8* p, usize len) {
         return;
     if (iface != g_loopback && checksum_finish(checksum_add(0, p, hl)) != 0)
         return;
-    u16 frag = get16(p + 6);
-    if ((frag & 0x2000) || (frag & 0x1FFF)) {
-        iface->rx_dropped++; // fragments: reassembly not implemented
-        return;
-    }
     u32 dst = get32(p + 16);
     bool for_us = iface->addr == 0 || dst == iface->addr || dst == 0xFFFFFFFF || is_local_address(dst) ||
                   (iface->netmask && dst == (iface->addr | ~iface->netmask)) || iface == g_loopback;
@@ -242,12 +218,49 @@ void ip_input(Interface* iface, const u8* p, usize len) {
         return;
     const u8* data = p + hl;
     usize dlen = total - hl;
+    u16 frag = get16(p + 6);
+    if ((frag & 0x2000) || (frag & 0x1FFF)) {
+        reassemble4(iface, p, hl, data, dlen);
+        return;
+    }
+    Endpoint src = ep4(get32(p + 12)), to = ep4(dst);
     switch (p[9]) {
     case PROTO_ICMP: icmp_input(iface, p, total, data, dlen); break;
-    case PROTO_UDP: udp_input(iface, p, data, dlen); break;
-    case PROTO_TCP: tcp_input(iface, p, data, dlen); break;
+    case PROTO_UDP: udp_input(iface, p, total, src, to, data, dlen); break;
+    case PROTO_TCP: tcp_input(iface, src, to, data, dlen); break;
     default: break;
     }
+}
+
+// Collect an IPv4 fragment; once the datagram is whole, rebuild it as one
+// unfragmented packet (20-byte header) and process it again.
+void reassemble4(Interface* iface, const u8* p, usize hl, const u8* data, usize dlen) {
+    u16 frag = get16(p + 6);
+    FragKey key{};
+    key.v6 = false;
+    memcpy(key.src, p + 12, 4);
+    memcpy(key.dst, p + 16, 4);
+    key.id = get16(p + 4);
+    key.proto = p[9];
+    usize total;
+    u8* payload = frag_add(key, (frag & 0x1FFFu) * 8u, frag & 0x2000, data, dlen, &total);
+    if (!payload)
+        return;
+    u8* whole = static_cast<u8*>(kmalloc(20 + total));
+    if (whole) {
+        memcpy(whole, p, 20);
+        whole[0] = 0x45;
+        put16(whole + 2, static_cast<u16>(20 + total));
+        put16(whole + 6, 0);
+        put16(whole + 10, 0);
+        put16(whole + 10, checksum_finish(checksum_add(0, whole, 20)));
+        memcpy(whole + 20, payload, total);
+        if (20 + total <= 0xFFFF)
+            ip_input(iface, whole, 20 + total);
+        kfree(whole);
+    }
+    kfree(payload);
+    (void)hl;
 }
 
 void timer_thread(void*) {
@@ -256,6 +269,8 @@ void timer_thread(void*) {
         u64 now = clock::now_ms();
         LockGuard guard(g_lock);
         tcp_timer(now);
+        ipv6_timer(now);
+        frag_timer(now);
         for (auto& e : g_arp) {
             if (!e.ip || e.resolved || !e.iface)
                 continue;
@@ -276,6 +291,29 @@ void timer_thread(void*) {
 void loopback_thread(void*) { g_loopback->run(); }
 
 } // namespace
+
+void eth_send(Interface* iface, const u8* dst_mac, u16 type, const u8* payload, usize len) {
+    u8 frame[MAX_FRAME];
+    if (len > MAX_FRAME - 14)
+        return;
+    memcpy(frame, dst_mac, 6);
+    memcpy(frame + 6, iface->mac, 6);
+    put16(frame + 12, type);
+    memcpy(frame + 14, payload, len);
+    usize total = 14 + len;
+    if (total < 60) { // minimum Ethernet frame
+        memset(frame + total, 0, 60 - total);
+        total = 60;
+    }
+    if (iface->transmit(frame, total) == 0) {
+        iface->tx_packets++;
+        iface->tx_bytes += total;
+    } else {
+        iface->tx_errors++;
+    }
+}
+
+Interface* loopback_interface() { return g_loopback; }
 
 // ---- checksums ----
 
@@ -370,54 +408,35 @@ void receive(Interface* iface, const u8* frame, usize len) {
     LockGuard guard(g_lock);
     if (type == ETH_IPV4)
         ip_input(iface, frame + 14, len - 14);
+    else if (type == ETH_IPV6)
+        ip6_input(iface, frame + 14, len - 14);
     else if (type == ETH_ARP && iface != g_loopback)
         arp_input(iface, frame + 14, len - 14);
 }
 
-long ip_send(u32 src, u32 dst, u8 proto, const u8* payload, usize len, u8 ttl) {
-    u32 hop;
-    Interface* f = route(dst, &hop);
-    if (!f)
-        return -101; // ENETUNREACH
-    if (len + 20 > f->mtu || len + 20 > MAX_FRAME - 14)
-        return -90; // EMSGSIZE
-    u8 packet[MAX_FRAME];
-    u8* h = packet;
-    h[0] = 0x45;
-    h[1] = 0;
-    put16(h + 2, static_cast<u16>(20 + len));
-    put16(h + 4, g_ip_id++);
-    put16(h + 6, 0x4000); // don't fragment
-    h[8] = ttl;
-    h[9] = proto;
-    put16(h + 10, 0);
-    if (!src)
-        src = f == g_loopback ? ((dst >> 24) == 127 ? LOOPBACK_ADDR : dst) : f->addr;
-    put32(h + 12, src);
-    put32(h + 16, dst);
-    put16(h + 10, checksum_finish(checksum_add(0, h, 20)));
-    memcpy(packet + 20, payload, len);
-    usize total = 20 + len;
+namespace {
 
+// Send one finished IPv4 packet towards `hop` on `f` (lock held).
+void ip_transmit(Interface* f, u32 hop, u32 dst, const u8* packet, usize total) {
     if (f == g_loopback) {
         eth_send(f, zero_mac, ETH_IPV4, packet, total);
-        return 0;
+        return;
     }
     if (dst == 0xFFFFFFFF || (f->netmask && dst == (f->addr | ~f->netmask))) {
         static const u8 broadcast[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
         eth_send(f, broadcast, ETH_IPV4, packet, total);
-        return 0;
+        return;
     }
     ArpEntry* e = arp_find(hop);
     if (e && e->resolved) {
         eth_send(f, e->mac, ETH_IPV4, packet, total);
-        return 0;
+        return;
     }
     // Unknown next hop: queue the packet and ask who has it.
     e = arp_slot(hop);
     e->ip = hop;
     e->iface = f;
-    if (e->pending_count < 4) {
+    if (e->pending_count < 16) {
         u8* copy = static_cast<u8*>(kmalloc(total));
         if (copy) {
             memcpy(copy, packet, total);
@@ -432,7 +451,91 @@ long ip_send(u32 src, u32 dst, u8 proto, const u8* payload, usize len, u8 ttl) {
         e->requests++;
         arp_send(f, 1, nullptr, hop);
     }
+}
+
+} // namespace
+
+long ip_send(u32 src, u32 dst, u8 proto, const u8* payload, usize len, u8 ttl) {
+    u32 hop;
+    Interface* f = route(dst, &hop);
+    if (!f)
+        return -101; // ENETUNREACH
+    if (len + 20 > MAX_IP_PAYLOAD)
+        return -90; // EMSGSIZE
+    if (!src)
+        src = f == g_loopback ? ((dst >> 24) == 127 ? LOOPBACK_ADDR : dst) : f->addr;
+    usize mtu = min<usize>(f->mtu, MAX_FRAME - 14);
+    // Packets that fit go out whole with DF set (path MTU discovery style);
+    // bigger ones are cut into fragments of a multiple of 8 bytes.
+    bool fragment = len + 20 > mtu;
+    usize chunk = fragment ? ((mtu - 20) & ~usize(7)) : len;
+    u16 id = g_ip_id++;
+    u8 packet[MAX_FRAME];
+    usize off = 0;
+    do {
+        usize n = min(chunk, len - off);
+        bool more = off + n < len;
+        u8* h = packet;
+        h[0] = 0x45;
+        h[1] = 0;
+        put16(h + 2, static_cast<u16>(20 + n));
+        put16(h + 4, id);
+        put16(h + 6, fragment ? static_cast<u16>((more ? 0x2000 : 0) | (off / 8)) : 0x4000);
+        h[8] = ttl;
+        h[9] = proto;
+        put16(h + 10, 0);
+        put32(h + 12, src);
+        put32(h + 16, dst);
+        put16(h + 10, checksum_finish(checksum_add(0, h, 20)));
+        memcpy(packet + 20, payload + off, n);
+        ip_transmit(f, hop, dst, packet, 20 + n);
+        off += n;
+    } while (off < len);
     return 0;
+}
+
+// ---- family-neutral helpers for TCP/UDP ----
+
+u16 pseudo_checksum6(const u8* src, const u8* dst, u8 proto, const u8* segment, usize len) {
+    u8 pseudo[40];
+    memcpy(pseudo, src, 16);
+    memcpy(pseudo + 16, dst, 16);
+    put32(pseudo + 32, static_cast<u32>(len));
+    pseudo[36] = pseudo[37] = pseudo[38] = 0;
+    pseudo[39] = proto;
+    return checksum_finish(checksum_add(checksum_add(0, pseudo, 40), segment, len));
+}
+
+u16 l4_checksum(const Endpoint& src, const Endpoint& dst, u8 proto, const u8* segment, usize len) {
+    if (dst.v6)
+        return pseudo_checksum6(src.addr6, dst.addr6, proto, segment, len);
+    return pseudo_checksum(src.addr, dst.addr, proto, segment, len);
+}
+
+long ip_output(const Endpoint& src, const Endpoint& dst, u8 proto, const u8* seg, usize len) {
+    if (dst.v6)
+        return ip6_send(src.any() ? nullptr : src.addr6, dst.addr6, dst.scope, proto, seg, len);
+    return ip_send(src.addr, dst.addr, proto, seg, len);
+}
+
+bool source_endpoint(const Endpoint& dst, Endpoint* src) {
+    *src = Endpoint{};
+    if (dst.v6) {
+        src->v6 = true;
+        src->scope = dst.scope;
+        return source6_for(dst.addr6, dst.scope, src->addr6);
+    }
+    src->addr = source_for(dst.addr);
+    return src->addr != 0 || dst.addr == 0xFFFFFFFF;
+}
+
+bool is_local_endpoint(const Endpoint& e) {
+    return e.v6 ? is_local_address6(e.addr6) : is_local_address(e.addr);
+}
+
+u32 path_mss(const Endpoint& dst) {
+    // Every interface (loopback included) is limited to 1500-byte packets by our frame buffers.
+    return dst.v6 ? 1500 - 60 : 1500 - 40;
 }
 
 void init() {
@@ -444,6 +547,11 @@ void init() {
 void start(u64 dhcp_wait_ms) {
     sched::spawn("net-timer", timer_thread, nullptr, -1, true);
     sched::spawn("net-loopback", loopback_thread, nullptr, -1, true);
+    {
+        LockGuard guard(g_lock);
+        for (u32 i = 0; i < g_iface_count; i++)
+            ipv6_init_interface(g_ifaces[i]); // ::1, link-local addresses, router solicitation
+    }
     bool any = false;
     for (u32 i = 0; i < g_iface_count; i++) {
         if (g_ifaces[i] != g_loopback) {

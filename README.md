@@ -89,11 +89,19 @@ tools/smoke-test.sh   headless QEMU boot: serial log + screenshot
             listen/accept, half-close), loopback, kernel DHCP client, /etc/resolv.conf, BSD socket
             API (glibc DNS, wget, ping, httpd, nc work), ifconfig/route ioctls, /proc/net/*,
             alarm/setitimer
-      - [ ] 6b: Realtek r8169 (most desktop boards), IPv6, AF_UNIX sockets, netlink (ip command),
-            TCP window scaling/SACK, IP fragment reassembly
+      - [x] 6b: AF_UNIX sockets (stream/dgram/seqpacket, fd passing, credentials), rtnetlink
+            (busybox ip, getifaddrs), IPv6 (SLAAC, neighbour discovery, ICMPv6, TCP/UDP, v4-mapped),
+            IP fragmentation both ways, TCP window scaling + NewReno + out-of-order queue
+            (50 MiB in 0.74 s), Realtek r8169/r8168 driver (untested on hardware)
+      - [ ] later: epoll, SACK, DHCPv6, ACPI _PRT legacy interrupt routing
 - [ ] **Phase 7**: Linux driver compatibility layer (LinuxKPI) + **Wi-Fi** for many chips: Intel
       (iwlwifi), Qualcomm/Atheros (ath9k/10k/11k/12k), MediaTek (mt76), Realtek (rtw88/rtw89),
       Broadcom (brcmfmac); mac80211/cfg80211, WPA2/WPA3 via wpa_supplicant/iwd, linux-firmware
+      - [x] 7a: LinuxKPI core (memory, locks, wait queues, timers, workqueues, PCI, MSI, DMA,
+            firmware loading); edu test driver 9/9
+      - [x] 7b: networking layer (net_device, sk_buff, NAPI, MII, ethtool); Linux's own 8139too
+            and 8139cp drivers compiled unmodified, 8139cp runs QEMU's RTL8139 (DHCP, ping, wget)
+      - [ ] 7c: USB in LinuxKPI, cfg80211/mac80211, then Wi-Fi drivers (need real hardware to test)
 - [ ] **Phase 8**: **audio**: ALSA-compatible kernel interface (so libasound, PipeWire and
       PulseAudio apps work), drivers for Intel HD Audio, USB audio, virtio-sound; volume control
 - [ ] **Phase 9**: Wayland compositor, GUI toolkit, Windows-style desktop (taskbar, start menu).
@@ -184,10 +192,10 @@ Legend: ✅ done · 🟡 partly done · ⬜ to do
 - ✅ Disk cache (4 KiB blocks, write-back every 5 s and on sync), MBR + GPT partitions
 
 **Networking**
-- 🟡 TCP/IP stack: Ethernet, ARP, IPv4, ICMP, UDP, TCP, DHCP done (ping google.com, wget, inbound
-     HTTP verified); IPv6 to do. Drivers: e1000/e1000e, virtio-net; Realtek r8169 to do
-- 🟡 Sockets API: AF_INET (TCP, UDP, ICMP) done; AF_UNIX (needed by the desktop) to do
-- ⬜ Netlink (network tools, Wi-Fi configuration)
+- ✅ TCP/IP stack: Ethernet, ARP, IPv4 + IPv6, ICMP, UDP, TCP (window scaling), DHCP, SLAAC,
+     fragments. Drivers: e1000/e1000e, virtio-net, RTL8139 (Linux 8139cp), r8169 (untested)
+- 🟡 Sockets API: AF_INET/AF_INET6, AF_UNIX (fd passing), AF_NETLINK done; epoll to do
+- 🟡 Netlink: rtnetlink done (ip, getifaddrs); nl80211 (Wi-Fi) to do
 
 **Linux compatibility**
 - ✅ ELF loader, dynamic linking, Debian userland running unmodified
@@ -220,4 +228,4 @@ Legend: ✅ done · 🟡 partly done · ⬜ to do
 - ⬜ Power management: sleep, battery, CPU frequency scaling
 - ⬜ Updates and recovery
 
-Tally: 21 done · 9 partly done · 34 to do.
+Tally: 22 done · 9 partly done · 33 to do.
