@@ -2,3 +2,4 @@ build/
 deps/
 compile_commands.json
 .idea/workspace.xml
+.claude/worktrees/

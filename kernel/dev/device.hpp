@@ -65,6 +65,12 @@ struct Driver {
     bool (*match)(const Device* d);
     long (*probe)(Device* d); // 0 = success, negative errno = failure
     ListNode node;
+    // Optional variants that also receive the driver, for code that registers
+    // many drivers through one implementation (the Linux driver layer).
+    // Used instead of match/probe when set.
+    bool (*match_ex)(const Driver* drv, const Device* d) = nullptr;
+    long (*probe_ex)(const Driver* drv, Device* d) = nullptr;
+    void* ctx = nullptr;
 };
 
 Device* add(Device* d);

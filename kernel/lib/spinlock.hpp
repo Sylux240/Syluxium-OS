@@ -75,6 +75,20 @@ public:
         }
     }
 
+    bool try_lock() {
+        bool was_enabled = arch::interrupts_enabled();
+        arch::cli();
+        cpu_local::preempt_disable();
+        if (m_lock.try_lock()) {
+            m_restore_interrupts = was_enabled;
+            return true;
+        }
+        cpu_local::preempt_dec();
+        if (was_enabled)
+            arch::sti();
+        return false;
+    }
+
     // Used by panic(): forget whoever held the lock so we can still print.
     void force_unlock() { m_lock.unlock(); }
 

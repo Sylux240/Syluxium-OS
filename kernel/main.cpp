@@ -17,6 +17,7 @@
 #include <drivers/input/input.hpp>
 #include <drivers/ps2kbd.hpp>
 #include <drivers/usb/usb.hpp>
+#include <linuxkpi/linuxkpi.hpp>
 #include <net/net.hpp>
 #include <drivers/storage/storage.hpp>
 #include <drivers/sound/sound_drivers.hpp>
@@ -133,6 +134,7 @@ void discover_hardware() {
     virtio_net::register_driver();
     sound::init(); // phase 8: ALSA-compatible sound core
     hda::register_driver();
+    linuxkpi::init(); // Linux drivers register themselves (module_init) here
     pci::init();
     dev::register_platform_devices(g_keyboard);
     dev::probe_all();
