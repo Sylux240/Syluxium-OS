@@ -10,7 +10,7 @@ cat > /tmp/syluxium-test.html <<'HTML'
 <p>This page was rendered by Firefox ESR on the Syluxium kernel.</p></body></html>
 HTML
 chmod 644 /tmp/syluxium-test.html
-su syluxium -s /bin/sh -c "cd; export HOME=/home/syluxium DISPLAY=:0 XDG_RUNTIME_DIR=/run/user/1000 MOZ_DISABLE_CONTENT_SANDBOX=1 MOZ_DISABLE_GMP_SANDBOX=1 MOZ_DISABLE_RDD_SANDBOX=1 MOZ_DISABLE_SOCKET_PROCESS_SANDBOX=1 MOZ_CRASHREPORTER_DISABLE=1; dbus-run-session -- firefox-esr --no-remote file:///tmp/syluxium-test.html > /tmp/ff.log 2>&1 &"
+su syluxium -s /bin/sh -c "FFURL=$FFURL; cd; export HOME=/home/syluxium DISPLAY=:0 XDG_RUNTIME_DIR=/run/user/1000 MOZ_DISABLE_CONTENT_SANDBOX=1 MOZ_DISABLE_GMP_SANDBOX=1 MOZ_DISABLE_RDD_SANDBOX=1 MOZ_DISABLE_SOCKET_PROCESS_SANDBOX=1 MOZ_CRASHREPORTER_DISABLE=1; dbus-run-session -- firefox-esr --no-remote ${FFURL:-file:///tmp/syluxium-test.html} > /tmp/ff.log 2>&1 &"
 sleep "${1:-45}"
 { echo "=== firefox processes:"; ps -A -o pid,user,args | grep -i [f]irefox | cut -c1-100; echo "=== where firefox processes wait:"
     for pid in $(ps -A -o pid,args | grep "[c]ontentproc -isForBrowser" | awk '{print $1}' | head -2); do
