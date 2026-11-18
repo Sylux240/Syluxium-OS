@@ -184,13 +184,25 @@ long do_openat(long dirfd, u64 user_path, u32 flags, u32 mode) {
         usize len;
         if ((r = resolve_parent(path.c_str(), base, &parent, &name, &len)) < 0)
             return r;
+        if ((r = proc::permission(parent, proc::MAY_WRITE | proc::MAY_EXEC)) < 0)
+            return r;
         if ((r = parent->create(name, len, S_IFREG | (mode & ~p->umask & 07777), nullptr, &inode)) < 0)
             return r;
+        proc::init_owner(parent, inode);
         inotify::child_event(parent, inotify::IN_CREATE, name, len);
     } else if (r < 0) {
         return r;
     } else if ((flags & O_CREAT) && (flags & O_EXCL)) {
         return -err::EXIST;
+    } else if (!(flags & O_PATH)) { // an existing file: may we open it this way?
+        int want = 0;
+        u32 acc = flags & O_ACCMODE;
+        if (acc == O_RDONLY || acc == O_RDWR)
+            want |= proc::MAY_READ;
+        if (acc == O_WRONLY || acc == O_RDWR || (flags & O_TRUNC))
+            want |= proc::MAY_WRITE;
+        if (long e = proc::permission(inode, want); e < 0)
+            return e;
     }
 
     if ((flags & O_DIRECTORY) && !is_dir(inode->mode))
@@ -383,7 +395,9 @@ long sys_access(SYSCALL_ARGS) {
     if (path.error())
         return path.error();
     Inode* n;
-    return resolve(path.c_str(), proc::current()->cwd, true, &n); // root may do anything
+    if (long r = resolve(path.c_str(), proc::current()->cwd, true, &n); r < 0)
+        return r;
+    return a1 ? proc::permission(n, static_cast<int>(a1 & 7), true) : 0; // checked with the real ids
 }
 
 long sys_faccessat(SYSCALL_ARGS) {
@@ -396,7 +410,10 @@ long sys_faccessat(SYSCALL_ARGS) {
     if (long r = dir_for(p, static_cast<i32>(a0), path.c_str(), &base); r < 0)
         return r;
     Inode* n;
-    return resolve(path.c_str(), base, true, &n);
+    if (long r = resolve(path.c_str(), base, !(a3 & AT_SYMLINK_NOFOLLOW), &n); r < 0)
+        return r;
+    constexpr u64 AT_EACCESS = 0x200;
+    return a2 ? proc::permission(n, static_cast<int>(a2 & 7), !(a3 & AT_EACCESS)) : 0;
 }
 
 long sys_dup(SYSCALL_ARGS) {
@@ -532,6 +549,8 @@ long sys_chdir(SYSCALL_ARGS) {
         return r;
     if (!is_dir(n->mode))
         return -err::NOTDIR;
+    if (long r = proc::permission(n, proc::MAY_EXEC); r < 0)
+        return r;
     char abs[512];
     join_path(p->cwd_path, path.c_str(), abs, sizeof(abs));
     p->cwd = n;
@@ -552,9 +571,17 @@ long do_mkdirat(long dirfd, u64 user_path, u32 mode) {
     usize len;
     if (long r = resolve_parent(path.c_str(), base, &parent, &name, &len); r < 0)
         return r;
-    long r = parent->create(name, len, S_IFDIR | (mode & ~p->umask & 07777), nullptr, nullptr);
-    if (r == 0)
+    if (long r = proc::permission(parent, proc::MAY_WRITE | proc::MAY_EXEC); r < 0)
+        return r;
+    Inode* made = nullptr;
+    long r = parent->create(name, len, S_IFDIR | (mode & ~p->umask & 07777), nullptr, &made);
+    if (r == 0) {
+        if (!made)
+            made = parent->lookup(name, len);
+        if (made)
+            proc::init_owner(parent, made);
         inotify::child_event(parent, inotify::IN_CREATE | inotify::IN_ISDIR, name, len);
+    }
     return r;
 }
 
@@ -577,6 +604,8 @@ long do_unlinkat(long dirfd, u64 user_path, bool dir) {
     // Files report IN_DELETE_SELF when they're really destroyed (last link
     // and last user gone: inotify::inode_gone from the destructor); `victim`
     // may already be freed after unlink, so it's only used for directories.
+    if (long r = proc::may_delete(parent, parent->lookup(name, len)); r < 0)
+        return r;
     Inode* victim = (inotify::active() && dir) ? parent->lookup(name, len) : nullptr;
     long r = parent->unlink(name, len, dir);
     if (r == 0) {
@@ -605,9 +634,17 @@ long do_symlinkat(u64 user_target, long dirfd, u64 user_path) {
     usize len;
     if (long r = resolve_parent(path.c_str(), base, &parent, &name, &len); r < 0)
         return r;
-    long r = parent->create(name, len, S_IFLNK | 0777, target.c_str(), nullptr);
-    if (r == 0)
+    if (long r = proc::permission(parent, proc::MAY_WRITE | proc::MAY_EXEC); r < 0)
+        return r;
+    Inode* made = nullptr;
+    long r = parent->create(name, len, S_IFLNK | 0777, target.c_str(), &made);
+    if (r == 0) {
+        if (!made)
+            made = parent->lookup(name, len);
+        if (made)
+            proc::init_owner(parent, made);
         inotify::child_event(parent, inotify::IN_CREATE, name, len);
+    }
     return r;
 }
 
@@ -631,6 +668,11 @@ long do_linkat(long olddirfd, u64 old_user, long newdirfd, u64 new_user, u32 fla
     usize len;
     if (long r = resolve_parent(newp.c_str(), nbase, &dir, &name, &len); r < 0)
         return r;
+    if (long r = proc::permission(dir, proc::MAY_WRITE | proc::MAY_EXEC); r < 0)
+        return r;
+    // protected_hardlinks: only to files we own or could read and write.
+    if (!proc::owns(target) && proc::permission(target, proc::MAY_READ | proc::MAY_WRITE) < 0)
+        return -err::PERM;
     if (!dir->is_ramfs_dir() || !target->shared_mappable())
         return -err::XDEV; // hard links exist only within tmpfs for now
     if (dir->lookup(name, len))
@@ -751,6 +793,8 @@ long sys_truncate(SYSCALL_ARGS) {
         return path.error();
     Inode* n;
     if (long r = resolve(path.c_str(), proc::current()->cwd, true, &n); r < 0)
+        return r;
+    if (long r = proc::permission(n, proc::MAY_WRITE); r < 0)
         return r;
     long r = n->truncate(a1);
     if (r == 0)
@@ -1052,9 +1096,76 @@ long sys_sendfile(SYSCALL_ARGS) {
 // ---- permissions ----
 
 long chmod_inode(Inode* n, u64 mode) {
-    n->mode = (n->mode & S_IFMT) | (static_cast<u32>(mode) & 07777);
-    n->ctime = vfs::now();
-    return 0;
+    if (!proc::owns(n))
+        return -err::PERM;
+    u32 m = static_cast<u32>(mode) & 07777;
+    if (proc::cred().fsuid != 0 && !proc::in_group(n->gid))
+        m &= ~S_ISGID; // can't make a file setgid to a group we're not in
+    long r = n->set_owner(m, n->uid, n->gid);
+    if (r == 0)
+        inotify::self_event(n, inotify::IN_ATTRIB);
+    return r;
+}
+
+// chown: only root gives files away; an owner may change the group to one
+// of their own groups. -1 leaves an id alone. Changing ownership clears
+// setuid (and group-executable setgid) bits, as on Linux.
+long chown_inode(Inode* n, u32 uid, u32 gid) {
+    const proc::Cred& c = proc::cred();
+    u32 new_uid = uid == 0xFFFFFFFF ? n->uid : uid;
+    u32 new_gid = gid == 0xFFFFFFFF ? n->gid : gid;
+    if (c.euid != 0) {
+        if (new_uid != n->uid || c.fsuid != n->uid)
+            return -err::PERM;
+        if (new_gid != n->gid && !proc::in_group(new_gid))
+            return -err::PERM;
+    }
+    u32 mode = n->mode & 07777;
+    if (is_reg(n->mode) && (uid != 0xFFFFFFFF || gid != 0xFFFFFFFF)) {
+        mode &= ~S_ISUID;
+        if (mode & 0010)
+            mode &= ~S_ISGID;
+    }
+    long r = n->set_owner(mode, new_uid, new_gid);
+    if (r == 0)
+        inotify::self_event(n, inotify::IN_ATTRIB);
+    return r;
+}
+
+long do_fchownat(long dirfd, u64 user_path, u32 uid, u32 gid, u32 flags) {
+    Process* p = proc::current();
+    Inode* n;
+    UserPath path(user_path);
+    if (path.error())
+        return path.error();
+    if (path.c_str()[0] == 0 && (flags & AT_EMPTY_PATH)) {
+        FileRef f(p, dirfd);
+        if (!f)
+            return -err::BADF;
+        n = f->inode;
+    } else {
+        Inode* base;
+        if (long r = dir_for(p, dirfd, path.c_str(), &base); r < 0)
+            return r;
+        if (long r = resolve(path.c_str(), base, !(flags & AT_SYMLINK_NOFOLLOW), &n); r < 0)
+            return r;
+    }
+    return chown_inode(n, uid, gid);
+}
+
+long sys_chown(SYSCALL_ARGS) { SYSCALL_UNUSED; return do_fchownat(AT_FDCWD, a0, static_cast<u32>(a1), static_cast<u32>(a2), 0); }
+long sys_lchown(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    return do_fchownat(AT_FDCWD, a0, static_cast<u32>(a1), static_cast<u32>(a2), AT_SYMLINK_NOFOLLOW);
+}
+long sys_fchownat(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    return do_fchownat(static_cast<i32>(a0), a1, static_cast<u32>(a2), static_cast<u32>(a3), static_cast<u32>(a4));
+}
+long sys_fchown(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    FileRef f(proc::current(), static_cast<long>(a0));
+    return f ? chown_inode(f->inode, static_cast<u32>(a1), static_cast<u32>(a2)) : -err::BADF;
 }
 
 long sys_chmod(SYSCALL_ARGS) {
@@ -1159,13 +1270,19 @@ long do_utimensat(long dirfd, u64 user_path, u64 user_times, u32 flags) {
         inode = f->inode;
     }
     Timespec now = vfs::now(), access = now, modify = now;
+    bool explicit_times = false;
     if (user_times) {
         struct { i64 sec, nsec; } ts[2];
         if (long r = uaccess::copy_from(ts, reinterpret_cast<void*>(user_times), sizeof(ts)); r < 0)
             return r;
         access = ts[0].nsec == UTIME_NOW ? now : ts[0].nsec == UTIME_OMIT ? inode->atime : Timespec{ts[0].sec, ts[0].nsec};
         modify = ts[1].nsec == UTIME_NOW ? now : ts[1].nsec == UTIME_OMIT ? inode->mtime : Timespec{ts[1].sec, ts[1].nsec};
+        explicit_times = (ts[0].nsec != UTIME_NOW && ts[0].nsec != UTIME_OMIT) ||
+                         (ts[1].nsec != UTIME_NOW && ts[1].nsec != UTIME_OMIT);
     }
+    // Setting "now" needs write access; setting other times needs ownership.
+    if (!proc::owns(inode) && (explicit_times || proc::permission(inode, proc::MAY_WRITE) < 0))
+        return explicit_times ? -err::PERM : -err::ACCES;
     long r = inode->set_times(access, modify);
     if (r == 0)
         inotify::self_event(inode, inotify::IN_ATTRIB);
@@ -1190,6 +1307,8 @@ long sys_utimes(SYSCALL_ARGS) { // utimes(path, timeval[2])
     Inode* inode;
     if (long r = resolve(path.c_str(), proc::current()->cwd, true, &inode); r < 0)
         return r;
+    if (!proc::owns(inode))
+        return -err::PERM;
     return inode->set_times(Timespec{tv[0].sec, tv[0].usec * 1000}, Timespec{tv[1].sec, tv[1].usec * 1000});
 }
 
@@ -1211,8 +1330,13 @@ long do_renameat(long olddirfd, u64 old_user, long newdirfd, u64 new_user, u32 f
     usize olen, nlen;
     if (long r = resolve_parent(oldp.c_str(), obase, &odir, &oname, &olen); r < 0) return r;
     if (long r = resolve_parent(newp.c_str(), nbase, &ndir, &nname, &nlen); r < 0) return r;
-    if ((flags & RENAME_NOREPLACE) && ndir->lookup(nname, nlen))
+    Inode* existing = ndir->lookup(nname, nlen);
+    if ((flags & RENAME_NOREPLACE) && existing)
         return -err::EXIST;
+    if (long r = proc::may_delete(odir, odir->lookup(oname, olen)); r < 0)
+        return r;
+    if (long r = existing ? proc::may_delete(ndir, existing) : proc::permission(ndir, proc::MAY_WRITE | proc::MAY_EXEC); r < 0)
+        return r;
     Inode* moved = inotify::active() ? odir->lookup(oname, olen) : nullptr;
     long r = odir->rename(oname, olen, ndir, nname, nlen);
     if (r == 0 && moved) {
@@ -1242,6 +1366,8 @@ long sys_sync(SYSCALL_ARGS) {
 
 long sys_mount(SYSCALL_ARGS) {
     SYSCALL_UNUSED;
+    if (!proc::capable())
+        return -err::PERM;
     UserPath source(a0), target(a1), type(a2);
     if (target.error()) return target.error();
     if (type.error()) return type.error();
@@ -1308,6 +1434,8 @@ long sys_mount(SYSCALL_ARGS) {
 
 long sys_umount2(SYSCALL_ARGS) {
     SYSCALL_UNUSED;
+    if (!proc::capable())
+        return -err::PERM;
     UserPath target(a0);
     if (target.error())
         return target.error();
@@ -1390,15 +1518,15 @@ void register_file() {
     set(271, sys_ppoll, "ppoll");
     set(90, sys_chmod, "chmod");
     set(91, sys_fchmod, "fchmod");
-    set(92, sys_ok, "chown");
-    set(93, sys_ok, "fchown");
-    set(94, sys_ok, "lchown");
+    set(92, sys_chown, "chown");
+    set(93, sys_fchown, "fchown");
+    set(94, sys_lchown, "lchown");
     set(95, sys_umask, "umask");
     set(162, sys_sync, "sync");
     set(217, sys_getdents64, "getdents64");
     set(257, sys_openat, "openat");
     set(258, sys_mkdirat, "mkdirat");
-    set(260, sys_ok, "fchownat");
+    set(260, sys_fchownat, "fchownat");
     set(262, sys_newfstatat, "newfstatat");
     set(263, sys_unlinkat, "unlinkat");
     set(266, sys_symlinkat, "symlinkat");

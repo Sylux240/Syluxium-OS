@@ -256,7 +256,7 @@ ROOTDISK_IMG := $(BUILD)/syluxium-root.img
 rootdisk: $(INITRAMFS)
 	@rm -f $(ROOTDISK_IMG).tmp
 	@truncate -s $$(( ($$(du -sm $(ROOTFS) | cut -f1) * 2 + 512) ))M $(ROOTDISK_IMG).tmp
-	@mke2fs -q -t ext4 -b 4096 -L SYLUXROOT -E root_owner=0:0 -d $(ROOTFS) $(ROOTDISK_IMG).tmp
+	@fakeroot mke2fs -q -t ext4 -b 4096 -L SYLUXROOT -d $(ROOTFS) $(ROOTDISK_IMG).tmp  # fakeroot: files owned by root, not the builder
 	@mv $(ROOTDISK_IMG).tmp $(ROOTDISK_IMG)
 	@echo "  ROOTDISK $(ROOTDISK_IMG)"
 

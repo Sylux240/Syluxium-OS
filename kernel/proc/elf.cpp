@@ -298,7 +298,7 @@ long load_interpreter(proc::Memory* mem, const char* path, const Layout& layout,
 
 // `img` (already read) is reused as scratch space for the interpreter's headers.
 long load_image(proc::Memory* mem, vfs::Inode* file, const char* exec_path, const char* const* argv,
-                const char* const* envp, Image* img, LoadResult* out) {
+                const char* const* envp, Image* img, LoadResult* out, const ExecIds& ids) {
     const Layout& layout = img->is32 ? LAYOUT32 : LAYOUT64;
     if (layout.is32)
         mem->set_compat(); // before anything is mapped: mmap() must stay below 4 GiB
@@ -377,8 +377,8 @@ long load_image(proc::Memory* mem, vfs::Inode* file, const char* exec_path, cons
         {AT_BASE, interp_base},
         {AT_FLAGS, 0},
         {AT_ENTRY, prog_entry},
-        {AT_UID, 0}, {AT_EUID, 0}, {AT_GID, 0}, {AT_EGID, 0},
-        {AT_SECURE, 0},
+        {AT_UID, ids.uid}, {AT_EUID, ids.euid}, {AT_GID, ids.gid}, {AT_EGID, ids.egid},
+        {AT_SECURE, ids.secure ? 1u : 0u},
         {AT_HWCAP, arch::cpuid(1).edx},
         {AT_HWCAP2, 0},
         {AT_CLKTCK, 100},
@@ -435,14 +435,14 @@ long load_image(proc::Memory* mem, vfs::Inode* file, const char* exec_path, cons
 } // namespace
 
 long load(proc::Memory* mem, vfs::Inode* file, const char* exec_path, const char* const* argv,
-          const char* const* envp, LoadResult* out) {
+          const char* const* envp, LoadResult* out, const ExecIds& ids) {
     // Header buffers are large (64 program headers): keep them off the kernel stack.
     auto* img = static_cast<Image*>(kmalloc(sizeof(Image)));
     if (!img)
         return -err::NOMEM;
     long r = read_headers(file, img);
     if (r == 0)
-        r = load_image(mem, file, exec_path, argv, envp, img, out);
+        r = load_image(mem, file, exec_path, argv, envp, img, out, ids);
     kfree(img);
     return r;
 }

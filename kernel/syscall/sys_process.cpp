@@ -45,8 +45,166 @@ long sys_getppid(SYSCALL_ARGS) {
     return parent ? parent->pid : 1; // orphans belong to "init", as on Linux
 }
 long sys_gettid(SYSCALL_ARGS) { SYSCALL_UNUSED; return sched::current()->user_tid; }
-long sys_getid(SYSCALL_ARGS) { SYSCALL_UNUSED; return 0; } // uid/gid/euid/egid: root
-long sys_setid(SYSCALL_ARGS) { SYSCALL_UNUSED; return 0; }
+// ---- user and group ids (POSIX/Linux rules; privileged = effective uid 0) ----
+
+namespace {
+
+proc::Cred& my_cred() { return proc::current()->cred; }
+constexpr u32 KEEP = 0xFFFFFFFF; // -1: leave this id alone
+
+bool one_of(u32 v, u32 a, u32 b, u32 c) { return v == a || v == b || v == c; }
+
+// setresuid/setresgid core: unprivileged callers may only shuffle their own ids.
+long set_res(u32* real, u32* eff, u32* saved, u32* fs, u32 r, u32 e, u32 sv, bool privileged) {
+    if (!privileged) {
+        if ((r != KEEP && !one_of(r, *real, *eff, *saved)) || (e != KEEP && !one_of(e, *real, *eff, *saved)) ||
+            (sv != KEEP && !one_of(sv, *real, *eff, *saved)))
+            return -err::PERM;
+    }
+    if (r != KEEP) *real = r;
+    if (e != KEEP) *eff = e;
+    if (sv != KEEP) *saved = sv;
+    *fs = *eff;
+    return 0;
+}
+
+} // namespace
+
+long sys_getuid(SYSCALL_ARGS) { SYSCALL_UNUSED; return my_cred().ruid; }
+long sys_geteuid(SYSCALL_ARGS) { SYSCALL_UNUSED; return my_cred().euid; }
+long sys_getgid(SYSCALL_ARGS) { SYSCALL_UNUSED; return my_cred().rgid; }
+long sys_getegid(SYSCALL_ARGS) { SYSCALL_UNUSED; return my_cred().egid; }
+
+long sys_setuid(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    proc::Cred& c = my_cred();
+    u32 uid = static_cast<u32>(a0);
+    if (c.euid == 0) {
+        c.ruid = c.euid = c.suid = c.fsuid = uid;
+        return 0;
+    }
+    if (uid != c.ruid && uid != c.suid)
+        return -err::PERM;
+    c.euid = c.fsuid = uid;
+    return 0;
+}
+
+long sys_setgid(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    proc::Cred& c = my_cred();
+    u32 gid = static_cast<u32>(a0);
+    if (c.euid == 0) {
+        c.rgid = c.egid = c.sgid = c.fsgid = gid;
+        return 0;
+    }
+    if (gid != c.rgid && gid != c.sgid)
+        return -err::PERM;
+    c.egid = c.fsgid = gid;
+    return 0;
+}
+
+long sys_setreuid(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    proc::Cred& c = my_cred();
+    u32 r = static_cast<u32>(a0), e = static_cast<u32>(a1);
+    if (c.euid != 0 && ((r != KEEP && r != c.ruid && r != c.euid) ||
+                        (e != KEEP && !one_of(e, c.ruid, c.euid, c.suid))))
+        return -err::PERM;
+    u32 old_ruid = c.ruid;
+    if (r != KEEP) c.ruid = r;
+    if (e != KEEP) c.euid = e;
+    if (r != KEEP || (e != KEEP && e != old_ruid))
+        c.suid = c.euid;
+    c.fsuid = c.euid;
+    return 0;
+}
+
+long sys_setregid(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    proc::Cred& c = my_cred();
+    u32 r = static_cast<u32>(a0), e = static_cast<u32>(a1);
+    if (c.euid != 0 && ((r != KEEP && r != c.rgid && r != c.egid) ||
+                        (e != KEEP && !one_of(e, c.rgid, c.egid, c.sgid))))
+        return -err::PERM;
+    u32 old_rgid = c.rgid;
+    if (r != KEEP) c.rgid = r;
+    if (e != KEEP) c.egid = e;
+    if (r != KEEP || (e != KEEP && e != old_rgid))
+        c.sgid = c.egid;
+    c.fsgid = c.egid;
+    return 0;
+}
+
+long sys_setresuid(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    proc::Cred& c = my_cred();
+    return set_res(&c.ruid, &c.euid, &c.suid, &c.fsuid, static_cast<u32>(a0), static_cast<u32>(a1),
+                   static_cast<u32>(a2), c.euid == 0);
+}
+
+long sys_setresgid(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    proc::Cred& c = my_cred();
+    return set_res(&c.rgid, &c.egid, &c.sgid, &c.fsgid, static_cast<u32>(a0), static_cast<u32>(a1),
+                   static_cast<u32>(a2), c.euid == 0);
+}
+
+long sys_setfsuid(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    proc::Cred& c = my_cred();
+    u32 old = c.fsuid, u = static_cast<u32>(a0);
+    if (c.euid == 0 || one_of(u, c.ruid, c.euid, c.suid) || u == c.fsuid)
+        c.fsuid = u;
+    return old;
+}
+
+long sys_setfsgid(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    proc::Cred& c = my_cred();
+    u32 old = c.fsgid, g = static_cast<u32>(a0);
+    if (c.euid == 0 || one_of(g, c.rgid, c.egid, c.sgid) || g == c.fsgid)
+        c.fsgid = g;
+    return old;
+}
+
+long sys_getgroups(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    proc::Cred& c = my_cred();
+    int size = static_cast<int>(a0);
+    if (size < 0)
+        return -err::INVAL;
+    if (size == 0)
+        return c.ngroups;
+    if (static_cast<u32>(size) < c.ngroups)
+        return -err::INVAL;
+    if (long r = uaccess::copy_to(reinterpret_cast<void*>(a1), c.groups, c.ngroups * sizeof(u32)); r < 0)
+        return r;
+    return c.ngroups;
+}
+
+long sys_setgroups(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    proc::Cred& c = my_cred();
+    if (c.euid != 0)
+        return -err::PERM;
+    if (a0 > proc::NGROUPS_MAX)
+        return -err::INVAL;
+    u32 groups[proc::NGROUPS_MAX];
+    if (a0 && uaccess::copy_from(groups, reinterpret_cast<const void*>(a1), a0 * sizeof(u32)) < 0)
+        return -err::FAULT;
+    memcpy(c.groups, groups, a0 * sizeof(u32));
+    c.ngroups = static_cast<u32>(a0);
+    return 0;
+}
+
+// May the current process signal `target`? (root, or a matching real/saved uid.)
+bool may_signal(Process* target, int sig) {
+    const proc::Cred& c = proc::cred();
+    const proc::Cred& t = target->cred;
+    if (c.euid == 0 || c.ruid == t.ruid || c.ruid == t.suid || c.euid == t.ruid || c.euid == t.suid)
+        return true;
+    return sig == 18 /* SIGCONT */ && target->sid == proc::current()->sid;
+}
 
 // ---- process groups and sessions ----
 
@@ -194,10 +352,10 @@ long sys_kill(SYSCALL_ARGS) {
         signal::send_to_group(pid == 0 ? me->pgid : -pid, sig);
         return 0;
     }
-    if (pid == -1) { // everyone but init and ourselves
+    if (pid == -1) { // everyone but init and ourselves (that we may signal)
         proc::for_each([](Process* p, void* arg) {
             int s = static_cast<int>(reinterpret_cast<uptr>(arg));
-            if (p != proc::current() && p->pid != 1 && s)
+            if (p != proc::current() && p->pid != 1 && s && may_signal(p, s))
                 signal::send(p, s);
         }, reinterpret_cast<void*>(static_cast<uptr>(sig)));
         return 0;
@@ -206,6 +364,8 @@ long sys_kill(SYSCALL_ARGS) {
     Process* p = proc::find(pid);
     if (!p || p->state == proc::State::Zombie)
         return -err::SRCH;
+    if (!may_signal(p, sig))
+        return -err::PERM;
     if (sig)
         signal::send(p, sig);
     return 0;
@@ -217,6 +377,8 @@ long sys_tgkill(SYSCALL_ARGS) {
     sched::Thread* t = proc::find_thread(static_cast<int>(a1));
     if (!t || !t->process || t->process->pid != static_cast<int>(a0))
         return -err::SRCH;
+    if (!may_signal(t->process, static_cast<int>(a2)))
+        return -err::PERM;
     if (a2)
         signal::send_thread(t, static_cast<int>(a2));
     return 0;
@@ -228,6 +390,8 @@ long sys_tkill(SYSCALL_ARGS) {
     sched::Thread* t = proc::find_thread(static_cast<int>(a0));
     if (!t)
         return -err::SRCH;
+    if (t->process && !may_signal(t->process, static_cast<int>(a1)))
+        return -err::PERM;
     if (a1)
         signal::send_thread(t, static_cast<int>(a1));
     return 0;
@@ -425,16 +589,13 @@ long sys_sysinfo(SYSCALL_ARGS) {
 
 // syslog(2) / klogctl: what dmesg uses.
 // getresuid/getresgid: real, effective and saved IDs (everyone is root for now).
-long sys_getresid(SYSCALL_ARGS) {
-    SYSCALL_UNUSED;
-    u32 zero = 0;
-    const u64 ptrs[3] = {a0, a1, a2};
-    for (u64 p : ptrs)
-        if (p)
-            if (long r = uaccess::put(reinterpret_cast<u32*>(p), zero); r < 0)
-                return r;
-    return 0;
+long put_ids(u64 pr, u64 pe, u64 ps, u32 r, u32 e, u32 sv) {
+    if (long x = uaccess::put(reinterpret_cast<u32*>(pr), r); x < 0) return x;
+    if (long x = uaccess::put(reinterpret_cast<u32*>(pe), e); x < 0) return x;
+    return uaccess::put(reinterpret_cast<u32*>(ps), sv);
 }
+long sys_getresuid(SYSCALL_ARGS) { SYSCALL_UNUSED; proc::Cred& c = my_cred(); return put_ids(a0, a1, a2, c.ruid, c.euid, c.suid); }
+long sys_getresgid(SYSCALL_ARGS) { SYSCALL_UNUSED; proc::Cred& c = my_cred(); return put_ids(a0, a1, a2, c.rgid, c.egid, c.sgid); }
 
 // capget/capset: everything runs as root with every capability.
 long sys_capget(SYSCALL_ARGS) {
@@ -656,20 +817,22 @@ void register_process() {
     set(140, sys_getpriority, "getpriority");
     set(141, sys_setpriority, "setpriority");
     set(436, sys_close_range, "close_range");
-    set(117, sys_setid, "setresuid");
-    set(118, sys_getresid, "getresuid");
-    set(119, sys_setid, "setresgid");
-    set(120, sys_getresid, "getresgid");
-    set(115, sys_getid, "getgroups"); // no supplementary groups
-    set(116, sys_setid, "setgroups");
-    set(102, sys_getid, "getuid");
-    set(104, sys_getid, "getgid");
-    set(105, sys_setid, "setuid");
-    set(122, sys_getid, "setfsuid"); // returns the previous fsuid: always root
-    set(123, sys_getid, "setfsgid");
-    set(106, sys_setid, "setgid");
-    set(107, sys_getid, "geteuid");
-    set(108, sys_getid, "getegid");
+    set(117, sys_setresuid, "setresuid");
+    set(118, sys_getresuid, "getresuid");
+    set(119, sys_setresgid, "setresgid");
+    set(120, sys_getresgid, "getresgid");
+    set(115, sys_getgroups, "getgroups");
+    set(116, sys_setgroups, "setgroups");
+    set(102, sys_getuid, "getuid");
+    set(104, sys_getgid, "getgid");
+    set(105, sys_setuid, "setuid");
+    set(106, sys_setgid, "setgid");
+    set(107, sys_geteuid, "geteuid");
+    set(108, sys_getegid, "getegid");
+    set(113, sys_setreuid, "setreuid");
+    set(114, sys_setregid, "setregid");
+    set(122, sys_setfsuid, "setfsuid");
+    set(123, sys_setfsgid, "setfsgid");
     set(109, sys_setpgid, "setpgid");
     set(110, sys_getppid, "getppid");
     set(111, sys_getpgrp, "getpgrp");

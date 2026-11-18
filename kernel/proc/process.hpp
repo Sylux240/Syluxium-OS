@@ -20,6 +20,31 @@ struct SigAction {
 
 enum class State : u8 { Running, Zombie };
 
+// Who a process is: real, effective, saved and file-system user/group ids,
+// plus supplementary groups (as on Linux; uid 0 = root, who may do anything).
+constexpr u32 NGROUPS_MAX = 32;
+struct Cred {
+    u32 ruid = 0, euid = 0, suid = 0, fsuid = 0;
+    u32 rgid = 0, egid = 0, sgid = 0, fsgid = 0;
+    u32 ngroups = 0;
+    u32 groups[NGROUPS_MAX] = {};
+};
+
+constexpr int MAY_EXEC = 1, MAY_WRITE = 2, MAY_READ = 4;
+const Cred& cred();          // the current process's (root for kernel threads)
+bool capable();              // effective uid 0: privileged operations
+bool in_group(u32 gid);      // file-system gid or a supplementary group
+// Unix permission check (owner / group / other bits) for the current process,
+// by its file-system ids, or by its real ids (access()). 0 or -EACCES.
+long permission(vfs::Inode* n, int mask, bool real_ids = false);
+bool owns(vfs::Inode* n);    // file-system uid owns it, or root
+// May the caller remove or rename `victim` out of `dir`? (write + search on
+// dir, and the sticky bit: only the file's or the directory's owner).
+long may_delete(vfs::Inode* dir, vfs::Inode* victim);
+// A freshly created inode belongs to the caller (group: the directory's if
+// it's setgid); persisted through Inode::set_owner.
+void init_owner(vfs::Inode* dir, vfs::Inode* n);
+
 struct Process {
     int pid = 0;
     int pgid = 0;   // process group (job)
@@ -40,6 +65,7 @@ struct Process {
     // ITIMER_REAL / alarm(): absolute deadline (clock ns, 0 = off) and reload interval.
     u64 alarm_deadline = 0, alarm_interval = 0;
     u32 umask = 022;
+    Cred cred;
 
     sched::Thread* main_thread = nullptr;     // the thread the process started with
 

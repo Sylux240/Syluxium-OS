@@ -134,6 +134,11 @@ tools/smoke-test.sh   headless QEMU boot: serial log + screenshot
             replay clean with both Syluxium and e2fsck; block cache holds per sector
       - [ ] 9-ext4: clean unmount on shutdown (clears needs_recovery), orphan file for
             open-but-deleted files, htree index maintenance
+      - [x] 9-users (kernel): real multi-user security: per-process real/effective/saved/fs
+            uid+gid and supplementary groups; set*id/getgroups/setgroups with POSIX rules;
+            setuid/setgid exec (AT_SECURE); permission checks on path search, open, create,
+            unlink/rename (sticky dirs), chmod/chown (persisted on ext4), utimes, truncate,
+            access (real ids), chdir, kill, mount; images owned by root; credtest 32 checks
       - [ ] 9-users: **login screen and user accounts**: graphical login (TDE's TDM, XP/7-styled:
             user tiles with pictures, password, Shut Down/Restart/Sleep buttons; optional
             auto-login), real multi-user security in the kernel (enforced file permissions and

@@ -12,6 +12,7 @@ namespace vfs {
 
 // File type bits of `mode` (same values as Linux's st_mode).
 constexpr u32 S_IFMT   = 0170000;
+constexpr u32 S_ISUID  = 04000, S_ISGID = 02000, S_ISVTX = 01000; // setuid, setgid, sticky
 constexpr u32 S_IFSOCK = 0140000;
 constexpr u32 S_IFLNK  = 0120000;
 constexpr u32 S_IFREG  = 0100000;
@@ -86,6 +87,15 @@ public:
     // open() of this node opens another inode instead (/dev/tty -> the
     // caller's controlling terminal).
     virtual Inode* open_redirect() { return this; }
+    // Change mode (permission bits, type unchanged) and ownership (chmod,
+    // chown, new files). Disk file systems persist them.
+    virtual long set_owner(u32 new_mode, u32 new_uid, u32 new_gid) {
+        mode = (mode & S_IFMT) | (new_mode & 07777);
+        uid = new_uid;
+        gid = new_gid;
+        ctime = vfs::now();
+        return 0;
+    }
     // Change access/modification times (utimensat). Disk file systems persist them.
     virtual long set_times(Timespec access, Timespec modify) {
         atime = access;
@@ -199,6 +209,8 @@ bool is_mountpoint(Inode* dir); // "/", a mount's root, or a directory something
 // file system's /dev, /proc, ... on it afterwards (see ram_root()).
 void set_root(Inode* new_root, const char* source, const char* type);
 Inode* ram_root(); // the RAM file system created at boot (the root until set_root)
+// Permission check used while walking paths (directories need search/x).
+void set_permission_hook(long (*fn)(Inode*, int));
 void for_each_mount(void (*fn)(const char* source, const char* path, const char* type, void* ctx), void* ctx);
 
 } // namespace vfs

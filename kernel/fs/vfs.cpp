@@ -21,6 +21,7 @@ constexpr int MAX_SYMLINK_DEPTH = 40;
 constexpr usize MAX_NAME = 255;
 
 long resolve_impl(const char* path, Inode* cwd, bool follow_last, Inode** out, int depth);
+long (*g_permission)(Inode*, int) = nullptr; // set by the process layer: search (x) permission on directories
 
 // ---- Mount table ----
 // A mount covers a directory (any file system) with another file system's
@@ -119,6 +120,9 @@ long resolve_impl(const char* path, Inode* cwd, bool follow_last, Inode** out, i
             continue;
         }
 
+        if (g_permission)
+            if (long r = g_permission(node, 1 /* MAY_EXEC */); r < 0)
+                return r;
         Inode* next = node->lookup(start, len);
         if (!next)
             return -err::NOENT;
@@ -371,6 +375,8 @@ void set_root(Inode* new_root, const char* source, const char* type) {
 }
 
 Inode* ram_root() { return g_ram_root; }
+
+void set_permission_hook(long (*fn)(Inode*, int)) { g_permission = fn; }
 
 void for_each_mount(void (*fn)(const char*, const char*, const char*, void*), void* ctx) {
     fn(g_root_source, "/", g_root_type, ctx); // not "rootfs": tools like df skip entries by that name

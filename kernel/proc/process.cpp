@@ -184,6 +184,7 @@ void on_return_to_user(interrupts::Frame* frame) {
 // ---------------------------------------------------------------------------
 
 void init() {
+    vfs::set_permission_hook([](vfs::Inode* n, int mask) { return permission(n, mask); });
     interrupts::set_handler(interrupts::VEC_PAGE_FAULT, page_fault);
     interrupts::set_user_fault_hook(user_fault);
     interrupts::set_return_to_user_hook(on_return_to_user);
@@ -211,6 +212,74 @@ u32 count() {
 }
 
 Process* current() { return sched::current()->process; }
+
+// ---- credentials and permissions ----
+
+namespace {
+const Cred g_kernel_cred; // kernel threads act as root
+}
+
+const Cred& cred() {
+    Process* p = current();
+    return p ? p->cred : g_kernel_cred;
+}
+
+bool capable() { return cred().euid == 0; }
+
+bool in_group(u32 gid) {
+    const Cred& c = cred();
+    if (c.fsgid == gid)
+        return true;
+    for (u32 i = 0; i < c.ngroups; i++)
+        if (c.groups[i] == gid)
+            return true;
+    return false;
+}
+
+long permission(vfs::Inode* n, int mask, bool real_ids) {
+    const Cred& c = cred();
+    u32 uid = real_ids ? c.ruid : c.fsuid;
+    if (uid == 0) { // root reads and writes anything; executes what has some x bit
+        if ((mask & MAY_EXEC) && !vfs::is_dir(n->mode) && !(n->mode & 0111))
+            return -err::ACCES;
+        return 0;
+    }
+    u32 bits;
+    if (n->uid == uid)
+        bits = n->mode >> 6;
+    else if ((real_ids ? c.rgid == n->gid : false) || in_group(n->gid))
+        bits = n->mode >> 3;
+    else
+        bits = n->mode;
+    return ((bits & 7) & static_cast<u32>(mask)) == static_cast<u32>(mask) ? 0 : -err::ACCES;
+}
+
+bool owns(vfs::Inode* n) {
+    const Cred& c = cred();
+    return c.fsuid == 0 || c.fsuid == n->uid;
+}
+
+long may_delete(vfs::Inode* dir, vfs::Inode* victim) {
+    if (long r = permission(dir, MAY_WRITE | MAY_EXEC); r < 0)
+        return r;
+    const Cred& c = cred();
+    if ((dir->mode & vfs::S_ISVTX) && c.fsuid != 0 && victim && c.fsuid != victim->uid && c.fsuid != dir->uid)
+        return -err::PERM;
+    return 0;
+}
+
+void init_owner(vfs::Inode* dir, vfs::Inode* n) {
+    const Cred& c = cred();
+    u32 gid = c.fsgid;
+    u32 mode = n->mode;
+    if (dir && (dir->mode & vfs::S_ISGID)) {
+        gid = dir->gid; // BSD-style group inheritance in setgid directories
+        if (vfs::is_dir(n->mode))
+            mode |= vfs::S_ISGID;
+    }
+    if (n->uid != c.fsuid || n->gid != gid || n->mode != mode)
+        n->set_owner(mode, c.fsuid, gid);
+}
 
 // ---- File descriptors ------------------------------------------------------
 
@@ -404,6 +473,7 @@ long do_clone(interrupts::Frame* frame, u64 flags, u64 new_sp, u64 parent_tid, u
     memcpy(child->cwd_path, parent->cwd_path, sizeof(child->cwd_path));
     child->cwd = parent->cwd;
     child->umask = parent->umask;
+    child->cred = parent->cred;
     child->ctty = parent->ctty;
     for (int i = 0; i <= MAX_SIGNALS; i++)
         child->sigactions[i] = parent->sigactions[i];
@@ -474,8 +544,8 @@ long exec_impl(interrupts::Frame* frame, const char* path, const char* const* ar
         return r;
     if (!vfs::is_reg(inode->mode))
         return -err::ACCES;
-    if (!(inode->mode & 0111))
-        return -err::ACCES;
+    if (long r = permission(inode, MAY_EXEC); r < 0)
+        return r;
 
     // "#!interpreter [arg]" scripts.
     char head[256];
@@ -519,12 +589,25 @@ long exec_impl(interrupts::Frame* frame, const char* path, const char* const* ar
         return r;
     }
 
+    // setuid / setgid programs run with their owner's / group's identity
+    // (not for scripts: the "#!" path above already recursed). The saved ids
+    // follow the effective ones, as POSIX says.
+    Cred next = p->cred;
+    if (inode->mode & vfs::S_ISUID)
+        next.euid = inode->uid;
+    if ((inode->mode & vfs::S_ISGID) && (inode->mode & 0010))
+        next.egid = inode->gid;
+    next.suid = next.fsuid = next.euid;
+    next.sgid = next.fsgid = next.egid;
+    elf::ExecIds ids{next.ruid, next.euid, next.rgid, next.egid,
+                     next.euid != next.ruid || next.egid != next.rgid};
+
     auto* as = vmm::AddressSpace::create_user();
     if (!as)
         return -err::NOMEM;
     auto* mem = new Memory(as);
     elf::LoadResult loaded;
-    if (long r = elf::load(mem, inode, path, argv, envp, &loaded); r < 0) {
+    if (long r = elf::load(mem, inode, path, argv, envp, &loaded, ids); r < 0) {
         mem->put(); // not active: safe to tear down
         return r;
     }
@@ -556,6 +639,7 @@ long exec_impl(interrupts::Frame* frame, const char* path, const char* const* ar
     }
     old->put(); // a vfork parent may still hold it
 
+    p->cred = next;
     snprintf(p->name, sizeof(p->name), "%s", basename(path));
     snprintf(p->exe_path, sizeof(p->exe_path), "%s", path);
     snprintf(t->name, sizeof(t->name), "%s", p->name);

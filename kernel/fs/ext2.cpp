@@ -599,8 +599,8 @@ public:
 
     void refresh() {
         mode = raw.mode;
-        uid = raw.uid;
-        gid = raw.gid;
+        uid = raw.uid | (static_cast<u32>(get16(raw.osd2 + 4)) << 16);
+        gid = raw.gid | (static_cast<u32>(get16(raw.osd2 + 6)) << 16);
         nlink = raw.links;
         size = raw.size_lo | (vfs::is_reg(raw.mode) ? static_cast<u64>(raw.size_hi) << 32 : 0);
         atime = vfs::Timespec{raw.atime, 0};
@@ -610,6 +610,10 @@ public:
 
     void save() {
         raw.mode = static_cast<u16>(mode);
+        raw.uid = static_cast<u16>(uid);
+        raw.gid = static_cast<u16>(gid);
+        put16(raw.osd2 + 4, static_cast<u16>(uid >> 16)); // l_i_uid_high
+        put16(raw.osd2 + 6, static_cast<u16>(gid >> 16)); // l_i_gid_high
         raw.links = static_cast<u16>(nlink);
         raw.size_lo = static_cast<u32>(size);
         if (vfs::is_reg(mode))
@@ -1136,6 +1140,18 @@ public:
             free_blocks |= static_cast<u64>(vol->sb32(0x158)) << 32;
         *out = FsStats{0xEF53, vol->block_size, vol->blocks_count, free_blocks,
                        static_cast<u64>(vol->sb32(0)), static_cast<u64>(vol->sb32(16))};
+        return 0;
+    }
+
+    long set_owner(u32 new_mode, u32 new_uid, u32 new_gid) override {
+        if (vol->read_only)
+            return -err::ROFS;
+        LockGuard guard(vol->lock);
+        mode = (mode & vfs::S_IFMT) | (new_mode & 07777);
+        uid = new_uid;
+        gid = new_gid;
+        ctime = vfs::now();
+        save();
         return 0;
     }
 

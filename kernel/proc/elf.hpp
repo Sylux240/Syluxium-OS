@@ -13,9 +13,17 @@ struct LoadResult {
     bool compat;    // a 32-bit program: start it in compatibility mode
 };
 
+// The ids the new program runs with (auxiliary vector AT_UID & co.);
+// secure = setuid/setgid exec (AT_SECURE: the dynamic linker ignores
+// LD_PRELOAD, LD_LIBRARY_PATH, ...).
+struct ExecIds {
+    u32 uid = 0, euid = 0, gid = 0, egid = 0;
+    bool secure = false;
+};
+
 // Map `file` into `mem` and build the initial stack (argc, argv, envp,
 // auxiliary vector) exactly as Linux does.
 long load(proc::Memory* mem, vfs::Inode* file, const char* exec_path, const char* const* argv,
-          const char* const* envp, LoadResult* out);
+          const char* const* envp, LoadResult* out, const ExecIds& ids = ExecIds{});
 
 } // namespace elf
