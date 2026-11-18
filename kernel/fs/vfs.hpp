@@ -190,6 +190,8 @@ long resolve_parent(const char* path, Inode* cwd, Inode** parent, const char** n
 
 // Convenience helpers for kernel code.
 long mkdir_p(const char* path, u32 mode = 0755);
+// realpath(): absolute, without "."/"..", every symlink resolved.
+long canonical_path(const char* path, const char* base, char* out, usize size);
 long create_file(const char* path, const void* data, usize size, u32 mode);
 long add_node(const char* path, Inode* node); // place a ready-made inode (devices)
 long remove_node(const char* path);            // unplugged device: drop its /dev entry (open files keep the inode)

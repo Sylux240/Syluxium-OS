@@ -122,7 +122,7 @@ int wait(Process* p);
 // System call implementations.
 long do_clone(interrupts::Frame* frame, u64 flags, u64 new_sp, u64 parent_tid, u64 child_tid, u64 tls);
 long do_execve(interrupts::Frame* frame, const char* path, const char* const* argv, const char* const* envp);
-long do_wait4(int pid, int* status_out, int options);
+long do_wait4(int pid, int* status_out, int options, u32* uid_out = nullptr);
 
 // End the whole current process (all threads) with a wait() status word
 // (exit: code << 8, killed: signal number).

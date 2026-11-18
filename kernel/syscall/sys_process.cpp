@@ -327,6 +327,54 @@ long sys_execve(SYSCALL_ARGS) {
     return r;
 }
 
+// waitid(idtype, id, siginfo*, options, rusage*): wait with the child's
+// status in a siginfo (CLD_EXITED/KILLED/DUMPED, pid, uid, status).
+long sys_waitid(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    constexpr int P_ALL = 0, P_PID = 1, P_PGID = 2;
+    constexpr int WNOHANG = 1, WEXITED = 4, WNOWAIT = 0x01000000;
+    int idtype = static_cast<int>(a0), id = static_cast<int>(a1), options = static_cast<int>(a3);
+    if (!(options & WEXITED))
+        return -err::INVAL; // stopped/continued children don't exist here (no job-control stops)
+    int pid = idtype == P_ALL ? -1 : idtype == P_PID ? id : idtype == P_PGID ? (id ? -id : 0) : -999;
+    if (pid == -999)
+        return -err::INVAL;
+    int status = 0;
+    u32 uid = 0;
+    long r = proc::do_wait4(pid, &status, options & (WNOHANG | WNOWAIT), &uid);
+    if (r < 0)
+        return r;
+    struct {
+        i32 signo, err, code, pad;
+        i32 pid;
+        u32 uid;
+        i32 status;
+        i32 pad2;
+        u8 rest[96];
+    } info{};
+    static_assert(sizeof(info) == 128);
+    if (r > 0) {
+        info.signo = 17; // SIGCHLD
+        info.pid = static_cast<i32>(r);
+        info.uid = uid;
+        if ((status & 0x7F) == 0) {
+            info.code = 1; // CLD_EXITED
+            info.status = (status >> 8) & 0xFF;
+        } else {
+            info.code = (status & 0x80) ? 3 : 2; // CLD_DUMPED / CLD_KILLED
+            info.status = status & 0x7F;
+        }
+    }
+    if (a2)
+        if (long e = uaccess::put(reinterpret_cast<decltype(info)*>(a2), info); e < 0)
+            return e;
+    if (a4) {
+        u8 zeros[144] = {};
+        uaccess::copy_to(reinterpret_cast<void*>(a4), zeros, sizeof(zeros));
+    }
+    return 0;
+}
+
 long sys_wait4(SYSCALL_ARGS) {
     SYSCALL_UNUSED;
     int status = 0;
@@ -628,6 +676,29 @@ long sys_capset(SYSCALL_ARGS) {
     return 0;
 }
 
+// Scheduling policy: everything runs as SCHED_OTHER (priority 0); asking
+// for a real-time policy is accepted for root and ignored by the scheduler.
+long sys_sched_getscheduler(SYSCALL_ARGS) { SYSCALL_UNUSED; return 0; } // SCHED_OTHER
+long sys_sched_setscheduler(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    if (a1 != 0 && a1 != 3 && a1 != 5 && !proc::capable()) // OTHER, BATCH, IDLE are always fine
+        return -err::PERM;
+    return 0;
+}
+long sys_sched_getparam(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    i32 priority = 0;
+    return uaccess::put(reinterpret_cast<i32*>(a1), priority);
+}
+long sys_sched_setparam(SYSCALL_ARGS) { SYSCALL_UNUSED; return 0; }
+long sys_sched_priority_max(SYSCALL_ARGS) { SYSCALL_UNUSED; return (a0 == 1 || a0 == 2) ? 99 : 0; } // FIFO/RR: 99
+long sys_sched_priority_min(SYSCALL_ARGS) { SYSCALL_UNUSED; return (a0 == 1 || a0 == 2) ? 1 : 0; }
+long sys_sched_rr_get_interval(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    i64 ts[2] = {0, 10'000'000}; // 10 ms
+    return uaccess::copy_to(reinterpret_cast<void*>(a1), ts, sizeof(ts));
+}
+
 // getpriority/setpriority: nice values are accepted but don't change scheduling yet.
 long sys_getpriority(SYSCALL_ARGS) {
     SYSCALL_UNUSED;
@@ -847,9 +918,17 @@ void register_process() {
     set(99, sys_sysinfo, "sysinfo");
     set(103, sys_syslog, "syslog");
     set(169, sys_reboot, "reboot");
+    set(247, sys_waitid, "waitid");
     set(125, sys_capget, "capget");
     set(126, sys_capset, "capset");
     set(140, sys_getpriority, "getpriority");
+    set(142, sys_sched_setparam, "sched_setparam");
+    set(143, sys_sched_getparam, "sched_getparam");
+    set(144, sys_sched_setscheduler, "sched_setscheduler");
+    set(145, sys_sched_getscheduler, "sched_getscheduler");
+    set(146, sys_sched_priority_max, "sched_get_priority_max");
+    set(147, sys_sched_priority_min, "sched_get_priority_min");
+    set(148, sys_sched_rr_get_interval, "sched_rr_get_interval");
     set(141, sys_setpriority, "setpriority");
     set(436, sys_close_range, "close_range");
     set(117, sys_setresuid, "setresuid");

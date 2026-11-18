@@ -1,3 +1,4 @@
+#include <core/log.hpp>
 #include <fs/poll.hpp>
 #include <arch/x86_64/cpu.hpp>
 #include <arch/x86_64/fpu.hpp>
@@ -250,6 +251,12 @@ void deliver(interrupts::Frame* frame) {
 
     if (act.handler == SIG_DFL || sig == SIGKILL) {
         arch::sti();
+        // Signals whose default is a core dump mean the program crashed or
+        // gave up: say so (SIGSEGV from faults is reported where it happens).
+        if (sig == 3 || sig == 4 || sig == 5 || sig == 6 || sig == 7 || sig == 8 || sig == 31)
+            klog::error("%s[%d]: killed by signal %d (%s) from pid %d", p->name, p->pid, sig,
+                        sig == 6 ? "SIGABRT" : sig == 4 ? "SIGILL" : sig == 7 ? "SIGBUS" : sig == 8 ? "SIGFPE" :
+                        sig == 5 ? "SIGTRAP" : sig == 31 ? "SIGSYS" : "SIGQUIT", si_pid);
         proc::exit_group(sig); // default action: terminate the whole process ("killed by signal")
     }
 

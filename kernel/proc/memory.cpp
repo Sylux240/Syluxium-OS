@@ -287,8 +287,17 @@ long Memory::protect(uptr addr, usize len, u32 prot) {
             split(v, end);
         v->prot = prot;
         u32 flags = prot_to_map_flags(prot);
-        for (uptr page = v->start; page < v->end; page += PAGE_SIZE)
-            m_as->protect(page, flags); // only affects pages already present
+        for (uptr page = v->start; page < v->end; page += PAGE_SIZE) {
+            u64 phys;
+            if (!m_as->translate(page, &phys))
+                continue; // not present: populated with the new protection later
+            u32 page_flags = flags;
+            // A page still shared copy-on-write (after fork) stays read-only:
+            // the first write must copy it, not change the other process's.
+            if ((flags & vmm::WRITE) && v->kind != VMA_DEVICE && pmm::frame(phys)->refcount > 1)
+                page_flags &= ~vmm::WRITE;
+            m_as->protect(page, page_flags);
+        }
         vmm::shootdown(v->start, (v->end - v->start) / PAGE_SIZE, m_as);
     }
     return 0;
@@ -337,6 +346,24 @@ bool Memory::populate(Vma* v, uptr page) {
         if (v->file->mmap_phys(v->file_offset + (page - v->start), &dev_phys) < 0)
             return false;
         return m_as->map(page, dev_phys, prot_to_map_flags(v->prot));
+    }
+    // A whole page of a RAM-backed file (the live system's programs and
+    // libraries): map the file's own page read-only and share it between
+    // every process that maps it; the first write copies it (copy-on-write).
+    // Copying it per process would cost each Firefox process 156 MiB of libxul.
+    if (v->file && v->file->shared_mappable()) {
+        u64 delta = page - v->start;
+        u64 file_phys;
+        if (delta + PAGE_SIZE <= v->file_bytes && ((v->file_offset + delta) & (PAGE_SIZE - 1)) == 0 &&
+            v->file->mmap_phys(v->file_offset + delta, &file_phys) == 0) {
+            __atomic_add_fetch(&pmm::frame(file_phys)->refcount, 1, __ATOMIC_ACQ_REL); // the mapping's reference
+            if (!m_as->map(page, file_phys, prot_to_map_flags(v->prot) & ~vmm::WRITE)) {
+                vmm::release_user_page(file_phys);
+                return false;
+            }
+            __atomic_add_fetch(&m_rss, 1, __ATOMIC_RELAXED);
+            return true;
+        }
     }
     u64 phys = pmm::alloc_page(true);
     if (!phys)

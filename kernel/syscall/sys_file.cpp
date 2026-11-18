@@ -744,6 +744,32 @@ long sys_listxattr(SYSCALL_ARGS) { SYSCALL_UNUSED; return 0; }
 long sys_setxattr(SYSCALL_ARGS) { SYSCALL_UNUSED; return -err::OPNOTSUPP; }
 long sys_removexattr(SYSCALL_ARGS) { SYSCALL_UNUSED; return -err::NODATA; }
 long sys_fadvise64(SYSCALL_ARGS) { SYSCALL_UNUSED; return 0; } // advice only
+long sys_readahead(SYSCALL_ARGS) { SYSCALL_UNUSED; return 0; } // a hint: the cache reads on demand
+
+// fallocate(fd, mode, offset, len): mode 0 makes sure the range exists
+// (the file grows; blocks are allocated as it's written); KEEP_SIZE (1)
+// is a pure reservation hint. Punching holes etc. isn't supported.
+long sys_fallocate(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    FileRef f(proc::current(), static_cast<long>(a0));
+    if (!f)
+        return -err::BADF;
+    if (!can_write(f.get()))
+        return -err::BADF;
+    if (!is_reg(f->inode->mode))
+        return -err::NODEV;
+    i64 offset = static_cast<i64>(a2), len = static_cast<i64>(a3);
+    if (offset < 0 || len <= 0)
+        return -err::INVAL;
+    if (a1 == 1)
+        return 0;
+    if (a1 != 0)
+        return -err::OPNOTSUPP;
+    u64 end = static_cast<u64>(offset + len);
+    if (end > f->inode->size)
+        return f->inode->truncate(end);
+    return 0;
+}
 
 long sys_symlink(SYSCALL_ARGS) { SYSCALL_UNUSED; return do_symlinkat(a0, AT_FDCWD, a1); }
 long sys_symlinkat(SYSCALL_ARGS) { SYSCALL_UNUSED; return do_symlinkat(a0, static_cast<i32>(a1), a2); }
@@ -1580,6 +1606,8 @@ void register_file() {
     set(198, sys_removexattr, "lremovexattr");
     set(199, sys_removexattr, "fremovexattr");
     set(221, sys_fadvise64, "fadvise64");
+    set(187, sys_readahead, "readahead");
+    set(285, sys_fallocate, "fallocate");
     set(88, sys_symlink, "symlink");
     set(265, sys_linkat, "linkat");
     set(89, sys_readlink, "readlink");

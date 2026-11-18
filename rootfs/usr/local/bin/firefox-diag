@@ -1,0 +1,4 @@
+#!/bin/sh
+# Bring-up aid: which library fails to load when Firefox starts.
+su syluxium -s /bin/sh -c 'cd /tmp; LD_DEBUG=files HOME=/tmp firefox-esr --headless --version > /tmp/ffdiag.log 2>&1'
+{ echo "=== ffdiag (errors, last opened):"; grep -iE "error|cannot|fail" /tmp/ffdiag.log | head -10; grep "file=" /tmp/ffdiag.log | tail -6; tail -5 /tmp/ffdiag.log; } > /dev/console 2>&1

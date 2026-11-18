@@ -146,6 +146,7 @@ void user_fault(interrupts::Frame* frame) {
 
 void page_fault(interrupts::Frame* frame) {
     u64 addr = arch::read_cr2();
+    sched::current()->last_fault_code = frame->error_code;
     bool write = frame->error_code & 2;
     bool from_user = frame->cs & 3;
     Process* p = current();
@@ -642,7 +643,10 @@ long exec_impl(interrupts::Frame* frame, const char* path, const char* const* ar
 
     p->cred = next;
     snprintf(p->name, sizeof(p->name), "%s", basename(path));
-    snprintf(p->exe_path, sizeof(p->exe_path), "%s", path);
+    // /proc/self/exe is the real file (symlinks resolved), as on Linux:
+    // programs find their own install directory through it.
+    if (vfs::canonical_path(path, p->cwd_path, p->exe_path, sizeof(p->exe_path)) < 0)
+        snprintf(p->exe_path, sizeof(p->exe_path), "%s", path);
     snprintf(t->name, sizeof(t->name), "%s", p->name);
     p->compat = loaded.compat;
     compat_segments::reset(t, p->compat); // drop the old program's TLS selectors/descriptors
@@ -672,7 +676,8 @@ long do_execve(interrupts::Frame* frame, const char* path, const char* const* ar
 
 // ---- wait4 -----------------------------------------------------------------
 
-long do_wait4(int pid, int* status_out, int options) {
+long do_wait4(int pid, int* status_out, int options, u32* uid_out) {
+    constexpr int WNOWAIT = 0x01000000; // report, but leave the child to be waited for again
     Process* me = current();
     for (;;) {
         u64 seen;
@@ -695,8 +700,10 @@ long do_wait4(int pid, int* status_out, int options) {
                 any = true;
                 if (c->state == State::Zombie) {
                     reaped = c;
-                    me->children.remove(c);
-                    g_processes.remove(c);
+                    if (!(options & WNOWAIT)) {
+                        me->children.remove(c);
+                        g_processes.remove(c);
+                    }
                     break;
                 }
             }
@@ -705,7 +712,10 @@ long do_wait4(int pid, int* status_out, int options) {
         if (reaped) {
             int child_pid = reaped->pid;
             *status_out = reaped->exit_status;
-            delete reaped;
+            if (uid_out)
+                *uid_out = reaped->cred.ruid;
+            if (!(options & WNOWAIT))
+                delete reaped;
             return child_pid;
         }
         if (!any)
@@ -840,9 +850,62 @@ sched::Thread* find_thread(int tid) {
     return nullptr;
 }
 
+namespace {
+// Describe where `addr` lies: in a mapping (range, permissions, file
+// offset) or after the nearest one below (how far past its end).
+void describe_address(Memory* mem, const char* label, u64 addr) {
+    struct Area {
+        uptr start = 0, end = 0;
+        u32 prot = 0;
+        bool file = false;
+        u64 offset = 0;
+        bool valid = false;
+    };
+    struct Ctx {
+        u64 addr;
+        Area in, below;
+    } c{addr, {}, {}};
+    mem->for_each_vma([](const Vma& v, void* a) {
+        auto* ctx = static_cast<Ctx*>(a);
+        Area area{v.start, v.end, v.prot, v.file != nullptr, v.file_offset, true};
+        if (ctx->addr >= v.start && ctx->addr < v.end)
+            ctx->in = area;
+        else if (v.end <= ctx->addr && (!ctx->below.valid || v.end > ctx->below.end))
+            ctx->below = area;
+    }, &c);
+    auto prot = [](u32 p, char* out) {
+        out[0] = (p & PROT_READ) ? 'r' : '-';
+        out[1] = (p & PROT_WRITE) ? 'w' : '-';
+        out[2] = (p & PROT_EXEC) ? 'x' : '-';
+        out[3] = 0;
+    };
+    char pr[4];
+    if (c.in.valid) {
+        prot(c.in.prot, pr);
+        klog::info("  %s %#lx: in %#lx-%#lx %s %s+%#lx", label, addr, c.in.start, c.in.end, pr,
+                   c.in.file ? "file" : "anon", c.in.offset + (addr - c.in.start));
+    } else if (c.below.valid) {
+        prot(c.below.prot, pr);
+        klog::info("  %s %#lx: unmapped, %#lx bytes past %#lx-%#lx %s %s", label, addr, addr - c.below.end,
+                   c.below.start, c.below.end, pr, c.below.file ? "file" : "anon");
+    } else {
+        klog::info("  %s %#lx: unmapped (below every mapping)", label, addr);
+    }
+}
+} // namespace
+
 void kill_current_on_fault(const char* what, u64 address, u64 ip, int sig) {
     Process* p = current();
     klog::error("%s[%d]: %s at %#lx, ip %#lx - killed (signal %d)", p->name, p->pid, what, address, ip, sig);
+    u64 ec = sched::current()->last_fault_code;
+    if (sig == signal::SIGSEGV)
+        klog::info("  page fault: %s, %s, %s%s", (ec & 1) ? "page present" : "page not present",
+                   (ec & 2) ? "write" : "read", (ec & 4) ? "user" : "kernel", (ec & 16) ? ", instruction fetch" : "");
+    if (p->mem) {
+        describe_address(p->mem, "ip", ip);
+        if (address)
+            describe_address(p->mem, "address", address);
+    }
     exit_current(sig);
 }
 

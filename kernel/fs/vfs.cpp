@@ -209,6 +209,81 @@ long resolve_parent(const char* path, Inode* cwd, Inode** parent, const char** n
     return 0;
 }
 
+// realpath(): an absolute path with "." / ".." removed and every symlink
+// resolved (what /proc/self/exe shows on Linux). `base` is the absolute
+// directory relative paths start from.
+long canonical_path(const char* path, const char* base, char* out, usize size) {
+    char work[1024], rest[1024];
+    usize n;
+    if (path[0] == '/')
+        n = static_cast<usize>(snprintf(work, sizeof(work), "%s", path));
+    else
+        n = static_cast<usize>(snprintf(work, sizeof(work), "%s/%s", base && base[0] ? base : "/", path));
+    if (n >= sizeof(work))
+        return -err::NAMETOOLONG;
+    char result[1024] = "";
+    usize rlen = 0;
+    const char* p = work;
+    for (int links = 0;;) {
+        while (*p == '/')
+            p++;
+        if (!*p)
+            break;
+        const char* start = p;
+        while (*p && *p != '/')
+            p++;
+        usize len = static_cast<usize>(p - start);
+        if (len == 1 && start[0] == '.')
+            continue;
+        if (len == 2 && start[0] == '.' && start[1] == '.') {
+            while (rlen > 0 && result[rlen - 1] != '/')
+                rlen--;
+            if (rlen > 0)
+                rlen--; // drop the slash too
+            result[rlen] = 0;
+            continue;
+        }
+        if (rlen + 1 + len >= sizeof(result))
+            return -err::NAMETOOLONG;
+        result[rlen++] = '/';
+        memcpy(result + rlen, start, len);
+        rlen += len;
+        result[rlen] = 0;
+        Inode* node;
+        if (long r = resolve(result, nullptr, false, &node); r < 0)
+            return r;
+        if (is_lnk(node->mode)) {
+            if (++links > MAX_SYMLINK_DEPTH)
+                return -err::LOOP;
+            char target[256];
+            isize t = node->readlink(target, sizeof(target) - 1);
+            if (t < 0)
+                return t;
+            target[t] = 0;
+            // Continue with target + whatever was left of the path.
+            snprintf(rest, sizeof(rest), "%s", p);
+            if (target[0] == '/') {
+                rlen = 0;
+                result[0] = 0;
+                snprintf(work, sizeof(work), "%s%s", target, rest);
+            } else {
+                while (rlen > 0 && result[rlen - 1] != '/') // the link's own name goes
+                    rlen--;
+                if (rlen > 0)
+                    rlen--;
+                result[rlen] = 0;
+                snprintf(work, sizeof(work), "%s%s", target, rest);
+            }
+            p = work;
+        }
+    }
+    if (rlen == 0)
+        snprintf(out, size, "/");
+    else
+        snprintf(out, size, "%s", result);
+    return 0;
+}
+
 long mkdir_p(const char* path, u32 mode) {
     char buf[1024];
     usize n = strlen(path);
