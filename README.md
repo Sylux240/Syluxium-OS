@@ -204,6 +204,13 @@ tools/smoke-test.sh   headless QEMU boot: serial log + screenshot
       drivers, so Steam, Proton and other games and 3D apps run. **Required**: native Intel, AMD
       and NVIDIA hardware acceleration for the desktop too (Xorg on modesetting/amdgpu with glamor
       instead of today's unaccelerated fbdev), on real hardware, not just in QEMU
+      - [ ] 10-proton: kernel features Steam/Proton and anti-cheat need: user + mount namespaces,
+            pivot_root (Steam's pressure-vessel / bubblewrap container), futex_waitv (fsync),
+            /dev/ntsync (Windows sync objects), syscall user dispatch (games that make Windows
+            syscalls directly), seccomp, ptrace semantics, accurate /proc. Easy Anti-Cheat and
+            BattlEye run on Proton in user space (no kernel driver) when the game's developer has
+            enabled Linux support; games with Windows kernel anti-cheat (Vanguard, Ricochet, ...)
+            can't run on any Linux-compatible system
 - [ ] **Phase 11**: **App Store** + package installer (.deb only; .rpm dropped): a Play Store-like
       app with screenshots, icons, descriptions, ratings/details, categories and search, pulling
       .deb packages from several repositories (Debian, Ubuntu, third-party apt repos); double-click
