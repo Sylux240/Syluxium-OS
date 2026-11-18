@@ -126,7 +126,7 @@ C_SRCS   := $(shell find kernel -name '*.c')
 OBJS     := $(CXX_SRCS:%.cpp=$(OBJDIR)/%.cpp.o) $(ASM_SRCS:%.S=$(OBJDIR)/%.S.o) $(C_SRCS:%.c=$(OBJDIR)/%.c.o)
 DEPS     := $(OBJS:.o=.d)
 
-.PHONY: all kernel image initramfs run run-uefi debug clean distclean deps
+.PHONY: all kernel image initramfs rootdisk run run-uefi debug clean distclean deps
 
 all: image
 
@@ -249,6 +249,17 @@ $(IMAGE): $(KERNEL) $(INITRAMFS) limine.conf $(LIMINE_DIR)/limine
 # ---------------------------------------------------------------------------
 # Running
 # ---------------------------------------------------------------------------
+# An installed-system disk: the whole root file system on an ext2 volume
+# labelled SYLUXROOT (boot it with root=LABEL=SYLUXROOT and no initramfs;
+# tools/smoke-test.sh does that with ROOTDISK=build/syluxium-root.img).
+ROOTDISK_IMG := $(BUILD)/syluxium-root.img
+rootdisk: $(INITRAMFS)
+	@rm -f $(ROOTDISK_IMG).tmp
+	@truncate -s $$(( ($$(du -sm $(ROOTFS) | cut -f1) * 2 + 512) ))M $(ROOTDISK_IMG).tmp
+	@mke2fs -q -t ext2 -L SYLUXROOT -E root_owner=0:0 -d $(ROOTFS) $(ROOTDISK_IMG).tmp
+	@mv $(ROOTDISK_IMG).tmp $(ROOTDISK_IMG)
+	@echo "  ROOTDISK $(ROOTDISK_IMG)"
+
 run: $(IMAGE)
 	$(QEMU) $(QEMU_FLAGS)
 

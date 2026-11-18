@@ -123,6 +123,120 @@ void print_memory_map() {
 
 bool g_keyboard = false;
 bool g_data_mounted = false;
+block::Device* g_root_dev = nullptr; // the disk "/" lives on (root= on the command line)
+
+// The value of `key=` on the kernel command line, or false.
+bool cmdline_value(const char* key, char* out, usize size) {
+    const char* c = boot::cmdline();
+    usize klen = strlen(key);
+    for (const char* p = c; *p;) {
+        while (*p == ' ')
+            p++;
+        const char* end = p;
+        while (*end && *end != ' ')
+            end++;
+        if (static_cast<usize>(end - p) > klen && memcmp(p, key, klen) == 0 && p[klen] == '=') {
+            usize n = min<usize>(static_cast<usize>(end - p) - klen - 1, size - 1);
+            memcpy(out, p + klen + 1, n);
+            out[n] = 0;
+            return true;
+        }
+        p = end;
+    }
+    return false;
+}
+
+// Does block device `d` match a root= spec: /dev/NAME, LABEL=..., UUID=...?
+bool matches_root_spec(block::Device* d, const char* spec) {
+    if (memcmp(spec, "/dev/", 5) == 0)
+        return strcmp(d->name, spec + 5) == 0;
+    u8 sb[136];
+    if (block::read(d, 1024, sb, sizeof(sb)) < 0 || sb[56] != 0x53 || sb[57] != 0xEF)
+        return false; // only ext2/3/4 roots
+    if (memcmp(spec, "LABEL=", 6) == 0) {
+        char label[17] = {};
+        memcpy(label, sb + 120, 16);
+        return strcmp(label, spec + 6) == 0;
+    }
+    if (memcmp(spec, "UUID=", 5) == 0) {
+        char uuid[37];
+        const u8* u = sb + 104;
+        snprintf(uuid, sizeof(uuid), "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x", u[0],
+                 u[1], u[2], u[3], u[4], u[5], u[6], u[7], u[8], u[9], u[10], u[11], u[12], u[13], u[14], u[15]);
+        const char* w = spec + 5;
+        for (usize i = 0; i < 36; i++) {
+            char c = w[i];
+            if (c >= 'A' && c <= 'F')
+                c = static_cast<char>(c - 'A' + 'a');
+            if (c != uuid[i])
+                return false;
+        }
+        return w[36] == 0;
+    }
+    return false;
+}
+
+// root=<spec> on the command line: "/" becomes that ext2/3/4 volume (an
+// installed Syluxium) instead of the RAM file system. The RAM file system's
+// /dev, /proc, /sys, /run and /tmp are mounted on it, as on Linux.
+void mount_disk_root() {
+    char spec[80];
+    if (!cmdline_value("root", spec, sizeof(spec)))
+        return;
+    struct Find {
+        const char* spec;
+        block::Device* dev;
+    } find{spec, nullptr};
+    for (int tries = 0; tries < 100 && !find.dev; tries++) { // up to 10 s for slow (USB) disks
+        block::for_each([](block::Device* d, void* ctx) {
+            auto* f = static_cast<Find*>(ctx);
+            if (!f->dev && matches_root_spec(d, f->spec))
+                f->dev = d;
+        }, &find);
+        if (!find.dev)
+            sched::sleep_ms(100);
+    }
+    if (!find.dev) {
+        klog::error("root=%s: no such disk; staying on the RAM file system", spec);
+        return;
+    }
+    vfs::Inode* root;
+    bool ro;
+    const char* kind;
+    if (long r = ext2::mount(find.dev, &root, &ro, &kind); r < 0) {
+        klog::error("root=%s: can't mount /dev/%s (error %ld)", spec, find.dev->name, r);
+        return;
+    }
+    // Directories that stay in RAM (and keep their contents: /dev nodes, /proc, /sys).
+    static const char* const ram_dirs[] = {"dev", "proc", "sys", "run", "tmp"};
+    for (const char* d : ram_dirs) {
+        char path[16];
+        snprintf(path, sizeof(path), "/%s", d);
+        vfs::mkdir_p(path); // still on the RAM root here
+        if (!root->lookup(d, strlen(d)) && !ro)
+            root->create(d, strlen(d), vfs::S_IFDIR | 0755, nullptr, nullptr);
+    }
+    vfs::Inode* ram = vfs::ram_root();
+    char source[32];
+    snprintf(source, sizeof(source), "/dev/%s", find.dev->name);
+    vfs::set_root(root, source, kind);
+    g_root_dev = find.dev;
+    static const char* const types[] = {"devtmpfs", "proc", "sysfs", "tmpfs", "tmpfs"};
+    for (usize i = 0; i < 5; i++) {
+        const char* d = ram_dirs[i];
+        char path[16];
+        snprintf(path, sizeof(path), "/%s", d);
+        vfs::Inode* dir = ram->lookup(d, strlen(d));
+        if (dir && vfs::mount_at(path, dir, types[i][0] == 't' ? "tmpfs" : types[i], types[i]) < 0)
+            klog::warn("root: /%s missing on %s; not mounted", d, source);
+    }
+    if (!root->lookup("etc", 3) || !ro) {
+        vfs::Inode* etc;
+        if (vfs::resolve("/etc", nullptr, true, &etc) == 0 && !etc->lookup("mtab", 4))
+            etc->create("mtab", 4, vfs::S_IFLNK | 0777, "/proc/mounts", nullptr);
+    }
+    klog::ok("Root file system: %s (%s%s)", source, kind, ro ? ", read-only" : "");
+}
 
 // Phase 5: find the hardware, bind drivers, publish it all in /sys.
 void discover_hardware() {
@@ -140,8 +254,15 @@ void discover_hardware() {
     linuxkpi::init(); // Linux drivers register themselves (module_init) here
     pci::init();
     dev::register_platform_devices(g_keyboard);
-    dev::probe_all();
+    // Disks and USB first, so the root file system (root=) is mounted before
+    // other drivers start: they may load firmware from /lib/firmware.
+    dev::probe_all([](dev::Device* d) {
+        u32 cls = d->class_code >> 8; // class + subclass
+        return d->bus == dev::Bus::Pci && ((cls >> 8) == 0x01 || cls == 0x0C03);
+    });
     xhci::enumerate_all();
+    mount_disk_root(); // root= on the command line: an installed system on disk
+    dev::probe_all();
     sysfs::populate_devices();
     fbdev::init(); // /dev/fb0 (after the PCI devices are in /sys: fb0 may belong to one)
 
@@ -169,7 +290,7 @@ void discover_hardware() {
     // The first Linux (ext2/3/4) volume becomes /data: persistent storage.
     block::for_each([](block::Device* d, void* ctx) {
         auto* done = static_cast<bool*>(ctx);
-        if (*done || !ext2::probe(d))
+        if (*done || d == g_root_dev || (g_root_dev && d == g_root_dev->parent) || !ext2::probe(d))
             return;
         vfs::Inode* root;
         bool ro;
@@ -198,6 +319,9 @@ void discover_hardware() {
 }
 
 void mount_initramfs() {
+    vfs::mkdir_p("/tmp", 01777);
+    vfs::mkdir_p("/run", 0755);
+    vfs::mkdir_p("/dev/shm", 01777); // POSIX shared memory (shm_open) lives here, as on Linux
     auto* mods = boot::modules();
     if (!mods || mods->module_count == 0) {
         klog::warn("No initramfs module loaded: no user programs available");
@@ -208,8 +332,6 @@ void mount_initramfs() {
     if (initramfs::unpack(f->address, f->size, &st) == 0)
         klog::ok("Initramfs: %u files, %u directories, %u symlinks (%lu KiB)", st.files, st.dirs, st.symlinks,
                  st.bytes / KiB);
-    vfs::mkdir_p("/tmp", 01777);
-    vfs::mkdir_p("/dev/shm", 01777); // POSIX shared memory (shm_open) lives here, as on Linux
 }
 
 // Run a program from the initramfs and wait for it. Returns the wait status.

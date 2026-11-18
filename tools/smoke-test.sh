@@ -38,7 +38,12 @@ if [[ -z ${KEEP_DISK:-} || ! -f $DISK ]]; then
     cp "$IMAGE" "$DISK"
     # Tests type at the text console, so boot the "text console" entry
     # unless DESKTOP=1 (boot straight into TDE like a real install).
-    if [[ ${DESKTOP:-0} != 1 ]]; then
+    if [[ -n ${ROOTDISK:-} ]]; then
+        # Boot an installed system: no initramfs, "/" from the disk labelled SYLUXROOT.
+        printf 'timeout: 0\n\n/Syluxium (disk root)\n    protocol: limine\n    path: boot():/boot/syluxium.elf\n    cmdline: root=LABEL=SYLUXROOT %s\n' \
+            "${ROOTCMD:-}" > "$OUT/limine-test.conf"
+        mcopy -o -i "$DISK@@1M" "$OUT/limine-test.conf" ::/boot/limine/limine.conf
+    elif [[ ${DESKTOP:-0} != 1 ]]; then
         sed 's/^default_entry: 1$/default_entry: 2/' limine.conf > "$OUT/limine-test.conf"
         mcopy -o -i "$DISK@@1M" "$OUT/limine-test.conf" ::/boot/limine/limine.conf
     fi
@@ -53,6 +58,7 @@ else
 fi
 args=(-M q35 -m 2G -smp 4 $ACCEL
       -drive "file=$DISK,format=raw,if=ide"
+      ${ROOTDISK:+-drive "file=$ROOTDISK,format=raw,if=ide,index=3"}
       -display none -serial "file:$LOG"
       -monitor "unix:$SOCK,server,nowait"
       -no-reboot)

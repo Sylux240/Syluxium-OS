@@ -122,7 +122,11 @@ tools/smoke-test.sh   headless QEMU boot: serial log + screenshot
       - [x] 9a: **TDE runs**: Trinity R14.1.7 from Trinity's Debian repo (twin, kicker, kdesktop,
             konqueror, konsole, kcontrol, ksmserver), D-Bus system + session buses, ld.so.cache,
             `starttde-test` session script (aRts sound server off; ALSA is used directly)
-      - [ ] 9-boot: boot from a disk root filesystem instead of a 350 MB initramfs; a login/session
+      - [x] 9-boot (first part): **boots from a disk root**: `root=LABEL=|UUID=|/dev/X` on the
+            command line, no initramfs needed; general mount table (mount on any file system,
+            `..` crosses mounts); /dev, /proc, /sys, /run, /tmp stay in RAM; disks/USB probed
+            before other drivers so firmware loads from the disk; `make rootdisk` (ext2 for now)
+      - [ ] 9-boot: ext4 read-write (extents, metadata checksums, journal) as the root file system
       - [ ] 9-users: **login screen and user accounts**: graphical login (TDE's TDM, XP/7-styled:
             user tiles with pictures, password, Shut Down/Restart/Sleep buttons; optional
             auto-login), real multi-user security in the kernel (enforced file permissions and

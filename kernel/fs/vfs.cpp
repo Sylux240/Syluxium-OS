@@ -13,12 +13,58 @@ namespace vfs {
 
 namespace {
 
-ramfs::Dir* g_root = nullptr;
+ramfs::Dir* g_ram_root = nullptr; // the RAM file system created at boot
+Inode* g_root = nullptr;          // "/": the RAM root, or a disk after set_root()
+char g_root_source[64] = "ramfs", g_root_type[16] = "ramfs";
 u64 g_next_ino = 1;
 constexpr int MAX_SYMLINK_DEPTH = 40;
 constexpr usize MAX_NAME = 255;
 
 long resolve_impl(const char* path, Inode* cwd, bool follow_last, Inode** out, int depth);
+
+// ---- Mount table ----
+// A mount covers a directory (any file system) with another file system's
+// root. Path lookup crosses from the covered directory into the mounted
+// root, and ".." at a mounted root crosses back to the covered directory's
+// parent. Mounts can stack; the newest one on a directory is visible.
+
+struct Mount {
+    char path[256];
+    char source[64];
+    char type[16];
+    Inode* root;
+    Inode* covered; // the directory it sits on
+};
+
+constexpr usize MAX_MOUNTS = 64;
+Mount g_mounts[MAX_MOUNTS];
+usize g_mount_count = 0;
+IrqSpinlock g_mount_lock;
+
+// The file system mounted on `dir`, if any (newest first, following stacks).
+Inode* cross_down(Inode* dir) {
+    LockGuard guard(g_mount_lock);
+    for (bool moved = true; moved;) {
+        moved = false;
+        for (usize i = g_mount_count; i-- > 0;) {
+            if (g_mounts[i].covered == dir) {
+                dir = g_mounts[i].root;
+                moved = true;
+                break;
+            }
+        }
+    }
+    return dir;
+}
+
+// If `root` is a mounted file system's root, the directory it covers.
+Inode* covered_by(Inode* root) {
+    LockGuard guard(g_mount_lock);
+    for (usize i = g_mount_count; i-- > 0;)
+        if (g_mounts[i].root == root)
+            return g_mounts[i].covered;
+    return nullptr;
+}
 
 // Follow `link` (found in directory `dir`) to its target.
 long follow(Inode* link, Inode* dir, Inode** out, int depth) {
@@ -64,7 +110,11 @@ long resolve_impl(const char* path, Inode* cwd, bool follow_last, Inode** out, i
         if (len == 1 && start[0] == '.')
             continue;
         if (len == 2 && start[0] == '.' && start[1] == '.') {
-            if (node->parent)
+            if (node == g_root)
+                continue;
+            for (Inode* c; node != g_root && (c = covered_by(node));)
+                node = c; // leave mounted file systems
+            if (node != g_root && node->parent)
                 node = node->parent;
             continue;
         }
@@ -72,6 +122,7 @@ long resolve_impl(const char* path, Inode* cwd, bool follow_last, Inode** out, i
         Inode* next = node->lookup(start, len);
         if (!next)
             return -err::NOENT;
+        next = cross_down(next);
         if (is_lnk(next->mode) && (!last || follow_last || trailing_slash)) {
             long r = follow(next, node, &next, depth);
             if (r < 0)
@@ -105,8 +156,9 @@ Timespec now() {
 }
 
 void init() {
-    g_root = new ramfs::Dir;
-    g_root->parent = g_root;
+    g_ram_root = new ramfs::Dir;
+    g_ram_root->parent = g_ram_root;
+    g_root = g_ram_root;
 }
 
 Inode* root() { return g_root; }
@@ -267,47 +319,23 @@ void file_put(File* f) {
 
 // ---- Mounts ----
 
-namespace {
-
-struct Mount {
-    char path[256];
-    char source[64];
-    char type[16];
-    Inode* root;
-    Inode* covered; // the directory that was there before
-};
-
-constexpr usize MAX_MOUNTS = 32;
-Mount g_mounts[MAX_MOUNTS];
-usize g_mount_count = 0;
-IrqSpinlock g_mount_lock;
-
-} // namespace
-
 long mount_at(const char* path, Inode* fs_root, const char* source, const char* type) {
-    Inode* parent;
-    const char* name;
-    usize len;
-    if (long r = resolve_parent(path, nullptr, &parent, &name, &len); r < 0)
+    Inode* target;
+    if (long r = resolve(path, nullptr, true, &target); r < 0)
         return r;
-    Inode* target = parent->lookup(name, len);
-    if (!target)
-        return -err::NOENT;
     if (!is_dir(target->mode))
         return -err::NOTDIR;
     LockGuard guard(g_mount_lock);
     if (g_mount_count >= MAX_MOUNTS)
         return -err::NOMEM;
-    // Only directories inside the RAM root file system can be covered for now.
-    auto* dir = static_cast<ramfs::Dir*>(parent);
-    if (!dir->replace(name, len, fs_root))
-        return -err::INVAL;
     Mount& m = g_mounts[g_mount_count++];
     snprintf(m.path, sizeof(m.path), "%s", path);
     snprintf(m.source, sizeof(m.source), "%s", source);
     snprintf(m.type, sizeof(m.type), "%s", type);
     m.root = fs_root;
     m.covered = target;
+    if (!fs_root->parent)
+        fs_root->parent = fs_root;
     return 0;
 }
 
@@ -316,20 +344,36 @@ long unmount(const char* path) {
     for (usize i = g_mount_count; i-- > 0;) {
         if (strcmp(g_mounts[i].path, path) != 0)
             continue;
-        Inode* parent;
-        const char* name;
-        usize len;
-        if (long r = resolve_parent(path, nullptr, &parent, &name, &len); r < 0)
-            return r;
-        static_cast<ramfs::Dir*>(parent)->replace(name, len, g_mounts[i].covered);
-        g_mounts[i] = g_mounts[--g_mount_count];
+        for (usize j = 0; j < g_mount_count; j++) // something mounted inside it?
+            if (j != i && g_mounts[j].covered->dev == g_mounts[i].root->dev && g_mounts[i].root->dev != 1)
+                return -err::BUSY;
+        for (usize j = i; j + 1 < g_mount_count; j++)
+            g_mounts[j] = g_mounts[j + 1];
+        g_mount_count--;
         return 0;
     }
     return -err::INVAL;
 }
 
+bool is_mountpoint(Inode* dir) {
+    LockGuard guard(g_mount_lock);
+    for (usize i = 0; i < g_mount_count; i++)
+        if (g_mounts[i].covered == dir || g_mounts[i].root == dir)
+            return true;
+    return dir == g_root;
+}
+
+void set_root(Inode* new_root, const char* source, const char* type) {
+    new_root->parent = new_root;
+    g_root = new_root;
+    snprintf(g_root_source, sizeof(g_root_source), "%s", source);
+    snprintf(g_root_type, sizeof(g_root_type), "%s", type);
+}
+
+Inode* ram_root() { return g_ram_root; }
+
 void for_each_mount(void (*fn)(const char*, const char*, const char*, void*), void* ctx) {
-    fn("ramfs", "/", "ramfs", ctx); // not "rootfs": tools like df skip entries by that name
+    fn(g_root_source, "/", g_root_type, ctx); // not "rootfs": tools like df skip entries by that name
     LockGuard guard(g_mount_lock);
     for (usize i = 0; i < g_mount_count; i++)
         fn(g_mounts[i].source, g_mounts[i].path, g_mounts[i].type, ctx);

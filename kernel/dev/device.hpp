@@ -79,7 +79,9 @@ Device* add(Device* d);
 // (flagged, never freed) because walkers like /sys don't hold the lock.
 void remove(Device* d);
 void register_driver(Driver* drv);
-void probe_all();            // try every registered driver on every unbound device
+// Try every registered driver on every unbound device (only those `filter`
+// accepts, if given).
+void probe_all(bool (*filter)(Device*) = nullptr);
 
 void for_each(void (*fn)(Device* d, void* ctx), void* ctx);
 u32 count();

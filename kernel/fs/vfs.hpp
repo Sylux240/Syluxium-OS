@@ -190,10 +190,15 @@ Timespec now();
 u64 next_fs_dev(); // a fresh st_dev for a newly mounted file system
 
 // ---- Mounts ----
-// Attach a file system's root over the directory at `path` (which must live
-// in the RAM root file system). source/type are what /proc/mounts shows.
+// Attach a file system's root over the directory at `path` (on any file
+// system). source/type are what /proc/mounts shows.
 long mount_at(const char* path, Inode* fs_root, const char* source, const char* type);
 long unmount(const char* path);
+bool is_mountpoint(Inode* dir); // "/", a mount's root, or a directory something is mounted on
+// Make `new_root` the "/" directory (booting from a disk). Mount the RAM
+// file system's /dev, /proc, ... on it afterwards (see ram_root()).
+void set_root(Inode* new_root, const char* source, const char* type);
+Inode* ram_root(); // the RAM file system created at boot (the root until set_root)
 void for_each_mount(void (*fn)(const char* source, const char* path, const char* type, void* ctx), void* ctx);
 
 } // namespace vfs

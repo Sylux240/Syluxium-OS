@@ -35,11 +35,11 @@ void register_driver(Driver* drv) {
     g_drivers.push_back(drv);
 }
 
-void probe_all() {
+void probe_all(bool (*filter)(Device*)) {
     // Probing may sleep and allocate, so walk the lists without the lock
     // (devices and drivers are only ever added, never removed, for now).
     for (Device* d = g_devices.front(); d; d = g_devices.next_of(d)) {
-        if (d->driver_name || d->removed)
+        if (d->driver_name || d->removed || (filter && !filter(d)))
             continue;
         for (Driver* drv = g_drivers.front(); drv; drv = g_drivers.next_of(drv)) {
             if (drv->match_ex ? !drv->match_ex(drv, d) : !drv->match(d))

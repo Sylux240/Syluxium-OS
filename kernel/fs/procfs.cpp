@@ -610,7 +610,8 @@ bool gen_mounts(TextBuffer& out, const void*) {
         auto* o = static_cast<TextBuffer*>(arg);
         o->printf("%s %s %s rw,relatime 0 0\n", source, path, type);
     }, &out);
-    out.append("proc /proc proc rw,nosuid,nodev,noexec 0 0\nsysfs /sys sysfs rw,nosuid,nodev,noexec 0 0\n"
+    if (vfs::root() == vfs::ram_root()) // on a disk root they're real mount entries
+        out.append("proc /proc proc rw,nosuid,nodev,noexec 0 0\nsysfs /sys sysfs rw,nosuid,nodev,noexec 0 0\n"
                "devtmpfs /dev devtmpfs rw 0 0\n");
     return true;
 }
