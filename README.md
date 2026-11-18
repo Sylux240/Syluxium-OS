@@ -123,6 +123,13 @@ tools/smoke-test.sh   headless QEMU boot: serial log + screenshot
             konqueror, konsole, kcontrol, ksmserver), D-Bus system + session buses, ld.so.cache,
             `starttde-test` session script (aRts sound server off; ALSA is used directly)
       - [ ] 9-boot: boot from a disk root filesystem instead of a 350 MB initramfs; a login/session
+      - [ ] 9-users: **login screen and user accounts**: graphical login (TDE's TDM, XP/7-styled:
+            user tiles with pictures, password, Shut Down/Restart/Sleep buttons; optional
+            auto-login), real multi-user security in the kernel (enforced file permissions and
+            ownership per uid/gid, setuid, per-user home directories), passwords in /etc/shadow
+            (PAM), a first-boot / installer step that creates the first account, and a **User
+            Accounts** control panel: add/remove users, change password and picture, account type
+            (administrator / standard), sudo-style "run as administrator" prompts, lock screen
       - [ ] 9-install: Syluxium's own on-disk filesystem + a GUI installer run from the live USB
       - [ ] 9-power: real power off / restart: ACPI S5 power-off, ACPI reset register or keyboard
             controller restart, sync + unmount first; working `poweroff`/`reboot`/`halt`; TDE
