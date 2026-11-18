@@ -127,6 +127,10 @@ tools/smoke-test.sh   headless QEMU boot: serial log + screenshot
       - [ ] 9-power: real power off / restart: ACPI S5 power-off, ACPI reset register or keyboard
             controller restart, sync + unmount first; working `poweroff`/`reboot`/`halt`; TDE
             Start → Shut Down / Restart call them (TDE shutdown backend or its shutdown-command fallback)
+      - [ ] 9-sleep: **Sleep** (ACPI S3 suspend-to-RAM: save/restore devices, wake on power button,
+            lid, keyboard/mouse; Start → Sleep, lid close) and later Hibernate (S4); **screen
+            timeout**: blank/power off the display after N minutes idle (DPMS), lock optional,
+            settings in Control Panel → Power Options
       - [ ] 9-sound: sound enabled by default in TDE (aRts on, or TDE using ALSA directly)
       - [ ] 9-firefox: Firefox (firefox-esr) is the default web browser; Konqueror only for files
       - [ ] 9-usb: USB plug and play: hot-plugged Ethernet adapters, Wi-Fi adapters and other
