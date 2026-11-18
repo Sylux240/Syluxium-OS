@@ -183,6 +183,9 @@ tools/smoke-test.sh   headless QEMU boot: serial log + screenshot
         Python, ...); real IDEs (KDevelop, Qt Creator, VS Code-likes, Geany) installable from the App Store
       - **Image Writer** (GUI): flash .iso/.img (and compressed images) to USB sticks and SD cards
         with verification, like balenaEtcher / Rufus
+      - **Office suite**: LibreOffice (OpenOffice's actively maintained successor; Debian's
+        packages), preinstalled: Writer, Calc, Impress, Draw, Base, Math; opens/saves Microsoft
+        Office files (.docx/.xlsx/.pptx); in the start menu, the default for documents
       - **Firefox** web browser: Debian's real firefox-esr package, preinstalled and pinned to
         the start menu/taskbar (needs Wayland or XWayland, GTK 3, epoll, shared memory, fonts)
       - Every system tool has a GUI (command line optional)
