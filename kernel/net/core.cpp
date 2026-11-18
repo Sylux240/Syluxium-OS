@@ -347,6 +347,8 @@ u16 pseudo_checksum(u32 src, u32 dst, u8 proto, const u8* segment, usize len) {
 
 // ---- interfaces ----
 
+bool g_started = false; // start() ran: interfaces registered later (hot-plug) are set up at once
+
 void register_interface(Interface* iface) {
     if (g_iface_count >= MAX_IFACES)
         return;
@@ -357,6 +359,13 @@ void register_interface(Interface* iface) {
     if (!(iface->flags & IFF_LOOPBACK))
         klog::ok("Network: %s, MAC %02x:%02x:%02x:%02x:%02x:%02x, link %s", iface->name, iface->mac[0], iface->mac[1],
                  iface->mac[2], iface->mac[3], iface->mac[4], iface->mac[5], iface->link_up ? "up" : "down");
+    if (g_started && !(iface->flags & IFF_LOOPBACK)) {
+        {
+            LockGuard guard(g_lock);
+            ipv6_init_interface(iface);
+        }
+        dhcp_start(iface);
+    }
 }
 
 Interface* interface_by_index(u32 index) { return index >= 1 && index <= g_iface_count ? g_ifaces[index - 1] : nullptr; }
@@ -545,6 +554,7 @@ void init() {
 }
 
 void start(u64 dhcp_wait_ms) {
+    g_started = true;
     sched::spawn("net-timer", timer_thread, nullptr, -1, true);
     sched::spawn("net-loopback", loopback_thread, nullptr, -1, true);
     {

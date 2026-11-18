@@ -3,6 +3,13 @@
 # desktop (as root, as the desktop icon would start it after sudo).
 startdesktop &
 sleep "${1:-55}"
-DISPLAY=:0 XAUTHORITY="$(ls /var/run/xauth/A:0-* | head -1)" syluxium-installer > /tmp/installer-gui.log 2>&1 &
+export DISPLAY=:0 XAUTHORITY="$(ls /var/run/xauth/A:0-* | head -1)"
+syluxium-installer > /tmp/installer-gui.log 2>&1 &
+# Stand in for the user's click: keep the installer's current window focused.
+( for i in $(seq 1 200); do
+      w=$(xdotool search --name "Install Syluxium" 2>/dev/null | tail -1)
+      [ -n "$w" ] && xdotool windowactivate "$w" 2>/dev/null
+      sleep 2
+  done ) &
 sleep "${2:-300}"
 { echo "=== installer log:"; cat /var/log/syluxium-install.log 2>&1 | tail -12; tail -5 /tmp/installer-gui.log; } > /dev/console 2>&1

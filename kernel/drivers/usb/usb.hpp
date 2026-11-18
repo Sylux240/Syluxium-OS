@@ -62,6 +62,11 @@ public:
     // drivers may still hold the pointer - but every request fails.
     virtual void disable() = 0;
 
+    // The active configuration descriptor (all of it), for class drivers
+    // that need more than the interface/endpoint summary (CDC, audio).
+    u8 config_desc[1024] = {};
+    u16 config_len = 0;
+
     // Class drivers register what to undo when the device goes away.
     // Called (in reverse order) by detach(), after disable().
     void add_binding(void (*disconnect)(void* ctx), void* ctx) {
@@ -120,6 +125,9 @@ bool probe(Device* d, const Interface& intf);
 }
 namespace hub {
 bool probe(Device* d, const Interface& intf);
+}
+namespace cdc_ether {
+bool probe(Device* d, const Interface& intf); // USB Ethernet adapters / tethering (CDC-ECM)
 }
 
 constexpr u8 REQ_GET_STATUS = 0, REQ_CLEAR_FEATURE = 1, REQ_SET_FEATURE = 3, REQ_GET_DESCRIPTOR = 6,

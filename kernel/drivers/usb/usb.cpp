@@ -121,16 +121,40 @@ void attach(Device* d) {
     if (!d->product_name[0])
         snprintf(d->product_name, sizeof(d->product_name), "USB device %04x:%04x", d->vendor, d->product);
 
-    // Configuration descriptor: header first, then the whole thing.
-    u8 header[9];
-    if (d->control(0x80, REQ_GET_DESCRIPTOR, DESC_CONFIGURATION << 8, 0, header, 9) < 9)
+    // Configuration descriptor: header first, then the whole thing. With
+    // several configurations, prefer one with a CDC Ethernet interface
+    // (QEMU's usb-net, Realtek RTL815x dongles offer RNDIS/vendor + CDC).
+    u8 configs = desc[17] ? desc[17] : 1;
+    u8 chosen = 0;
+    u8* config = d->config_desc;
+    u16 total = 0;
+    for (u8 index = 0; index < configs && index < 4; index++) {
+        u8 header[9];
+        if (d->control(0x80, REQ_GET_DESCRIPTOR, static_cast<u16>((DESC_CONFIGURATION << 8) | index), 0, header, 9) < 9)
+            break;
+        u16 len = static_cast<u16>(header[2] | (header[3] << 8));
+        if (len > sizeof(d->config_desc))
+            len = sizeof(d->config_desc);
+        if (d->control(0x80, REQ_GET_DESCRIPTOR, static_cast<u16>((DESC_CONFIGURATION << 8) | index), 0, config, len) < len)
+            break;
+        bool cdc = false;
+        for (u16 off = 0; off + 9 <= len && config[off] >= 2; off = static_cast<u16>(off + config[off]))
+            if (config[off + 1] == DESC_INTERFACE && config[off + 5] == 2 && (config[off + 6] == 6 || config[off + 6] == 0x0D))
+                cdc = true;
+        if (index == 0 || cdc) {
+            chosen = index;
+            total = len;
+        }
+        if (cdc)
+            break;
+    }
+    if (!total)
         return;
-    u16 total = static_cast<u16>(header[2] | (header[3] << 8));
-    if (total > 1024)
-        total = 1024;
-    u8 config[1024];
-    if (d->control(0x80, REQ_GET_DESCRIPTOR, DESC_CONFIGURATION << 8, 0, config, total) < total)
-        return;
+    if (chosen != 0 || configs > 1) { // re-read the chosen one (the loop may have read past it)
+        if (d->control(0x80, REQ_GET_DESCRIPTOR, static_cast<u16>((DESC_CONFIGURATION << 8) | chosen), 0, config, total) < total)
+            return;
+    }
+    d->config_len = total;
     if (d->control(0x00, REQ_SET_CONFIGURATION, config[5], 0, nullptr, 0) < 0)
         return;
 
@@ -151,6 +175,8 @@ void attach(Device* d) {
     auto offer = [&]() {
         if (!have_intf || intf.alt_setting != 0)
             return;
+        if (bound)
+            return; // one driver per device for now (the first interface that binds names it)
         entry->category = category_for(intf.cls);
         entry->class_code = (static_cast<u32>(intf.cls) << 16) | (static_cast<u32>(intf.subclass) << 8) | intf.protocol;
         if (xpad::probe(d, intf)) {
@@ -165,6 +191,10 @@ void attach(Device* d) {
             bound = true;
         } else if (hub::probe(d, intf)) {
             entry->driver_name = "hub";
+            bound = true;
+        } else if (cdc_ether::probe(d, intf)) {
+            entry->category = dev::Category::Network;
+            entry->driver_name = "cdc_ether";
             bound = true;
         }
     };
