@@ -210,7 +210,8 @@ tools/smoke-test.sh   headless QEMU boot: serial log + screenshot
             syscalls directly), seccomp, ptrace semantics, accurate /proc. Easy Anti-Cheat and
             BattlEye run on Proton in user space (no kernel driver) when the game's developer has
             enabled Linux support; games with Windows kernel anti-cheat (Vanguard, Ricochet, ...)
-            can't run on any Linux-compatible system
+            can't run on any Linux-compatible system. **Goal: every game that runs on a Steam
+            Deck / desktop Linux (ProtonDB "Platinum"/"Gold", anti-cheat included) runs on Syluxium**
 - [ ] **Phase 11**: **App Store** + package installer (.deb only; .rpm dropped): a Play Store-like
       app with screenshots, icons, descriptions, ratings/details, categories and search, pulling
       .deb packages from several repositories (Debian, Ubuntu, third-party apt repos); double-click
