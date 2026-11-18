@@ -351,11 +351,12 @@ bool Memory::populate(Vma* v, uptr page) {
     // libraries): map the file's own page read-only and share it between
     // every process that maps it; the first write copies it (copy-on-write).
     // Copying it per process would cost each Firefox process 156 MiB of libxul.
-    if (v->file && v->file->shared_mappable()) {
+    if (v->file) {
         u64 delta = page - v->start;
         u64 file_phys;
-        if (delta + PAGE_SIZE <= v->file_bytes && ((v->file_offset + delta) & (PAGE_SIZE - 1)) == 0 &&
-            v->file->mmap_phys(v->file_offset + delta, &file_phys) == 0) {
+        bool whole = delta + PAGE_SIZE <= v->file_bytes && ((v->file_offset + delta) & (PAGE_SIZE - 1)) == 0;
+        if (whole && (v->file->shared_mappable() ? v->file->mmap_phys(v->file_offset + delta, &file_phys)
+                                                 : v->file->cache_page(v->file_offset + delta, &file_phys)) == 0) {
             __atomic_add_fetch(&pmm::frame(file_phys)->refcount, 1, __ATOMIC_ACQ_REL); // the mapping's reference
             if (!m_as->map(page, file_phys, prot_to_map_flags(v->prot) & ~vmm::WRITE)) {
                 vmm::release_user_page(file_phys);

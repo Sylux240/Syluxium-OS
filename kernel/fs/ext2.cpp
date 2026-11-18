@@ -7,6 +7,9 @@
 #include <lib/random.hpp>
 #include <lib/string.hpp>
 #include <mm/heap.hpp>
+#include <mm/vmm.hpp>
+#include <mm/layout.hpp>
+#include <mm/pmm.hpp>
 #include <sched/sync.hpp>
 #include <time/rtc.hpp>
 
@@ -590,6 +593,56 @@ public:
     RawInode raw;
     Node* next_cached = nullptr;
 
+    // Page cache for mmap (see vfs::Inode::cache_page): file page -> frame.
+    u64* m_cache = nullptr;
+    u32 m_cache_pages = 0;
+
+    void drop_cache() {
+        if (!m_cache)
+            return;
+        for (u32 i = 0; i < m_cache_pages; i++)
+            if (m_cache[i])
+                vmm::release_user_page(m_cache[i]); // mappings keep their own references
+        kfree(m_cache);
+        m_cache = nullptr;
+        m_cache_pages = 0;
+    }
+
+    long cache_page(u64 offset, u64* phys) override {
+        if (!vfs::is_reg(mode) || (offset & 4095))
+            return -err::INVAL;
+        LockGuard guard(vol->lock);
+        if (offset >= size)
+            return -err::FAULT;
+        u32 index = static_cast<u32>(offset / 4096);
+        if (index >= m_cache_pages) {
+            u32 want = static_cast<u32>((size + 4095) / 4096);
+            if (want <= index)
+                return -err::FAULT;
+            auto* grown = static_cast<u64*>(kzalloc(want * sizeof(u64)));
+            if (!grown)
+                return -err::NOMEM;
+            if (m_cache)
+                memcpy(grown, m_cache, m_cache_pages * sizeof(u64));
+            kfree(m_cache);
+            m_cache = grown;
+            m_cache_pages = want;
+        }
+        if (!m_cache[index]) {
+            u64 p = pmm::alloc_page(true);
+            if (!p)
+                return -err::NOMEM;
+            usize n = min<u64>(4096, size - offset);
+            if (read_locked(offset, mm::phys_to_virt<u8>(p), n) < 0) {
+                pmm::free_page(p);
+                return -err::IO;
+            }
+            m_cache[index] = p; // the cache's own reference (refcount 1)
+        }
+        *phys = m_cache[index];
+        return 0;
+    }
+
     Node(Volume* v, u32 inode_number) : vol(v), number(inode_number) {
         v->read_inode(inode_number, &raw);
         ino = inode_number;
@@ -1083,6 +1136,7 @@ public:
     }
 
     isize write_locked(u64 offset, const void* buf, usize count) {
+        drop_cache(); // new mappings must see the new data
         auto* in = static_cast<const u8*>(buf);
         usize done = 0;
         while (done < count) {
@@ -1110,6 +1164,7 @@ public:
         if (!writable())
             return -err::ROFS;
         LockGuard guard(vol->lock);
+        drop_cache();
         if (new_size < size) {
             u64 keep_blocks = (new_size + vol->block_size - 1) / vol->block_size;
             free_blocks_from(keep_blocks);
@@ -1485,6 +1540,7 @@ public:
         bool fast_symlink = vfs::is_lnk(victim->mode) && !victim->uses_extents() && victim->raw.blocks_lo == 0;
         if (!fast_symlink)
             victim->free_blocks_from(0);
+        victim->drop_cache();
         victim->raw.dtime = now_seconds();
         victim->nlink = 0;
         victim->size = 0;
