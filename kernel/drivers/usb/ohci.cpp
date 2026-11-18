@@ -67,8 +67,10 @@ public:
 
     struct Pipe {
         Ed* ed = nullptr;
-        u64 page_phys = 0;   // ED + 63 TDs (16 bytes each) in one page
+        u64 page_phys = 0;   // the ED, then a ring of 255 TD slots (16 bytes each)
         Td* tds = nullptr;
+        u32 dummy = 0;       // slot of the dummy TD the ED's tail points at
+        u32 int_slot = 0;    // the interrupt pipe's pending TD
         u8* buffer = nullptr;
         u64 buffer_phys = 0;
         u16 max_packet = 8;
@@ -172,6 +174,8 @@ bool OhciDevice::make_pipe(u8 index, u8 ep_num, bool in, u16 max_packet, bool pe
     p.max_packet = max_packet;
     p.periodic = periodic;
     // Empty queue: head == tail == a dummy TD.
+    p.dummy = 0;
+    memset(p.tds, 0, sizeof(Td));
     u32 dummy = static_cast<u32>(p.page_phys + 16);
     p.ed->control = ed_control(p);
     p.ed->tail = dummy;
@@ -181,56 +185,79 @@ bool OhciDevice::make_pipe(u8 index, u8 ep_num, bool in, u16 max_packet, bool pe
     return true;
 }
 
-// TDs [0, count) are filled; append the dummy, start, wait for head == tail.
-long OhciDevice::run(Pipe& p, u32 count, u64 timeout_ms) {
-    u32 base = static_cast<u32>(p.page_phys + 16);
-    for (u32 i = 0; i < count; i++)
-        p.tds[i].next = base + (i + 1) * 16;
-    Td& dummy = p.tds[count];
-    memset(&dummy, 0, sizeof(dummy));
-    u32 tail = base + count * 16;
-    __atomic_thread_fence(__ATOMIC_SEQ_CST);
-    p.ed->head = base | (p.ed->head & 2); // keep the toggle carry, clear halt
-    p.ed->tail = tail;
-    m_hc->set(HcCommandStatus, p.ep_num == 0 ? CMD_CLF : CMD_BLF);
-    u64 deadline = clock::now_ns() + timeout_ms * 1'000'000;
-    for (;;) {
-        if (gone)
-            return -err::NODEV;
-        u32 head = __atomic_load_n(&p.ed->head, __ATOMIC_ACQUIRE);
-        if (head & 1) { // halted: a TD failed (or a short packet without rounding)
-            klog::warn("ohci: ep %u%s halted: TD0 cc %u", p.ep_num, p.in ? " in" : "", p.tds[0].control >> 28);
-            p.ed->head = tail; // drop the rest
-            return -err::IO;
-        }
-        if ((head & ~0xFu) == tail)
-            return 0;
-        if (clock::now_ns() > deadline) {
-            if (timeout_ms < 100000)
-                klog::warn("ohci: ep %u%s timed out: head %#x tail %#x ed %#x TD0 cc %u cbp %#x be %#x", p.ep_num,
-                           p.in ? " in" : "", head, tail, p.ed->control, p.tds[0].control >> 28, p.tds[0].cbp,
-                           p.tds[0].be);
-            p.ed->control |= 1u << 14; // sKip, then drop the queue
-            sched::sleep_ms(2);
-            p.ed->head = tail;
-            p.ed->control &= ~(1u << 14);
-            return -err::TIMEDOUT;
-        }
-        sched::sleep_ms(1);
-    }
-}
+// The TD slot ring. The controller writes the ED's head back on every
+// pass, so the driver never writes the head of a live ED: new TDs go into
+// the current dummy (and the slots after it), a fresh dummy is appended,
+// and the tail moves - the OHCI way.
+constexpr u32 SLOTS = 255;
+u32 slot_after(const OhciDevice::Pipe& p, u32 k) { return (p.dummy + k) % SLOTS; }
+u32 slot_phys(const OhciDevice::Pipe& p, u32 slot) { return static_cast<u32>(p.page_phys + 16 + 16 * slot); }
 
-void fill(OhciDevice::Pipe& p, u32 i, u32 pid_toggle, u32 off, u32 len) {
-    Td& t = p.tds[i];
+void fill(OhciDevice::Pipe& p, u32 slot, u32 pid_toggle, u32 off, u32 len) {
+    Td& t = p.tds[slot];
     t.control = pid_toggle | TD_ROUNDING | TD_NO_INT | (0xFu << 28);
     t.cbp = len ? static_cast<u32>(p.buffer_phys + off) : 0;
     t.be = len ? static_cast<u32>(p.buffer_phys + off + len - 1) : 0;
 }
 
 // Bytes a completed TD moved: CBP 0 = all of it, else up to CBP.
-u32 moved(const OhciDevice::Pipe& p, u32 i, u32 off, u32 len) {
-    u32 cbp = p.tds[i].cbp;
+u32 moved(const OhciDevice::Pipe& p, u32 slot, u32 off, u32 len) {
+    u32 cbp = p.tds[slot].cbp;
     return cbp ? cbp - static_cast<u32>(p.buffer_phys + off) : len;
+}
+
+// The `count` TDs filled at slot_after(p, 0...) go live; returns the new tail.
+u32 submit(OhciDevice::Pipe& p, u32 count) {
+    for (u32 k = 0; k < count; k++)
+        p.tds[slot_after(p, k)].next = slot_phys(p, slot_after(p, k + 1));
+    u32 fresh = slot_after(p, count);
+    memset(&p.tds[fresh], 0, sizeof(Td));
+    p.dummy = fresh;
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    u32 tail = slot_phys(p, fresh);
+    __atomic_store_n(&p.ed->tail, tail, __ATOMIC_RELEASE);
+    return tail;
+}
+
+// Restart a halted ED (the controller leaves it alone while halted):
+// drop what's left, keep the toggle carry.
+void unhalt(OhciDevice::Pipe& p, u32 tail) {
+    u32 head = __atomic_load_n(&p.ed->head, __ATOMIC_ACQUIRE);
+    __atomic_store_n(&p.ed->head, tail | (head & 2), __ATOMIC_RELEASE);
+}
+
+// The TDs filled at slot_after(p, 0...count) run; waits for head == tail.
+long OhciDevice::run(Pipe& p, u32 count, u64 timeout_ms) {
+    u32 first = p.dummy;
+    u32 tail = submit(p, count);
+    m_hc->set(HcCommandStatus, p.ep_num == 0 ? CMD_CLF : CMD_BLF);
+    u64 deadline = clock::now_ns() + timeout_ms * 1'000'000;
+    for (;;) {
+        if (gone)
+            return -err::NODEV;
+        u32 head = __atomic_load_n(&p.ed->head, __ATOMIC_ACQUIRE);
+        if (head & 1) { // halted: a TD failed
+            klog::warn("ohci: ep %u%s halted: cc %u", p.ep_num, p.in ? " in" : "", p.tds[first].control >> 28);
+            unhalt(p, tail);
+            return -err::IO;
+        }
+        if ((head & ~0xFu) == tail)
+            return 0;
+        if (clock::now_ns() > deadline) {
+            if (timeout_ms < 100000)
+                klog::warn("ohci: ep %u%s timed out (cc %u)", p.ep_num, p.in ? " in" : "",
+                           p.tds[first].control >> 28);
+            p.ed->control |= 1u << 14; // sKip: the controller stops writing the ED back
+            sched::sleep_ms(2);
+            unhalt(p, tail);
+            p.ed->control &= ~(1u << 14);
+            return -err::TIMEDOUT;
+        }
+        // The controller drops "list filled" when a pass finds nothing it
+        // can do (a device NAKing); keep it set while the queue is pending.
+        m_hc->set(HcCommandStatus, p.ep_num == 0 ? CMD_CLF : CMD_BLF);
+        sched::sleep_ms(1);
+    }
 }
 
 long OhciDevice::control(u8 type, u8 request, u16 value, u16 index, void* data, u16 length) {
@@ -250,13 +277,14 @@ long OhciDevice::control(u8 type, u8 request, u16 value, u16 index, void* data, 
     if (!in && length)
         memcpy(p.buffer, data, length);
     u32 n = 0;
-    fill(p, n++, TD_DP_SETUP | TD_DATA0, 4096 - 8, 8);
+    u32 data_slot = slot_after(p, 1);
+    fill(p, slot_after(p, n++), TD_DP_SETUP | TD_DATA0, 4096 - 8, 8);
     if (length)
-        fill(p, n++, (in ? TD_DP_IN : TD_DP_OUT) | TD_DATA1, 0, length);
-    fill(p, n++, ((in && length) ? TD_DP_OUT : TD_DP_IN) | TD_DATA1, 0, 0);
+        fill(p, slot_after(p, n++), (in ? TD_DP_IN : TD_DP_OUT) | TD_DATA1, 0, length);
+    fill(p, slot_after(p, n++), ((in && length) ? TD_DP_OUT : TD_DP_IN) | TD_DATA1, 0, 0);
     if (long r = run(p, n, 2000); r < 0)
         return r;
-    u32 actual = length ? moved(p, 1, 0, length) : 0;
+    u32 actual = length ? moved(p, data_slot, 0, length) : 0;
     if (in && actual)
         memcpy(data, p.buffer, actual);
     return actual;
@@ -280,13 +308,18 @@ long OhciDevice::bulk(u8 ep_address, void* data, u32 length, u64 timeout_ms) {
     bool in = ep_address & 0x80;
     u32 done = 0;
     do {
-        u32 chunk = min<u32>(length - done, 4096); // one page per round (a TD may cross one page boundary)
+        // One page per round at most (a TD may cross one page boundary).
+        // OUT: at most 32 packets - QEMU's OHCI sends each OUT packet as a
+        // loop step and declares the controller dead past 32 in one frame.
+        u32 cap = in ? 4096 : min<u32>(4096, 32u * p.max_packet);
+        u32 chunk = min<u32>(length - done, cap);
         if (!in)
             memcpy(p.buffer, static_cast<u8*>(data) + done, chunk);
-        fill(p, 0, (in ? TD_DP_IN : TD_DP_OUT) | TD_TOGGLE_ED, 0, chunk);
+        u32 slot = p.dummy;
+        fill(p, slot, (in ? TD_DP_IN : TD_DP_OUT) | TD_TOGGLE_ED, 0, chunk);
         if (long r = run(p, 1, timeout_ms); r < 0)
             return r;
-        u32 got = moved(p, 0, 0, chunk);
+        u32 got = moved(p, slot, 0, chunk);
         if (in)
             memcpy(static_cast<u8*>(data) + done, p.buffer, got);
         done += got;
@@ -304,13 +337,9 @@ long OhciDevice::start_interrupt_in(u8 ep_address, u32 length, usb::InterruptCal
     p.requested = min<u32>(length, 1024);
     p.callback_ctx = ctx;
     p.callback = cb;
-    fill(p, 0, TD_DP_IN | TD_TOGGLE_ED, 0, p.requested);
-    u32 base = static_cast<u32>(p.page_phys + 16);
-    p.tds[0].next = base + 16;
-    memset(&p.tds[1], 0, sizeof(Td));
-    __atomic_thread_fence(__ATOMIC_SEQ_CST);
-    p.ed->head = base | (p.ed->head & 2);
-    p.ed->tail = base + 16;
+    p.int_slot = p.dummy;
+    fill(p, p.int_slot, TD_DP_IN | TD_TOGGLE_ED, 0, p.requested);
+    submit(p, 1);
     return 0;
 }
 
@@ -319,19 +348,20 @@ void OhciDevice::poll_interrupts() {
         Pipe& p = pipes[index];
         if (!p.callback || gone)
             continue;
-        u32 base = static_cast<u32>(p.page_phys + 16);
+        u32 tail = slot_phys(p, p.dummy);
         u32 head = __atomic_load_n(&p.ed->head, __ATOMIC_ACQUIRE);
-        if (!(head & 1) && (head & ~0xFu) != base + 16)
+        if (!(head & 1) && (head & ~0xFu) != tail)
             continue; // still pending
-        if (!(head & 1)) {
-            u32 got = moved(p, 0, 0, p.requested);
+        if (head & 1) {
+            unhalt(p, tail);
+        } else {
+            u32 got = moved(p, p.int_slot, 0, p.requested);
             if (got)
                 p.callback(p.callback_ctx, p.buffer, got);
         }
-        fill(p, 0, TD_DP_IN | TD_TOGGLE_ED, 0, p.requested);
-        p.tds[0].next = base + 16;
-        __atomic_thread_fence(__ATOMIC_SEQ_CST);
-        p.ed->head = base | (head & 2);
+        p.int_slot = p.dummy;
+        fill(p, p.int_slot, TD_DP_IN | TD_TOGGLE_ED, 0, p.requested);
+        submit(p, 1);
     }
 }
 
