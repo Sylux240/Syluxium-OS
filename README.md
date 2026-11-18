@@ -212,6 +212,19 @@ tools/smoke-test.sh   headless QEMU boot: serial log + screenshot
             enabled Linux support; games with Windows kernel anti-cheat (Vanguard, Ricochet, ...)
             can't run on any Linux-compatible system. **Goal: every game that runs on a Steam
             Deck / desktop Linux (ProtonDB "Platinum"/"Gold", anti-cheat included) runs on Syluxium**
+- [ ] **Security**: a thorough kernel security review before Syluxium is used for real, and an
+      ongoing one after each phase
+      - Audit every syscall and ioctl for user-pointer validation, integer overflows, missing
+        bounds checks, use-after-free and races (TOCTOU on user memory, lock ordering)
+      - Fuzzing: syzkaller (it speaks the Linux syscall ABI, so it can fuzz Syluxium directly),
+        plus file system image, USB descriptor and network packet fuzzers
+      - Hardening: SMEP/SMAP, KASLR, stack canaries, guard pages, hardened usercopy, CFI,
+        zeroing freed memory, a KASAN-style memory error detector for test builds
+      - Permission model (with 9-users): enforced uid/gid/file modes, capabilities, namespaces
+        isolation, seccomp; untrusted devices (USB, Thunderbolt DMA via IOMMU) can't take over
+      - Network stack: TCP sequence randomization, SYN flood handling, malformed packet tests
+      - Responsible process: findings tracked, regression test per fixed bug
+
 - [ ] **Phase 11**: **App Store** + package installer (.deb only; .rpm dropped): a Play Store-like
       app with screenshots, icons, descriptions, ratings/details, categories and search, pulling
       .deb packages from several repositories (Debian, Ubuntu, third-party apt repos); double-click
