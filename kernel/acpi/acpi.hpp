@@ -86,5 +86,6 @@ const SdtHeader* find_table(const char* signature, u32 index = 0);
 const MadtInfo& madt();
 const HpetInfo& hpet();
 u8 revision();
+u64 rsdp_phys(); // for the AML interpreter (uACPI), which starts after boot memory is gone
 
 } // namespace acpi

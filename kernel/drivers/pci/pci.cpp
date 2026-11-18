@@ -183,6 +183,13 @@ void write8(const Function& f, u16 off, u8 v) { f.config[off] = v; }
 void write16(const Function& f, u16 off, u16 v) { *reinterpret_cast<volatile u16*>(f.config + off) = v; }
 void write32(const Function& f, u16 off, u32 v) { raw_write32(f.config, off, v); }
 
+volatile u8* config_space(u16 segment, u8 bus, u8 device, u8 function) {
+    for (u32 r = 0; r < g_region_count; r++)
+        if (g_regions[r].segment == segment && bus >= g_regions[r].start_bus && bus <= g_regions[r].end_bus)
+            return config_window(r, bus, device, function);
+    return nullptr;
+}
+
 void init() {
     auto* mcfg = acpi::find_table("MCFG");
     if (!mcfg) {

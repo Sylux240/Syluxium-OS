@@ -45,6 +45,7 @@ struct PACKED Hpet {
 constexpr u32 MAX_TABLES = 64;
 
 const SdtHeader* g_tables[MAX_TABLES];
+u64 g_rsdp_phys = 0;
 u32 g_table_count = 0;
 u8 g_revision = 0;
 MadtInfo g_madt;
@@ -175,6 +176,7 @@ void init() {
         panic("ACPI: RSDP is corrupt");
 
     g_revision = rsdp->revision;
+    g_rsdp_phys = mm::direct_virt_to_phys(rsdp);
     if (rsdp->revision >= 2 && rsdp->xsdt_address) {
         const SdtHeader* xsdt = map_table(rsdp->xsdt_address);
         usize n = (xsdt->length - sizeof(SdtHeader)) / 8;
@@ -216,5 +218,6 @@ const SdtHeader* find_table(const char* signature, u32 index) {
 const MadtInfo& madt() { return g_madt; }
 const HpetInfo& hpet() { return g_hpet; }
 u8 revision() { return g_revision; }
+u64 rsdp_phys() { return g_rsdp_phys; }
 
 } // namespace acpi

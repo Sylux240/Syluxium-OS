@@ -98,7 +98,7 @@ CFLAGS := \
     -mno-80387 -mno-mmx -mno-sse -mno-sse2 -msoft-float \
     -isystem $(LKPI_INCLUDE) \
     -MMD -MP
-CXXFLAGS += -isystem $(LKPI_INCLUDE)
+CXXFLAGS += -isystem $(LKPI_INCLUDE) -isystem deps/uacpi/include -DUACPI_USE_BUILTIN_STRING
 
 ASFLAGS := --target=x86_64-unknown-none-elf -g -Ikernel -MMD -MP
 
@@ -123,7 +123,14 @@ QEMU_FLAGS := \
 CXX_SRCS := $(shell find kernel -name '*.cpp')
 ASM_SRCS := $(shell find kernel -name '*.S')
 C_SRCS   := $(shell find kernel -name '*.c')
-OBJS     := $(CXX_SRCS:%.cpp=$(OBJDIR)/%.cpp.o) $(ASM_SRCS:%.S=$(OBJDIR)/%.S.o) $(C_SRCS:%.c=$(OBJDIR)/%.c.o)
+# uACPI (deps/uacpi, MIT): the ACPI AML interpreter, fetched at a fixed version.
+UACPI_DIR     := deps/uacpi
+UACPI_VERSION := 7.0.0
+UACPI_SRCS := $(addprefix $(UACPI_DIR)/source/,default_handlers.c event.c interpreter.c io.c mutex.c namespace.c \
+              notify.c opcodes.c opregion.c osi.c registers.c resources.c sleep.c stdlib.c tables.c types.c uacpi.c \
+              utilities.c)
+OBJS     := $(CXX_SRCS:%.cpp=$(OBJDIR)/%.cpp.o) $(ASM_SRCS:%.S=$(OBJDIR)/%.S.o) $(C_SRCS:%.c=$(OBJDIR)/%.c.o) \
+            $(UACPI_SRCS:%.c=$(OBJDIR)/%.c.o)
 DEPS     := $(OBJS:.o=.d)
 
 .PHONY: all kernel image initramfs rootdisk run run-uefi debug clean distclean deps
@@ -155,6 +162,21 @@ $(OBJDIR)/%.cpp.o: %.cpp | $(LIMINE_PROTOCOL_DIR)/include/limine.h
 	@mkdir -p $(dir $@)
 	@echo "  CXX   $<"
 	@$(CXX) $(CXXFLAGS) -MJ $@.json -c $< -o $@
+
+# uACPI: kernel C flags, without the LinuxKPI headers.
+UACPI_CFLAGS := $(filter-out -isystem $(LKPI_INCLUDE),$(CFLAGS)) -isystem deps/uacpi/include -DUACPI_USE_BUILTIN_STRING \
+                -Wno-unused-function -Wno-implicit-fallthrough
+$(UACPI_SRCS): | $(UACPI_DIR)/.fetched
+$(UACPI_DIR)/.fetched:
+	@echo "  GIT   uACPI $(UACPI_VERSION)"
+	@rm -rf $(UACPI_DIR) && git clone -q --depth 1 --branch $(UACPI_VERSION) https://github.com/uACPI/uACPI.git $(UACPI_DIR)
+	@touch $@
+$(OBJS): | $(UACPI_DIR)/.fetched
+
+$(OBJDIR)/deps/uacpi/%.c.o: deps/uacpi/%.c
+	@mkdir -p $(dir $@)
+	@echo "  CC    $<"
+	@$(CC) $(UACPI_CFLAGS) -c $< -o $@
 
 $(OBJDIR)/%.c.o: %.c
 	@mkdir -p $(dir $@)

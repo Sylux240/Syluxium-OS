@@ -1,5 +1,6 @@
 #include <acpi/acpi.hpp>
 #include <acpi/power.hpp>
+#include <acpi/devices.hpp>
 #include <arch/x86_64/apic.hpp>
 #include <arch/x86_64/cpu.hpp>
 #include <arch/x86_64/fpu.hpp>
@@ -477,6 +478,7 @@ void kernel_main_thread(void*) {
     // Every CPU is now off the bootloader's stacks and page tables.
     sysfs::init(); // needs the final CPU count
     discover_hardware();
+    acpi::start_interpreter(); // AML: power button, battery, lid (after PCI)
     u64 reclaimed = pmm::reclaim_bootloader_memory();
     klog::ok("Reclaimed %lu KiB of bootloader memory", reclaimed / KiB);
 

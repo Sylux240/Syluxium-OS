@@ -36,6 +36,9 @@ void init(); // enumerate everything and register it in the device registry
 u8 read8(const Function& f, u16 offset);
 u16 read16(const Function& f, u16 offset);
 u32 read32(const Function& f, u16 offset);
+// Config space of any function by address (ACPI code may touch functions
+// that have no driver); nullptr if no ECAM region covers it.
+volatile u8* config_space(u16 segment, u8 bus, u8 device, u8 function);
 void write8(const Function& f, u16 offset, u8 value);
 void write16(const Function& f, u16 offset, u16 value);
 void write32(const Function& f, u16 offset, u32 value);
