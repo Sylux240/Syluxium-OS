@@ -17,7 +17,7 @@ volatile u64 requests_start_marker[] = LIMINE_REQUESTS_START_MARKER;
 LIMINE_REQUEST u64 base_revision[] = LIMINE_BASE_REVISION(6);
 
 LIMINE_REQUEST limine_framebuffer_request framebuffer_request = {
-    .id = LIMINE_FRAMEBUFFER_REQUEST_ID, .revision = 0, .response = nullptr};
+    .id = LIMINE_FRAMEBUFFER_REQUEST_ID, .revision = 1, .response = nullptr}; // revision 1: the mode list
 
 LIMINE_REQUEST limine_memmap_request memmap_request = {
     .id = LIMINE_MEMMAP_REQUEST_ID, .revision = 0, .response = nullptr};

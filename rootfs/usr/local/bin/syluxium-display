@@ -1,0 +1,46 @@
+#!/bin/bash
+# Display Settings: choose the screen resolution. Until GPU drivers arrive,
+# the firmware sets the mode at boot: the choice goes into the boot loader's
+# configuration (Limine "resolution:") and takes effect after a restart.
+#   syluxium-display            graphical
+#   syluxium-display --set WxH  set it directly (no restart)
+export PATH=/opt/trinity/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+TITLE="Display Settings"
+SYS=/sys/class/graphics/fb0
+CONF=/boot/efi/boot/limine/limine.conf
+
+set_resolution() {
+    local res=$1
+    [ -f "$CONF" ] || { echo "no boot loader configuration at $CONF" >&2; return 1; }
+    awk -v res="$res" '
+        /^[ \t]*resolution:/ { next }
+        { print }
+        /^[ \t]*path:[ \t]*boot\(\):\/boot\/syluxium\.elf/ { print "    resolution: " res }
+    ' "$CONF" > "$CONF.new" && mv "$CONF.new" "$CONF" && sync
+}
+
+if [ "$1" = "--set" ]; then
+    [ "$(id -u)" = 0 ] || { echo "must be root" >&2; exit 1; }
+    set_resolution "$2"
+    exit $?
+fi
+[ "$(id -u)" = 0 ] || exec tdesudo -c "$0" -- "$@"
+
+current=$(sed 's/^U://; s/p.*//' "$SYS/mode" 2>/dev/null)
+modes=()
+while read -r line; do
+    m=$(echo "$line" | sed 's/^U://; s/p.*//')
+    [ -n "$m" ] && modes+=("$m")
+done < "$SYS/modes"
+[ ${#modes[@]} -gt 0 ] || { kdialog --title "$TITLE" --error "The screen's resolutions could not be read."; exit 1; }
+choice=$(kdialog --title "$TITLE" --combobox "Screen resolution (now: $current):" "${modes[@]}" --default "$current") || exit 0
+[ "$choice" = "$current" ] && exit 0
+if ! set_resolution "$choice"; then
+    kdialog --title "$TITLE" --error "The setting could not be saved."
+    exit 1
+fi
+if kdialog --title "$TITLE" --yesno "The screen will use $choice after a restart.
+
+Restart now?"; then
+    reboot
+fi

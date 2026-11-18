@@ -60,6 +60,11 @@ void init_display() {
     if (primary.init(fb->address, fb->width, fb->height, fb->pitch, fb->bpp,
                      fb->red_mask_shift, fb->green_mask_shift, fb->blue_mask_shift))
         console::init(primary);
+    // The modes the firmware offers (Display Settings picks one for the next boot).
+    if (fbs->revision >= 1)
+        for (u64 i = 0; i < fb->mode_count; i++)
+            fbdev::record_mode(static_cast<u32>(fb->modes[i]->width), static_cast<u32>(fb->modes[i]->height),
+                               fb->modes[i]->bpp);
 }
 
 void print_banner() {

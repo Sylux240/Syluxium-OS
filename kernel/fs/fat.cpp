@@ -544,13 +544,6 @@ public:
         if (find_locked(name, len))
             return -err::EXIST;
 
-        char sn[11];
-        make_short_name(name, len, sn);
-        int lfn_count = static_cast<int>((len + 12) / 13);
-        u64 slot = find_free_slots(lfn_count + 1);
-        if (!slot)
-            return -err::NOSPC;
-
         bool dir = type == vfs::S_IFDIR;
         u32 cluster = 0;
         if (dir) {
@@ -558,26 +551,7 @@ public:
             if (!cluster)
                 return -err::NOSPC;
         }
-
-        u8 sum = lfn_checksum(sn);
-        for (int i = 0; i < lfn_count; i++) {
-            LfnEntry l{};
-            int seq = lfn_count - i;
-            l.order = static_cast<u8>(seq | (i == 0 ? 0x40 : 0));
-            l.attr = ATTR_LFN;
-            l.checksum = sum;
-            u16 chars[13];
-            for (int k = 0; k < 13; k++) {
-                usize pos = static_cast<usize>(seq - 1) * 13 + k;
-                chars[k] = pos < len ? static_cast<u8>(name[pos]) : (pos == len ? 0 : 0xFFFF);
-            }
-            memcpy(l.name1, chars, 10);
-            memcpy(l.name2, chars + 5, 12);
-            memcpy(l.name3, chars + 11, 4);
-            block::write(vol->dev, slot + static_cast<u64>(i) * 32, &l, 32);
-        }
         DirEntry e{};
-        memcpy(e.name, sn, 11);
         e.attr = dir ? ATTR_DIR : ATTR_ARCHIVE;
         e.cluster_hi = static_cast<u16>(cluster >> 16);
         e.cluster_lo = static_cast<u16>(cluster);
@@ -585,8 +559,12 @@ public:
         encode_now(&d, &t);
         e.mod_date = e.crt_date = d;
         e.mod_time = e.crt_time = t;
-        u64 entry_offset = slot + static_cast<u64>(lfn_count) * 32;
-        block::write(vol->dev, entry_offset, &e, 32);
+        u64 entry_offset = write_entry_locked(name, len, &e);
+        if (!entry_offset) {
+            if (cluster)
+                vol->free_chain(cluster);
+            return -err::NOSPC;
+        }
 
         if (dir) { // "." and ".." in the new directory
             DirEntry dots[2] = {};
@@ -604,6 +582,128 @@ public:
         Node* n = vol->node_for(entry_offset, e, this);
         if (out)
             *out = n;
+        return 0;
+    }
+
+    // Write a directory entry for `name` (long-name slots + the short entry,
+    // whose name field is filled in here). Returns its offset, 0 if full.
+    u64 write_entry_locked(const char* name, usize len, DirEntry* e) {
+        char sn[11];
+        make_short_name(name, len, sn);
+        int lfn_count = static_cast<int>((len + 12) / 13);
+        u64 slot = find_free_slots(lfn_count + 1);
+        if (!slot)
+            return 0;
+        u8 sum = lfn_checksum(sn);
+        for (int i = 0; i < lfn_count; i++) {
+            LfnEntry l{};
+            int seq = lfn_count - i;
+            l.order = static_cast<u8>(seq | (i == 0 ? 0x40 : 0));
+            l.attr = ATTR_LFN;
+            l.checksum = sum;
+            u16 chars[13];
+            for (int k = 0; k < 13; k++) {
+                usize pos = static_cast<usize>(seq - 1) * 13 + k;
+                chars[k] = pos < len ? static_cast<u8>(name[pos]) : (pos == len ? 0 : 0xFFFF);
+            }
+            memcpy(l.name1, chars, 10);
+            memcpy(l.name2, chars + 5, 12);
+            memcpy(l.name3, chars + 11, 4);
+            block::write(vol->dev, slot + static_cast<u64>(i) * 32, &l, 32);
+        }
+        memcpy(e->name, sn, 11);
+        u64 entry_offset = slot + static_cast<u64>(lfn_count) * 32;
+        block::write(vol->dev, entry_offset, e, 32);
+        return entry_offset;
+    }
+
+    // Find `name`: entry offset (0 = absent), first slot, slot count, entry.
+    u64 find_entry_locked(const char* name, usize len, u64* first_slot, int* slots, DirEntry* found) {
+        u64 entry = 0;
+        iterate([&](const char* n, const DirEntry& e, u64 off, u64 fs, int s) {
+            if (!equal_nocase(name, len, n))
+                return false;
+            entry = off;
+            *first_slot = fs;
+            *slots = s;
+            *found = e;
+            return true;
+        });
+        return entry;
+    }
+
+    // Mark an entry's long-name slots and the entry itself deleted.
+    void erase_slots(u64 entry, u64 first_slot, int slots) {
+        u8 deleted = 0xE5;
+        if (first_slot + static_cast<u64>(slots - 1) * 32 == entry) {
+            for (int i = 0; i < slots; i++)
+                block::write(vol->dev, first_slot + static_cast<u64>(i) * 32, &deleted, 1);
+        } else {
+            block::write(vol->dev, entry, &deleted, 1);
+        }
+    }
+
+    long rename(const char* old_name, usize old_len, vfs::Inode* new_dir_inode, const char* new_name,
+                usize new_len) override {
+        auto* new_dir = static_cast<Node*>(new_dir_inode);
+        if (new_dir->dev != dev || new_dir->vol != vol)
+            return -err::XDEV;
+        if (!is_directory || !new_dir->is_directory)
+            return -err::NOTDIR;
+        if (new_len > 255)
+            return -err::NAMETOOLONG;
+        LockGuard guard(vol->lock);
+        u64 first = 0;
+        int slots = 0;
+        DirEntry e{};
+        u64 entry = find_entry_locked(old_name, old_len, &first, &slots, &e);
+        if (!entry)
+            return -err::NOENT;
+        Node* moving = vol->node_for(entry, e, this);
+        bool dir = e.attr & ATTR_DIR;
+        // An existing target is replaced (files by files, empty dirs by dirs).
+        u64 t_first = 0;
+        int t_slots = 0;
+        DirEntry te{};
+        if (u64 target = new_dir->find_entry_locked(new_name, new_len, &t_first, &t_slots, &te)) {
+            if (target == entry) { // same file (maybe a case change): rewrite the name below
+            } else {
+                bool tdir = te.attr & ATTR_DIR;
+                if (tdir && !dir) return -err::ISDIR;
+                if (!tdir && dir) return -err::NOTDIR;
+                Node* victim = vol->node_for(target, te, new_dir);
+                if (tdir && victim->iterate([](const char*, const DirEntry&, u64, u64, int) { return true; }))
+                    return -err::NOTEMPTY;
+                new_dir->erase_slots(target, t_first, t_slots);
+                vol->free_chain(victim->first_cluster);
+                victim->first_cluster = 0;
+                victim->nlink = 0;
+                victim->dirent_offset = 0;
+                Node** link = &vol->nodes;
+                while (*link && *link != victim)
+                    link = &(*link)->next_cached;
+                if (*link)
+                    *link = victim->next_cached;
+            }
+        }
+        // Old entry out first, so a rename in place can reuse its slots.
+        erase_slots(entry, first, slots);
+        DirEntry copy = e;
+        u64 new_entry = new_dir->write_entry_locked(new_name, new_len, &copy);
+        if (!new_entry) { // directory full: put the old entry back
+            u8 first_byte = static_cast<u8>(e.name[0]);
+            block::write(vol->dev, entry, &first_byte, 1);
+            return -err::NOSPC;
+        }
+        moving->dirent_offset = new_entry;
+        moving->parent = new_dir;
+        if (dir && new_dir != this) { // its ".." now names the new parent
+            u32 parent_cluster = new_dir->dirent_offset ? new_dir->first_cluster : 0;
+            u64 dotdot = vol->cluster_offset(moving->first_cluster) + 32;
+            u16 hi = static_cast<u16>(parent_cluster >> 16), lo = static_cast<u16>(parent_cluster);
+            block::write(vol->dev, dotdot + 20, &hi, 2);
+            block::write(vol->dev, dotdot + 26, &lo, 2);
+        }
         return 0;
     }
 

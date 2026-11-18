@@ -179,6 +179,12 @@ struct Ctx {
     bool found;
 };
 
+struct Mode {
+    u32 width, height;
+};
+Mode g_modes[128];
+u32 g_mode_count = 0;
+
 Ctx g_ctx;
 Ctx& ctx_for(u64 phys, char* dir, char* link) {
     g_ctx = Ctx{phys, dir, link, false};
@@ -186,6 +192,16 @@ Ctx& ctx_for(u64 phys, char* dir, char* link) {
 }
 
 } // namespace
+
+void record_mode(u32 width, u32 height, u16 bpp) {
+    if (bpp != 32 || width < 640 || height < 480)
+        return; // the console, X and fbdev use 32-bit pixels
+    for (u32 i = 0; i < g_mode_count; i++)
+        if (g_modes[i].width == width && g_modes[i].height == height)
+            return;
+    if (g_mode_count < 128)
+        g_modes[g_mode_count++] = Mode{width, height};
+}
 
 void init() {
     video::Framebuffer& fb = video::primary_framebuffer();
@@ -230,6 +246,26 @@ void init() {
     genfs::static_file(path, text);
     snprintf(path, sizeof(path), "%s/bits_per_pixel", dir);
     genfs::static_file(path, "32\n");
+    // modes (Linux's format, largest first) and the current mode.
+    for (u32 i = 0; i < g_mode_count; i++)
+        for (u32 k = i + 1; k < g_mode_count; k++)
+            if (static_cast<u64>(g_modes[k].width) * g_modes[k].height > static_cast<u64>(g_modes[i].width) * g_modes[i].height) {
+                Mode t = g_modes[i];
+                g_modes[i] = g_modes[k];
+                g_modes[k] = t;
+            }
+    static char modes_text[128 * 24];
+    usize used = 0;
+    for (u32 i = 0; i < g_mode_count && used + 24 < sizeof(modes_text); i++)
+        used += static_cast<usize>(snprintf(modes_text + used, sizeof(modes_text) - used, "U:%ux%up-0\n",
+                                            g_modes[i].width, g_modes[i].height));
+    if (!g_mode_count)
+        snprintf(modes_text, sizeof(modes_text), "U:%ux%up-0\n", fb.width(), fb.height());
+    snprintf(path, sizeof(path), "%s/modes", dir);
+    genfs::static_file(path, modes_text);
+    snprintf(path, sizeof(path), "%s/mode", dir);
+    snprintf(text, sizeof(text), "U:%ux%up-0\n", fb.width(), fb.height());
+    genfs::static_file(path, text);
     vfs::mkdir_p("/sys/class/graphics");
     vfs::add_node("/sys/class/graphics/fb0", new ramfs::Symlink(link));
 }
