@@ -1,6 +1,8 @@
 #include <core/log.hpp>
 #include <fs/ext2.hpp>
+#include <lib/crc32c.hpp>
 #include <lib/format.hpp>
+#include <lib/random.hpp>
 #include <lib/string.hpp>
 #include <mm/heap.hpp>
 #include <sched/sync.hpp>
@@ -14,18 +16,28 @@ constexpr u16 MAGIC = 0xEF53;
 constexpr u32 ROOT_INO = 2;
 
 // Feature bits.
+constexpr u32 COMPAT_HAS_JOURNAL = 0x4;
 constexpr u32 INCOMPAT_FILETYPE = 0x2, INCOMPAT_RECOVER = 0x4, INCOMPAT_META_BG = 0x10, INCOMPAT_EXTENTS = 0x40,
               INCOMPAT_64BIT = 0x80, INCOMPAT_FLEX_BG = 0x200,
               INCOMPAT_CSUM_SEED = 0x2000, INCOMPAT_LARGEDIR = 0x4000;
 constexpr u32 INCOMPAT_READ_OK = INCOMPAT_FILETYPE | INCOMPAT_RECOVER | INCOMPAT_EXTENTS | INCOMPAT_64BIT |
                                  INCOMPAT_FLEX_BG | INCOMPAT_CSUM_SEED | INCOMPAT_LARGEDIR | INCOMPAT_META_BG;
-constexpr u32 INCOMPAT_WRITE_OK = INCOMPAT_FILETYPE | INCOMPAT_FLEX_BG;
+// Writable: everything Debian's mkfs.ext4 turns on. Not (yet): a journal that
+// needs replaying (RECOVER), meta_bg, inline data, encryption, casefolding.
+constexpr u32 INCOMPAT_WRITE_OK = INCOMPAT_FILETYPE | INCOMPAT_EXTENTS | INCOMPAT_64BIT | INCOMPAT_FLEX_BG |
+                                  INCOMPAT_CSUM_SEED | INCOMPAT_LARGEDIR;
 constexpr u32 RO_SPARSE_SUPER = 0x1, RO_LARGE_FILE = 0x2, RO_HUGE_FILE = 0x8, RO_GDT_CSUM = 0x10,
               RO_DIR_NLINK = 0x20, RO_EXTRA_ISIZE = 0x40, RO_METADATA_CSUM = 0x400;
-constexpr u32 RO_WRITE_OK = RO_SPARSE_SUPER | RO_LARGE_FILE | RO_HUGE_FILE | RO_DIR_NLINK | RO_EXTRA_ISIZE;
+constexpr u32 RO_WRITE_OK = RO_SPARSE_SUPER | RO_LARGE_FILE | RO_HUGE_FILE | RO_GDT_CSUM | RO_DIR_NLINK |
+                            RO_EXTRA_ISIZE | RO_METADATA_CSUM;
+
+constexpr u16 BG_INODE_UNINIT = 0x1, BG_BLOCK_UNINIT = 0x2;
 
 constexpr u32 FLAG_INDEX = 0x1000, FLAG_EXTENTS = 0x80000, FLAG_INLINE = 0x10000000;
 constexpr u8 FT_UNKNOWN = 0, FT_REG = 1, FT_DIR = 2, FT_CHR = 3, FT_BLK = 4, FT_FIFO = 5, FT_SOCK = 6, FT_SYMLINK = 7;
+
+constexpr u16 EXT_MAGIC = 0xF30A;
+constexpr u32 EXT_INIT_MAX_LEN = 32768;
 
 struct PACKED RawInode {
     u16 mode, uid;
@@ -65,6 +77,64 @@ u8 dtype_for(u8 ft) {
 
 u32 now_seconds() { return static_cast<u32>(rtc::realtime_ns() / 1'000'000'000); }
 
+// Little-endian field access in on-disk structures.
+u16 get16(const u8* p) { u16 v; memcpy(&v, p, 2); return v; }
+u32 get32(const u8* p) { u32 v; memcpy(&v, p, 4); return v; }
+void put16(u8* p, u16 v) { memcpy(p, &v, 2); }
+void put32(u8* p, u32 v) { memcpy(p, &v, 4); }
+
+// CRC-16 (ANSI, reflected 0xA001): the older "uninit_bg" group descriptor checksum.
+u16 crc16(u16 crc, const void* data, usize len) {
+    auto* p = static_cast<const u8*>(data);
+    while (len--) {
+        crc ^= *p++;
+        for (int k = 0; k < 8; k++)
+            crc = (crc & 1) ? static_cast<u16>((crc >> 1) ^ 0xA001) : static_cast<u16>(crc >> 1);
+    }
+    return crc;
+}
+
+// A small growable array (the kernel has no std::vector).
+template <typename T>
+struct Array {
+    T* v = nullptr;
+    usize n = 0, cap = 0;
+    Array() = default;
+    Array(const Array&) = delete;
+    Array& operator=(const Array&) = delete;
+    ~Array() { kfree(v); }
+    bool push(const T& item) {
+        if (n == cap) {
+            usize ncap = cap ? cap * 2 : 16;
+            T* nv = static_cast<T*>(kmalloc(ncap * sizeof(T)));
+            if (!nv)
+                return false;
+            if (v)
+                memcpy(nv, v, n * sizeof(T));
+            kfree(v);
+            v = nv;
+            cap = ncap;
+        }
+        v[n++] = item;
+        return true;
+    }
+    bool insert(usize at, const T& item) {
+        if (!push(item))
+            return false;
+        for (usize i = n - 1; i > at; i--)
+            v[i] = v[i - 1];
+        v[at] = item;
+        return true;
+    }
+};
+
+struct Extent {
+    u32 lblk; // first file block
+    u32 len;
+    u64 pblk; // first disk block
+    bool uninit;
+};
+
 class Node;
 
 class Volume {
@@ -73,53 +143,137 @@ public:
     u32 block_size;
     u32 inodes_per_group, blocks_per_group, inode_size, group_count, desc_size;
     u64 blocks_count, first_data_block, gdt_block;
-    u32 incompat, ro_compat;
+    u32 compat, incompat, ro_compat;
     bool read_only;
     bool has_filetype;
+    bool csum = false;     // metadata_csum: crc32c on everything
+    bool gdt_csum = false; // uninit_bg: crc16 on group descriptors only
+    bool sparse = false;
+    bool extents = false;  // new files use extent trees
+    u32 csum_seed = 0;
+    u8 uuid[16] = {};
+    u32 gdt_blocks = 0, reserved_gdt = 0, first_ino = 11;
+    u16 extra_isize = 0;
     u64 fs_dev = vfs::next_fs_dev();
     sched::Mutex lock;
     Node* cache[256] = {};
 
     u64 block_offset(u64 b) const { return b * block_size; }
     u32 ptrs_per_block() const { return block_size / 4; }
+    bool uses_gd_flags() const { return csum || gdt_csum; }
 
-    // ---- superblock / group descriptors ----
+    // ---- superblock ----
     u32 sb32(u32 off) { u32 v = 0; block::read(dev, 1024 + off, &v, 4); return v; }
-    void sb_add32(u32 off, i64 delta) {
-        u32 v = sb32(off);
-        v = static_cast<u32>(static_cast<i64>(v) + delta);
-        block::write(dev, 1024 + off, &v, 4);
+    void sb_csum() {
+        if (!csum)
+            return;
+        u8 sb[1024];
+        block::read(dev, 1024, sb, sizeof(sb));
+        u32 c = crc32c(~0u, sb, 0x3FC);
+        block::write(dev, 1024 + 0x3FC, &c, 4);
+    }
+    void sb_add_free_blocks(i64 delta) {
+        u64 v = sb32(12);
+        if (incompat & INCOMPAT_64BIT)
+            v |= static_cast<u64>(sb32(0x158)) << 32;
+        v = static_cast<u64>(static_cast<i64>(v) + delta);
+        u32 lo = static_cast<u32>(v), hi = static_cast<u32>(v >> 32);
+        block::write(dev, 1024 + 12, &lo, 4);
+        if (incompat & INCOMPAT_64BIT)
+            block::write(dev, 1024 + 0x158, &hi, 4);
+        sb_csum();
+    }
+    void sb_add_free_inodes(i64 delta) {
+        u32 v = static_cast<u32>(static_cast<i64>(sb32(16)) + delta);
+        block::write(dev, 1024 + 16, &v, 4);
+        sb_csum();
     }
 
+    // ---- group descriptors ----
     u64 gd_offset(u32 g) const { return block_offset(gdt_block) + static_cast<u64>(g) * desc_size; }
-    u64 gd_block_bitmap(u32 g) {
-        u8 d[64] = {};
+    void gd_read(u32 g, u8* d) {
+        memset(d, 0, 64);
         block::read(dev, gd_offset(g), d, desc_size);
-        u32 lo, hi = 0;
-        memcpy(&lo, d + 0, 4);
-        if (desc_size >= 64) memcpy(&hi, d + 0x20, 4);
-        return lo | (static_cast<u64>(hi) << 32);
     }
-    u64 gd_inode_bitmap(u32 g) {
-        u8 d[64] = {};
-        block::read(dev, gd_offset(g), d, desc_size);
-        u32 lo, hi = 0;
-        memcpy(&lo, d + 4, 4);
-        if (desc_size >= 64) memcpy(&hi, d + 0x24, 4);
-        return lo | (static_cast<u64>(hi) << 32);
+    void gd_write(u32 g, u8* d) {
+        if (csum) {
+            u32 c = crc32c(csum_seed, &g, 4);
+            c = crc32c(c, d, 0x1E);
+            u16 zero = 0;
+            c = crc32c(c, &zero, 2);
+            if (desc_size > 0x20)
+                c = crc32c(c, d + 0x20, desc_size - 0x20);
+            put16(d + 0x1E, static_cast<u16>(c));
+        } else if (gdt_csum) {
+            u16 c = crc16(0xFFFF, uuid, 16);
+            c = crc16(c, &g, 4);
+            c = crc16(c, d, 0x1E);
+            if (desc_size > 0x20)
+                c = crc16(c, d + 0x20, desc_size - 0x20);
+            put16(d + 0x1E, c);
+        }
+        block::write(dev, gd_offset(g), d, desc_size);
     }
-    u64 gd_inode_table(u32 g) {
-        u8 d[64] = {};
-        block::read(dev, gd_offset(g), d, desc_size);
-        u32 lo, hi = 0;
-        memcpy(&lo, d + 8, 4);
-        if (desc_size >= 64) memcpy(&hi, d + 0x28, 4);
-        return lo | (static_cast<u64>(hi) << 32);
+    // Fields split into a low half and (64-bit descriptors) a high half.
+    u64 gd_get32x2(const u8* d, u32 lo, u32 hi) const {
+        return get32(d + lo) | (desc_size >= 64 ? static_cast<u64>(get32(d + hi)) << 32 : 0);
     }
-    u16 gd16(u32 g, u32 off) { u16 v = 0; block::read(dev, gd_offset(g) + off, &v, 2); return v; }
-    void gd_add16(u32 g, u32 off, int delta) {
-        u16 v = static_cast<u16>(gd16(g, off) + delta);
-        block::write(dev, gd_offset(g) + off, &v, 2);
+    u32 gd_get16x2(const u8* d, u32 lo, u32 hi) const {
+        return get16(d + lo) | (desc_size >= 64 ? static_cast<u32>(get16(d + hi)) << 16 : 0);
+    }
+    void gd_set16x2(u8* d, u32 lo, u32 hi, u32 v) const {
+        put16(d + lo, static_cast<u16>(v));
+        if (desc_size >= 64)
+            put16(d + hi, static_cast<u16>(v >> 16));
+    }
+    u64 gd_block_bitmap(u32 g) { u8 d[64]; gd_read(g, d); return gd_get32x2(d, 0, 0x20); }
+    u64 gd_inode_bitmap(u32 g) { u8 d[64]; gd_read(g, d); return gd_get32x2(d, 4, 0x24); }
+    u64 gd_inode_table(u32 g) { u8 d[64]; gd_read(g, d); return gd_get32x2(d, 8, 0x28); }
+
+    void set_bitmap_csum(u8* d, bool inode_bitmap, const u8* bitmap) {
+        if (!csum)
+            return;
+        u32 c = crc32c(csum_seed, bitmap, (inode_bitmap ? inodes_per_group : blocks_per_group) / 8);
+        put16(d + (inode_bitmap ? 0x1A : 0x18), static_cast<u16>(c));
+        if (desc_size >= 0x3C)
+            put16(d + (inode_bitmap ? 0x3A : 0x38), static_cast<u16>(c >> 16));
+    }
+
+    // ---- group layout ----
+    bool group_has_super(u32 g) const {
+        if (g <= 1 || !sparse)
+            return true;
+        static const u32 bases[] = {3, 5, 7};
+        for (u32 base : bases) {
+            u64 p = base;
+            while (p < g)
+                p *= base;
+            if (p == g)
+                return true;
+        }
+        return false;
+    }
+    u32 blocks_in_group(u32 g) const {
+        return static_cast<u32>(min<u64>(blocks_per_group, blocks_count - first_data_block - static_cast<u64>(g) * blocks_per_group));
+    }
+    // A BLOCK_UNINIT group's bitmap isn't on disk: it's implied by the layout.
+    void init_block_bitmap(u32 g, const u8* d, u8* bm) {
+        memset(bm, 0, block_size);
+        auto mark = [&](u32 i) { bm[i / 8] |= static_cast<u8>(1 << (i % 8)); };
+        if (group_has_super(g))
+            for (u32 i = 0; i < 1 + gdt_blocks + reserved_gdt; i++)
+                mark(i);
+        u64 start = first_data_block + static_cast<u64>(g) * blocks_per_group;
+        u32 count = blocks_in_group(g);
+        auto mark_abs = [&](u64 b) { if (b >= start && b < start + count) mark(static_cast<u32>(b - start)); };
+        mark_abs(gd_get32x2(d, 0, 0x20));
+        mark_abs(gd_get32x2(d, 4, 0x24));
+        u64 table = gd_get32x2(d, 8, 0x28);
+        u64 table_blocks = (static_cast<u64>(inodes_per_group) * inode_size + block_size - 1) / block_size;
+        for (u64 i = 0; i < table_blocks; i++)
+            mark_abs(table + i);
+        for (u32 i = count; i < block_size * 8; i++)
+            mark(i);
     }
 
     // ---- inodes ----
@@ -129,31 +283,92 @@ public:
         return block_offset(gd_inode_table(g)) + static_cast<u64>(idx) * inode_size;
     }
     void read_inode(u32 ino, RawInode* out) { block::read(dev, inode_offset(ino), out, sizeof(RawInode)); }
-    void write_inode(u32 ino, const RawInode& in) { block::write(dev, inode_offset(ino), &in, sizeof(RawInode)); }
 
-    // ---- allocation (ext2-style bitmaps) ----
-    u64 alloc_block(u32 goal_group) {
+    u32 inode_seed(u32 ino, u32 generation) const {
+        u32 c = crc32c(csum_seed, &ino, 4);
+        return crc32c(c, &generation, 4);
+    }
+
+    // Write the first 128 bytes; the rest of a large inode (extra fields) is
+    // kept, or zeroed for a fresh inode. Then the inode checksum.
+    void write_inode(u32 ino, const RawInode& in, bool fresh = false) {
+        u8 buf[1024];
+        u64 off = inode_offset(ino);
+        if (fresh) {
+            memset(buf, 0, inode_size);
+            if (inode_size > 128)
+                put16(buf + 0x80, extra_isize);
+        } else {
+            block::read(dev, off, buf, inode_size);
+        }
+        memcpy(buf, &in, sizeof(RawInode));
+        if (csum) {
+            u16 zero = 0;
+            u32 c = inode_seed(ino, in.generation);
+            c = crc32c(c, buf, 0x7C);
+            c = crc32c(c, &zero, 2);
+            c = crc32c(c, buf + 0x7E, 128 - 0x7E);
+            bool has_hi = false;
+            if (inode_size > 128) {
+                u16 extra = get16(buf + 0x80);
+                c = crc32c(c, buf + 128, 2);
+                u32 rest = 0x82;
+                if (extra >= 4) {
+                    c = crc32c(c, &zero, 2);
+                    rest = 0x84;
+                    has_hi = true;
+                }
+                c = crc32c(c, buf + rest, inode_size - rest);
+            }
+            put16(buf + 0x7C, static_cast<u16>(c));
+            if (has_hi)
+                put16(buf + 0x82, static_cast<u16>(c >> 16));
+        }
+        block::write(dev, off, buf, inode_size);
+    }
+
+    // ---- allocation ----
+    // A free block, searching from `goal` onwards (keeps files contiguous).
+    u64 alloc_block(u64 goal) {
+        if (goal < first_data_block || goal >= blocks_count)
+            goal = first_data_block;
         u8* bitmap = static_cast<u8*>(kmalloc(block_size));
         if (!bitmap)
             return 0;
+        u32 goal_group = static_cast<u32>((goal - first_data_block) / blocks_per_group);
+        u32 goal_index = static_cast<u32>((goal - first_data_block) % blocks_per_group);
         u64 result = 0;
-        for (u32 n = 0; n < group_count && !result; n++) {
+        for (u32 n = 0; n <= group_count && !result; n++) {
             u32 g = (goal_group + n) % group_count;
-            if (gd16(g, 12) == 0)
-                continue; // no free blocks in this group
-            u64 bm = gd_block_bitmap(g);
-            block::read(dev, block_offset(bm), bitmap, block_size);
-            u32 in_group = min<u64>(blocks_per_group, blocks_count - first_data_block - static_cast<u64>(g) * blocks_per_group);
-            for (u32 i = 0; i < in_group; i++) {
-                if (bitmap[i / 8] & (1 << (i % 8)))
-                    continue;
-                bitmap[i / 8] |= static_cast<u8>(1 << (i % 8));
-                block::write(dev, block_offset(bm) + i / 8, &bitmap[i / 8], 1);
-                gd_add16(g, 12, -1);
-                sb_add32(12, -1);
-                result = first_data_block + static_cast<u64>(g) * blocks_per_group + i;
-                break;
+            u8 d[64];
+            gd_read(g, d);
+            u32 free = gd_get16x2(d, 0x0C, 0x2C);
+            if (free == 0)
+                continue;
+            u16 flags = get16(d + 0x12);
+            u64 bm = gd_get32x2(d, 0, 0x20);
+            if (uses_gd_flags() && (flags & BG_BLOCK_UNINIT))
+                init_block_bitmap(g, d, bitmap);
+            else
+                block::read(dev, block_offset(bm), bitmap, block_size);
+            u32 count = blocks_in_group(g);
+            u32 from = (n == 0) ? goal_index : 0;
+            u32 found = ~0u;
+            for (u32 k = 0; k < count && found == ~0u; k++) {
+                u32 i = (from + k) % count;
+                if (!(bitmap[i / 8] & (1 << (i % 8))))
+                    found = i;
             }
+            if (found == ~0u)
+                continue;
+            bitmap[found / 8] |= static_cast<u8>(1 << (found % 8));
+            block::write(dev, block_offset(bm), bitmap, block_size);
+            gd_set16x2(d, 0x0C, 0x2C, free - 1);
+            put16(d + 0x12, static_cast<u16>(flags & ~BG_BLOCK_UNINIT));
+            set_bitmap_csum(d, false, bitmap);
+            gd_write(g, d);
+            sb_add_free_blocks(-1);
+            result = first_data_block + static_cast<u64>(g) * blocks_per_group + found;
         }
         if (result) { // fresh blocks read back as zeros
             memset(bitmap, 0, block_size);
@@ -163,21 +378,40 @@ public:
         return result;
     }
 
-    void free_block(u64 b) {
-        if (b < first_data_block || b >= blocks_count)
+    // Free `count` blocks starting at `start` (one bitmap update per group).
+    void free_range(u64 start, u64 count) {
+        u8* bitmap = static_cast<u8*>(kmalloc(block_size));
+        if (!bitmap)
             return;
-        u64 rel = b - first_data_block;
-        u32 g = static_cast<u32>(rel / blocks_per_group);
-        u32 i = static_cast<u32>(rel % blocks_per_group);
-        u64 bm = gd_block_bitmap(g);
-        u8 byte;
-        block::read(dev, block_offset(bm) + i / 8, &byte, 1);
-        if (!(byte & (1 << (i % 8))))
-            return; // already free
-        byte &= static_cast<u8>(~(1 << (i % 8)));
-        block::write(dev, block_offset(bm) + i / 8, &byte, 1);
-        gd_add16(g, 12, 1);
-        sb_add32(12, 1);
+        while (count) {
+            if (start < first_data_block || start >= blocks_count)
+                break;
+            u64 rel = start - first_data_block;
+            u32 g = static_cast<u32>(rel / blocks_per_group);
+            u32 i = static_cast<u32>(rel % blocks_per_group);
+            u32 chunk = static_cast<u32>(min<u64>(count, blocks_per_group - i));
+            u8 d[64];
+            gd_read(g, d);
+            u64 bm = gd_get32x2(d, 0, 0x20);
+            block::read(dev, block_offset(bm), bitmap, block_size);
+            u32 cleared = 0;
+            for (u32 k = i; k < i + chunk; k++) {
+                if (bitmap[k / 8] & (1 << (k % 8))) {
+                    bitmap[k / 8] &= static_cast<u8>(~(1 << (k % 8)));
+                    cleared++;
+                }
+            }
+            if (cleared) {
+                block::write(dev, block_offset(bm), bitmap, block_size);
+                gd_set16x2(d, 0x0C, 0x2C, gd_get16x2(d, 0x0C, 0x2C) + cleared);
+                set_bitmap_csum(d, false, bitmap);
+                gd_write(g, d);
+                sb_add_free_blocks(cleared);
+            }
+            start += chunk;
+            count -= chunk;
+        }
+        kfree(bitmap);
     }
 
     u32 alloc_inode(u32 goal_group, bool dir) {
@@ -187,40 +421,91 @@ public:
         u32 result = 0;
         for (u32 n = 0; n < group_count && !result; n++) {
             u32 g = (goal_group + n) % group_count;
-            if (gd16(g, 14) == 0)
+            u8 d[64];
+            gd_read(g, d);
+            u32 free = gd_get16x2(d, 0x0E, 0x2E);
+            if (free == 0)
                 continue;
-            u64 bm = gd_inode_bitmap(g);
-            block::read(dev, block_offset(bm), bitmap, block_size);
+            u16 flags = get16(d + 0x12);
+            u64 bm = gd_get32x2(d, 4, 0x24);
+            if (uses_gd_flags() && (flags & BG_INODE_UNINIT)) {
+                memset(bitmap, 0, block_size);
+                for (u32 i = inodes_per_group; i < block_size * 8; i++)
+                    bitmap[i / 8] |= static_cast<u8>(1 << (i % 8));
+            } else {
+                block::read(dev, block_offset(bm), bitmap, block_size);
+            }
+            u32 found = ~0u;
             for (u32 i = 0; i < inodes_per_group; i++) {
                 u32 ino = g * inodes_per_group + i + 1;
-                if (ino < 11 || (bitmap[i / 8] & (1 << (i % 8))))
-                    continue; // inodes 1-10 are reserved
-                bitmap[i / 8] |= static_cast<u8>(1 << (i % 8));
-                block::write(dev, block_offset(bm) + i / 8, &bitmap[i / 8], 1);
-                gd_add16(g, 14, -1);
-                if (dir)
-                    gd_add16(g, 16, 1);
-                sb_add32(16, -1);
-                result = ino;
-                break;
+                if (ino >= first_ino && !(bitmap[i / 8] & (1 << (i % 8)))) {
+                    found = i;
+                    break;
+                }
             }
+            if (found == ~0u)
+                continue;
+            bitmap[found / 8] |= static_cast<u8>(1 << (found % 8));
+            block::write(dev, block_offset(bm), bitmap, block_size);
+            gd_set16x2(d, 0x0E, 0x2E, free - 1);
+            if (dir)
+                gd_set16x2(d, 0x10, 0x30, gd_get16x2(d, 0x10, 0x30) + 1);
+            if (uses_gd_flags()) {
+                put16(d + 0x12, static_cast<u16>(flags & ~BG_INODE_UNINIT));
+                u32 unused = gd_get16x2(d, 0x1C, 0x32);
+                if (found >= inodes_per_group - unused) // the high-water mark of used inodes moves up
+                    gd_set16x2(d, 0x1C, 0x32, inodes_per_group - found - 1);
+            }
+            set_bitmap_csum(d, true, bitmap);
+            gd_write(g, d);
+            sb_add_free_inodes(-1);
+            result = g * inodes_per_group + found + 1;
         }
         kfree(bitmap);
         return result;
     }
 
     void free_inode(u32 ino, bool dir) {
+        u8* bitmap = static_cast<u8*>(kmalloc(block_size));
+        if (!bitmap)
+            return;
         u32 g = (ino - 1) / inodes_per_group;
         u32 i = (ino - 1) % inodes_per_group;
-        u64 bm = gd_inode_bitmap(g);
-        u8 byte;
-        block::read(dev, block_offset(bm) + i / 8, &byte, 1);
-        byte &= static_cast<u8>(~(1 << (i % 8)));
-        block::write(dev, block_offset(bm) + i / 8, &byte, 1);
-        gd_add16(g, 14, 1);
-        if (dir)
-            gd_add16(g, 16, -1);
-        sb_add32(16, 1);
+        u8 d[64];
+        gd_read(g, d);
+        u64 bm = gd_get32x2(d, 4, 0x24);
+        block::read(dev, block_offset(bm), bitmap, block_size);
+        if (bitmap[i / 8] & (1 << (i % 8))) {
+            bitmap[i / 8] &= static_cast<u8>(~(1 << (i % 8)));
+            block::write(dev, block_offset(bm), bitmap, block_size);
+            gd_set16x2(d, 0x0E, 0x2E, gd_get16x2(d, 0x0E, 0x2E) + 1);
+            if (dir)
+                gd_set16x2(d, 0x10, 0x30, gd_get16x2(d, 0x10, 0x30) - 1);
+            set_bitmap_csum(d, true, bitmap);
+            gd_write(g, d);
+            sb_add_free_inodes(1);
+        }
+        kfree(bitmap);
+    }
+
+    // ---- checksummed directory and extent blocks ----
+    u32 dir_limit() const { return block_size - (csum ? 12 : 0); } // usable bytes per directory block
+    void finish_dir_block(u32 seed, u8* buf) {
+        if (!csum)
+            return;
+        u8* t = buf + block_size - 12;
+        put32(t, 0);
+        put16(t + 4, 12);
+        t[6] = 0;
+        t[7] = 0xDE; // the checksum "entry"
+        put32(t + 8, crc32c(seed, buf, block_size - 12));
+    }
+    void finish_extent_block(u32 seed, u8* buf) {
+        if (!csum)
+            return;
+        u32 tail = 12 + get16(buf + 4) * 12u;
+        if (tail + 4 <= block_size)
+            put32(buf + tail, crc32c(seed, buf, tail));
     }
 
     Node* node(u32 ino, Node* parent);
@@ -264,70 +549,341 @@ public:
         vol->write_inode(number, raw);
     }
 
+    u32 seed() const { return vol->inode_seed(number, raw.generation); }
     bool uses_extents() const { return raw.flags & FLAG_EXTENTS; }
+    u32 goal_group() const { return (number - 1) / vol->inodes_per_group; }
+    u64 goal_block() const { return vol->first_data_block + static_cast<u64>(goal_group()) * vol->blocks_per_group; }
+    void add_blocks(i64 count) {
+        raw.blocks_lo = static_cast<u32>(static_cast<i64>(raw.blocks_lo) + count * (vol->block_size / 512));
+    }
 
-    // ---- block mapping ----
+    // ---- extent trees ----
 
     // Physical block for file block `n` via the extent tree (0 = hole).
     u64 extent_block(u64 n) {
         u8 node_buf[4096];
         const u8* hdr = reinterpret_cast<const u8*>(raw.block);
-        u8* owned = nullptr;
         for (int level = 0; level < 8; level++) {
-            u16 magic, entries, depth;
-            memcpy(&magic, hdr, 2);
-            memcpy(&entries, hdr + 2, 2);
-            memcpy(&depth, hdr + 6, 2);
-            if (magic != 0xF30A)
+            if (get16(hdr) != EXT_MAGIC)
                 break;
+            u16 entries = get16(hdr + 2), depth = get16(hdr + 6);
             const u8* e = hdr + 12;
             if (depth == 0) {
                 for (u16 i = 0; i < entries; i++, e += 12) {
-                    u32 first;
-                    u16 len, hi;
-                    u32 lo;
-                    memcpy(&first, e, 4);
-                    memcpy(&len, e + 4, 2);
-                    memcpy(&hi, e + 6, 2);
-                    memcpy(&lo, e + 8, 4);
-                    bool uninit = len > 32768;
-                    if (uninit) len -= 32768;
-                    if (n >= first && n < first + len) {
-                        kfree(owned);
-                        return uninit ? 0 : (static_cast<u64>(hi) << 32 | lo) + (n - first);
-                    }
+                    u32 first = get32(e);
+                    u32 len = get16(e + 4);
+                    bool uninit = len > EXT_INIT_MAX_LEN;
+                    if (uninit) len -= EXT_INIT_MAX_LEN;
+                    if (n >= first && n < first + len)
+                        return uninit ? 0 : ((static_cast<u64>(get16(e + 6)) << 32) | get32(e + 8)) + (n - first);
                 }
                 break;
             }
             // Index node: follow the last entry whose first block <= n.
             u64 child = 0;
             for (u16 i = 0; i < entries; i++, e += 12) {
-                u32 first, lo;
-                u16 hi;
-                memcpy(&first, e, 4);
-                memcpy(&lo, e + 4, 4);
-                memcpy(&hi, e + 8, 2);
-                if (first > n)
+                if (get32(e) > n)
                     break;
-                child = static_cast<u64>(hi) << 32 | lo;
+                child = (static_cast<u64>(get16(e + 8)) << 32) | get32(e + 4);
             }
             if (!child || vol->block_size > sizeof(node_buf))
                 break;
             block::read(vol->dev, vol->block_offset(child), node_buf, vol->block_size);
             hdr = node_buf;
         }
-        kfree(owned);
         return 0;
     }
 
-    // Block-mapped (ext2/ext3) files: direct, single, double, triple indirect.
+    // Every extent, in order, plus the tree's own (non-inode) blocks.
+    bool flatten(const u8* hdr, Array<Extent>& out, Array<u64>* tree_blocks, int level = 0) {
+        if (level > 8 || get16(hdr) != EXT_MAGIC)
+            return level == 0 && get16(hdr) == 0; // an empty i_block is an empty tree
+        u16 entries = get16(hdr + 2), depth = get16(hdr + 6);
+        const u8* e = hdr + 12;
+        if (depth == 0) {
+            for (u16 i = 0; i < entries; i++, e += 12) {
+                u32 len = get16(e + 4);
+                bool uninit = len > EXT_INIT_MAX_LEN;
+                if (uninit) len -= EXT_INIT_MAX_LEN;
+                if (!out.push(Extent{get32(e), len, (static_cast<u64>(get16(e + 6)) << 32) | get32(e + 8), uninit}))
+                    return false;
+            }
+            return true;
+        }
+        u8* buf = static_cast<u8*>(kmalloc(vol->block_size));
+        if (!buf)
+            return false;
+        bool ok = true;
+        for (u16 i = 0; i < entries && ok; i++, e += 12) {
+            u64 child = (static_cast<u64>(get16(e + 8)) << 32) | get32(e + 4);
+            if (tree_blocks && !tree_blocks->push(child)) {
+                ok = false;
+                break;
+            }
+            block::read(vol->dev, vol->block_offset(child), buf, vol->block_size);
+            ok = flatten(buf, out, tree_blocks, level + 1);
+        }
+        kfree(buf);
+        return ok;
+    }
+
+    static void put_extent(u8* e, const Extent& x) {
+        put32(e, x.lblk);
+        put16(e + 4, static_cast<u16>(x.uninit ? x.len + EXT_INIT_MAX_LEN : x.len));
+        put16(e + 6, static_cast<u16>(x.pblk >> 32));
+        put32(e + 8, static_cast<u32>(x.pblk));
+    }
+    static void put_header(u8* h, u16 entries, u16 max, u16 depth) {
+        put16(h, EXT_MAGIC);
+        put16(h + 2, entries);
+        put16(h + 4, max);
+        put16(h + 6, depth);
+        put32(h + 8, 0);
+    }
+
+    // Write a fresh tree holding `ext` (the old tree's blocks are already
+    // freed): up to 4 extents live in the inode, more go into leaf blocks
+    // under index levels.
+    long write_tree(const Extent* ext, usize count) {
+        u8* root = reinterpret_cast<u8*>(raw.block);
+        memset(root, 0, 60);
+        if (count <= 4) {
+            put_header(root, static_cast<u16>(count), 4, 0);
+            for (usize i = 0; i < count; i++)
+                put_extent(root + 12 + i * 12, ext[i]);
+            save();
+            return 0;
+        }
+        u16 per_block = static_cast<u16>((vol->block_size - 12) / 12);
+        struct Key { u32 lblk; u64 blk; };
+        Array<Key> level;
+        u8* buf = static_cast<u8*>(kmalloc(vol->block_size));
+        if (!buf)
+            return -err::NOMEM;
+        u64 goal = ext[0].pblk;
+        for (usize i = 0; i < count; i += per_block) { // leaves
+            usize n = min<usize>(per_block, count - i);
+            u64 b = vol->alloc_block(goal);
+            if (!b) { kfree(buf); return -err::NOSPC; }
+            add_blocks(1);
+            memset(buf, 0, vol->block_size);
+            put_header(buf, static_cast<u16>(n), per_block, 0);
+            for (usize k = 0; k < n; k++)
+                put_extent(buf + 12 + k * 12, ext[i + k]);
+            vol->finish_extent_block(seed(), buf);
+            block::write(vol->dev, vol->block_offset(b), buf, vol->block_size);
+            level.push(Key{ext[i].lblk, b});
+        }
+        u16 depth = 1;
+        while (level.n > 4) { // index levels
+            Array<Key> up;
+            for (usize i = 0; i < level.n; i += per_block) {
+                usize n = min<usize>(per_block, level.n - i);
+                u64 b = vol->alloc_block(goal);
+                if (!b) { kfree(buf); return -err::NOSPC; }
+                add_blocks(1);
+                memset(buf, 0, vol->block_size);
+                put_header(buf, static_cast<u16>(n), per_block, depth);
+                for (usize k = 0; k < n; k++) {
+                    u8* e = buf + 12 + k * 12;
+                    put32(e, level.v[i + k].lblk);
+                    put32(e + 4, static_cast<u32>(level.v[i + k].blk));
+                    put16(e + 8, static_cast<u16>(level.v[i + k].blk >> 32));
+                }
+                vol->finish_extent_block(seed(), buf);
+                block::write(vol->dev, vol->block_offset(b), buf, vol->block_size);
+                up.push(Key{level.v[i].lblk, b});
+            }
+            kfree(level.v);
+            level.v = up.v;
+            level.n = up.n;
+            level.cap = up.cap;
+            up.v = nullptr;
+            depth++;
+        }
+        put_header(root, static_cast<u16>(level.n), 4, depth);
+        for (usize k = 0; k < level.n; k++) {
+            u8* e = root + 12 + k * 12;
+            put32(e, level.v[k].lblk);
+            put32(e + 4, static_cast<u32>(level.v[k].blk));
+            put16(e + 8, static_cast<u16>(level.v[k].blk >> 32));
+        }
+        kfree(buf);
+        save();
+        return 0;
+    }
+
+    void free_tree_blocks(Array<u64>& blocks) {
+        for (usize i = 0; i < blocks.n; i++) {
+            vol->free_range(blocks.v[i], 1);
+            add_blocks(-1);
+        }
+    }
+
+    // The leaf that holds (or would hold) file block `n`: copied into `buf`;
+    // *where = its disk block, or 0 for the inode itself.
+    bool leaf_for(u64 n, u8* buf, u64* where) {
+        memcpy(buf, raw.block, 60);
+        *where = 0;
+        for (int level = 0; level < 8; level++) {
+            if (get16(buf) != EXT_MAGIC)
+                return false;
+            u16 entries = get16(buf + 2), depth = get16(buf + 6);
+            if (depth == 0)
+                return true;
+            if (!entries)
+                return false;
+            const u8* e = buf + 12;
+            u64 child = (static_cast<u64>(get16(e + 8)) << 32) | get32(e + 4);
+            for (u16 i = 1; i < entries; i++) {
+                e += 12;
+                if (get32(e) > n)
+                    break;
+                child = (static_cast<u64>(get16(e + 8)) << 32) | get32(e + 4);
+            }
+            block::read(vol->dev, vol->block_offset(child), buf, vol->block_size);
+            *where = child;
+        }
+        return false;
+    }
+
+    void write_leaf(u64 where, u8* buf) {
+        if (!where) {
+            memcpy(raw.block, buf, 60);
+            save();
+            return;
+        }
+        vol->finish_extent_block(seed(), buf);
+        block::write(vol->dev, vol->block_offset(where), buf, vol->block_size);
+    }
+
+    // Map file block `n`, allocating a block if it's a hole.
+    u64 extent_alloc(u64 n) {
+        if (u64 b = extent_block(n))
+            return b;
+        u64 goal = n ? extent_block(n - 1) : 0;
+        goal = goal ? goal + 1 : goal_block();
+
+        // Inside an unwritten (fallocated) extent? Zero it and mark it written.
+        // Otherwise allocate a block and try the cheap updates first.
+        u8* buf = static_cast<u8*>(kmalloc(vol->block_size));
+        if (!buf)
+            return 0;
+        u64 where;
+        u64 nb = 0;
+        if (leaf_for(n, buf, &where)) {
+            u16 entries = get16(buf + 2), max = get16(buf + 4);
+            bool covered_uninit = false;
+            for (u16 i = 0; i < entries; i++) {
+                u8* e = buf + 12 + i * 12;
+                u32 len = get16(e + 4);
+                if (len > EXT_INIT_MAX_LEN && n >= get32(e) && n < get32(e) + len - EXT_INIT_MAX_LEN)
+                    covered_uninit = true;
+            }
+            if (!covered_uninit) {
+                nb = vol->alloc_block(goal);
+                if (!nb) { kfree(buf); return 0; }
+                add_blocks(1);
+                // 1) Extend the extent that ends right before n, if the block is adjacent.
+                for (u16 i = 0; i < entries; i++) {
+                    u8* e = buf + 12 + i * 12;
+                    u32 len = get16(e + 4);
+                    u64 p = (static_cast<u64>(get16(e + 6)) << 32) | get32(e + 8);
+                    if (len < EXT_INIT_MAX_LEN && get32(e) + len == n && p + len == nb) {
+                        put16(e + 4, static_cast<u16>(len + 1));
+                        write_leaf(where, buf);
+                        kfree(buf);
+                        return nb;
+                    }
+                }
+                // 2) Append a new extent at the end of this leaf (still sorted:
+                //    leaf_for() chose the last leaf whose first block is <= n).
+                bool after_all = true;
+                if (entries) {
+                    u8* last = buf + 12 + (entries - 1) * 12;
+                    u32 llen = get16(last + 4);
+                    if (llen > EXT_INIT_MAX_LEN) llen -= EXT_INIT_MAX_LEN;
+                    after_all = get32(last) + llen <= n;
+                }
+                if (entries < max && after_all) {
+                    put_extent(buf + 12 + entries * 12, Extent{static_cast<u32>(n), 1, nb, false});
+                    put16(buf + 2, static_cast<u16>(entries + 1));
+                    write_leaf(where, buf);
+                    kfree(buf);
+                    return nb;
+                }
+            }
+        }
+        kfree(buf);
+
+        // 3) General case: rebuild the tree with the new extent in place.
+        Array<Extent> ext;
+        Array<u64> tree;
+        if (!flatten(reinterpret_cast<const u8*>(raw.block), ext, &tree))
+            return 0;
+        for (usize i = 0; i < ext.n; i++) {
+            Extent& x = ext.v[i];
+            if (x.uninit && n >= x.lblk && n < x.lblk + x.len) {
+                u8* zeros = static_cast<u8*>(kzalloc(vol->block_size));
+                if (!zeros)
+                    return 0;
+                for (u32 k = 0; k < x.len; k++)
+                    block::write(vol->dev, vol->block_offset(x.pblk + k), zeros, vol->block_size);
+                kfree(zeros);
+                x.uninit = false;
+                nb = x.pblk + (n - x.lblk);
+                free_tree_blocks(tree);
+                return write_tree(ext.v, ext.n) == 0 ? nb : 0;
+            }
+        }
+        if (!nb) {
+            nb = vol->alloc_block(goal);
+            if (!nb)
+                return 0;
+            add_blocks(1);
+        }
+        usize at = 0;
+        while (at < ext.n && ext.v[at].lblk < n)
+            at++;
+        if (!ext.insert(at, Extent{static_cast<u32>(n), 1, nb, false}))
+            return 0;
+        free_tree_blocks(tree);
+        return write_tree(ext.v, ext.n) == 0 ? nb : 0;
+    }
+
+    // Free every block from file block `from` on (extent-mapped files).
+    void free_extents_from(u64 from) {
+        Array<Extent> ext, keep;
+        Array<u64> tree;
+        if (!flatten(reinterpret_cast<const u8*>(raw.block), ext, &tree))
+            return;
+        free_tree_blocks(tree);
+        for (usize i = 0; i < ext.n; i++) {
+            Extent x = ext.v[i];
+            if (x.lblk >= from) {
+                vol->free_range(x.pblk, x.len);
+                add_blocks(-static_cast<i64>(x.len));
+            } else if (x.lblk + x.len > from) {
+                u32 cut = static_cast<u32>(x.lblk + x.len - from);
+                vol->free_range(x.pblk + (x.len - cut), cut);
+                add_blocks(-static_cast<i64>(cut));
+                x.len -= cut;
+                keep.push(x);
+            } else {
+                keep.push(x);
+            }
+        }
+        write_tree(keep.v, keep.n);
+    }
+
+    // ---- block-mapped (ext2/ext3) files: direct, single, double, triple indirect ----
     u64 mapped_block(u64 n, bool create) {
         u32 ppb = vol->ptrs_per_block();
-        u32 goal = (number - 1) / vol->inodes_per_group;
+        u64 goal = goal_block();
         if (n < 12) {
             if (!raw.block[n] && create) {
                 raw.block[n] = static_cast<u32>(vol->alloc_block(goal));
-                if (raw.block[n]) raw.blocks_lo += vol->block_size / 512;
+                if (raw.block[n]) add_blocks(1);
                 save();
             }
             return raw.block[n];
@@ -343,7 +899,7 @@ public:
             if (!create) return 0;
             *slot = static_cast<u32>(vol->alloc_block(goal));
             if (!*slot) return 0;
-            raw.blocks_lo += vol->block_size / 512;
+            add_blocks(1);
             save();
         }
         u64 table = *slot;
@@ -357,10 +913,10 @@ public:
             block::read(vol->dev, off, &entry, 4);
             if (!entry) {
                 if (!create) return 0;
-                entry = static_cast<u32>(vol->alloc_block(goal));
+                entry = static_cast<u32>(vol->alloc_block(table + 1));
                 if (!entry) return 0;
                 block::write(vol->dev, off, &entry, 4);
-                raw.blocks_lo += vol->block_size / 512;
+                add_blocks(1);
                 save();
             }
             table = entry;
@@ -370,15 +926,18 @@ public:
 
     u64 file_block(u64 n, bool create) {
         if (uses_extents())
-            return create ? 0 : extent_block(n);
+            return create ? extent_alloc(n) : extent_block(n);
         return mapped_block(n, create);
     }
 
-    // Free every data and indirect block from file block `from` on (block-mapped files).
     void free_blocks_from(u64 from) {
+        if (uses_extents()) {
+            free_extents_from(from);
+            return;
+        }
         u32 ppb = vol->ptrs_per_block();
         for (u64 n = from; n < 12; n++) {
-            if (raw.block[n]) { vol->free_block(raw.block[n]); raw.block[n] = 0; raw.blocks_lo -= vol->block_size / 512; }
+            if (raw.block[n]) { vol->free_range(raw.block[n], 1); raw.block[n] = 0; add_blocks(-1); }
         }
         // Indirect trees: free whole trees only when truncating to their start.
         auto free_tree = [&](auto& self, u64 blk, int level) -> void {
@@ -391,8 +950,8 @@ public:
                     kfree(entries);
                 }
             }
-            vol->free_block(blk);
-            raw.blocks_lo -= vol->block_size / 512;
+            vol->free_range(blk, 1);
+            add_blocks(-1);
         };
         u64 starts[3] = {12, 12 + static_cast<u64>(ppb), 12 + static_cast<u64>(ppb) + static_cast<u64>(ppb) * ppb};
         for (int i = 0; i < 3; i++) {
@@ -437,10 +996,12 @@ public:
         return static_cast<isize>(done);
     }
 
+    bool writable() const { return !vol->read_only && !(raw.flags & FLAG_INLINE); }
+
     isize write(u64 offset, const void* buf, usize count) override {
         if (vfs::is_dir(mode))
             return -err::ISDIR;
-        if (vol->read_only || uses_extents())
+        if (!writable())
             return -err::ROFS;
         LockGuard guard(vol->lock);
         return write_locked(offset, buf, count);
@@ -471,7 +1032,7 @@ public:
     long truncate(u64 new_size) override {
         if (vfs::is_dir(mode))
             return -err::ISDIR;
-        if (vol->read_only || uses_extents())
+        if (!writable())
             return -err::ROFS;
         LockGuard guard(vol->lock);
         if (new_size < size) {
@@ -548,10 +1109,8 @@ public:
             u32 off = 0;
             u64 prev = 0;
             while (off + 8 <= vol->block_size) {
-                u32 ino;
-                u16 rec_len;
-                memcpy(&ino, blockbuf + off, 4);
-                memcpy(&rec_len, blockbuf + off + 4, 2);
+                u32 ino = get32(blockbuf + off);
+                u16 rec_len = get16(blockbuf + off + 4);
                 u8 name_len = blockbuf[off + 6];
                 u8 type = vol->has_filetype ? blockbuf[off + 7] : FT_UNKNOWN;
                 if (rec_len < 8 || off + rec_len > vol->block_size)
@@ -607,9 +1166,62 @@ public:
 
     static u16 entry_size(u32 name_len) { return static_cast<u16>((8 + name_len + 3) & ~3u); }
 
-    // Add a directory entry (directory must be block-mapped and writable).
+    // Read-modify-write the directory block containing byte `disk_offset`.
+    template <typename Fn>
+    void edit_dir_block(u64 disk_offset, Fn fn) {
+        u8* buf = static_cast<u8*>(kmalloc(vol->block_size));
+        if (!buf)
+            return;
+        u64 start = disk_offset - disk_offset % vol->block_size;
+        block::read(vol->dev, start, buf, vol->block_size);
+        fn(buf, static_cast<u32>(disk_offset - start));
+        vol->finish_dir_block(seed(), buf);
+        block::write(vol->dev, start, buf, vol->block_size);
+        kfree(buf);
+    }
+
+    // We don't maintain htree indexes: before changing an indexed directory,
+    // turn it back into a plain linear one (which ext4 reads just as well).
+    // With checksums, the index blocks are rewritten as checksummed leaves.
+    void ensure_linear() {
+        if (!(raw.flags & FLAG_INDEX))
+            return;
+        if (vol->csum) {
+            u8* buf = static_cast<u8*>(kmalloc(vol->block_size));
+            if (buf) {
+                u64 blocks = (size + vol->block_size - 1) / vol->block_size;
+                for (u64 bi = 0; bi < blocks; bi++) {
+                    u64 b = file_block(bi, false);
+                    if (!b)
+                        continue;
+                    block::read(vol->dev, vol->block_offset(b), buf, vol->block_size);
+                    bool rewrite = false;
+                    if (bi == 0) { // the index root: "." then ".." spanning the rest
+                        u16 dot_len = get16(buf + 4);
+                        put16(buf + dot_len + 4, static_cast<u16>(vol->dir_limit() - dot_len));
+                        rewrite = true;
+                    } else if (get32(buf) == 0 && get16(buf + 4) == vol->block_size) { // an index node
+                        memset(buf, 0, vol->block_size);
+                        put16(buf + 4, static_cast<u16>(vol->dir_limit()));
+                        rewrite = true;
+                    }
+                    if (rewrite) {
+                        vol->finish_dir_block(seed(), buf);
+                        block::write(vol->dev, vol->block_offset(b), buf, vol->block_size);
+                    }
+                }
+                kfree(buf);
+            }
+        }
+        raw.flags &= ~FLAG_INDEX;
+        save();
+    }
+
+    // Add a directory entry.
     long add_entry(const char* name, usize len, u32 ino, u8 type) {
+        ensure_linear();
         u16 needed = entry_size(static_cast<u32>(len));
+        u32 limit = vol->dir_limit();
         u8* blockbuf = static_cast<u8*>(kmalloc(vol->block_size));
         if (!blockbuf)
             return -err::NOMEM;
@@ -620,25 +1232,22 @@ public:
                 continue;
             block::read(vol->dev, vol->block_offset(b), blockbuf, vol->block_size);
             u32 off = 0;
-            while (off + 8 <= vol->block_size) {
-                u32 e_ino;
-                u16 rec_len;
-                memcpy(&e_ino, blockbuf + off, 4);
-                memcpy(&rec_len, blockbuf + off + 4, 2);
-                if (rec_len < 8)
+            while (off + 8 <= limit) {
+                u32 e_ino = get32(blockbuf + off);
+                u16 rec_len = get16(blockbuf + off + 4);
+                if (rec_len < 8 || off + rec_len > limit)
                     break;
                 u16 used = e_ino ? entry_size(blockbuf[off + 6]) : 0;
                 if (rec_len - used >= needed) {
                     u32 at = off + used;
-                    if (e_ino) { // split: shrink the existing entry, ours takes the rest
-                        memcpy(blockbuf + off + 4, &used, 2);
-                    }
-                    u16 ours = static_cast<u16>(rec_len - used);
-                    memcpy(blockbuf + at, &ino, 4);
-                    memcpy(blockbuf + at + 4, &ours, 2);
+                    if (e_ino) // split: shrink the existing entry, ours takes the rest
+                        put16(blockbuf + off + 4, used);
+                    put32(blockbuf + at, ino);
+                    put16(blockbuf + at + 4, static_cast<u16>(rec_len - used));
                     blockbuf[at + 6] = static_cast<u8>(len);
                     blockbuf[at + 7] = vol->has_filetype ? type : 0;
                     memcpy(blockbuf + at + 8, name, len);
+                    vol->finish_dir_block(seed(), blockbuf);
                     block::write(vol->dev, vol->block_offset(b), blockbuf, vol->block_size);
                     kfree(blockbuf);
                     touch_dir();
@@ -654,12 +1263,12 @@ public:
             return -err::NOSPC;
         }
         memset(blockbuf, 0, vol->block_size);
-        u16 whole = static_cast<u16>(vol->block_size);
-        memcpy(blockbuf, &ino, 4);
-        memcpy(blockbuf + 4, &whole, 2);
+        put32(blockbuf, ino);
+        put16(blockbuf + 4, static_cast<u16>(limit));
         blockbuf[6] = static_cast<u8>(len);
         blockbuf[7] = vol->has_filetype ? type : 0;
         memcpy(blockbuf + 8, name, len);
+        vol->finish_dir_block(seed(), blockbuf);
         block::write(vol->dev, vol->block_offset(b), blockbuf, vol->block_size);
         kfree(blockbuf);
         size += vol->block_size;
@@ -668,13 +1277,13 @@ public:
     }
 
     void touch_dir() {
-        raw.flags &= ~FLAG_INDEX; // we don't maintain htree indexes: fall back to linear lookup
         mtime = ctime = vfs::now();
         save();
     }
 
     // Remove the entry for `name`; returns its inode number (0 if absent).
     u32 remove_entry(const char* name, usize len) {
+        ensure_linear();
         u32 victim = 0;
         u64 at = 0, prev = 0;
         iterate([&](const char* n, u8 nl, u32 ino, u8, u64 here, u64 before) {
@@ -689,17 +1298,15 @@ public:
         if (!victim)
             return 0;
         u64 block_start = at - at % vol->block_size;
-        if (prev >= block_start && prev && prev != at) {
-            // Merge into the previous entry of the same block.
-            u16 prev_len, our_len;
-            block::read(vol->dev, prev + 4, &prev_len, 2);
-            block::read(vol->dev, at + 4, &our_len, 2);
-            prev_len = static_cast<u16>(prev_len + our_len);
-            block::write(vol->dev, prev + 4, &prev_len, 2);
-        } else {
-            u32 zero = 0; // first entry in its block: just mark it unused
-            block::write(vol->dev, at, &zero, 4);
-        }
+        bool merge = prev >= block_start && prev && prev != at;
+        edit_dir_block(at, [&](u8* buf, u32 off) {
+            if (merge) { // merge into the previous entry of the same block
+                u32 poff = static_cast<u32>(prev - block_start);
+                put16(buf + poff + 4, static_cast<u16>(get16(buf + poff + 4) + get16(buf + off + 4)));
+            } else {
+                put32(buf + off, 0); // first entry in its block: just mark it unused
+            }
+        });
         touch_dir();
         return victim;
     }
@@ -713,7 +1320,7 @@ public:
     long create(const char* name, usize len, u32 new_mode, const char* target, vfs::Inode** out) override {
         if (!vfs::is_dir(mode))
             return -err::NOTDIR;
-        if (vol->read_only || uses_extents())
+        if (!writable())
             return -err::ROFS;
         if (len > 255)
             return -err::NAMETOOLONG;
@@ -724,8 +1331,7 @@ public:
         if (type == 0)
             type = vfs::S_IFREG;
         bool dir = type == vfs::S_IFDIR;
-        u32 goal = (number - 1) / vol->inodes_per_group;
-        u32 ino = vol->alloc_inode(goal, dir);
+        u32 ino = vol->alloc_inode(goal_group(), dir);
         if (!ino)
             return -err::NOSPC;
 
@@ -734,7 +1340,13 @@ public:
         r.mode = static_cast<u16>(type | (new_mode & 07777));
         r.links = dir ? 2 : 1;
         r.atime = r.ctime = r.mtime = t;
-        vol->write_inode(ino, r);
+        r.generation = static_cast<u32>(random::next_u64());
+        bool fast_symlink = type == vfs::S_IFLNK && target && strlen(target) < 60;
+        if (vol->extents && (type == vfs::S_IFREG || dir || (type == vfs::S_IFLNK && !fast_symlink))) {
+            r.flags |= FLAG_EXTENTS;
+            put_header(reinterpret_cast<u8*>(r.block), 0, 4, 0);
+        }
+        vol->write_inode(ino, r, true);
         vol->forget(ino);
         Node* n = vol->node(ino, this);
 
@@ -746,18 +1358,18 @@ public:
             u8* blockbuf = static_cast<u8*>(kzalloc(vol->block_size));
             if (!blockbuf)
                 return -err::NOMEM;
-            u16 dot_len = 12, dotdot_len = static_cast<u16>(vol->block_size - 12);
-            memcpy(blockbuf, &ino, 4);
-            memcpy(blockbuf + 4, &dot_len, 2);
+            put32(blockbuf, ino);
+            put16(blockbuf + 4, 12);
             blockbuf[6] = 1;
             blockbuf[7] = vol->has_filetype ? FT_DIR : 0;
             blockbuf[8] = '.';
-            memcpy(blockbuf + 12, &number, 4);
-            memcpy(blockbuf + 16, &dotdot_len, 2);
+            put32(blockbuf + 12, number);
+            put16(blockbuf + 16, static_cast<u16>(vol->dir_limit() - 12));
             blockbuf[18] = 2;
             blockbuf[19] = vol->has_filetype ? FT_DIR : 0;
             blockbuf[20] = '.';
             blockbuf[21] = '.';
+            vol->finish_dir_block(n->seed(), blockbuf);
             block::write(vol->dev, vol->block_offset(b), blockbuf, vol->block_size);
             kfree(blockbuf);
             n->size = vol->block_size;
@@ -766,7 +1378,7 @@ public:
             save();
         } else if (type == vfs::S_IFLNK && target) {
             usize tl = strlen(target);
-            if (tl < 60) {
+            if (fast_symlink) {
                 memcpy(n->raw.block, target, tl);
                 n->size = tl;
                 n->save();
@@ -783,7 +1395,8 @@ public:
 
     void release_inode(Node* victim) {
         bool dir = vfs::is_dir(victim->mode);
-        if (!victim->uses_extents())
+        bool fast_symlink = vfs::is_lnk(victim->mode) && !victim->uses_extents() && victim->raw.blocks_lo == 0;
+        if (!fast_symlink)
             victim->free_blocks_from(0);
         victim->raw.dtime = now_seconds();
         victim->nlink = 0;
@@ -796,7 +1409,7 @@ public:
     long unlink(const char* name, usize len, bool remove_dir) override {
         if (!vfs::is_dir(mode))
             return -err::NOTDIR;
-        if (vol->read_only || uses_extents())
+        if (!writable())
             return -err::ROFS;
         LockGuard guard(vol->lock);
         Node* victim = find_locked(name, len);
@@ -806,7 +1419,7 @@ public:
         if (remove_dir && !dir) return -err::NOTDIR;
         if (!remove_dir && dir) return -err::ISDIR;
         if (dir && !victim->dir_empty()) return -err::NOTEMPTY;
-        if (victim->uses_extents()) return -err::ROFS;
+        if (victim->raw.flags & FLAG_INLINE) return -err::ROFS;
         remove_entry(name, len);
         if (dir) {
             nlink--;
@@ -825,7 +1438,7 @@ public:
         auto* new_dir = static_cast<Node*>(new_dir_inode);
         if (new_dir->vol != vol)
             return -err::XDEV;
-        if (vol->read_only || uses_extents() || new_dir->uses_extents())
+        if (!writable() || !new_dir->writable())
             return -err::ROFS;
         LockGuard guard(vol->lock);
         Node* moving = find_locked(old_name, old_len);
@@ -853,13 +1466,17 @@ public:
         remove_entry(old_name, old_len);
         if (vfs::is_dir(moving->mode) && new_dir != this) {
             // Point the moved directory's ".." at its new parent.
+            moving->ensure_linear();
+            u64 dotdot = 0;
             moving->iterate([&](const char* n, u8 nl, u32, u8, u64 here, u64) {
                 if (nl == 2 && n[0] == '.' && n[1] == '.') {
-                    block::write(vol->dev, here, &new_dir->number, 4);
+                    dotdot = here;
                     return true;
                 }
                 return false;
             });
+            if (dotdot)
+                moving->edit_dir_block(dotdot, [&](u8* buf, u32 off) { put32(buf + off, new_dir->number); });
             nlink--;
             save();
             new_dir->nlink++;
@@ -910,8 +1527,8 @@ long mount(block::Device* dev, vfs::Inode** root, bool* read_only, const char** 
         return -err::INVAL;
     u8 sb[1024];
     block::read(dev, 1024, sb, sizeof(sb));
-    auto u32_at = [&](u32 off) { u32 v; memcpy(&v, sb + off, 4); return v; };
-    auto u16_at = [&](u32 off) { u16 v; memcpy(&v, sb + off, 2); return v; };
+    auto u32_at = [&](u32 off) { return get32(sb + off); };
+    auto u16_at = [&](u32 off) { return get16(sb + off); };
 
     auto* v = new Volume;
     v->dev = dev;
@@ -921,6 +1538,8 @@ long mount(block::Device* dev, vfs::Inode** root, bool* read_only, const char** 
     v->first_data_block = u32_at(20);
     u32 rev = u32_at(76);
     v->inode_size = rev >= 1 ? u16_at(88) : 128;
+    v->first_ino = rev >= 1 ? u32_at(0x54) : 11;
+    v->compat = rev >= 1 ? u32_at(92) : 0;
     v->incompat = rev >= 1 ? u32_at(96) : 0;
     v->ro_compat = rev >= 1 ? u32_at(100) : 0;
     v->has_filetype = v->incompat & INCOMPAT_FILETYPE;
@@ -930,7 +1549,8 @@ long mount(block::Device* dev, vfs::Inode** root, bool* read_only, const char** 
         v->blocks_count |= static_cast<u64>(u32_at(0x150)) << 32;
         v->desc_size = max<u32>(u16_at(0xFE), 32);
     }
-    if (v->block_size > 4096 || !v->blocks_per_group || !v->inodes_per_group) {
+    if (v->block_size > 4096 || !v->blocks_per_group || !v->inodes_per_group || v->inode_size < 128 ||
+        v->inode_size > 1024 || v->desc_size > 64) {
         delete v;
         return -err::INVAL;
     }
@@ -939,23 +1559,40 @@ long mount(block::Device* dev, vfs::Inode** root, bool* read_only, const char** 
         delete v;
         return -err::INVAL;
     }
+    memcpy(v->uuid, sb + 0x68, 16);
+    v->csum = v->ro_compat & RO_METADATA_CSUM;
+    v->gdt_csum = !v->csum && (v->ro_compat & RO_GDT_CSUM);
+    v->sparse = v->ro_compat & RO_SPARSE_SUPER;
+    v->extents = v->incompat & INCOMPAT_EXTENTS;
+    v->csum_seed = (v->incompat & INCOMPAT_CSUM_SEED) ? u32_at(0x270) : crc32c(~0u, v->uuid, 16);
+    v->reserved_gdt = u16_at(0xCE);
+    if (v->inode_size > 128) {
+        u16 want = u16_at(0x15E);
+        v->extra_isize = static_cast<u16>(min<u32>(want ? want : 32, v->inode_size - 128));
+    }
     v->group_count = static_cast<u32>((v->blocks_count - v->first_data_block + v->blocks_per_group - 1) / v->blocks_per_group);
+    v->gdt_blocks = (v->group_count * v->desc_size + v->block_size - 1) / v->block_size;
     v->gdt_block = v->first_data_block + 1;
     // We can write only what we fully understand; anything else stays safe.
     v->read_only = (v->incompat & ~INCOMPAT_WRITE_OK) || (v->ro_compat & ~RO_WRITE_OK);
     *read_only = v->read_only;
 
-    const char* kind = (v->incompat & INCOMPAT_EXTENTS) ? "ext4" : (u32_at(92) & 0x4) ? "ext3" : "ext2";
+    const char* kind = (v->incompat & (INCOMPAT_EXTENTS | INCOMPAT_64BIT | INCOMPAT_FLEX_BG)) ? "ext4"
+                       : (v->compat & COMPAT_HAS_JOURNAL)                                    ? "ext3"
+                                                                                             : "ext2";
     if (kind_out)
         *kind_out = kind;
     char label[17] = {};
     memcpy(label, sb + 120, 16);
-    klog::ok("%s on %s%s%s%s: %lu MiB, %u-byte blocks, %s", kind, dev->name, label[0] ? " (\"" : "", label,
+    const char* why = "";
+    if (v->incompat & INCOMPAT_RECOVER)
+        why = " (journal needs replay)";
+    else if (v->read_only)
+        why = " (unsupported features)";
+    klog::ok("%s on %s%s%s%s: %lu MiB, %u-byte blocks, %s%s%s", kind, dev->name, label[0] ? " (\"" : "", label,
              label[0] ? "\")" : "", v->blocks_count * v->block_size / MiB, v->block_size,
-             v->read_only ? "read-only" : "read-write");
+             v->read_only ? "read-only" : "read-write", v->csum ? ", checksums" : "", why);
     *root = v->node(ROOT_INO, nullptr);
-    (void)RO_GDT_CSUM;
-    (void)RO_METADATA_CSUM;
     return 0;
 }
 

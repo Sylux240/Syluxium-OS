@@ -5,9 +5,12 @@
 
 // The ext2 / ext3 / ext4 family (Linux's native file systems).
 //
-// Reads all three, including ext4 extents and 64-bit layouts. Writes
-// ext2-style volumes (block-mapped files, no metadata checksums); a volume
-// using ext4 features the writer doesn't handle yet is mounted read-only.
+// Reads and writes all three, including ext4 as Debian's mkfs.ext4 makes it:
+// extent trees, 64-bit block groups, flex_bg, uninitialized groups, metadata
+// checksums (crc32c). Directory htree indexes are read, and an indexed
+// directory turns linear when changed. Not yet: journaling (writes go
+// straight to their place; a journal that needs replaying -> read-only),
+// meta_bg, inline data, encryption.
 namespace ext2 {
 
 bool probe(block::Device* dev);

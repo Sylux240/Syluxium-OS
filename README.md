@@ -79,7 +79,7 @@ tools/smoke-test.sh   headless QEMU boot: serial log + screenshot
 - [ ] **Phase 5**: PCI, AHCI/NVMe, USB (xHCI) keyboard/mouse/storage, driver model with a
       device registry (every device: name, vendor, driver, status, resources), ext4 so files persist
       - [x] 5a: PCI + device registry + driver model, block layer + cache + partitions, AHCI, NVMe,
-            FAT32 (rw), ext2 (rw) / ext3 / ext4 (ro), mount/umount/rename/statfs/utimensat
+            FAT32 (rw), ext2 (rw) / ext3 / ext4 (ro; rw since phase 9), mount/umount/rename/statfs/utimensat
       - [x] 5b: PS/2 mouse (wheel), Linux input events (/dev/input/eventN, evdev ioctls), USB:
             xHCI host controller, hubs, HID keyboards/mice, mass storage (USB sticks as /dev/sdX),
             kernel log buffer (dmesg)
@@ -126,7 +126,10 @@ tools/smoke-test.sh   headless QEMU boot: serial log + screenshot
             command line, no initramfs needed; general mount table (mount on any file system,
             `..` crosses mounts); /dev, /proc, /sys, /run, /tmp stay in RAM; disks/USB probed
             before other drivers so firmware loads from the disk; `make rootdisk` (ext2 for now)
-      - [ ] 9-boot: ext4 read-write (extents, metadata checksums, journal) as the root file system
+      - [x] 9-ext4 (first part): **ext4 read-write**: extent trees (multi-level), metadata
+            checksums (crc32c, hardware-accelerated), 64-bit groups, flex_bg, uninit groups, htree
+            dirs converted on change; `make rootdisk` is ext4; e2fsck-clean after `fsstress` + TDE
+      - [ ] 9-ext4: jbd2 journaling (crash safety) + journal replay; clean unmount on shutdown
       - [ ] 9-users: **login screen and user accounts**: graphical login (TDE's TDM, XP/7-styled:
             user tiles with pictures, password, Shut Down/Restart/Sleep buttons; optional
             auto-login), real multi-user security in the kernel (enforced file permissions and

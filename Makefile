@@ -249,14 +249,14 @@ $(IMAGE): $(KERNEL) $(INITRAMFS) limine.conf $(LIMINE_DIR)/limine
 # ---------------------------------------------------------------------------
 # Running
 # ---------------------------------------------------------------------------
-# An installed-system disk: the whole root file system on an ext2 volume
+# An installed-system disk: the whole root file system on an ext4 volume
 # labelled SYLUXROOT (boot it with root=LABEL=SYLUXROOT and no initramfs;
 # tools/smoke-test.sh does that with ROOTDISK=build/syluxium-root.img).
 ROOTDISK_IMG := $(BUILD)/syluxium-root.img
 rootdisk: $(INITRAMFS)
 	@rm -f $(ROOTDISK_IMG).tmp
 	@truncate -s $$(( ($$(du -sm $(ROOTFS) | cut -f1) * 2 + 512) ))M $(ROOTDISK_IMG).tmp
-	@mke2fs -q -t ext2 -L SYLUXROOT -E root_owner=0:0 -d $(ROOTFS) $(ROOTDISK_IMG).tmp
+	@mke2fs -q -t ext4 -b 4096 -L SYLUXROOT -E root_owner=0:0 -d $(ROOTFS) $(ROOTDISK_IMG).tmp
 	@mv $(ROOTDISK_IMG).tmp $(ROOTDISK_IMG)
 	@echo "  ROOTDISK $(ROOTDISK_IMG)"
 

@@ -1,0 +1,26 @@
+#!/bin/sh
+# File system write stress test: fsstress <directory on the file system to test>
+# Prints checksums so the result can be compared on another system.
+D="$1/stress"
+rm -rf "$D"; mkdir -p "$D" && cd "$D" || exit 1
+i=0; while [ $i -lt 300 ]; do echo "file number $i" > f$i; i=$((i+1)); done
+dd if=/dev/urandom of=big bs=64k count=128 2>/dev/null           # 8 MiB, sequential
+i=0; while [ $i -lt 400 ]; do                                     # two interleaved files: fragmented
+    dd if=/dev/urandom bs=4k count=1 2>/dev/null >> fragA
+    dd if=/dev/urandom bs=4k count=1 2>/dev/null >> fragB
+    i=$((i+1))
+done
+dd if=/dev/zero of=sparse bs=4k count=1 seek=5000 2>/dev/null     # a hole of 20 MB
+mkdir -p a/b/c && mv f1 a/b/c/moved && mv a/b c2
+ln -s a/very/long/symlink/target/name/that/is/certainly/longer/than/sixty/characters longlink
+ln -s short shortlink
+i=0; while [ $i -lt 300 ]; do [ $((i % 3)) -eq 0 ] && rm -f f$i; i=$((i+1)); done
+md5sum big fragA fragB
+cp fragB fragC && truncate -s 100000 fragC && md5sum fragC
+if [ -d "$1/indexed" ]; then                                      # an htree directory made by mkfs
+    touch "$1/indexed/added-by-syluxium" && rm -f "$1/indexed/x10" && mv "$1/indexed/x20" "$1/indexed/renamed20"
+    echo "indexed: $(ls "$1/indexed" | wc -l) entries"
+fi
+rm -rf "$1/stress/c2"
+sync
+echo FSSTRESS-DONE
