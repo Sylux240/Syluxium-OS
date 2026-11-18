@@ -1,0 +1,11 @@
+[Desktop Entry]
+Exec=firefox-esr %u
+Icon=firefox-esr
+Name=Web Browser
+GenericName=Web Browser
+Comment=Browse the World Wide Web (Firefox)
+StartupNotify=true
+Terminal=false
+Type=Application
+X-TDE-SubstituteUID=false
+OnlyShowIn=TDE;

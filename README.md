@@ -158,17 +158,24 @@ tools/smoke-test.sh   headless QEMU boot: serial log + screenshot
       - [x] 9-install: graphical installer on the live desktop (wizard: disk, name, user, password,
             computer name, progress) -> GPT + ext4 (journaled) + Limine UEFI/BIOS; installed
             disk boots and logs in. Later: dual boot/manual partitions, time zone, keyboard, language
-      - [ ] 9-power: real power off / restart: ACPI S5 power-off, ACPI reset register or keyboard
+      - [x] 9-power: real power off / restart (ACPI S5, reset register / 8042 / 0xCF9), clean ext4
+            unmount, poweroff/reboot/halt, TDM Shut Down/Restart; power button (uACPI) = orderly shutdown
+      - [ ] 9-power (old item): real power off / restart: ACPI S5 power-off, ACPI reset register or keyboard
             controller restart, sync + unmount first; working `poweroff`/`reboot`/`halt`; TDE
             Start → Shut Down / Restart call them (TDE shutdown backend or its shutdown-command fallback)
-      - [ ] 9-sleep: **Sleep** (ACPI S3 suspend-to-RAM: save/restore devices, wake on power button,
+      - [ ] 9-sleep (needs GPU drivers to bring the screen back on real hardware - with Phase 10): **Sleep** (ACPI S3 suspend-to-RAM: save/restore devices, wake on power button,
             lid, keyboard/mouse; Start → Sleep, lid close) and later Hibernate (S4); **screen
             timeout**: blank/power off the display after N minutes idle (DPMS), lock optional,
             settings in Control Panel → Power Options
       - [x] 9-sound: sound on by default (aRts runs; the "cpu overload" abort was a CPU-time clock bug)
-      - [ ] 9-firefox: Firefox (firefox-esr) is the default web browser; Konqueror only for files
-      - [ ] 9-usb: USB plug and play: hot-plugged Ethernet adapters, Wi-Fi adapters and other
+      - [x] 9-firefox: **Firefox ESR runs and is the default browser** (desktop, taskbar, TDE
+            BrowserApplication, x-www-browser); Konqueror for files. Sandbox off until seccomp/namespaces
+      - [x] 9-usb (part): EHCI (USB 2.0) and UHCI (USB 1.1) drivers, Intel xHCI port routing, USB
+            Ethernet (CDC-ECM, hot-plug DHCP); PS/2 init fixed for real laptops (HP ProBook report)
+      - [ ] 9-usb: OHCI, more USB network chips (RTL8152 vendor mode, AX88179), USB audio. Old item: hot-plugged Ethernet adapters, Wi-Fi adapters and other
             peripherals just work (driver binding + desktop notification)
+      - [x] 9-laptop (part): ACPI interpreter (uACPI 7.0): battery + AC adapter in
+            /sys/class/power_supply, lid state, power button; Display Settings (resolution, from boot)
       - [ ] 9-laptop: **touchpad**: precision/multi-touch drivers (I2C-HID, PS/2 Synaptics/ALPS/
             Elantech, Apple SPI/USB trackpads on MacBooks) via libinput; settings for tap-to-click,
             two-finger scroll + natural scrolling, speed, palm rejection, disable while typing,

@@ -3,3 +3,7 @@
 # "sudo" group are administrators). root has no password.
 [super-user-command]
 super-user-command=sudo
+
+# Firefox is the web browser; Konqueror stays the file manager.
+[General]
+BrowserApplication=firefox-esr

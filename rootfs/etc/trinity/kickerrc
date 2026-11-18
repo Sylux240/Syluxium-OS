@@ -14,9 +14,9 @@ FreeSpace2=0
 StorageId[$e]=tde-Home.desktop
 
 [ServiceButton_2]
-DesktopFile[$e]=/opt/trinity/share/applications/tde/konqbrowser.desktop
+DesktopFile[$e]=/usr/share/applications/firefox-esr.desktop
 FreeSpace2=0
-StorageId[$e]=tde-konqbrowser.desktop
+StorageId[$e]=firefox-esr.desktop
 
 [Applet_2]
 ConfigFile=taskbar_panelappletrc

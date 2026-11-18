@@ -5,6 +5,16 @@ chown syluxium: /run/user/1000; chmod 700 /run/user/1000
 mkdir -p /home/syluxium && chown syluxium: /home/syluxium
 /usr/lib/xorg/Xorg :0 vt1 -nolisten tcp -ac -logfile /tmp/Xorg.0.log > /tmp/xorg.out 2>&1 &
 sleep 4
-su syluxium -s /bin/sh -c "cd; export HOME=/home/syluxium DISPLAY=:0 XDG_RUNTIME_DIR=/run/user/1000 MOZ_DISABLE_CONTENT_SANDBOX=1 MOZ_DISABLE_GMP_SANDBOX=1 MOZ_DISABLE_RDD_SANDBOX=1 MOZ_DISABLE_SOCKET_PROCESS_SANDBOX=1 MOZ_CRASHREPORTER_DISABLE=1; dbus-run-session -- firefox-esr --no-remote 'data:text/html,<h1>Firefox runs on Syluxium</h1>' > /tmp/ff.log 2>&1 &"
+cat > /tmp/syluxium-test.html <<'HTML'
+<html><body style="font-family:sans-serif;background:#eef"><h1>Firefox runs on Syluxium</h1>
+<p>This page was rendered by Firefox ESR on the Syluxium kernel.</p></body></html>
+HTML
+chmod 644 /tmp/syluxium-test.html
+su syluxium -s /bin/sh -c "cd; export HOME=/home/syluxium DISPLAY=:0 XDG_RUNTIME_DIR=/run/user/1000 MOZ_DISABLE_CONTENT_SANDBOX=1 MOZ_DISABLE_GMP_SANDBOX=1 MOZ_DISABLE_RDD_SANDBOX=1 MOZ_DISABLE_SOCKET_PROCESS_SANDBOX=1 MOZ_CRASHREPORTER_DISABLE=1; dbus-run-session -- firefox-esr --no-remote file:///tmp/syluxium-test.html > /tmp/ff.log 2>&1 &"
 sleep "${1:-45}"
-{ echo "=== firefox processes:"; ps -A -o pid,user,args | grep -i [f]irefox | cut -c1-100; echo "=== firefox log:"; grep -v "^$" /tmp/ff.log | grep -v "Crash Annotation" | head -40; } > /dev/console 2>&1
+{ echo "=== firefox processes:"; ps -A -o pid,user,args | grep -i [f]irefox | cut -c1-100; echo "=== where firefox processes wait:"
+    for pid in $(ps -A -o pid,args | grep "[c]ontentproc -isForBrowser" | awk '{print $1}' | head -2); do
+        echo "pid $pid: main $(cat /proc/$pid/syscall)"
+        for t in /proc/$pid/task/*; do echo "   t$(basename $t) $(cat $t/comm 2>/dev/null): $(cat $t/syscall)"; done | head -20
+    done
+    echo "=== firefox log:"; grep -v "^$" /tmp/ff.log | grep -v "Crash Annotation" | head -40; } > /dev/console 2>&1
