@@ -25,6 +25,14 @@ while IFS=: read -r name _ uid gid _ home _; do
     fi
 done < /etc/passwd
 
+# D-Bus starts system services (e.g. TDE's hardware control daemon: power
+# management, brightness) through a setuid helper that must belong to the
+# messagebus group; the image's files all start out group root.
+helper=/usr/lib/dbus-1.0/dbus-daemon-launch-helper
+if [ -f "$helper" ]; then
+    chown root:messagebus "$helper" && chmod 4754 "$helper"
+fi
+
 dbus-uuidgen --ensure=/etc/machine-id 2>/dev/null
 cp /etc/machine-id /var/lib/dbus/machine-id 2>/dev/null
 [ -S /run/dbus/system_bus_socket ] || dbus-daemon --system --fork > /var/log/dbus-system.log 2>&1

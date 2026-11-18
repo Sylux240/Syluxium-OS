@@ -248,6 +248,12 @@ void start_interpreter() {
     uacpi_find_devices("ACPI0003", found_ac, nullptr);
     uacpi_find_devices("PNP0C0D", found_lid, nullptr);
     publish_power_supplies();
+    // What power managers (TDE's tdepowersave) look for to know ACPI is
+    // there; no sleep states are offered until resume works.
+    vfs::mkdir_p("/proc/acpi");
+    vfs::mkdir_p("/sys/firmware/acpi");
+    vfs::mkdir_p("/sys/power");
+    genfs::static_file("/sys/power/state", "\n");
     klog::ok("ACPI: AML interpreter running (uACPI); %d battery(ies), AC adapter %s, lid %s, power button on",
              g_battery_count, g_ac ? "yes" : "no", g_lid ? "yes" : "no");
 }
