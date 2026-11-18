@@ -173,7 +173,9 @@ tools/smoke-test.sh   headless QEMU boot: serial log + screenshot
       (virgl) first, then AMD (amdgpu) and NVIDIA (nouveau, and NVIDIA's open kernel modules)
       through the driver compatibility layer. Display side (KMS): resolutions, refresh rates,
       multiple monitors. 3D: Mesa's **Vulkan** (RADV, NVK) and **OpenGL** (radeonsi, zink/nouveau)
-      drivers, so Steam, Proton and other games and 3D apps run
+      drivers, so Steam, Proton and other games and 3D apps run. **Required**: native AMD and
+      NVIDIA hardware acceleration for the desktop too (Xorg on amdgpu/modesetting with glamor
+      instead of today's unaccelerated fbdev), on real hardware, not just in QEMU
 - [ ] **Phase 11**: **App Store** + package installer (.deb only; .rpm dropped): a Play Store-like
       app with screenshots, icons, descriptions, ratings/details, categories and search, pulling
       .deb packages from several repositories (Debian, Ubuntu, third-party apt repos); double-click
