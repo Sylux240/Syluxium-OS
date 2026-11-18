@@ -743,9 +743,30 @@ Controller* g_controllers = nullptr;
 
 bool match(const dev::Device* d) { return d->bus == dev::Bus::Pci && d->class_code == 0x0C0330; }
 
+// Intel 7/8/9-series chipsets (2012-2015 laptops) start with every USB port
+// wired to their EHCI controllers; the OS switches the ports it can drive to
+// xHCI (as Linux's usb_enable_intel_xhci_ports does). Without this, devices
+// in those ports - including many laptops' internal ones - are invisible.
+void switch_intel_ports(const dev::Device* d, pci::Function* f) {
+    static const u16 ids[] = {0x1E31, 0x8C31, 0x9C31, 0x9CB1, 0x8CB1, 0x0F35};
+    if (d->vendor != 0x8086)
+        return;
+    bool known = false;
+    for (u16 id : ids)
+        known |= d->device == id;
+    if (!known)
+        return;
+    u32 usb3 = pci::read32(*f, 0xDC);  // USB3PRM: ports that may be switched to SuperSpeed
+    pci::write32(*f, 0xD8, usb3);      // USB3_PSSEN
+    u32 usb2 = pci::read32(*f, 0xD4);  // XUSB2PRM: USB 2 ports that may be routed to xHCI
+    pci::write32(*f, 0xD0, usb2);      // XUSB2PR
+    klog::info("%s: Intel xHCI: USB 3 ports %#x, USB 2 ports %#x switched from EHCI", d->bus_id, usb3, usb2);
+}
+
 long probe(dev::Device* d) {
     pci::Function* f = pci::function_of(d);
     pci::enable(*f);
+    switch_intel_ports(d, f);
     auto* hc = new Controller;
     hc->entry = d;
     hc->cap = static_cast<volatile u8*>(pci::map_bar(*f, 0));

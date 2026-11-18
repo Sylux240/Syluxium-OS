@@ -245,6 +245,7 @@ void discover_hardware() {
     ahci::register_driver();
     nvme::register_driver();
     xhci::register_driver();
+    ehci::register_driver();
     net::init(); // loopback first: it becomes ifindex 1, like Linux
     e1000::register_driver();
     virtio_net::register_driver();

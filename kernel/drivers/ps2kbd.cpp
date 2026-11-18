@@ -1,3 +1,4 @@
+#include <core/log.hpp>
 // i8042 PS/2 controller: keyboard (IRQ 1) and mouse (IRQ 12).
 //
 // Both devices share the data port, so one handler drains it and routes
@@ -168,8 +169,23 @@ bool mouse_cmd(u8 b) {
     return read_byte(&ack) && ack == 0xFA;
 }
 
+void flush_output() {
+    for (int i = 0; i < 256 && (arch::inb(STATUS) & STATUS_OUTPUT_FULL); i++) {
+        arch::inb(DATA);
+        arch::io_wait();
+    }
+}
+
 bool init_mouse() {
     controller_cmd(0xA8); // enable the aux port
+    flush_output();
+    mouse_cmd(0xFF);      // reset (touchpads come up in plain PS/2 mouse mode)
+    {
+        u8 b;
+        u64 deadline = clock::now_ns() + 1'000'000'000;
+        while (clock::now_ns() < deadline && !(read_byte(&b) && b == 0xAA)) {}
+        read_byte(&b);    // device id after the self-test
+    }
     controller_cmd(0x20); // read config byte
     u8 config;
     if (!read_byte(&config))
@@ -243,12 +259,78 @@ void console_key(u16 keycode, bool pressed) {
     tty::input_char(c);
 }
 
+// Send a byte to the keyboard and wait for its ACK (0xFA; 0xFE = resend).
+bool keyboard_cmd(u8 b) {
+    for (int attempt = 0; attempt < 3; attempt++) {
+        if (!wait_write())
+            return false;
+        arch::outb(DATA, b);
+        u8 r;
+        if (!read_byte(&r))
+            return false;
+        if (r == 0xFA)
+            return true;
+        if (r != 0xFE)
+            return false;
+    }
+    return false;
+}
+
+// Set the controller up the way Linux's i8042 driver does. Firmware leaves
+// it in all sorts of states: UEFI firmware often polls the keyboard and
+// leaves its interrupt disabled, or the keyboard port disabled entirely.
+void setup_controller() {
+    controller_cmd(0xAD); // disable the keyboard port
+    controller_cmd(0xA7); // disable the aux port
+    flush_output();
+    controller_cmd(0x20);
+    u8 config = 0x45;     // fallback if the read fails
+    bool got_config = read_byte(&config);
+    u8 firmware_config = config;
+    config &= ~0x03;      // interrupts off while we set up
+    config |= 0x40;       // scancode translation (set 2 -> set 1)
+    config &= ~0x10;      // keyboard clock on
+    controller_cmd(0x60);
+    wait_write();
+    arch::outb(DATA, config);
+    // Self-test resets some controllers' config; many laptops answer
+    // nonsense or nothing at all. Neither is fatal (Linux ignores it too).
+    controller_cmd(0xAA);
+    u8 result = 0;
+    read_byte(&result);
+    controller_cmd(0x60);
+    wait_write();
+    arch::outb(DATA, config);
+    controller_cmd(0xAE); // enable the keyboard port
+    flush_output();
+    klog::info("PS/2 controller: firmware config %#x%s (keyboard IRQ %s), self-test %#x", firmware_config,
+               got_config ? "" : " (unreadable)", (firmware_config & 1) ? "on" : "OFF", result);
+    // The keyboard itself: reset (0xFF -> ACK, 0xAA), then scanning on.
+    if (keyboard_cmd(0xFF)) {
+        u8 bat = 0;
+        u64 deadline = clock::now_ns() + 1'000'000'000;
+        while (clock::now_ns() < deadline && !(read_byte(&bat) && (bat == 0xAA || bat == 0xFC))) {}
+    }
+    keyboard_cmd(0xF4); // enable scanning
+    flush_output();
+    // Keyboard interrupt on (the aux interrupt is set by init_mouse()).
+    controller_cmd(0x20);
+    if (read_byte(&config)) {
+        config |= 0x01;
+        config |= 0x40;
+        config &= ~0x10;
+        controller_cmd(0x60);
+        wait_write();
+        arch::outb(DATA, config);
+    }
+}
+
 bool init() {
     // No controller (common on new UEFI-only PCs) reads back as 0xFF.
     if (arch::inb(STATUS) == 0xFF)
         return false;
-    for (int i = 0; i < 64 && (arch::inb(STATUS) & STATUS_OUTPUT_FULL); i++)
-        arch::inb(DATA); // drain stale bytes
+    flush_output();
+    setup_controller();
 
     const char kname[] = "AT Translated Set 2 keyboard"; // what Linux calls it
     for (usize i = 0; i < sizeof(kname); i++)
