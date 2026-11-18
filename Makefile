@@ -247,7 +247,9 @@ $(INITRAMFS): $(KERNEL) tools/mkfontdir.py $(DEBIAN_STAMP) $(DEBIAN_I386_STAMP) 
 	@# Font indexes Debian's install scripts would have made (mkfontdir).
 	@python3 tools/mkfontdir.py $(ROOTFS)/usr/share/fonts/X11/misc $(ROOTFS)/usr/share/fonts/X11/100dpi $(ROOTFS)/usr/share/fonts/X11/75dpi > /dev/null
 	@echo "  CPIO  $@"
-	@cd $(ROOTFS) && find . | LC_ALL=C sort | cpio -o -H newc --quiet --owner=0:0 > ../initramfs.cpio
+	@# gzip: 670 MB -> ~250 MB to load from the boot medium; the kernel
+	@# decompresses and unpacks it in one stream.
+	@cd $(ROOTFS) && find . | LC_ALL=C sort | cpio -o -H newc --quiet --owner=0:0 | gzip -n -6 > ../initramfs.cpio
 
 # ---------------------------------------------------------------------------
 # Bootable MBR disk image: one FAT32 EFI system partition, BIOS + UEFI boot.

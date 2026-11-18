@@ -2,6 +2,7 @@
 #include <fs/initramfs.hpp>
 #include <fs/vfs.hpp>
 #include <lib/format.hpp>
+#include <lib/inflate.hpp>
 #include <lib/string.hpp>
 
 namespace initramfs {
@@ -25,54 +26,139 @@ u32 hex_field(const char* p) {
 
 usize align4(usize v) { return (v + 3) & ~usize(3); }
 
-} // namespace
+// A cpio stream unpacker: fed the archive in pieces of any size (straight
+// from memory, or as the decompressor produces it).
+class Unpacker {
+public:
+    explicit Unpacker(Stats* stats) : m_stats(stats) { *stats = {}; }
+    bool done() const { return m_state == State::Done; }
+    bool failed() const { return m_failed; }
 
-long unpack(const void* archive, usize size, Stats* stats) {
-    *stats = {};
-    auto* base = static_cast<const char*>(archive);
-    usize pos = 0;
-
-    while (pos + HEADER_SIZE <= size) {
-        const char* h = base + pos;
-        if (memcmp(h, "070701", 6) != 0 && memcmp(h, "070702", 6) != 0) {
-            klog::error("initramfs: bad cpio magic at offset %zu", pos);
-            return -err::INVAL;
+    bool feed(const u8* data, usize len) {
+        while (len && !m_failed && m_state != State::Done) {
+            usize used = step(data, len);
+            data += used;
+            len -= used;
+            m_offset += used;
         }
-        u32 mode = hex_field(h + 14);
-        u32 file_size = hex_field(h + 54);
-        u32 name_size = hex_field(h + 94);
+        return !m_failed;
+    }
 
-        usize name_pos = pos + HEADER_SIZE;
-        usize data_pos = align4(name_pos + name_size);
-        usize next = align4(data_pos + file_size);
-        if (name_size == 0 || data_pos + file_size > size)
-            return -err::INVAL;
+private:
+    enum class State { Header, Name, NamePad, Data, DataPad, Done };
+    State m_state = State::Header;
+    Stats* m_stats;
+    bool m_failed = false;
+    u64 m_offset = 0;      // bytes consumed so far (alignment is relative to the archive start)
+    char m_header[HEADER_SIZE];
+    usize m_have = 0;      // bytes collected for the current field
+    u32 m_mode = 0, m_file_size = 0, m_name_size = 0;
+    char m_name[512];
+    char m_path[512];
+    vfs::Inode* m_file = nullptr; // regular file being filled
+    char m_link[256];
 
-        const char* name = base + name_pos;
-        if (strcmp(name, "TRAILER!!!") == 0)
-            break;
+    usize pad_bytes() const { return static_cast<usize>(align4(m_offset) - m_offset); }
 
+    usize step(const u8* data, usize len) {
+        switch (m_state) {
+        case State::Header: {
+            usize n = min<usize>(len, HEADER_SIZE - m_have);
+            memcpy(m_header + m_have, data, n);
+            m_have += n;
+            if (m_have == HEADER_SIZE) {
+                if (memcmp(m_header, "070701", 6) != 0 && memcmp(m_header, "070702", 6) != 0) {
+                    klog::error("initramfs: bad cpio magic at offset %lu", m_offset + n - HEADER_SIZE);
+                    m_failed = true;
+                    return n;
+                }
+                m_mode = hex_field(m_header + 14);
+                m_file_size = hex_field(m_header + 54);
+                m_name_size = hex_field(m_header + 94);
+                if (m_name_size == 0 || m_name_size > sizeof(m_name)) {
+                    m_failed = true;
+                    return n;
+                }
+                m_have = 0;
+                m_state = State::Name;
+            }
+            return n;
+        }
+        case State::Name: {
+            usize n = min<usize>(len, m_name_size - m_have);
+            memcpy(m_name + m_have, data, n);
+            m_have += n;
+            if (m_have == m_name_size) {
+                m_name[m_name_size - 1] = 0;
+                m_have = 0;
+                m_state = State::NamePad;
+            }
+            return n;
+        }
+        case State::NamePad: {
+            usize pad = pad_bytes();
+            if (pad) {
+                usize n = min(len, pad);
+                return n;
+            }
+            if (strcmp(m_name, "TRAILER!!!") == 0) {
+                m_state = State::Done;
+                return 0;
+            }
+            begin_entry();
+            m_state = State::Data;
+            return 0;
+        }
+        case State::Data: {
+            if (m_have == m_file_size) {
+                end_entry();
+                m_have = 0;
+                m_state = State::DataPad;
+                return 0;
+            }
+            usize n = min<usize>(len, m_file_size - m_have);
+            if (m_file) {
+                if (m_file->write(m_have, data, n) < 0)
+                    klog::warn("initramfs: could not write %s", m_path);
+            } else if ((m_mode & vfs::S_IFMT) == vfs::S_IFLNK && m_have < sizeof(m_link) - 1) {
+                usize k = min<usize>(n, sizeof(m_link) - 1 - m_have);
+                memcpy(m_link + m_have, data, k);
+            }
+            m_have += n;
+            return n;
+        }
+        case State::DataPad: {
+            usize pad = pad_bytes();
+            if (pad)
+                return min(len, pad);
+            m_state = State::Header;
+            return 0;
+        }
+        case State::Done:
+            return len;
+        }
+        return len;
+    }
+
+    void begin_entry() {
         // Normalize "./bin/x" or "bin/x" into "/bin/x".
-        char path[512];
-        const char* n = name;
+        const char* n = m_name;
         if (n[0] == '.' && n[1] == '/') n += 2;
         else if (n[0] == '.' && n[1] == 0) n += 1;
         while (*n == '/') n++;
-        snprintf(path, sizeof(path), "/%s", n);
-
-        const char* data = base + data_pos;
-        u32 perms = mode & 07777;
+        snprintf(m_path, sizeof(m_path), "/%s", n);
+        m_file = nullptr;
+        u32 perms = m_mode & 07777;
         long r = 0;
-
-        switch (mode & vfs::S_IFMT) {
+        switch (m_mode & vfs::S_IFMT) {
         case vfs::S_IFDIR:
-            r = vfs::mkdir_p(path, perms);
-            stats->dirs++;
+            r = vfs::mkdir_p(m_path, perms);
+            m_stats->dirs++;
             break;
         case vfs::S_IFREG: {
             // Make sure the parent exists (archives don't always list directories first).
             char parent[512];
-            snprintf(parent, sizeof(parent), "%s", path);
+            snprintf(parent, sizeof(parent), "%s", m_path);
             char* slash = nullptr;
             for (char* q = parent; *q; q++)
                 if (*q == '/')
@@ -81,34 +167,59 @@ long unpack(const void* archive, usize size, Stats* stats) {
                 *slash = 0;
                 vfs::mkdir_p(parent);
             }
-            r = vfs::create_file(path, data, file_size, perms);
-            stats->files++;
-            stats->bytes += file_size;
+            vfs::Inode* dir;
+            const char* leaf;
+            usize leaf_len;
+            r = vfs::resolve_parent(m_path, nullptr, &dir, &leaf, &leaf_len);
+            if (r == 0)
+                r = dir->create(leaf, leaf_len, vfs::S_IFREG | perms, nullptr, &m_file);
+            m_stats->files++;
+            m_stats->bytes += m_file_size;
             break;
         }
-        case vfs::S_IFLNK: {
-            char target[256];
-            usize len = min<usize>(file_size, sizeof(target) - 1);
-            memcpy(target, data, len);
-            target[len] = 0;
+        case vfs::S_IFLNK:
+            memset(m_link, 0, sizeof(m_link));
+            break;
+        default:
+            break; // device nodes, FIFOs: created by the kernel itself
+        }
+        if (r < 0 && r != -err::EXIST)
+            klog::warn("initramfs: could not create %s (error %ld)", m_path, -r);
+    }
+
+    void end_entry() {
+        if ((m_mode & vfs::S_IFMT) == vfs::S_IFLNK) {
             vfs::Inode* parent;
             const char* leaf;
             usize leaf_len;
-            r = vfs::resolve_parent(path, nullptr, &parent, &leaf, &leaf_len);
+            long r = vfs::resolve_parent(m_path, nullptr, &parent, &leaf, &leaf_len);
             if (r == 0)
-                r = parent->create(leaf, leaf_len, vfs::S_IFLNK | 0777, target, nullptr);
-            stats->symlinks++;
-            break;
+                r = parent->create(leaf, leaf_len, vfs::S_IFLNK | 0777, m_link, nullptr);
+            m_stats->symlinks++;
+            if (r < 0 && r != -err::EXIST)
+                klog::warn("initramfs: could not create %s (error %ld)", m_path, -r);
         }
-        default:
-            // Device nodes, FIFOs: created by the kernel itself.
-            break;
-        }
-        if (r < 0 && r != -err::EXIST)
-            klog::warn("initramfs: could not create %s (error %ld)", path, -r);
-        pos = next;
+        m_file = nullptr;
     }
-    return 0;
+};
+
+} // namespace
+
+long unpack(const void* archive, usize size, Stats* stats) {
+    auto* u = new Unpacker(stats);
+    long r;
+    if (inflate::is_gzip(archive, size)) {
+        // A compressed initramfs: decompress and unpack in one stream.
+        r = inflate::gunzip(archive, size, [](void* ctx, const u8* data, usize len) {
+            return static_cast<Unpacker*>(ctx)->feed(data, len);
+        }, u);
+    } else {
+        r = u->feed(static_cast<const u8*>(archive), size) ? 0 : -err::INVAL;
+    }
+    if (u->failed())
+        r = -err::INVAL;
+    delete u;
+    return r;
 }
 
 } // namespace initramfs
