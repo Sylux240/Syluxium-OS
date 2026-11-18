@@ -159,10 +159,10 @@ Willing=/etc/trinity/tdm/Xwilling
 [Shutdown]
 # The command (subject to word splitting) to run to halt the system.
 # Default is "/sbin/poweroff"
-#HaltCmd=
+HaltCmd=/usr/local/sbin/poweroff
 # The command (subject to word splitting) to run to reboot the system.
 # Default is "/sbin/reboot"
-#RebootCmd=
+RebootCmd=/usr/local/sbin/reboot
 # Whether it is allowed to shut down the system via the global command FiFo.
 # Default is false
 #AllowFifo=true

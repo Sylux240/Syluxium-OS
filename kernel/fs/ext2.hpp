@@ -17,4 +17,8 @@ namespace ext2 {
 bool probe(block::Device* dev);
 long mount(block::Device* dev, vfs::Inode** root, bool* read_only, const char** kind = nullptr);
 
+// Shutting down: commit journals, mark every writable volume clean (no
+// replay needed at the next mount) and flush it to the disk.
+void shutdown_all();
+
 } // namespace ext2

@@ -1,0 +1,10 @@
+#!/bin/sh
+# reboot: ask every program to quit (they may save their work), wait a
+# moment, then let the kernel flush the disks and reboot.
+[ "$(id -u)" = 0 ] || { echo "reboot: must be run as root (try: sudo reboot)" >&2; exit 1; }
+sync
+kill -TERM -1 2>/dev/null
+sleep 2
+kill -KILL -1 2>/dev/null
+sync
+exec busybox reboot -f

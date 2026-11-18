@@ -1883,7 +1883,28 @@ void Volume::commit_locked() {
     kfree(data);
 }
 
+Volume* g_volumes[16];
+usize g_volume_count = 0;
+
 } // namespace
+
+void shutdown_all() {
+    for (usize i = 0; i < g_volume_count; i++) {
+        Volume* v = g_volumes[i];
+        LockGuard guard(v->lock);
+        if (v->read_only)
+            continue;
+        v->commit_locked(); // the journal is empty afterwards
+        if (v->journal.active) {
+            // Cleanly unmounted: nothing to replay at the next mount.
+            u32 inc = v->sb32(96) & ~INCOMPAT_RECOVER;
+            block::write(v->dev, 1024 + 96, &inc, 4);
+            v->journal.active = false; // no more commits / holds
+            v->sb_csum();
+        }
+        block::sync_device(v->dev);
+    }
+}
 
 bool probe(block::Device* dev) {
     u16 magic = 0;
@@ -1984,6 +2005,8 @@ long mount(block::Device* dev, vfs::Inode** root, bool* read_only, const char** 
              label[0] ? "\")" : "", v->blocks_count * v->block_size / MiB, v->block_size,
              v->read_only ? "read-only" : "read-write", v->csum ? ", checksums" : "", why);
     *root = v->node(ROOT_INO, nullptr);
+    if (g_volume_count < 16)
+        g_volumes[g_volume_count++] = v;
     return 0;
 }
 

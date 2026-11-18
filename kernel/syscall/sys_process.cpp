@@ -1,3 +1,6 @@
+#include <fs/ext2.hpp>
+#include <block/block.hpp>
+#include <acpi/power.hpp>
 // Process, identity, signal-bookkeeping and system-information calls.
 
 #include <core/log.hpp>
@@ -655,6 +658,37 @@ long sys_close_range(SYSCALL_ARGS) {
     return 0;
 }
 
+// reboot(magic1, magic2, cmd): power off / restart / halt (root only).
+// Disks are flushed and journaled file systems marked clean first.
+long sys_reboot(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    constexpr u64 MAGIC1 = 0xfee1dead;
+    constexpr u32 RESTART = 0x01234567, HALT = 0xCDEF0123, POWER_OFF = 0x4321FEDC, CAD_ON = 0x89ABCDEF,
+                  CAD_OFF = 0, RESTART2 = 0xA1B2C3D4;
+    if (!proc::capable())
+        return -err::PERM;
+    u32 m2 = static_cast<u32>(a1);
+    if ((a0 & 0xFFFFFFFF) != MAGIC1 || (m2 != 672274793 && m2 != 85072278 && m2 != 369367448 && m2 != 537993216))
+        return -err::INVAL;
+    u32 cmd = static_cast<u32>(a2);
+    if (cmd == CAD_ON || cmd == CAD_OFF)
+        return 0;
+    if (cmd != RESTART && cmd != RESTART2 && cmd != HALT && cmd != POWER_OFF)
+        return -err::INVAL;
+    klog::info("System %s: flushing disks...", cmd == POWER_OFF ? "power off" : cmd == HALT ? "halt" : "restart");
+    block::sync_all();
+    ext2::shutdown_all();
+    block::sync_all();
+    if (cmd == RESTART || cmd == RESTART2)
+        acpi::restart();
+    if (cmd == POWER_OFF)
+        acpi::power_off();
+    klog::ok("System halted: it's safe to turn the computer off.");
+    arch::cli();
+    for (;;)
+        arch::hlt();
+}
+
 long sys_syslog(SYSCALL_ARGS) {
     SYSCALL_UNUSED;
     int type = static_cast<int>(a0);
@@ -812,6 +846,7 @@ void register_process() {
     set(97, sys_getrlimit, "getrlimit");
     set(99, sys_sysinfo, "sysinfo");
     set(103, sys_syslog, "syslog");
+    set(169, sys_reboot, "reboot");
     set(125, sys_capget, "capget");
     set(126, sys_capset, "capset");
     set(140, sys_getpriority, "getpriority");

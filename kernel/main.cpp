@@ -1,4 +1,5 @@
 #include <acpi/acpi.hpp>
+#include <acpi/power.hpp>
 #include <arch/x86_64/apic.hpp>
 #include <arch/x86_64/cpu.hpp>
 #include <arch/x86_64/fpu.hpp>
@@ -552,6 +553,7 @@ extern "C" [[noreturn]] void kmain() {
 
     // ---- Phase 3: hardware discovery, timers, scheduler -------------------
     acpi::init();
+    acpi::power_init();
     const auto& madt = acpi::madt();
     klog::ok("ACPI %s: %u CPU(s), %u I/O APIC(s), %u interrupt override(s)%s",
              acpi::revision() >= 2 ? "2.0+" : "1.0", madt.cpu_count, madt.ioapic_count,
