@@ -180,7 +180,8 @@ void release_control(Control& c) {
 Ucred current_cred() {
     Ucred c;
     c.pid = proc::current() ? proc::current()->pid : 0;
-    c.uid = c.gid = 0; // everything runs as root for now
+    c.uid = proc::cred().euid; // what SO_PEERCRED / SCM_CREDENTIALS report (D-Bus checks them)
+    c.gid = proc::cred().egid;
     return c;
 }
 
@@ -437,6 +438,12 @@ long sys_socket(SYSCALL_ARGS) {
         break;
     case AF_NETLINK:
         if (type != SOCK_RAW && type != SOCK_DGRAM)
+            return -EPROTONOSUPPORT;
+        // Route (0) is answered; uevent listeners (15) just hear nothing.
+        // Protocols whose users wait for answers (audit: PAM/login, sock_diag,
+        // generic netlink, ...) are refused, as by a kernel built without
+        // them: libaudit then quietly skips auditing instead of timing out.
+        if (protocol != 0 && protocol != 15)
             return -EPROTONOSUPPORT;
         s = create_netlink(type, protocol);
         break;

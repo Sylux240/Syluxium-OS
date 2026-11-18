@@ -1,24 +1,26 @@
 #!/bin/sh
-# Start the desktop: D-Bus, the X server, then a Trinity (TDE) session.
-# Returns to the caller when the user logs out of TDE.
-export HOME=/root PATH=/opt/trinity/bin:/usr/local/bin:/usr/bin:/usr/sbin:/bin:/sbin
-export XDG_RUNTIME_DIR=/run/user/0 LANG=C.UTF-8
-mkdir -p /var/log /tmp/.X11-unix /tmp/.ICE-unix /run/dbus /var/lib/dbus "$XDG_RUNTIME_DIR"
+# Start the graphical login screen (TDM), which starts the X server and,
+# after a login, the user's Trinity (TDE) session. Runs as root at boot.
+export PATH=/opt/trinity/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+mkdir -p /var/log /var/lib/tdm /tmp/.X11-unix /tmp/.ICE-unix /run/dbus /var/lib/dbus /run/user
 chmod 1777 /tmp/.X11-unix /tmp/.ICE-unix
-chmod 700 "$XDG_RUNTIME_DIR"
+chmod 755 /run/user
+
+# Home folders: make any missing ones from /etc/skel and give them to
+# their owners (the live system's files all start out as root's).
+while IFS=: read -r name _ uid gid _ home _; do
+    [ "$uid" -ge 1000 ] 2>/dev/null && [ "$uid" -lt 60000 ] || continue
+    case "$home" in /home/*) ;; *) continue ;; esac
+    if [ ! -d "$home" ]; then
+        mkdir -p "$home" && cp -a /etc/skel/. "$home/" 2>/dev/null
+    fi
+    if [ "$(stat -c %u "$home")" != "$uid" ]; then
+        chown -R "$uid:$gid" "$home" && chmod 750 "$home"
+    fi
+done < /etc/passwd
+
 dbus-uuidgen --ensure=/etc/machine-id 2>/dev/null
 cp /etc/machine-id /var/lib/dbus/machine-id 2>/dev/null
-[ -S /run/dbus/system_bus_socket ] || dbus-daemon --system --fork > /tmp/dbus-system.log 2>&1
+[ -S /run/dbus/system_bus_socket ] || dbus-daemon --system --fork > /var/log/dbus-system.log 2>&1
 
-/usr/lib/xorg/Xorg :0 vt1 -nolisten tcp -noreset -logfile /tmp/Xorg.0.log > /tmp/xorg.out 2>&1 &
-XPID=$!
-for i in 1 2 3 4 5 6 7 8 9 10; do [ -e /tmp/.X11-unix/X0 ] && break; sleep 1; done
-if [ ! -e /tmp/.X11-unix/X0 ]; then
-    echo "startdesktop: the X server did not start; see /tmp/Xorg.0.log" >&2
-    kill $XPID 2>/dev/null
-    exit 1
-fi
-DISPLAY=:0 dbus-run-session -- starttde > /tmp/tde.log 2>&1
-kill $XPID 2>/dev/null
-wait $XPID 2>/dev/null
-rm -f /tmp/.X11-unix/X0 /tmp/.X0-lock
+exec tdm -nodaemon ${TDM_DEBUG:+-debug $TDM_DEBUG} -error /var/log/tdm.log > /var/log/tdm.out 2>&1

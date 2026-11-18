@@ -1,0 +1,31 @@
+#! /bin/sh
+# Xstartup - run as root before session starts
+
+
+
+# Syluxium: the user's runtime directory (XDG_RUNTIME_DIR), as logind
+# would make it. This script runs as root when a session starts.
+if [ -n "$USER" ]; then
+    uid=$(id -u "$USER" 2>/dev/null)
+    if [ -n "$uid" ]; then
+        mkdir -p "/run/user/$uid" && chown "$USER:" "/run/user/$uid" && chmod 700 "/run/user/$uid"
+    fi
+fi
+
+if [ -e /etc/nologin ]; then
+  # always display the nologin message, if possible
+  if [ -s /etc/nologin ] && which xmessage > /dev/null 2>&1; then
+    xmessage -file /etc/nologin -geometry 640x480
+  fi
+  if [ "$(id -u)" != "0" ] && \
+     ! grep -qs '^ignore-nologin' /etc/trinity/tdm/tdm.options; then
+    exit 1
+  fi
+fi
+
+if grep -qs '^use-sessreg' /etc/trinity/tdm/tdm.options && \
+   which sessreg > /dev/null 2>&1; then
+      exec sessreg -a -l "$DISPLAY" -u /var/run/utmp \
+                   -h "`echo $DISPLAY | cut -d: -f1`" "$USER"
+      # NOTREACHED
+fi

@@ -13,6 +13,10 @@ namespace vfs {
 // File type bits of `mode` (same values as Linux's st_mode).
 constexpr u32 S_IFMT   = 0170000;
 constexpr u32 S_ISUID  = 04000, S_ISGID = 02000, S_ISVTX = 01000; // setuid, setgid, sticky
+
+// Groups that own device nodes (Debian's numbers; "input" is Syluxium's fixed
+// choice, matched by /etc/group). Desktop users are members.
+constexpr u32 GID_TTY = 5, GID_DISK = 6, GID_AUDIO = 29, GID_VIDEO = 44, GID_INPUT = 105;
 constexpr u32 S_IFSOCK = 0140000;
 constexpr u32 S_IFLNK  = 0120000;
 constexpr u32 S_IFREG  = 0100000;

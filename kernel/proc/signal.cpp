@@ -117,22 +117,36 @@ bool blocked_somewhere(proc::Process* p, int sig) {
     return false;
 }
 
-void send(proc::Process* p, int sig) {
+// Who sends: a user process (kill/tgkill: its pid and real uid) or the kernel.
+void sender_info(i32 code, i32* code_out, i32* pid_out, u32* uid_out) {
+    proc::Process* me = proc::current();
+    *code_out = code;
+    *pid_out = (code != SI_KERNEL && me) ? me->pid : 0;
+    *uid_out = (code != SI_KERNEL && me) ? me->cred.ruid : 0;
+}
+
+void send(proc::Process* p, int sig) { send(p, sig, SI_KERNEL); }
+
+void send(proc::Process* p, int sig, i32 code) {
     if (!p || sig < 1 || sig > proc::MAX_SIGNALS || p->state == proc::State::Zombie)
         return;
     if (is_ignored(p, sig) && (p->sigactions[sig].handler == SIG_IGN || !blocked_somewhere(p, sig)))
         return; // would be discarded on delivery anyway
+    sender_info(code, &p->sig_code[sig], &p->sig_pid[sig], &p->sig_uid[sig]);
     __atomic_or_fetch(&p->sig_pending, bit(sig), __ATOMIC_RELEASE);
     wake_process(p);
     poll::notify(); // signalfd readers
 }
 
-void send_thread(sched::Thread* t, int sig) {
+void send_thread(sched::Thread* t, int sig) { send_thread(t, sig, SI_KERNEL); }
+
+void send_thread(sched::Thread* t, int sig, i32 code) {
     proc::Process* p = t->process;
     if (!p || sig < 1 || sig > proc::MAX_SIGNALS)
         return;
     if (is_ignored(p, sig) && (p->sigactions[sig].handler == SIG_IGN || !(t->sigmask & bit(sig))))
         return;
+    sender_info(code, &t->sig_code[sig], &t->sig_pid[sig], &t->sig_uid[sig]);
     __atomic_or_fetch(&t->sig_pending, bit(sig), __ATOMIC_RELEASE);
     if (t->state == sched::ThreadState::Blocked)
         sched::wake(t);
@@ -221,12 +235,16 @@ void deliver(interrupts::Frame* frame) {
     u64 mine = __atomic_load_n(&t->sig_pending, __ATOMIC_ACQUIRE) & (~t->sigmask | UNBLOCKABLE);
     u64 shared = __atomic_load_n(&p->sig_pending, __ATOMIC_ACQUIRE) & (~t->sigmask | UNBLOCKABLE);
     int sig;
+    i32 si_code, si_pid;
+    u32 si_uid;
     if (mine) {
         sig = __builtin_ctzll(mine) + 1;
         __atomic_and_fetch(&t->sig_pending, ~bit(sig), __ATOMIC_RELEASE);
+        si_code = t->sig_code[sig], si_pid = t->sig_pid[sig], si_uid = t->sig_uid[sig];
     } else {
         sig = __builtin_ctzll(shared) + 1;
         __atomic_and_fetch(&p->sig_pending, ~bit(sig), __ATOMIC_RELEASE);
+        si_code = p->sig_code[sig], si_pid = p->sig_pid[sig], si_uid = p->sig_uid[sig];
     }
     proc::SigAction act = p->sigactions[sig];
 
@@ -276,6 +294,9 @@ void deliver(interrupts::Frame* frame) {
     c.fpstate = fp_addr;
     f.uc.sigmask = restore_mask;
     f.info.si_signo = sig;
+    f.info.si_code = si_code;
+    memcpy(f.info.fields, &si_pid, 4);     // si_pid
+    memcpy(f.info.fields + 4, &si_uid, 4); // si_uid
 
     fpu::save(t->fpu_state);
     arch::sti(); // writing user memory may fault pages in (and sleep)

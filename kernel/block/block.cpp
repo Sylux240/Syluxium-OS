@@ -186,6 +186,7 @@ public:
     explicit BlockNode(Device* d, u32 minor) : m_dev(d) {
         ino = vfs::next_ino();
         mode = vfs::S_IFBLK | 0660;
+        gid = vfs::GID_DISK;
         rdev = (8u << 8) | minor; // major 8: SCSI/SATA disks on Linux
         size = d->size_bytes();
         atime = mtime = ctime = vfs::now();

@@ -4,6 +4,6 @@
 if [ "$(tty 2>/dev/null)" = /dev/console ] && [ ! -e /run/desktop-started ] &&
    grep -qw desktop /proc/cmdline 2>/dev/null && [ -x /usr/local/bin/startdesktop ]; then
     : > /run/desktop-started
-    echo "Starting the desktop... (log out of it to get this text console)"
+    echo "Starting the login screen..."
     /usr/local/bin/startdesktop
 fi

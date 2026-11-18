@@ -1,6 +1,8 @@
+#include <boot/limine_requests.hpp>
 #include <arch/x86_64/cpu.hpp>
 #include <arch/x86_64/gdt.hpp>
 #include <core/log.hpp>
+#include <lib/string.hpp>
 #include <proc/process.hpp>
 #include <proc/signal.hpp>
 #include <syscall/syscall.hpp>
@@ -64,10 +66,43 @@ Handler native(u32 number) { return number < MAX_SYSCALLS ? g_table[number].hand
 
 } // namespace syscall
 
+namespace {
+// Debugging aid: "strace=<program name>" on the kernel command line logs
+// every system call that program makes (name, arguments, result) to the
+// serial console, as it enters and when it returns.
+char g_trace_name[32];
+int g_trace_state = -1; // -1 = command line not read yet, 0 = off, 1 = on
+
+bool tracing(proc::Process* p) {
+    if (g_trace_state < 0) {
+        g_trace_state = 0;
+        const char* c = boot::cmdline();
+        for (const char* q = c; *q; q++) {
+            if ((q == c || q[-1] == ' ') && memcmp(q, "strace=", 7) == 0) {
+                usize n = 0;
+                for (q += 7; *q && *q != ' ' && n + 1 < sizeof(g_trace_name); q++)
+                    g_trace_name[n++] = *q;
+                g_trace_name[n] = 0;
+                g_trace_state = n ? 1 : 0;
+                break;
+            }
+        }
+    }
+    return g_trace_state == 1 && p && strcmp(p->name, g_trace_name) == 0;
+}
+} // namespace
+
 extern "C" void syscall_dispatch(interrupts::Frame* frame) {
     using namespace syscall;
     u64 nr = frame->rax;
     long result;
+    proc::Process* traced = tracing(proc::current()) ? proc::current() : nullptr;
+    if (traced && nr < MAX_SYSCALLS)
+        kprintf_serial("[strace %d] %s(%#lx, %#lx, %#lx, %#lx) ...\n", traced->pid,
+                       g_table[nr].name ? g_table[nr].name : "?", frame->rdi, frame->rsi, frame->rdx, frame->r10);
+    sched::Thread* self = sched::current();
+    self->cur_syscall = static_cast<i64>(nr);
+    self->cur_args[0] = frame->rdi, self->cur_args[1] = frame->rsi, self->cur_args[2] = frame->rdx;
     if (nr < MAX_SYSCALLS && g_table[nr].handler) {
         result = g_table[nr].handler(frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8, frame->r9, frame);
     } else {
@@ -78,6 +113,9 @@ extern "C" void syscall_dispatch(interrupts::Frame* frame) {
         }
         result = -err::NOSYS;
     }
+    if (traced && nr < MAX_SYSCALLS)
+        kprintf_serial("[strace %d]   %s = %ld\n", traced->pid, g_table[nr].name ? g_table[nr].name : "?", result);
+    self->cur_syscall = -1;
     frame->rax = static_cast<u64>(result);
 
     // Back to user mode: run pending signals' handlers / default actions.

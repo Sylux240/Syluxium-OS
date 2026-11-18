@@ -356,7 +356,7 @@ long sys_kill(SYSCALL_ARGS) {
         proc::for_each([](Process* p, void* arg) {
             int s = static_cast<int>(reinterpret_cast<uptr>(arg));
             if (p != proc::current() && p->pid != 1 && s && may_signal(p, s))
-                signal::send(p, s);
+                signal::send(p, s, signal::SI_USER);
         }, reinterpret_cast<void*>(static_cast<uptr>(sig)));
         return 0;
     }
@@ -367,7 +367,7 @@ long sys_kill(SYSCALL_ARGS) {
     if (!may_signal(p, sig))
         return -err::PERM;
     if (sig)
-        signal::send(p, sig);
+        signal::send(p, sig, signal::SI_USER);
     return 0;
 }
 
@@ -380,7 +380,7 @@ long sys_tgkill(SYSCALL_ARGS) {
     if (!may_signal(t->process, static_cast<int>(a2)))
         return -err::PERM;
     if (a2)
-        signal::send_thread(t, static_cast<int>(a2));
+        signal::send_thread(t, static_cast<int>(a2), signal::SI_TKILL);
     return 0;
 }
 
@@ -393,7 +393,7 @@ long sys_tkill(SYSCALL_ARGS) {
     if (t->process && !may_signal(t->process, static_cast<int>(a1)))
         return -err::PERM;
     if (a1)
-        signal::send_thread(t, static_cast<int>(a1));
+        signal::send_thread(t, static_cast<int>(a1), signal::SI_TKILL);
     return 0;
 }
 

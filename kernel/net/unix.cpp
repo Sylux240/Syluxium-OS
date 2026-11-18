@@ -233,6 +233,8 @@ public:
             return r == -err::EXIST ? -EADDRINUSE : r;
         if (parent->lookup(leaf, leaf_len))
             return -EADDRINUSE;
+        if (long r = proc::permission(parent, proc::MAY_WRITE | proc::MAY_EXEC); r < 0)
+            return r;
         proc::Process* p = proc::current();
         u32 perms = 0777 & ~(p ? p->umask : 022);
         vfs::Inode* node = nullptr;
@@ -246,6 +248,7 @@ public:
         } else if (long r = parent->create(leaf, leaf_len, vfs::S_IFSOCK | perms, nullptr, &node); r < 0) {
             return r == -err::EXIST ? -EADDRINUSE : r;
         }
+        proc::init_owner(parent, node); // the socket file belongs to whoever bound it
         node_dev = node->dev;
         node_ino = node->ino;
         name = SockAddr{};
@@ -458,8 +461,17 @@ public:
             m->ctl.nfiles = ctl->nfiles;
             ctl->files = nullptr;
             ctl->nfiles = 0;
-            if (ctl->has_cred)
-                m->cred = ctl->cred; // root may claim any credentials
+            if (ctl->has_cred) {
+                // Root may claim any credentials; others only their own ids
+                // (and pid), as Linux checks in scm_check_creds().
+                const proc::Cred& c = proc::cred();
+                const Ucred& w = ctl->cred;
+                bool own_uid = w.uid == c.ruid || w.uid == c.euid || w.uid == c.suid;
+                bool own_gid = w.gid == c.rgid || w.gid == c.egid || w.gid == c.sgid;
+                bool own_pid = proc::current() && w.pid == static_cast<u32>(proc::current()->pid);
+                if (c.euid == 0 || (own_uid && own_gid && own_pid))
+                    m->cred = w;
+            }
         }
         memcpy(m->data, data, len);
         return m;

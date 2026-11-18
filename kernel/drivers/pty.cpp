@@ -332,6 +332,8 @@ public:
     explicit PtsNode(Pty* p) : m_pty(p) {
         ino = vfs::next_ino();
         mode = vfs::S_IFCHR | 0620;
+        uid = proc::cred().ruid; // belongs to whoever opened /dev/ptmx (glibc's grantpt checks this)
+        gid = vfs::GID_TTY;
         rdev = (136u << 8) | static_cast<u32>(p->index); // Linux: majors 136+ for pts
         atime = mtime = ctime = vfs::now();
     }

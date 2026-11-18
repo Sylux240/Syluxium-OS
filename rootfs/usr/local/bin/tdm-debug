@@ -1,0 +1,19 @@
+#!/bin/sh
+# Start the login screen in the background and dump its state to the console (bring-up aid).
+startdesktop &
+i=0; while [ $i -lt "${1:-30}" ]; do echo "tick $i" > /dev/console; sleep 1; i=$((i+1)); done
+{
+    echo "=== processes:"; ps -o pid,user,args 2>/dev/null || ps
+    echo "=== where user processes wait (syscall nr + args):"
+    for d in /proc/[0-9]*; do
+        case "$(basename "$d")" in 1|2|3|4|5|6|7|8|9|1[0-9]|2[0-9]) continue ;; esac
+        pp=$(awk '/^PPid/ {print $2}' "$d/status" 2>/dev/null)
+        echo "$(basename "$d") (parent $pp, uid $(stat -c %u "$d")) $(tr '\0' ' ' < "$d/cmdline" | cut -c1-40): $(cat "$d/syscall" 2>/dev/null)"
+        for t in "$d"/task/*; do [ "$t" = "$d/task/$(basename "$d")" ] || echo "   thread $(basename "$t"): $(cat "$t/syscall" 2>/dev/null)"; done
+    done
+    echo "=== tdm.log:"; cat /var/log/tdm.log /var/log/tdm.out 2>&1 | tail -40
+    echo "=== session errors:"; ls -la /home/syluxium 2>&1 | head -8; tail -30 /home/syluxium/.xsession-errors 2>&1
+    echo "=== Xorg (end):"; tail -4 /var/log/Xorg.0.log
+    echo "=== client with TDM's cookie:"; timeout 5 env DISPLAY=:0 XAUTHORITY="$(ls /var/run/xauth/A:0-* | head -1)" xset q 2>&1 | head -3; echo "exit $?"
+    echo "=== client without a cookie:"; timeout 5 env DISPLAY=:0 XAUTHORITY=/nonexistent xset q 2>&1 | head -3
+} > /dev/console 2>&1

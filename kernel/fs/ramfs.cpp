@@ -101,6 +101,10 @@ long Dir::create(const char* name, usize len, u32 new_mode, const char* target, 
     case S_IFLNK: node = new Symlink(target ? target : ""); break;
     case S_IFREG:
     case 0:       node = new RegularFile; break;
+    case S_IFIFO: // named pipe: opening it connects to a pipe (pipe::fifo_for)
+        node = new RegularFile;
+        node->mode = S_IFIFO;
+        break;
     default:      return -err::OPNOTSUPP; // device nodes are added by the kernel
     }
     node->mode = (node->mode & S_IFMT) | (new_mode & 07777);

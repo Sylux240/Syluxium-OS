@@ -696,6 +696,7 @@ public:
     explicit PcmNode(Substream* s) : m_s(s) {
         ino = vfs::next_ino();
         mode = vfs::S_IFCHR | 0660;
+        gid = vfs::GID_AUDIO;
         u32 minor = static_cast<u32>(s->card->number) * 32 + (is_playback(s) ? 16 : 24) + s->pcm->device;
         rdev = (116u << 8) | minor; // ALSA's static minor numbering
         gid = 29; // "audio"

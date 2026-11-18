@@ -54,6 +54,7 @@ KernelTermios g_termios = {
     {3, 28, 127, 21, 4, 0, 1, 0, 17, 19, 26, 0, 18, 15, 23, 22, 0, 0, 0},
 };
 i32 g_foreground_pgrp = 1;
+u32 g_active_vt = 1; // VT number reported as active (see the VT ioctls)
 
 // Cooked input waiting to be read, plus the line being edited.
 char g_ready[BUF_SIZE];
@@ -86,6 +87,7 @@ public:
     Console() {
         ino = vfs::next_ino();
         mode = vfs::S_IFCHR | 0620;
+        gid = vfs::GID_TTY;
         rdev = (5 << 8) | 1; // Linux: major 5, minor 1 = /dev/console
     }
 
@@ -123,21 +125,27 @@ public:
             u8 leds = 0;
             return uaccess::put(static_cast<u8*>(uarg), leds);
         }
-        case VT_OPENQRY: { // a free VT: Syluxium has one console, VT 1
-            i32 vt = 1;
+        // One physical console behind every VT number: a VT "switch" only
+        // changes which number is reported as active (X servers started by
+        // display managers ask for a VT, activate it and check it's theirs).
+        case VT_OPENQRY: {
+            i32 vt = g_active_vt == 1 ? 2 : 1;
             return uaccess::put(static_cast<i32*>(uarg), vt);
         }
         case VT_GETSTATE: {
-            u16 st[3] = {1, 0, 0x2}; // active VT 1, VT 1 in use
+            u16 st[3] = {static_cast<u16>(g_active_vt), 0, static_cast<u16>(0x2 | (1u << g_active_vt))};
             return uaccess::copy_to(uarg, st, sizeof(st));
         }
+        case VT_ACTIVATE:
+            if (arg >= 1 && arg <= 63)
+                g_active_vt = static_cast<u32>(arg);
+            return 0;
         case VT_GETMODE: {
             u8 mode[8] = {}; // VT_AUTO, no signals
             return uaccess::copy_to(uarg, mode, sizeof(mode));
         }
         case VT_SETMODE:
         case VT_RELDISP:
-        case VT_ACTIVATE:
         case VT_WAITACTIVE:
         case VT_DISALLOCATE:
             return 0;

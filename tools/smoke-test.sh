@@ -8,7 +8,8 @@
 #   smoke/<date>_<label>_<mode>.png / .log
 # which lives outside build/ so `make clean` keeps it.
 # <seconds> is the maximum wait for the shell prompt; typing starts as soon as it
-# appears, and the run ends once the output has been quiet for 3 s.
+# appears, and the run ends once the output has been quiet for 3 s (QUIET=<secs>
+# to wait longer, for commands that are silent for a while).
 # Extra QEMU arguments can be passed in $QEMU_EXTRA (e.g. QEMU_EXTRA="-cpu max").
 # USB=1 adds an xHCI controller with a USB keyboard, mouse and the FAT32
 # stick from tools/make-test-disks.sh (as /dev/sdb).
@@ -143,7 +144,7 @@ if text:
         size = os.path.getsize(log) if os.path.exists(log) else 0
         if size != last:
             last, quiet_since = size, time.time()
-        elif time.time() - quiet_since >= 3:
+        elif time.time() - quiet_since >= float(os.environ.get("QUIET", "3")):
             break
         time.sleep(0.25)
 s.sendall(f"screendump {sys.argv[2]}\n".encode())

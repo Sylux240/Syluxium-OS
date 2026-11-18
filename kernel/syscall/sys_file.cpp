@@ -217,6 +217,11 @@ long do_openat(long dirfd, u64 user_path, u32 flags, u32 mode) {
     }
 
     inode = inode->open_redirect();
+    if ((inode->mode & S_IFMT) == S_IFIFO && !(flags & O_PATH)) { // a named pipe
+        inode = pipe::fifo_for(inode);
+        if (!inode)
+            return -err::NOMEM;
+    }
     File* f = open_inode(inode, flags & ~(O_CREAT | O_EXCL | O_TRUNC | O_CLOEXEC) /* O_NOCTTY stays: terminals check it */);
     {
         char abs[512];
@@ -571,6 +576,8 @@ long do_mkdirat(long dirfd, u64 user_path, u32 mode) {
     usize len;
     if (long r = resolve_parent(path.c_str(), base, &parent, &name, &len); r < 0)
         return r;
+    if (parent->lookup(name, len))
+        return -err::EXIST; // "exists" wins over "no permission", as on Linux (mkdir -p relies on it)
     if (long r = proc::permission(parent, proc::MAY_WRITE | proc::MAY_EXEC); r < 0)
         return r;
     Inode* made = nullptr;
@@ -584,6 +591,46 @@ long do_mkdirat(long dirfd, u64 user_path, u32 mode) {
     }
     return r;
 }
+
+// mknod/mknodat: named pipes (FIFOs) and plain files. Device nodes are made
+// by the kernel itself (devtmpfs-style), so only root may ask, and gets
+// EPERM like an unprivileged container would.
+long do_mknodat(long dirfd, u64 user_path, u32 mode) {
+    Process* p = proc::current();
+    u32 type = mode & S_IFMT;
+    if (type == S_IFCHR || type == S_IFBLK)
+        return -err::PERM;
+    if (type != 0 && type != S_IFREG && type != S_IFIFO)
+        return -err::INVAL; // sockets are made by bind()
+    UserPath path(user_path);
+    if (path.error())
+        return path.error();
+    Inode* base;
+    if (long r = dir_for(p, dirfd, path.c_str(), &base); r < 0)
+        return r;
+    Inode* parent;
+    const char* name;
+    usize len;
+    if (long r = resolve_parent(path.c_str(), base, &parent, &name, &len); r < 0)
+        return r;
+    if (parent->lookup(name, len))
+        return -err::EXIST; // "exists" wins over "no permission", as on Linux (mkdir -p relies on it)
+    if (long r = proc::permission(parent, proc::MAY_WRITE | proc::MAY_EXEC); r < 0)
+        return r;
+    Inode* made = nullptr;
+    long r = parent->create(name, len, (type ? type : S_IFREG) | (mode & ~p->umask & 07777), nullptr, &made);
+    if (r == 0) {
+        if (!made)
+            made = parent->lookup(name, len);
+        if (made)
+            proc::init_owner(parent, made);
+        inotify::child_event(parent, inotify::IN_CREATE, name, len);
+    }
+    return r;
+}
+
+long sys_mknod(SYSCALL_ARGS) { SYSCALL_UNUSED; return do_mknodat(AT_FDCWD, a0, static_cast<u32>(a1)); }
+long sys_mknodat(SYSCALL_ARGS) { SYSCALL_UNUSED; return do_mknodat(static_cast<i32>(a0), a1, static_cast<u32>(a2)); }
 
 long sys_mkdir(SYSCALL_ARGS) { SYSCALL_UNUSED; return do_mkdirat(AT_FDCWD, a0, static_cast<u32>(a1)); }
 long sys_mkdirat(SYSCALL_ARGS) { SYSCALL_UNUSED; return do_mkdirat(static_cast<i32>(a0), a1, static_cast<u32>(a2)); }
@@ -634,6 +681,8 @@ long do_symlinkat(u64 user_target, long dirfd, u64 user_path) {
     usize len;
     if (long r = resolve_parent(path.c_str(), base, &parent, &name, &len); r < 0)
         return r;
+    if (parent->lookup(name, len))
+        return -err::EXIST; // "exists" wins over "no permission", as on Linux (mkdir -p relies on it)
     if (long r = proc::permission(parent, proc::MAY_WRITE | proc::MAY_EXEC); r < 0)
         return r;
     Inode* made = nullptr;
@@ -1479,6 +1528,8 @@ void register_file() {
     set(77, sys_ftruncate, "ftruncate");
     set(79, sys_getcwd, "getcwd");
     set(80, sys_chdir, "chdir");
+    set(133, sys_mknod, "mknod");
+    set(259, sys_mknodat, "mknodat");
     set(82, sys_rename, "rename");
     set(137, sys_statfs, "statfs");
     set(138, sys_fstatfs, "fstatfs");

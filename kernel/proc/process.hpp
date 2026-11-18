@@ -66,6 +66,7 @@ struct Process {
     u64 alarm_deadline = 0, alarm_interval = 0;
     u32 umask = 022;
     Cred cred;
+    int oom_score_adj = 0; // /proc/<pid>/oom_score_adj (kept, not used: no OOM killer yet)
 
     sched::Thread* main_thread = nullptr;     // the thread the process started with
 
@@ -101,6 +102,7 @@ struct Process {
 
     // ---- Signals ----
     u64 sig_pending = 0;                 // process-wide pending signals, bit n-1 = signal n
+    i32 sig_code[65] = {}, sig_pid[65] = {}; u32 sig_uid[65] = {}; // who sent each (siginfo)
     SigAction sigactions[MAX_SIGNALS + 1];  // shared by all threads (per-thread masks live in Thread)
 };
 

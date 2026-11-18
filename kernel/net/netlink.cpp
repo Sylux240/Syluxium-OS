@@ -1,9 +1,9 @@
 // AF_NETLINK sockets. NETLINK_ROUTE ("rtnetlink") answers the requests
 // that `ip addr/link/route` (busybox, iproute2) and glibc's getifaddrs()
 // and getaddrinfo(AI_ADDRCONFIG) send: link, address and route dumps, and
-// adding/removing addresses, routes and link flags. Sockets of every other
-// netlink protocol (uevents, audit, ...) can be created and bound but
-// never receive anything, which is what programs see on a quiet system.
+// adding/removing addresses, routes and link flags. NETLINK_KOBJECT_UEVENT
+// sockets can be created and bound but never receive anything (a quiet
+// system); other protocols are refused when the socket is created.
 //
 // Requests are handled synchronously inside sendmsg(): the replies are
 // queued on the sender's socket as datagrams of at most one page (glibc

@@ -474,6 +474,7 @@ long do_clone(interrupts::Frame* frame, u64 flags, u64 new_sp, u64 parent_tid, u
     child->cwd = parent->cwd;
     child->umask = parent->umask;
     child->cred = parent->cred;
+    child->oom_score_adj = parent->oom_score_adj;
     child->ctty = parent->ctty;
     for (int i = 0; i <= MAX_SIGNALS; i++)
         child->sigactions[i] = parent->sigactions[i];

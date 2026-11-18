@@ -1,0 +1,3 @@
+#!/bin/sh
+# The default desktop session (Debian's Xsession runs this): Trinity.
+exec /opt/trinity/bin/starttde "$@"

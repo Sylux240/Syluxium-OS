@@ -10,4 +10,8 @@ namespace pipe {
 // Create a pipe; returns the read and write ends.
 long create(u32 flags, vfs::File** read_end, vfs::File** write_end);
 
+// The pipe behind a named FIFO node (mkfifo/mknod), on any file system:
+// every open of the node shares it.
+vfs::Inode* fifo_for(vfs::Inode* node);
+
 } // namespace pipe

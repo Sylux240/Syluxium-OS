@@ -41,9 +41,9 @@ USER32_PROGS  := $(patsubst userspace/ia32/%.c,$(TESTS_DIR)/%,$(wildcard userspa
 DEBIAN_SUITE := trixie
 # Trinity Desktop Environment (phase 9): Trinity's own Debian repository.
 TRINITY_REPO := https://mirror.ppa.trinitydesktop.org/trinity/deb/trinity-r14.1.x|trixie|main,deps
-TRINITY_PKGS := dbus tdebase-trinity-bin twin-trinity kicker-trinity kdesktop-trinity konsole-trinity \
+TRINITY_PKGS := dbus tdebase-trinity-bin twin-trinity kicker-trinity kdesktop-trinity konsole-trinity tdm-trinity \
                 konqueror-trinity kcontrol-trinity ksmserver-trinity tdebase-data-trinity
-DEBIAN_PKGS  := bash busybox hello ncurses-base pciutils pci.ids netbase alsa-utils xserver-xorg-core xserver-xorg-video-fbdev xserver-xorg-input-evdev xinit x11-xserver-utils x11-xkb-utils xterm twm xfonts-base
+DEBIAN_PKGS  := bash busybox hello ncurses-base pciutils pci.ids netbase alsa-utils xserver-xorg-core xserver-xorg-video-fbdev xserver-xorg-input-evdev xinit x11-xserver-utils x11-xkb-utils xterm twm xfonts-base sudo libpam-runtime libpam-modules login
 DEBIAN_ROOT  := $(BUILD)/rootfs-debian
 DEBIAN_STAMP := $(DEBIAN_ROOT)/.fetched
 # A few i386 packages for testing 32-bit dynamic linking (Steam is 32-bit).
@@ -51,7 +51,7 @@ DEBIAN_I386_PKGS  := hello busybox bash
 # Only the libraries these programs need (base-files would pull in gawk & co.).
 # Mesa's 3D stack (~190 MB) is only used by Xorg's GLAMOR acceleration, which the
 # fbdev driver doesn't use; it returns with real GPU drivers (phase 10).
-DEBIAN_EXCLUDE := mesa-libgallium,libllvm19,libz3-4,libgl1-mesa-dri,libglx-mesa0,libegl-mesa0,cpp,cpp-14,cpp-14-x86-64-linux-gnu,cpp-x86-64-linux-gnu,man-db,groff-base,systemd,udev
+DEBIAN_EXCLUDE := mesa-libgallium,libllvm19,libz3-4,libgl1-mesa-dri,libglx-mesa0,libegl-mesa0,cpp,cpp-14,cpp-14-x86-64-linux-gnu,cpp-x86-64-linux-gnu,man-db,groff-base,systemd,udev,debconf,debconf-2.0,xbase-clients
 DEBIAN_I386_EXCLUDE := base-files,debianutils,gawk,libmpfr6,libgmp10,libsigsegv2,readline-common,libreadline8t64
 DEBIAN_I386_PROGS := hello busybox bash
 DEBIAN_I386_ROOT  := $(BUILD)/rootfs-debian-i386
@@ -195,7 +195,7 @@ $(DEBIAN_I386_STAMP): tools/debian-fetch.py Makefile
 	@python3 tools/debian-fetch.py --arch i386 --suite $(DEBIAN_SUITE) --out $(DEBIAN_I386_ROOT) --cache deps/debian --exclude $(DEBIAN_I386_EXCLUDE) $(DEBIAN_I386_PKGS)
 	@touch $@
 
-$(INITRAMFS): tools/mkfontdir.py $(DEBIAN_STAMP) $(DEBIAN_I386_STAMP) $(USER_PROGS) $(USER32_PROGS) $(shell find rootfs -type f 2>/dev/null) Makefile
+$(INITRAMFS): tools/mkfontdir.py $(DEBIAN_STAMP) $(DEBIAN_I386_STAMP) $(USER_PROGS) $(USER32_PROGS) $(shell find rootfs -type f 2>/dev/null) $(shell find rootfs -type d 2>/dev/null) Makefile
 	@echo "  ROOT  $(ROOTFS)"
 	@rm -rf $(ROOTFS)
 	@cp -a $(DEBIAN_ROOT) $(ROOTFS)
@@ -215,6 +215,7 @@ $(INITRAMFS): tools/mkfontdir.py $(DEBIAN_STAMP) $(DEBIAN_I386_STAMP) $(USER_PRO
 	@cp -a $(DEBIAN_I386_ROOT)/usr/lib/ld-linux.so.2 $(ROOTFS)/usr/lib/
 	@for prog in $(DEBIAN_I386_PROGS); do cp $(DEBIAN_I386_ROOT)/usr/bin/$$prog $(ROOTFS)/usr/bin/$$prog-i386; done
 	@cp -r rootfs/. $(ROOTFS)/
+	@mkdir -p $(ROOTFS)/tmp $(ROOTFS)/var/tmp && chmod 1777 $(ROOTFS)/tmp $(ROOTFS)/var/tmp
 	@# The dynamic loader's cache (ldconfig): TDE's libraries live in /opt/trinity/lib.
 	@ldconfig -r $(ROOTFS) -X 2>/dev/null || echo "  warning: ldconfig failed; /opt/trinity libraries may not be found"
 	@# Font indexes Debian's install scripts would have made (mkfontdir).

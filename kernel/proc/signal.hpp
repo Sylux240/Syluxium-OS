@@ -20,9 +20,13 @@ constexpr int SIGHUP = 1, SIGINT = 2, SIGQUIT = 3, SIGILL = 4, SIGTRAP = 5, SIGA
               SIGTTIN = 21, SIGTTOU = 22, SIGURG = 23, SIGWINCH = 28;
 
 // Queue a signal for a process and wake it if it's sleeping. Interrupt-safe.
-void send(proc::Process* p, int sig);
+// si_code values (who sent a signal; glibc's internal signals check them).
+constexpr i32 SI_USER = 0, SI_KERNEL = 0x80, SI_TKILL = -6;
+void send(proc::Process* p, int sig);                 // from the kernel (SI_KERNEL)
+void send(proc::Process* p, int sig, i32 code);       // kill(): SI_USER, with the sender's pid/uid
 void send_to_group(int pgid, int sig);
-void send_thread(sched::Thread* t, int sig); // tgkill: to one specific thread
+void send_thread(sched::Thread* t, int sig); // to one specific thread, from the kernel
+void send_thread(sched::Thread* t, int sig, i32 code); // tgkill/tkill: SI_TKILL
 void wake_all_threads(proc::Process* p);     // make every sleeping thread re-check (group exit)
 
 // Does `p` have a signal that would actually do something if delivered?

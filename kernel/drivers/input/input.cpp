@@ -59,6 +59,7 @@ public:
     explicit EvdevNode(DeviceState* st) : m_state(st) {
         ino = vfs::next_ino();
         mode = vfs::S_IFCHR | 0660;
+        gid = vfs::GID_INPUT;
         rdev = (13u << 8) | (64 + st->dev->index); // Linux: major 13, minor 64+N
         atime = mtime = ctime = vfs::now();
     }

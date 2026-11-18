@@ -1,0 +1,6 @@
+[Desktop Entry]
+# Syluxium: no first-run tde_license_info window
+Name=tde_license_info
+Type=Application
+Exec=true
+Hidden=true

@@ -1,0 +1,3 @@
+# Members of "sudo" are administrators ("Run as administrator" asks for
+# their own password).
+%sudo	ALL=(ALL:ALL) ALL

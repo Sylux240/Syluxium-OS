@@ -139,7 +139,13 @@ tools/smoke-test.sh   headless QEMU boot: serial log + screenshot
             setuid/setgid exec (AT_SECURE); permission checks on path search, open, create,
             unlink/rename (sticky dirs), chmod/chown (persisted on ext4), utimes, truncate,
             access (real ids), chdir, kill, mount; images owned by root; credtest 32 checks
-      - [ ] 9-users: **login screen and user accounts**: graphical login (TDE's TDM, XP/7-styled:
+      - [x] 9-users (login): **graphical login screen** (TDM: user list, "Welcome to Syluxium"),
+            sessions run as the user (PAM: pam_unix, /etc/shadow; D-Bus session bus per login;
+            /run/user/<uid>); live user `syluxium` (sudo, audio, video, input, plugdev, netdev);
+            sudo; device groups (tty/disk/audio/video/input); first-run TDE windows off for all users
+      - [ ] 9-users: XP/7-styled login (user tiles with pictures), User Accounts control panel
+            (add/remove users, passwords, pictures, administrator/standard), "Run as administrator",
+            lock screen, installer creates the first account. Original item: graphical login (TDE's TDM, XP/7-styled:
             user tiles with pictures, password, Shut Down/Restart/Sleep buttons; optional
             auto-login), real multi-user security in the kernel (enforced file permissions and
             ownership per uid/gid, setuid, per-user home directories), passwords in /etc/shadow

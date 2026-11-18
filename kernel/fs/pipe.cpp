@@ -14,6 +14,8 @@ constexpr usize PIPE_BUF = 4096;
 
 class Pipe : public vfs::Inode {
 public:
+    vfs::Inode* backing = nullptr; // named FIFO: the file system node it belongs to
+
     Pipe() {
         ino = vfs::next_ino();
         mode = vfs::S_IFIFO | 0600;
@@ -26,31 +28,45 @@ public:
     bool seekable() const override { return false; }
 
     void on_open(vfs::File* f) override {
-        LockGuard guard(m_wq.lock());
-        if ((f->flags & vfs::O_ACCMODE) == vfs::O_RDONLY)
-            m_readers++;
-        else
-            m_writers++;
+        u32 acc = f->flags & vfs::O_ACCMODE;
+        {
+            LockGuard guard(m_wq.lock());
+            if (acc == vfs::O_RDONLY || acc == vfs::O_RDWR)
+                m_readers++;
+            if (acc == vfs::O_WRONLY || acc == vfs::O_RDWR)
+                m_writers++;
+        }
+        m_wq.wake_all();
+        poll::notify();
+        // A named FIFO opened for one direction waits for the other side
+        // (unless non-blocking), as POSIX says.
+        if (backing && acc != vfs::O_RDWR && !(f->flags & vfs::O_NONBLOCK)) {
+            bool reader = acc == vfs::O_RDONLY;
+            m_wq.wait_until([&] { return (reader ? m_writers : m_readers) > 0 || signal::interrupted(); });
+        }
     }
 
     void on_release(vfs::File* f) override {
         bool gone;
         {
             LockGuard guard(m_wq.lock());
-            if ((f->flags & vfs::O_ACCMODE) == vfs::O_RDONLY)
+            u32 acc = f->flags & vfs::O_ACCMODE;
+            if (acc == vfs::O_RDONLY || acc == vfs::O_RDWR)
                 m_readers--;
-            else
+            if (acc == vfs::O_WRONLY || acc == vfs::O_RDWR)
                 m_writers--;
             gone = m_readers == 0 && m_writers == 0;
         }
         m_wq.wake_all(); // EOF for readers / EPIPE for writers
         poll::notify();
-        if (gone)
+        if (gone && !backing) // named FIFOs keep their pipe (and buffered data) for the next open
             delete this;
     }
 
     u16 poll(vfs::File* f) override {
         LockGuard guard(m_wq.lock());
+        if ((f->flags & vfs::O_ACCMODE) == vfs::O_RDWR)
+            return (m_count > 0 ? poll::POLLIN : 0) | (m_count < CAPACITY ? poll::POLLOUT : 0);
         if ((f->flags & vfs::O_ACCMODE) == vfs::O_RDONLY) {
             u16 r = m_count > 0 ? poll::POLLIN : 0;
             if (m_writers == 0)
@@ -139,7 +155,44 @@ private:
     sched::WaitQueue m_wq; // its lock protects all of the above
 };
 
+struct Named {
+    vfs::Inode* backing;
+    Pipe* pipe;
+};
+Named* g_named = nullptr;
+usize g_named_count = 0, g_named_cap = 0;
+sched::Mutex g_named_lock;
+
 } // namespace
+
+vfs::Inode* fifo_for(vfs::Inode* node) {
+    LockGuard guard(g_named_lock);
+    for (usize i = 0; i < g_named_count; i++)
+        if (g_named[i].backing == node)
+            return g_named[i].pipe;
+    if (g_named_count == g_named_cap) {
+        usize ncap = g_named_cap ? g_named_cap * 2 : 16;
+        auto* n = static_cast<Named*>(kmalloc(ncap * sizeof(Named)));
+        if (!n)
+            return nullptr;
+        if (g_named)
+            memcpy(n, g_named, g_named_count * sizeof(Named));
+        kfree(g_named);
+        g_named = n;
+        g_named_cap = ncap;
+    }
+    auto* p = new Pipe;
+    if (!p->ok()) {
+        delete p;
+        return nullptr;
+    }
+    p->backing = node;
+    p->mode = node->mode;
+    p->uid = node->uid;
+    p->gid = node->gid;
+    g_named[g_named_count++] = Named{node, p};
+    return p;
+}
 
 long create(u32 flags, vfs::File** read_end, vfs::File** write_end) {
     auto* p = new Pipe;

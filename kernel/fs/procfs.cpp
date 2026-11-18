@@ -58,6 +58,7 @@ struct Snapshot {
     char cwd[512];
     u64 utime, stime, start_ticks, vsize, rss;
     u64 sig_pending, sig_blocked;
+    proc::Cred cred;
     proc::Memory* mem; // referenced (put() when done) or null
     int cpu;
 };
@@ -73,6 +74,7 @@ bool snapshot(int pid, int tid, Snapshot* s, bool want_memory) {
     s->pgid = p->pgid;
     s->sid = p->sid;
     memcpy(s->name, p->name, sizeof(s->name));
+    s->cred = p->cred;
     memcpy(s->exe, p->exe_path, sizeof(s->exe));
     memcpy(s->cwd, p->cwd_path, sizeof(s->cwd));
     s->start_ticks = p->start_ns / (1'000'000'000 / USER_HZ);
@@ -135,6 +137,66 @@ const char* state_name(char c) {
 class FdDir;
 class TaskDir;
 
+// /proc/<pid>/oom_score_adj (-1000..1000) and the older oom_adj (-17..15):
+// readable and writable; TDE's start_tdeinit protects its core processes
+// through them (and waits until it has).
+class OomFile : public vfs::Inode {
+public:
+    OomFile(int p, bool legacy) : m_pid(p), m_legacy(legacy) {
+        ino = vfs::next_ino();
+        mode = vfs::S_IFREG | 0644;
+        atime = mtime = ctime = vfs::now();
+    }
+    isize read(u64 offset, void* buf, usize count) override {
+        int v;
+        {
+            LockGuard guard(proc::table_lock());
+            Process* p = proc::find(m_pid);
+            if (!p)
+                return -err::SRCH;
+            v = m_legacy ? p->oom_score_adj * 17 / 1000 : p->oom_score_adj;
+        }
+        char text[16];
+        usize n = static_cast<usize>(snprintf(text, sizeof(text), "%d\n", v));
+        if (offset >= n)
+            return 0;
+        n = min<usize>(n - offset, count);
+        memcpy(buf, text + offset, n);
+        return static_cast<isize>(n);
+    }
+    isize write(u64, const void* buf, usize count) override {
+        char text[16] = {};
+        memcpy(text, buf, min<usize>(count, sizeof(text) - 1));
+        const char* q = text;
+        bool neg = *q == '-';
+        if (neg || *q == '+')
+            q++;
+        int v = 0;
+        while (*q >= '0' && *q <= '9')
+            v = v * 10 + (*q++ - '0');
+        if (neg)
+            v = -v;
+        int lo = m_legacy ? -17 : -1000, hi = m_legacy ? 15 : 1000;
+        if (v < lo || v > hi)
+            return -err::INVAL;
+        if (m_legacy)
+            v = v == -17 ? -1000 : v * 1000 / 17;
+        LockGuard guard(proc::table_lock());
+        Process* p = proc::find(m_pid);
+        if (!p)
+            return -err::SRCH;
+        if (v < p->oom_score_adj && !proc::capable())
+            return -err::ACCES; // only root may protect a process more
+        p->oom_score_adj = v;
+        return static_cast<isize>(count);
+    }
+    long truncate(u64) override { return 0; }
+
+private:
+    int m_pid;
+    bool m_legacy;
+};
+
 class PidDir : public vfs::Inode {
 public:
     PidDir(int pid, int tid);
@@ -150,7 +212,17 @@ private:
         const char* name;
         vfs::Inode* inode;
     };
-    Entry m_entries[12];
+    Entry m_entries[16];
+
+public:
+    void set_entry_owner(u32 u, u32 g) {
+        for (int i = 0; i < m_count; i++) {
+            m_entries[i].inode->uid = u;
+            m_entries[i].inode->gid = g;
+        }
+    }
+
+private:
     int m_count = 0;
     void add(const char* name, vfs::Inode* node) { m_entries[m_count++] = {name, node}; }
 };
@@ -158,14 +230,29 @@ private:
 PidDir* g_pid_dirs = nullptr; // cache, never freed (one small object per pid ever looked at)
 IrqSpinlock g_cache_lock;
 
+// The /proc/<pid> directory belongs to the process's (effective) user, as on
+// Linux: ps shows the owner as the process's user.
+void set_owner_from(PidDir* d) {
+    Snapshot s;
+    if (snapshot(d->pid, d->tid, &s, false)) {
+        d->uid = s.cred.euid;
+        d->gid = s.cred.egid;
+        d->set_entry_owner(s.cred.euid, s.cred.egid); // its files too (owner checks, as on Linux)
+    }
+}
+
 PidDir* pid_dir(int pid, int tid) {
     {
         LockGuard guard(g_cache_lock);
-        for (PidDir* d = g_pid_dirs; d; d = d->next_cached)
-            if (d->pid == pid && d->tid == tid)
+        for (PidDir* d = g_pid_dirs; d; d = d->next_cached) {
+            if (d->pid == pid && d->tid == tid) {
+                set_owner_from(d); // pids are reused; ids change with setuid
                 return d;
+            }
+        }
     }
     auto* d = new PidDir(pid, tid);
+    set_owner_from(d);
     LockGuard guard(g_cache_lock);
     d->next_cached = g_pid_dirs;
     g_pid_dirs = d;
@@ -207,11 +294,29 @@ bool gen_status(TextBuffer& out, const void* ctx) {
     if (s.mem)
         s.vsize = s.mem->virtual_size();
     out.printf("Name:\t%s\nUmask:\t0022\nState:\t%s\nTgid:\t%d\nNgid:\t0\nPid:\t%d\nPPid:\t%d\nTracerPid:\t0\n"
-               "Uid:\t0\t0\t0\t0\nGid:\t0\t0\t0\t0\nFDSize:\t%d\nVmSize:\t%8lu kB\nVmRSS:\t%8lu kB\n"
+               "Uid:\t%u\t%u\t%u\t%u\nGid:\t%u\t%u\t%u\t%u\nFDSize:\t%d\nVmSize:\t%8lu kB\nVmRSS:\t%8lu kB\n"
                "Threads:\t%d\nSigPnd:\t%016lx\nSigBlk:\t%016lx\nCpus_allowed_list:\t0-%u\n",
-               s.name, state_name(s.state), s.pid, d->tid ? d->tid : s.pid, s.ppid, proc::MAX_FDS,
+               s.name, state_name(s.state), s.pid, d->tid ? d->tid : s.pid, s.ppid, s.cred.ruid, s.cred.euid,
+               s.cred.suid, s.cred.fsuid, s.cred.rgid, s.cred.egid, s.cred.sgid, s.cred.fsgid, proc::MAX_FDS,
                s.vsize / 1024, s.rss * 4, s.threads, s.sig_pending, s.sig_blocked, percpu::online_count() - 1);
     release(s);
+    return true;
+}
+
+// /proc/<pid>/syscall: the system call the (main) thread is blocked in.
+bool gen_syscall(TextBuffer& out, const void* ctx) {
+    auto* d = static_cast<const PidDir*>(ctx);
+    LockGuard guard(proc::table_lock());
+    Process* p = proc::find(d->pid);
+    if (!p)
+        return false;
+    sched::Thread* t = d->tid ? proc::find_thread(d->tid) : p->main_thread;
+    if (!t)
+        return false;
+    if (t->cur_syscall < 0)
+        out.append("running\n");
+    else
+        out.printf("%ld %#lx %#lx %#lx\n", t->cur_syscall, t->cur_args[0], t->cur_args[1], t->cur_args[2]);
     return true;
 }
 
@@ -417,6 +522,9 @@ PidDir::PidDir(int p, int t) : pid(p), tid(t) {
     add("stat", new GeneratedFile(gen_stat, this));
     add("status", new GeneratedFile(gen_status, this));
     add("statm", new GeneratedFile(gen_statm, this));
+    add("syscall", new GeneratedFile(gen_syscall, this, 0400));
+    add("oom_score_adj", new OomFile(pid, false));
+    add("oom_adj", new OomFile(pid, true));
     add("comm", new GeneratedFile(gen_comm, this, 0644));
     add("cmdline", new GeneratedFile(gen_cmdline, this));
     add("environ", new GeneratedFile(gen_environ, this, 0400));

@@ -60,6 +60,7 @@ public:
     explicit FbDevice(video::Framebuffer& fb) : m_fb(fb) {
         ino = vfs::next_ino();
         mode = vfs::S_IFCHR | 0660;
+        gid = vfs::GID_VIDEO;
         rdev = (29u << 8) | 0; // major 29, minor 0, as on Linux
         atime = mtime = ctime = vfs::now();
         m_phys = mm::direct_virt_to_phys(fb.base());

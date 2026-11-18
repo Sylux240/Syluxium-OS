@@ -52,6 +52,9 @@ struct Thread {
     u64 clear_child_tid = 0;             // set_tid_address / CLONE_CHILD_CLEARTID
     int user_tid = 0;                    // Linux thread id (shares the pid number space)
     u64 sig_pending = 0;                 // signals sent to this thread only (tgkill)
+    i64 cur_syscall = -1;                // the system call it's in (-1: none), /proc/<pid>/syscall
+    u64 cur_args[3] = {};
+    i32 sig_code[65] = {}, sig_pid[65] = {}; u32 sig_uid[65] = {}; // who sent each (siginfo)
     u64 sigmask = 0;                     // blocked signals (per thread, as on Linux)
     // ppoll/pselect/epoll_pwait: the mask to put back on the way to user
     // mode (or, if a handler runs, when it returns via sigreturn).

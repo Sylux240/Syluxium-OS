@@ -104,6 +104,7 @@ public:
     explicit ControlNode(Card* card) : m_card(card) {
         ino = vfs::next_ino();
         mode = vfs::S_IFCHR | 0660;
+        gid = vfs::GID_AUDIO;
         rdev = (116u << 8) | static_cast<u32>(card->number * 32);
         gid = 29; // "audio"
         atime = mtime = ctime = vfs::now();
@@ -418,6 +419,7 @@ public:
     TimerNode() {
         ino = vfs::next_ino();
         mode = vfs::S_IFCHR | 0660;
+        gid = vfs::GID_AUDIO;
         rdev = (116u << 8) | 33;
         gid = 29;
         atime = mtime = ctime = vfs::now();
