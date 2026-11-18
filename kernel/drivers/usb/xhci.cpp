@@ -129,7 +129,11 @@ public:
 
     long control(u8 type, u8 request, u16 value, u16 index, void* data, u16 length) override;
     long open_endpoint(const usb::Endpoint& ep) override;
-    long transfer(u8 ep_address, void* data, u32 length) override;
+    long transfer(u8 ep_address, void* data, u32 length) override { return transfer_ms(ep_address, data, length, 5000); }
+    long transfer_wait(u8 ep_address, void* data, u32 length) override {
+        return transfer_ms(ep_address, data, length, 1ull << 40); // practically forever
+    }
+    long transfer_ms(u8 ep_address, void* data, u32 length, u64 timeout_ms);
     long start_interrupt_in(u8 ep_address, u32 length, usb::InterruptCallback cb, void* ctx) override;
     void disable() override;
 
@@ -642,7 +646,7 @@ long UsbDevice::open_endpoint(const usb::Endpoint& e) {
     return m_hc->command(m_in_phys, 0, (TRB_CONFIGURE_EP << 10) | (static_cast<u32>(m_slot) << 24), nullptr);
 }
 
-long UsbDevice::transfer(u8 ep_address, void* data, u32 length) {
+long UsbDevice::transfer_ms(u8 ep_address, void* data, u32 length, u64 timeout_ms) {
     Active active(this);
     if (!active.ok)
         return -err::NODEV;
@@ -659,7 +663,7 @@ long UsbDevice::transfer(u8 ep_address, void* data, u32 length) {
     u64 trb = ep.ring.push(ep.buffer_phys, length, (TRB_NORMAL << 10) | (1 << 5) | (1 << 2)); // IOC, ISP
     ep.wait_trb = trb;
     m_hc->doorbells[m_slot] = dci;
-    if (long r = wait(ep, 5000); r < 0)
+    if (long r = wait(ep, timeout_ms); r < 0)
         return r;
     u32 actual = length - ep.residual;
     if (in)

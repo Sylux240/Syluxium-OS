@@ -85,7 +85,7 @@ public:
     void rx_loop() {
         u8* frame = static_cast<u8*>(kmalloc(FRAME_MAX + 512));
         while (!gone) {
-            long r = usb->transfer(bulk_in, frame, FRAME_MAX + 512);
+            long r = usb->transfer_wait(bulk_in, frame, FRAME_MAX + 512);
             if (r < 0) {
                 if (r == -err::NODEV)
                     gone = true;

@@ -45,6 +45,9 @@ public:
 
     // Synchronous bulk/interrupt transfer; returns bytes transferred or -errno.
     virtual long transfer(u8 ep_address, void* data, u32 length) = 0;
+    // The same without a timeout, for IN endpoints where the device decides
+    // when data comes (network adapters' receive endpoint).
+    virtual long transfer_wait(u8 ep_address, void* data, u32 length) { return transfer(ep_address, data, length); }
 
     // Keep an interrupt IN endpoint polled; `cb` runs for every report (in
     // the host controller's event thread: it must not sleep).
