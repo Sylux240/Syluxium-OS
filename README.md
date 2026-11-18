@@ -96,7 +96,7 @@ tools/smoke-test.sh   headless QEMU boot: serial log + screenshot
             (busybox ip, getifaddrs), IPv6 (SLAAC, neighbour discovery, ICMPv6, TCP/UDP, v4-mapped),
             IP fragmentation both ways, TCP window scaling + NewReno + out-of-order queue
             (50 MiB in 0.74 s), Realtek r8169/r8168 driver (untested on hardware)
-      - [ ] later: epoll, SACK, DHCPv6, ACPI _PRT legacy interrupt routing
+      - [ ] later: SACK, DHCPv6, ACPI _PRT legacy interrupt routing
 - [ ] **Phase 7**: Linux driver compatibility layer (LinuxKPI) + **Wi-Fi** for many chips: Intel
       (iwlwifi), Qualcomm/Atheros (ath9k/10k/11k/12k), MediaTek (mt76), Realtek (rtw88/rtw89),
       Broadcom (brcmfmac); mac80211/cfg80211, WPA2/WPA3 via wpa_supplicant/iwd, linux-firmware
@@ -170,11 +170,12 @@ tools/smoke-test.sh   headless QEMU boot: serial log + screenshot
         the start menu/taskbar (needs Wayland or XWayland, GTK 3, epoll, shared memory, fonts)
       - Every system tool has a GUI (command line optional)
 - [ ] **Phase 10**: GPU drivers and acceleration, for gaming and other graphics work: virtio-gpu
-      (virgl) first, then AMD (amdgpu) and NVIDIA (nouveau, and NVIDIA's open kernel modules)
+      (virgl) first, then Intel (i915 / xe: HD/UHD/Iris Xe/Arc), AMD (amdgpu) and NVIDIA (nouveau,
+      and NVIDIA's open kernel modules)
       through the driver compatibility layer. Display side (KMS): resolutions, refresh rates,
-      multiple monitors. 3D: Mesa's **Vulkan** (RADV, NVK) and **OpenGL** (radeonsi, zink/nouveau)
-      drivers, so Steam, Proton and other games and 3D apps run. **Required**: native AMD and
-      NVIDIA hardware acceleration for the desktop too (Xorg on amdgpu/modesetting with glamor
+      multiple monitors. 3D: Mesa's **Vulkan** (ANV, RADV, NVK) and **OpenGL** (iris, radeonsi, zink/nouveau)
+      drivers, so Steam, Proton and other games and 3D apps run. **Required**: native Intel, AMD
+      and NVIDIA hardware acceleration for the desktop too (Xorg on modesetting/amdgpu with glamor
       instead of today's unaccelerated fbdev), on real hardware, not just in QEMU
 - [ ] **Phase 11**: **App Store** + package installer (.deb only; .rpm dropped): a Play Store-like
       app with screenshots, icons, descriptions, ratings/details, categories and search, pulling
