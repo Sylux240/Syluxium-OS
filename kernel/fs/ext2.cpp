@@ -1,4 +1,6 @@
+#include <boot/limine_requests.hpp>
 #include <core/log.hpp>
+#include <core/panic.hpp>
 #include <fs/ext2.hpp>
 #include <lib/crc32c.hpp>
 #include <lib/format.hpp>
@@ -83,6 +85,18 @@ u32 get32(const u8* p) { u32 v; memcpy(&v, p, 4); return v; }
 void put16(u8* p, u16 v) { memcpy(p, &v, 2); }
 void put32(u8* p, u32 v) { memcpy(p, &v, 4); }
 
+// jbd2 (the journal) stores everything big-endian.
+u32 be32(const u8* p) { return (u32(p[0]) << 24) | (u32(p[1]) << 16) | (u32(p[2]) << 8) | p[3]; }
+u16 be16(const u8* p) { return static_cast<u16>((p[0] << 8) | p[1]); }
+void put_be32(u8* p, u32 v) { p[0] = u8(v >> 24); p[1] = u8(v >> 16); p[2] = u8(v >> 8); p[3] = u8(v); }
+void put_be16(u8* p, u16 v) { p[0] = u8(v >> 8); p[1] = u8(v); }
+
+constexpr u32 JBD2_MAGIC = 0xC03B3998;
+constexpr u32 JBD2_DESCRIPTOR = 1, JBD2_COMMIT = 2, JBD2_SB_V1 = 3, JBD2_SB_V2 = 4, JBD2_REVOKE = 5;
+constexpr u32 JBD2_INCOMPAT_REVOKE = 0x1, JBD2_INCOMPAT_64BIT = 0x2, JBD2_INCOMPAT_ASYNC_COMMIT = 0x4,
+              JBD2_INCOMPAT_CSUM_V3 = 0x10;
+constexpr u32 JBD2_TAG_ESCAPE = 1, JBD2_TAG_SAME_UUID = 2, JBD2_TAG_LAST = 8;
+
 // CRC-16 (ANSI, reflected 0xA001): the older "uninit_bg" group descriptor checksum.
 u16 crc16(u16 crc, const void* data, usize len) {
     auto* p = static_cast<const u8*>(data);
@@ -158,6 +172,63 @@ public:
     sched::Mutex lock;
     Node* cache[256] = {};
 
+    // ---- journal (jbd2): metadata changes are committed to the journal
+    // before they reach their home blocks, so a crash can't leave half an
+    // update behind. One running transaction, committed every few seconds
+    // (and on sync), then checkpointed right away: the journal is empty
+    // between commits.
+    struct Journal {
+        bool active = false;
+        Node* inode = nullptr;
+        u32 maxlen = 0, first = 0, sequence = 0, incompat = 0;
+        bool csum_v3 = false, wide = false;
+        u32 seed = 0;
+        Array<u64> txn; // file system blocks in the running transaction
+        u64* set = nullptr;  // open-addressing index of txn (block + 1; 0 = empty)
+        usize set_cap = 0;
+    } journal;
+
+    bool txn_insert(u64 blk) { // false if already there
+        if (journal.txn.n * 2 + 2 > journal.set_cap) {
+            usize ncap = journal.set_cap ? journal.set_cap * 2 : 1024;
+            u64* nset = static_cast<u64*>(kzalloc(ncap * sizeof(u64)));
+            if (!nset)
+                return false;
+            for (usize i = 0; i < journal.txn.n; i++) {
+                usize h = (journal.txn.v[i] * 0x9E3779B97F4A7C15ull) & (ncap - 1);
+                while (nset[h]) h = (h + 1) & (ncap - 1);
+                nset[h] = journal.txn.v[i] + 1;
+            }
+            kfree(journal.set);
+            journal.set = nset;
+            journal.set_cap = ncap;
+        }
+        usize h = (blk * 0x9E3779B97F4A7C15ull) & (journal.set_cap - 1);
+        while (journal.set[h]) {
+            if (journal.set[h] == blk + 1)
+                return false;
+            h = (h + 1) & (journal.set_cap - 1);
+        }
+        journal.set[h] = blk + 1;
+        journal.txn.push(blk);
+        return true;
+    }
+
+    // Every metadata write goes through here.
+    void meta(u64 offset, const void* buf, usize len) {
+        block::write(dev, offset, buf, len);
+        if (!journal.active)
+            return;
+        for (u64 b = offset / block_size; b <= (offset + len - 1) / block_size; b++)
+            if (txn_insert(b))
+                block::hold(dev, b * block_size, block_size, +1);
+    }
+
+    u64 journal_phys(u32 lblk);
+    long journal_load();
+    void journal_write_sb(u32 start);
+    void commit_locked();
+
     u64 block_offset(u64 b) const { return b * block_size; }
     u32 ptrs_per_block() const { return block_size / 4; }
     bool uses_gd_flags() const { return csum || gdt_csum; }
@@ -170,7 +241,7 @@ public:
         u8 sb[1024];
         block::read(dev, 1024, sb, sizeof(sb));
         u32 c = crc32c(~0u, sb, 0x3FC);
-        block::write(dev, 1024 + 0x3FC, &c, 4);
+        meta(1024 + 0x3FC, &c, 4);
     }
     void sb_add_free_blocks(i64 delta) {
         u64 v = sb32(12);
@@ -178,14 +249,14 @@ public:
             v |= static_cast<u64>(sb32(0x158)) << 32;
         v = static_cast<u64>(static_cast<i64>(v) + delta);
         u32 lo = static_cast<u32>(v), hi = static_cast<u32>(v >> 32);
-        block::write(dev, 1024 + 12, &lo, 4);
+        meta(1024 + 12, &lo, 4);
         if (incompat & INCOMPAT_64BIT)
-            block::write(dev, 1024 + 0x158, &hi, 4);
+            meta(1024 + 0x158, &hi, 4);
         sb_csum();
     }
     void sb_add_free_inodes(i64 delta) {
         u32 v = static_cast<u32>(static_cast<i64>(sb32(16)) + delta);
-        block::write(dev, 1024 + 16, &v, 4);
+        meta(1024 + 16, &v, 4);
         sb_csum();
     }
 
@@ -212,7 +283,7 @@ public:
                 c = crc16(c, d + 0x20, desc_size - 0x20);
             put16(d + 0x1E, c);
         }
-        block::write(dev, gd_offset(g), d, desc_size);
+        meta(gd_offset(g), d, desc_size);
     }
     // Fields split into a low half and (64-bit descriptors) a high half.
     u64 gd_get32x2(const u8* d, u32 lo, u32 hi) const {
@@ -324,7 +395,7 @@ public:
             if (has_hi)
                 put16(buf + 0x82, static_cast<u16>(c >> 16));
         }
-        block::write(dev, off, buf, inode_size);
+        meta(off, buf, inode_size);
     }
 
     // ---- allocation ----
@@ -362,7 +433,7 @@ public:
             if (found == ~0u)
                 continue;
             bitmap[found / 8] |= static_cast<u8>(1 << (found % 8));
-            block::write(dev, block_offset(bm), bitmap, block_size);
+            meta(block_offset(bm), bitmap, block_size);
             gd_set16x2(d, 0x0C, 0x2C, free - 1);
             put16(d + 0x12, static_cast<u16>(flags & ~BG_BLOCK_UNINIT));
             set_bitmap_csum(d, false, bitmap);
@@ -402,7 +473,7 @@ public:
                 }
             }
             if (cleared) {
-                block::write(dev, block_offset(bm), bitmap, block_size);
+                meta(block_offset(bm), bitmap, block_size);
                 gd_set16x2(d, 0x0C, 0x2C, gd_get16x2(d, 0x0C, 0x2C) + cleared);
                 set_bitmap_csum(d, false, bitmap);
                 gd_write(g, d);
@@ -446,7 +517,7 @@ public:
             if (found == ~0u)
                 continue;
             bitmap[found / 8] |= static_cast<u8>(1 << (found % 8));
-            block::write(dev, block_offset(bm), bitmap, block_size);
+            meta(block_offset(bm), bitmap, block_size);
             gd_set16x2(d, 0x0E, 0x2E, free - 1);
             if (dir)
                 gd_set16x2(d, 0x10, 0x30, gd_get16x2(d, 0x10, 0x30) + 1);
@@ -477,7 +548,7 @@ public:
         block::read(dev, block_offset(bm), bitmap, block_size);
         if (bitmap[i / 8] & (1 << (i % 8))) {
             bitmap[i / 8] &= static_cast<u8>(~(1 << (i % 8)));
-            block::write(dev, block_offset(bm), bitmap, block_size);
+            meta(block_offset(bm), bitmap, block_size);
             gd_set16x2(d, 0x0E, 0x2E, gd_get16x2(d, 0x0E, 0x2E) + 1);
             if (dir)
                 gd_set16x2(d, 0x10, 0x30, gd_get16x2(d, 0x10, 0x30) - 1);
@@ -671,7 +742,7 @@ public:
             for (usize k = 0; k < n; k++)
                 put_extent(buf + 12 + k * 12, ext[i + k]);
             vol->finish_extent_block(seed(), buf);
-            block::write(vol->dev, vol->block_offset(b), buf, vol->block_size);
+            vol->meta(vol->block_offset(b), buf, vol->block_size);
             level.push(Key{ext[i].lblk, b});
         }
         u16 depth = 1;
@@ -691,7 +762,7 @@ public:
                     put16(e + 8, static_cast<u16>(level.v[i + k].blk >> 32));
                 }
                 vol->finish_extent_block(seed(), buf);
-                block::write(vol->dev, vol->block_offset(b), buf, vol->block_size);
+                vol->meta(vol->block_offset(b), buf, vol->block_size);
                 up.push(Key{level.v[i].lblk, b});
             }
             kfree(level.v);
@@ -754,7 +825,7 @@ public:
             return;
         }
         vol->finish_extent_block(seed(), buf);
-        block::write(vol->dev, vol->block_offset(where), buf, vol->block_size);
+        vol->meta(vol->block_offset(where), buf, vol->block_size);
     }
 
     // Map file block `n`, allocating a block if it's a hole.
@@ -915,7 +986,7 @@ public:
                 if (!create) return 0;
                 entry = static_cast<u32>(vol->alloc_block(table + 1));
                 if (!entry) return 0;
-                block::write(vol->dev, off, &entry, 4);
+                vol->meta(off, &entry, 4);
                 add_blocks(1);
                 save();
             }
@@ -1176,7 +1247,7 @@ public:
         block::read(vol->dev, start, buf, vol->block_size);
         fn(buf, static_cast<u32>(disk_offset - start));
         vol->finish_dir_block(seed(), buf);
-        block::write(vol->dev, start, buf, vol->block_size);
+        vol->meta(start, buf, vol->block_size);
         kfree(buf);
     }
 
@@ -1207,7 +1278,7 @@ public:
                     }
                     if (rewrite) {
                         vol->finish_dir_block(seed(), buf);
-                        block::write(vol->dev, vol->block_offset(b), buf, vol->block_size);
+                        vol->meta(vol->block_offset(b), buf, vol->block_size);
                     }
                 }
                 kfree(buf);
@@ -1248,7 +1319,7 @@ public:
                     blockbuf[at + 7] = vol->has_filetype ? type : 0;
                     memcpy(blockbuf + at + 8, name, len);
                     vol->finish_dir_block(seed(), blockbuf);
-                    block::write(vol->dev, vol->block_offset(b), blockbuf, vol->block_size);
+                    vol->meta(vol->block_offset(b), blockbuf, vol->block_size);
                     kfree(blockbuf);
                     touch_dir();
                     return 0;
@@ -1269,7 +1340,7 @@ public:
         blockbuf[7] = vol->has_filetype ? type : 0;
         memcpy(blockbuf + 8, name, len);
         vol->finish_dir_block(seed(), blockbuf);
-        block::write(vol->dev, vol->block_offset(b), blockbuf, vol->block_size);
+        vol->meta(vol->block_offset(b), blockbuf, vol->block_size);
         kfree(blockbuf);
         size += vol->block_size;
         touch_dir();
@@ -1370,7 +1441,7 @@ public:
             blockbuf[20] = '.';
             blockbuf[21] = '.';
             vol->finish_dir_block(n->seed(), blockbuf);
-            block::write(vol->dev, vol->block_offset(b), blockbuf, vol->block_size);
+            vol->meta(vol->block_offset(b), blockbuf, vol->block_size);
             kfree(blockbuf);
             n->size = vol->block_size;
             n->save();
@@ -1513,6 +1584,266 @@ void Volume::forget(u32 ino) {
     }
 }
 
+
+// ---- journal ----
+
+u64 Volume::journal_phys(u32 lblk) { return journal.inode->file_block(lblk, false); }
+
+void Volume::journal_write_sb(u32 start) {
+    u8 sb[1024];
+    u64 at = block_offset(journal_phys(0));
+    block::read(dev, at, sb, sizeof(sb));
+    put_be32(sb + 24, journal.sequence);
+    put_be32(sb + 28, start);
+    if (journal.csum_v3) {
+        put_be32(sb + 0xFC, 0);
+        put_be32(sb + 0xFC, crc32c(~0u, sb, sizeof(sb)));
+    }
+    block::write_through(dev, at, sb, sizeof(sb));
+    dev->flush();
+}
+
+// Read the journal superblock; replay committed transactions if the journal
+// isn't empty. Returns 0 if the journal can be used for writing.
+long Volume::journal_load() {
+    u32 jino = sb32(0xE0);
+    if (!jino)
+        return -err::OPNOTSUPP; // external journal device: not supported
+    journal.inode = node(jino, nullptr);
+    u8* buf = static_cast<u8*>(kmalloc(block_size));
+    u8* data = static_cast<u8*>(kmalloc(block_size));
+    if (!buf || !data) {
+        kfree(buf);
+        kfree(data);
+        return -err::NOMEM;
+    }
+    long result = 0;
+    block::read(dev, block_offset(journal_phys(0)), buf, block_size);
+    u32 type = be32(buf + 4);
+    journal.maxlen = be32(buf + 16);
+    journal.first = be32(buf + 20);
+    journal.sequence = be32(buf + 24);
+    u32 start = be32(buf + 28);
+    journal.incompat = type == JBD2_SB_V2 ? be32(buf + 40) : 0;
+    u32 jcompat = type == JBD2_SB_V2 ? be32(buf + 36) : 0;
+    journal.csum_v3 = journal.incompat & JBD2_INCOMPAT_CSUM_V3;
+    journal.wide = journal.incompat & JBD2_INCOMPAT_64BIT;
+    journal.seed = crc32c(~0u, buf + 48, 16);
+    if (be32(buf) != JBD2_MAGIC || (type != JBD2_SB_V1 && type != JBD2_SB_V2) || be32(buf + 12) != block_size ||
+        journal.first == 0 || journal.first >= journal.maxlen || jcompat ||
+        (journal.incompat & ~(JBD2_INCOMPAT_REVOKE | JBD2_INCOMPAT_64BIT | JBD2_INCOMPAT_ASYNC_COMMIT | JBD2_INCOMPAT_CSUM_V3)) ||
+        (!journal.wide && blocks_count > 0xFFFFFFFFull)) {
+        klog::warn("ext4 %s: journal format not supported (type %u, features %#x/%#x)", dev->name, type, jcompat,
+                   journal.incompat);
+        result = -err::OPNOTSUPP;
+    }
+    u32 tag_size = journal.csum_v3 ? 16 : (journal.wide ? 12 : 8);
+    auto next = [&](u32 pos) { return pos + 1 >= journal.maxlen ? journal.first : pos + 1; };
+
+    if (result == 0 && start != 0) {
+        // Pass 1: find the committed transactions and the revoked blocks.
+        struct Tag { u64 blk; u32 jpos; bool escape; u32 tid; };
+        struct Revoke { u64 blk; u32 tid; };
+        Array<Tag> committed, pending;
+        Array<Revoke> revokes, pending_revokes;
+        u32 pos = start, expect = journal.sequence, transactions = 0;
+        for (u32 guard = 0; guard < journal.maxlen; guard++) {
+            block::read(dev, block_offset(journal_phys(pos)), buf, block_size);
+            if (be32(buf) != JBD2_MAGIC || be32(buf + 8) != expect)
+                break;
+            u32 btype = be32(buf + 4);
+            if (btype == JBD2_DESCRIPTOR) {
+                u32 off = 12, end = block_size - (journal.csum_v3 ? 4 : 0);
+                u32 dpos = next(pos);
+                while (off + tag_size <= end) {
+                    u64 blk = be32(buf + off);
+                    u32 flags = journal.csum_v3 ? be32(buf + off + 4) : be16(buf + off + 6);
+                    if (journal.wide)
+                        blk |= static_cast<u64>(be32(buf + off + 8)) << 32;
+                    pending.push(Tag{blk, dpos, (flags & JBD2_TAG_ESCAPE) != 0, expect});
+                    dpos = next(dpos);
+                    off += tag_size;
+                    if (!(flags & JBD2_TAG_SAME_UUID))
+                        off += 16;
+                    if (flags & JBD2_TAG_LAST)
+                        break;
+                }
+                pos = dpos;
+            } else if (btype == JBD2_COMMIT) {
+                if (journal.csum_v3) {
+                    u32 want = be32(buf + 16);
+                    put_be32(buf + 16, 0);
+                    if (crc32c(journal.seed, buf, block_size) != want)
+                        break; // torn commit: this transaction never happened
+                }
+                for (usize i = 0; i < pending.n; i++)
+                    committed.push(pending.v[i]);
+                for (usize i = 0; i < pending_revokes.n; i++)
+                    revokes.push(pending_revokes.v[i]);
+                pending.n = pending_revokes.n = 0;
+                transactions++;
+                expect++;
+                pos = next(pos);
+            } else if (btype == JBD2_REVOKE) {
+                u32 used = min<u32>(be32(buf + 12), block_size - (journal.csum_v3 ? 4 : 0));
+                u32 rsize = journal.wide ? 8 : 4;
+                for (u32 off = 16; off + rsize <= used; off += rsize) {
+                    u64 blk = journal.wide ? (static_cast<u64>(be32(buf + off)) << 32) | be32(buf + off + 4) : be32(buf + off);
+                    pending_revokes.push(Revoke{blk, expect});
+                }
+                pos = next(pos);
+            } else {
+                break;
+            }
+        }
+        // Pass 2: write the journaled copies home, oldest first.
+        u32 replayed = 0;
+        for (usize i = 0; i < committed.n; i++) {
+            const Tag& t = committed.v[i];
+            bool revoked = false;
+            for (usize k = 0; k < revokes.n && !revoked; k++)
+                revoked = revokes.v[k].blk == t.blk && revokes.v[k].tid >= t.tid;
+            if (revoked || t.blk >= blocks_count)
+                continue;
+            block::read(dev, block_offset(journal_phys(t.jpos)), data, block_size);
+            if (t.escape)
+                put_be32(data, JBD2_MAGIC);
+            block::write(dev, block_offset(t.blk), data, block_size);
+            replayed++;
+        }
+        block::sync_device(dev);
+        journal.sequence = expect;
+        journal_write_sb(0);
+        klog::ok("ext4 %s: journal replayed (%u transactions, %u blocks)", dev->name, transactions, replayed);
+    }
+    kfree(buf);
+    kfree(data);
+    if (result == 0)
+        journal.active = true;
+    return result;
+}
+
+// Test hook: "jbd2_crash=before|after" on the kernel command line stops the
+// machine at the second commit, just before / right after the commit block
+// reaches the disk (crash-recovery tests).
+int crash_test_mode() {
+    static int mode = -1;
+    if (mode < 0) {
+        mode = 0;
+        const char* c = boot::cmdline();
+        for (const char* p = c; *p; p++) {
+            if (memcmp(p, "jbd2_crash=before", 17) == 0) mode = 1;
+            if (memcmp(p, "jbd2_crash=after", 16) == 0) mode = 2;
+        }
+    }
+    return mode;
+}
+
+// Commit the running transaction, then checkpoint it.
+void Volume::commit_locked() {
+    if (!journal.active || journal.txn.n == 0)
+        return;
+    u32 n = static_cast<u32>(journal.txn.n);
+    u32 tag_size = journal.csum_v3 ? 16 : (journal.wide ? 12 : 8);
+    u32 per_desc = (block_size - 12 - (journal.csum_v3 ? 4 : 0) - 16) / tag_size;
+    u32 needed = (n + per_desc - 1) / per_desc + n + 1;
+    auto release_all = [&] {
+        for (usize i = 0; i < journal.txn.n; i++)
+            block::hold(dev, block_offset(journal.txn.v[i]), block_size, -1);
+        journal.txn.n = 0;
+        memset(journal.set, 0, journal.set_cap * sizeof(u64));
+    };
+    if (needed > journal.maxlen - journal.first) {
+        klog::warn("ext4 %s: transaction of %u blocks doesn't fit the journal; writing it directly", dev->name, n);
+        release_all();
+        block::sync_device(dev);
+        return;
+    }
+    u8* desc = static_cast<u8*>(kmalloc(block_size));
+    u8* data = static_cast<u8*>(kmalloc(block_size));
+    if (!desc || !data) {
+        kfree(desc);
+        kfree(data);
+        return;
+    }
+    u32 tid = journal.sequence;
+    block::sync_device(dev);           // 1. file data first ("ordered" mode)
+    journal_write_sb(journal.first);   // 2. the journal now starts here
+    u32 pos = journal.first;           // 3. descriptor blocks + copies
+    u8 juuid[16];
+    block::read(dev, block_offset(journal_phys(0)) + 48, juuid, 16);
+    for (u32 i = 0; i < n;) {
+        u32 count = min<u32>(per_desc, n - i);
+        memset(desc, 0, block_size);
+        put_be32(desc, JBD2_MAGIC);
+        put_be32(desc + 4, JBD2_DESCRIPTOR);
+        put_be32(desc + 8, tid);
+        u32 off = 12;
+        for (u32 k = 0; k < count; k++) {
+            u64 blk = journal.txn.v[i + k];
+            block::read(dev, block_offset(blk), data, block_size);
+            u32 flags = 0;
+            if (be32(data) == JBD2_MAGIC) { // a block that looks like a journal block: escape it
+                put_be32(data, 0);
+                flags |= JBD2_TAG_ESCAPE;
+            }
+            if (k > 0)
+                flags |= JBD2_TAG_SAME_UUID;
+            if (k == count - 1)
+                flags |= JBD2_TAG_LAST;
+            u8* tag = desc + off;
+            put_be32(tag, static_cast<u32>(blk));
+            if (journal.csum_v3) {
+                put_be32(tag + 4, flags);
+                put_be32(tag + 8, static_cast<u32>(blk >> 32));
+                u8 seq[4];
+                put_be32(seq, tid);
+                put_be32(tag + 12, crc32c(crc32c(journal.seed, seq, 4), data, block_size));
+            } else {
+                put_be16(tag + 6, static_cast<u16>(flags));
+                if (journal.wide)
+                    put_be32(tag + 8, static_cast<u32>(blk >> 32));
+            }
+            off += tag_size;
+            if (k == 0) {
+                memcpy(desc + off, juuid, 16);
+                off += 16;
+            }
+            block::write_through(dev, block_offset(journal_phys(pos + 1 + k)), data, block_size);
+        }
+        if (journal.csum_v3)
+            put_be32(desc + block_size - 4, crc32c(journal.seed, desc, block_size));
+        block::write_through(dev, block_offset(journal_phys(pos)), desc, block_size);
+        pos += 1 + count;
+        i += count;
+    }
+    dev->flush();
+    static int commits = 0;
+    bool crash_now = crash_test_mode() && ++commits == 2;
+    if (crash_now && crash_test_mode() == 1)
+        panic("jbd2 crash test: stopped before the commit block of transaction %u (%u blocks)", tid, n);
+    memset(desc, 0, block_size);       // 4. the commit block: from here on the transaction counts
+    put_be32(desc, JBD2_MAGIC);
+    put_be32(desc + 4, JBD2_COMMIT);
+    put_be32(desc + 8, tid);
+    u64 now_ns = rtc::realtime_ns();
+    put_be32(desc + 48, static_cast<u32>((now_ns / 1'000'000'000) >> 32));
+    put_be32(desc + 52, static_cast<u32>(now_ns / 1'000'000'000));
+    put_be32(desc + 56, static_cast<u32>(now_ns % 1'000'000'000));
+    if (journal.csum_v3)
+        put_be32(desc + 16, crc32c(journal.seed, desc, block_size));
+    block::write_through(dev, block_offset(journal_phys(pos)), desc, block_size);
+    dev->flush();
+    if (crash_now)
+        panic("jbd2 crash test: stopped after committing transaction %u (%u blocks)", tid, n);
+    release_all();                     // 5. checkpoint: the blocks go home
+    block::sync_device(dev);
+    journal.sequence = tid + 1;        // 6. the journal is empty again
+    journal_write_sb(0);
+    kfree(desc);
+    kfree(data);
+}
+
 } // namespace
 
 bool probe(block::Device* dev) {
@@ -1574,7 +1905,28 @@ long mount(block::Device* dev, vfs::Inode** root, bool* read_only, const char** 
     v->gdt_blocks = (v->group_count * v->desc_size + v->block_size - 1) / v->block_size;
     v->gdt_block = v->first_data_block + 1;
     // We can write only what we fully understand; anything else stays safe.
-    v->read_only = (v->incompat & ~INCOMPAT_WRITE_OK) || (v->ro_compat & ~RO_WRITE_OK);
+    v->read_only = (v->incompat & ~(INCOMPAT_WRITE_OK | INCOMPAT_RECOVER)) || (v->ro_compat & ~RO_WRITE_OK);
+    bool needed_recovery = v->incompat & INCOMPAT_RECOVER;
+    if (!v->read_only && (v->compat & COMPAT_HAS_JOURNAL)) {
+        if (v->journal_load() == 0) {
+            // While we have it mounted, the journal is in use (as on Linux):
+            // after a crash, whoever mounts it next replays it first.
+            u32 inc = v->sb32(96) | INCOMPAT_RECOVER;
+            block::write(dev, 1024 + 96, &inc, 4);
+            v->incompat = inc;
+            v->sb_csum();
+            block::sync_device(dev);
+            block::add_sync_hook([](void* ctx) {
+                auto* vol = static_cast<Volume*>(ctx);
+                LockGuard guard(vol->lock);
+                vol->commit_locked();
+            }, v);
+        } else {
+            v->read_only = true;
+        }
+    } else if (needed_recovery) {
+        v->read_only = true; // a journal we can't replay
+    }
     *read_only = v->read_only;
 
     const char* kind = (v->incompat & (INCOMPAT_EXTENTS | INCOMPAT_64BIT | INCOMPAT_FLEX_BG)) ? "ext4"
@@ -1585,10 +1937,10 @@ long mount(block::Device* dev, vfs::Inode** root, bool* read_only, const char** 
     char label[17] = {};
     memcpy(label, sb + 120, 16);
     const char* why = "";
-    if (v->incompat & INCOMPAT_RECOVER)
-        why = " (journal needs replay)";
-    else if (v->read_only)
-        why = " (unsupported features)";
+    if (v->read_only)
+        why = needed_recovery ? " (journal needs replay)" : " (unsupported features)";
+    else if (v->journal.active)
+        why = ", journaled";
     klog::ok("%s on %s%s%s%s: %lu MiB, %u-byte blocks, %s%s%s", kind, dev->name, label[0] ? " (\"" : "", label,
              label[0] ? "\")" : "", v->blocks_count * v->block_size / MiB, v->block_size,
              v->read_only ? "read-only" : "read-write", v->csum ? ", checksums" : "", why);

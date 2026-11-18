@@ -129,7 +129,11 @@ tools/smoke-test.sh   headless QEMU boot: serial log + screenshot
       - [x] 9-ext4 (first part): **ext4 read-write**: extent trees (multi-level), metadata
             checksums (crc32c, hardware-accelerated), 64-bit groups, flex_bg, uninit groups, htree
             dirs converted on change; `make rootdisk` is ext4; e2fsck-clean after `fsstress` + TDE
-      - [ ] 9-ext4: jbd2 journaling (crash safety) + journal replay; clean unmount on shutdown
+      - [x] 9-ext4: **jbd2 journaling**: ordered mode, commits every 5 s and on sync, checksums
+            v3, replay at mount (revokes, torn-commit detection); crash tests (`jbd2_crash=`)
+            replay clean with both Syluxium and e2fsck; block cache holds per sector
+      - [ ] 9-ext4: clean unmount on shutdown (clears needs_recovery), orphan file for
+            open-but-deleted files, htree index maintenance
       - [ ] 9-users: **login screen and user accounts**: graphical login (TDE's TDM, XP/7-styled:
             user tiles with pictures, password, Shut Down/Restart/Sleep buttons; optional
             auto-login), real multi-user security in the kernel (enforced file permissions and

@@ -7,10 +7,11 @@
 //
 // Reads and writes all three, including ext4 as Debian's mkfs.ext4 makes it:
 // extent trees, 64-bit block groups, flex_bg, uninitialized groups, metadata
-// checksums (crc32c). Directory htree indexes are read, and an indexed
-// directory turns linear when changed. Not yet: journaling (writes go
-// straight to their place; a journal that needs replaying -> read-only),
-// meta_bg, inline data, encryption.
+// checksums (crc32c), and the jbd2 journal: metadata changes are committed
+// to the journal (ordered mode: file data first) every few seconds and on
+// sync, a journal left by a crash is replayed at mount. Directory htree
+// indexes are read, and an indexed directory turns linear when changed.
+// Not yet: meta_bg, inline data, encryption, external journals.
 namespace ext2 {
 
 bool probe(block::Device* dev);

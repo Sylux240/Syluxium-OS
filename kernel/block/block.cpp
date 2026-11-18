@@ -23,7 +23,8 @@ struct CacheBlock {
     u64 number;      // in 4 KiB units from the start of the device
     u8* data;
     u32 valid_bytes; // the last block of a device can be partial
-    bool dirty;
+    u8 dirty;        // one bit per sector (512-byte sectors: 8 per block)
+    u16 held[8];     // per sector: > 0 = a journal transaction owns it (not written back yet)
     CacheBlock* hash_next;
     ListNode lru_node; // most recently used at the back
 };
@@ -43,15 +44,50 @@ sched::Mutex g_sd_lock;
 
 usize hash_of(const Device* d, u64 n) { return ((reinterpret_cast<uptr>(d) >> 4) ^ (n * 0x9E3779B1)) % HASH_SIZE; }
 
+u32 sectors_per_block(const Device* d) { return min<u32>(BLOCK / d->sector_size, 8); }
+u32 sector_unit(const Device* d) { return BLOCK / sectors_per_block(d); } // bytes per dirty/held bit
+
+bool any_held(const CacheBlock* b) {
+    for (u16 h : b->held)
+        if (h)
+            return true;
+    return false;
+}
+
+// Write the dirty sectors that no journal transaction holds (in runs).
 long write_back(CacheBlock* b) {
     if (!b->dirty)
         return 0;
-    u32 sectors = (b->valid_bytes + b->dev->sector_size - 1) / b->dev->sector_size;
-    u64 lba = b->number * (BLOCK / b->dev->sector_size);
-    long r = b->dev->write_sectors(lba, sectors, b->data);
-    if (r == 0)
-        b->dirty = false;
-    return r;
+    Device* d = b->dev;
+    u32 units = sectors_per_block(d), unit = sector_unit(d);
+    u32 valid_units = (b->valid_bytes + unit - 1) / unit;
+    for (u32 i = 0; i < valid_units;) {
+        if (!(b->dirty & (1u << i)) || b->held[i]) {
+            i++;
+            continue;
+        }
+        u32 j = i;
+        while (j < valid_units && (b->dirty & (1u << j)) && !b->held[j])
+            j++;
+        u32 first_byte = i * unit, bytes = min<u32>(j * unit, b->valid_bytes) - first_byte;
+        u32 count = (bytes + d->sector_size - 1) / d->sector_size;
+        u64 lba = (b->number * BLOCK + first_byte) / d->sector_size;
+        if (long r = d->write_sectors(lba, count, b->data + first_byte); r != 0)
+            return r;
+        for (u32 k = i; k < j; k++)
+            b->dirty &= static_cast<u8>(~(1u << k));
+        i = j;
+    }
+    (void)units;
+    return 0;
+}
+
+u8 unit_mask(const Device* d, usize in_block, usize len) {
+    u32 unit = sector_unit(d);
+    u8 mask = 0;
+    for (usize k = in_block / unit; k <= (in_block + len - 1) / unit && k < 8; k++)
+        mask |= static_cast<u8>(1u << k);
+    return mask;
 }
 
 // Unlink and free a cached block. Cache lock held.
@@ -68,6 +104,8 @@ void drop_block(CacheBlock* victim) {
 
 void evict_one() {
     CacheBlock* victim = g_lru.front();
+    while (victim && any_held(victim))
+        victim = g_lru.next_of(victim);
     if (!victim)
         return;
     write_back(victim);
@@ -91,7 +129,7 @@ CacheBlock* get_block(Device* d, u64 n, bool will_overwrite) {
     u64 phys = pmm::alloc_page();
     if (!phys)
         return nullptr;
-    auto* b = new CacheBlock{d, n, mm::phys_to_virt<u8>(phys), 0, false, nullptr, {}};
+    auto* b = new CacheBlock{d, n, mm::phys_to_virt<u8>(phys), 0, 0, {}, nullptr, {}};
     u64 start = n * BLOCK;
     u64 end = min<u64>(start + BLOCK, d->size_bytes());
     b->valid_bytes = static_cast<u32>(end - start);
@@ -336,7 +374,7 @@ long write(Device* d, u64 offset, const void* buf, usize len) {
         if (!b)
             return -err::IO;
         memcpy(b->data + in_block, in, chunk);
-        b->dirty = true;
+        b->dirty |= unit_mask(d, in_block, chunk);
         in += chunk;
         offset += chunk;
         len -= chunk;
@@ -344,7 +382,65 @@ long write(Device* d, u64 offset, const void* buf, usize len) {
     return 0;
 }
 
+namespace {
+struct SyncHook {
+    void (*fn)(void*);
+    void* ctx;
+};
+SyncHook g_sync_hooks[16];
+usize g_sync_hook_count = 0;
+} // namespace
+
+void add_sync_hook(void (*fn)(void*), void* ctx) {
+    if (g_sync_hook_count < 16)
+        g_sync_hooks[g_sync_hook_count++] = SyncHook{fn, ctx};
+}
+
+long hold(Device* d, u64 offset, usize len, int delta) {
+    LockGuard guard(g_cache_lock);
+    while (len) {
+        u64 n = offset / BLOCK;
+        usize in_block = offset % BLOCK;
+        usize chunk = min<usize>(len, BLOCK - in_block);
+        CacheBlock* b = get_block(d, n, false);
+        if (!b)
+            return -err::IO;
+        u8 mask = unit_mask(d, in_block, chunk);
+        for (u32 k = 0; k < 8; k++)
+            if (mask & (1u << k))
+                b->held[k] = static_cast<u16>(b->held[k] + delta);
+        offset += chunk;
+        len -= chunk;
+    }
+    return 0;
+}
+
+long write_through(Device* d, u64 offset, const void* buf, usize len) {
+    if (long r = write(d, offset, buf, len); r < 0)
+        return r;
+    LockGuard guard(g_cache_lock);
+    for (u64 n = offset / BLOCK; n <= (offset + len - 1) / BLOCK; n++) {
+        CacheBlock* b = get_block(d, n, false);
+        if (!b)
+            return -err::IO;
+        if (long r = write_back(b); r < 0)
+            return r;
+    }
+    return 0;
+}
+
+long sync_device(Device* d) {
+    LockGuard guard(g_cache_lock);
+    for (CacheBlock* b : g_lru)
+        if (b->dirty && b->dev == d)
+            if (long r = write_back(b); r < 0)
+                return r;
+    return d->flush();
+}
+
 void sync_all() {
+    for (usize i = 0; i < g_sync_hook_count; i++) // file systems commit their journals
+        g_sync_hooks[i].fn(g_sync_hooks[i].ctx);
     LockGuard guard(g_cache_lock);
     bool wrote = false;
     for (CacheBlock* b : g_lru) {
@@ -364,7 +460,7 @@ CacheStats cache_stats() {
     LockGuard guard(g_cache_lock);
     u64 dirty = 0;
     for (CacheBlock* b : g_lru)
-        dirty += b->dirty;
+        dirty += b->dirty != 0;
     return CacheStats{g_cached, dirty, g_hits, g_misses};
 }
 

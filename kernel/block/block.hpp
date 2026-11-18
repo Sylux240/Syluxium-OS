@@ -46,8 +46,19 @@ void for_each(void (*fn)(Device* d, void* ctx), void* ctx);
 long read(Device* d, u64 offset, void* buf, usize len);
 long write(Device* d, u64 offset, const void* buf, usize len);
 
-// Write every dirty cached block back to its disk.
+// Write every dirty cached block back to its disk (after running the sync
+// hooks: journaling file systems commit there).
 void sync_all();
+void add_sync_hook(void (*fn)(void*), void* ctx);
+
+// Journaling support. Held bytes (delta +1 / -1, counted, tracked per
+// sector) stay in the cache and aren't written back until every hold is
+// released; the rest of the same cache block is written back as usual.
+long hold(Device* d, u64 offset, usize len, int delta);
+// Write through the cache straight to the disk (no flush; see sync_device).
+long write_through(Device* d, u64 offset, const void* buf, usize len);
+// Write back d's dirty (unheld) blocks, then flush the disk's write cache.
+long sync_device(Device* d);
 
 void init(); // start the background writeback thread
 

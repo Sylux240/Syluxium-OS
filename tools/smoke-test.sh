@@ -43,6 +43,11 @@ if [[ -z ${KEEP_DISK:-} || ! -f $DISK ]]; then
         printf 'timeout: 0\n\n/Syluxium (disk root)\n    protocol: limine\n    path: boot():/boot/syluxium.elf\n    cmdline: root=LABEL=SYLUXROOT %s\n' \
             "${ROOTCMD:-}" > "$OUT/limine-test.conf"
         mcopy -o -i "$DISK@@1M" "$OUT/limine-test.conf" ::/boot/limine/limine.conf
+    elif [[ -n ${KCMD:-} ]]; then
+        # The text console entry with extra kernel options.
+        printf 'timeout: 0\n\n/Syluxium (test)\n    protocol: limine\n    path: boot():/boot/syluxium.elf\n    cmdline: %s\n    module_path: boot():/boot/initramfs.cpio\n' \
+            "$KCMD" > "$OUT/limine-test.conf"
+        mcopy -o -i "$DISK@@1M" "$OUT/limine-test.conf" ::/boot/limine/limine.conf
     elif [[ ${DESKTOP:-0} != 1 ]]; then
         sed 's/^default_entry: 1$/default_entry: 2/' limine.conf > "$OUT/limine-test.conf"
         mcopy -o -i "$DISK@@1M" "$OUT/limine-test.conf" ::/boot/limine/limine.conf
