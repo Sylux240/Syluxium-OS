@@ -135,6 +135,13 @@ tools/smoke-test.sh   headless QEMU boot: serial log + screenshot
       - [ ] 9-firefox: Firefox (firefox-esr) is the default web browser; Konqueror only for files
       - [ ] 9-usb: USB plug and play: hot-plugged Ethernet adapters, Wi-Fi adapters and other
             peripherals just work (driver binding + desktop notification)
+      - [ ] 9-laptop: **touchpad**: precision/multi-touch drivers (I2C-HID, PS/2 Synaptics/ALPS/
+            Elantech, Apple SPI/USB trackpads on MacBooks) via libinput; settings for tap-to-click,
+            two-finger scroll + natural scrolling, speed, palm rejection, disable while typing,
+            gestures. **Battery/power**: ACPI battery + AC adapter (percentage, time left, charging),
+            taskbar battery icon with low-battery warnings, power plans (balanced / power saver /
+            performance: CPU frequency scaling, screen brightness, idle timeouts), brightness keys,
+            charge limit where supported (ThinkPads); all in Control Panel → Power Options / Mouse
       - [ ] 9-android: run **Android apps** that feel native: a Waydroid-style Android
             userspace (LineageOS-based image) in a container, on kernel-side Android support
             (binder/binderfs, ashmem-compatible memfd, namespaces/cgroups); each app in its own
