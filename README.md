@@ -123,6 +123,16 @@ tools/smoke-test.sh   headless QEMU boot: serial log + screenshot
             konqueror, konsole, kcontrol, ksmserver), D-Bus system + session buses, ld.so.cache,
             `starttde-test` session script (aRts sound server off; ALSA is used directly)
       - [ ] 9-boot: boot from a disk root filesystem instead of a 350 MB initramfs; a login/session
+      - [ ] 9-install: Syluxium's own on-disk filesystem + a GUI installer run from the live USB
+      - [ ] 9-power: real power off / restart: ACPI S5 power-off, ACPI reset register or keyboard
+            controller restart, sync + unmount first; working `poweroff`/`reboot`/`halt`; TDE
+            Start → Shut Down / Restart call them (TDE shutdown backend or its shutdown-command fallback)
+      - [ ] 9-sound: sound enabled by default in TDE (aRts on, or TDE using ALSA directly)
+      - [ ] 9-firefox: Firefox (firefox-esr) is the default web browser; Konqueror only for files
+      - [ ] 9-usb: USB plug and play: hot-plugged Ethernet adapters, Wi-Fi adapters and other
+            peripherals just work (driver binding + desktop notification)
+      - [ ] 9-wine: run Windows .exe programs out of the box (Wine, preconfigured; double-click an
+            .exe and it runs, no user setup)
       - [x] 9b (first part): green glossy **"Start"** button (Syluxium's own tiles,
             tools/make-start-tiles.py), no desktop pager, a single desktop (/etc/trinity defaults)
       - [x] 9b: boots straight into TDE (boot menu: "Syluxium" = desktop, "Syluxium (text
