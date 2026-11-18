@@ -141,7 +141,8 @@ constexpr u8 DESC_DEVICE = 1, DESC_CONFIGURATION = 2, DESC_STRING = 3, DESC_INTE
 } // namespace usb
 
 namespace ehci {
-void register_driver(); // takes EHCI controllers from the firmware (USB legacy handoff)
+void register_driver(); // USB 2.0 controllers
+void enumerate_all();   // scan their root ports (after all PCI drivers are probed)
 }
 
 namespace xhci {

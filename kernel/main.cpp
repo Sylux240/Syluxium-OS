@@ -268,6 +268,7 @@ void discover_hardware() {
         return d->bus == dev::Bus::Pci && ((cls >> 8) == 0x01 || cls == 0x0C03);
     });
     xhci::enumerate_all();
+    ehci::enumerate_all();
     mount_disk_root(); // root= on the command line: an installed system on disk
     dev::probe_all();
     sysfs::populate_devices();
