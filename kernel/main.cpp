@@ -1,3 +1,4 @@
+#include <power/cpupower.hpp>
 #include <acpi/acpi.hpp>
 #include <acpi/power.hpp>
 #include <acpi/devices.hpp>
@@ -479,6 +480,7 @@ void kernel_main_thread(void*) {
 
     // Every CPU is now off the bootloader's stacks and page tables.
     sysfs::init(); // needs the final CPU count
+    cpupower::publish(); // cpufreq files; idle CPUs go tickless from here
     discover_hardware();
     acpi::start_interpreter(); // AML: power button, battery, lid (after PCI)
     u64 reclaimed = pmm::reclaim_bootloader_memory();
@@ -600,6 +602,7 @@ extern "C" [[noreturn]] void kmain() {
 
     sched::init();
     sched::spawn("kmain", kernel_main_thread, nullptr);
+    cpupower::init_cpu();
     apic::start_timer(sched::TICK_HZ);
     sched::enter(); // never returns: the boot stack is abandoned here
 }

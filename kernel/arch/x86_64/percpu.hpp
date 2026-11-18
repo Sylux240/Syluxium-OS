@@ -38,6 +38,14 @@ struct alignas(64) Cpu {
     u64 ticks = 0;
     u64 context_switches = 0;
     u64 user_ticks = 0, system_ticks = 0, idle_ticks = 0; // for /proc/stat and CPU usage graphs
+
+    // Power: tickless idle and frequency.
+    bool tickless = false;   // idle with the periodic tick stopped (one-shot armed)
+    u64 idle_since_ns = 0;
+    u64 window_ticks = 0, window_idle = 0; // load over the governor's window
+    u32 cur_khz = 0;         // measured (APERF/MPERF) or set frequency
+    u32 cur_ratio = 0;       // legacy governor: the ratio last written
+    u64 last_aperf = 0, last_mperf = 0;
 };
 
 static_assert(__builtin_offsetof(Cpu, self) == cpu_local::OFFSET_SELF);

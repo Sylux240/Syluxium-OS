@@ -10,6 +10,7 @@
 #include <lib/string.hpp>
 #include <mm/vmalloc.hpp>
 #include <mm/vmm.hpp>
+#include <power/cpupower.hpp>
 #include <proc/process.hpp>
 #include <sched/sched.hpp>
 #include <time/clock.hpp>
@@ -162,11 +163,78 @@ Cpu* least_loaded_cpu() {
     return best ? best : this_cpu();
 }
 
+// ---- tickless idle ----
+// An idle CPU stops its periodic tick: it arms a one-shot timer for its
+// next sleeping thread's deadline (at most IDLE_MAX_NS away) and sleeps
+// until that or another interrupt. The tick resumes when it picks up work.
+constexpr u64 IDLE_MAX_NS = 50'000'000;
+constexpr u64 IDLE_MIN_NS = 2'000'000;
+
+// Idle time while tickless counts as idle ticks (for /proc/stat).
+void credit_idle(Cpu* cpu, u64 now) {
+    u64 ms = (now - cpu->idle_since_ns) / 1'000'000;
+    cpu->ticks += ms;
+    cpu->idle_ticks += ms;
+    cpu->idle_since_ns += ms * 1'000'000;
+}
+
+void resume_tick(Cpu* cpu) {
+    if (!cpu->tickless)
+        return;
+    credit_idle(cpu, clock::now_ns());
+    cpu->tickless = false;
+    apic::start_timer(TICK_HZ);
+}
+
+// Work queued on a busy CPU: wake a sleeping idle CPU to steal it.
+void kick_idle_cpu(Cpu* self) {
+    u32 n = percpu::count();
+    for (u32 i = 0; i < n; i++) {
+        Cpu* c = percpu::get(i);
+        if (c && c != self && __atomic_load_n(&c->online, __ATOMIC_ACQUIRE) &&
+            __atomic_load_n(&c->tickless, __ATOMIC_ACQUIRE) && c->current == c->rq.idle) {
+            apic::send_ipi(c->lapic_id, interrupts::VEC_RESCHEDULE);
+            return;
+        }
+    }
+}
+
 void idle_loop(void*) {
     for (;;) {
-        // `sti; hlt` as one asm statement: sti only takes effect after the
-        // next instruction, so a wakeup IPI can't slip in before the hlt.
-        asm volatile("sti; hlt" ::: "memory");
+        arch::cli();
+        Cpu* cpu = this_cpu();
+        u64 expected = 0;
+        if (cpupower::tickless_enabled() && !cpu->need_resched) {
+            RunQueue& rq = cpu->rq;
+            rq.lock.lock();
+            u64 now = clock::now_ns();
+            if (cpu->tickless)
+                credit_idle(cpu, now);
+            if (rq.ready.empty()) {
+                u64 until = now + IDLE_MAX_NS;
+                if (Thread* t = rq.sleepers.front(); t && t->wake_deadline < until)
+                    until = t->wake_deadline;
+                expected = until > now ? until - now : 0;
+                if (expected >= IDLE_MIN_NS) {
+                    if (!cpu->tickless) {
+                        cpu->idle_since_ns = now;
+                        __atomic_store_n(&cpu->tickless, true, __ATOMIC_RELEASE);
+                    }
+                    apic::timer_oneshot_ns(expected);
+                }
+            }
+            rq.lock.unlock();
+        }
+        if (cpu->tickless && expected < IDLE_MIN_NS)
+            resume_tick(cpu);
+        if (cpu->need_resched) {
+            arch::sti();
+            schedule();
+            continue;
+        }
+        // Sleeps with interrupts enabled atomically (sti's delay), so a
+        // wakeup IPI can't slip in before the hlt/mwait.
+        cpupower::idle(expected);
     }
 }
 
@@ -286,6 +354,8 @@ void schedule() {
         return;
     }
 
+    if (prev == rq.idle)
+        resume_tick(cpu); // leaving tickless idle: real work needs the tick
     __atomic_store_n(&next->on_cpu, true, __ATOMIC_RELAXED);
     next->cpu = cpu;
     next->context_switches++;
@@ -330,6 +400,8 @@ void wake(Thread* t) {
             c->need_resched = true;
         else if (__atomic_load_n(&c->online, __ATOMIC_ACQUIRE))
             apic::send_ipi(c->lapic_id, interrupts::VEC_RESCHEDULE);
+    } else if (queued) {
+        kick_idle_cpu(c);
     }
     irq_restore(flags);
 }
@@ -429,20 +501,28 @@ void sleep_ns(u64 ns) {
 
 void timer_tick(bool from_user) {
     Cpu* cpu = this_cpu();
-    cpu->ticks++;
-    if (!cpu->online)
+    if (!cpu->online) {
+        cpu->ticks++;
         return;
+    }
 
-    // CPU time accounting: who was running when the tick hit?
+    // CPU time accounting: who was running when the tick hit? (A tickless
+    // idle CPU's one-shot wakeup isn't a tick: the idle loop credits it.)
     Thread* running = cpu->current;
-    if (running == cpu->rq.idle) {
-        cpu->idle_ticks++;
-    } else if (from_user) {
-        cpu->user_ticks++;
-        running->utime_ticks++;
-    } else {
-        cpu->system_ticks++;
-        running->stime_ticks++;
+    if (!cpu->tickless) {
+        cpu->ticks++;
+        cpu->window_ticks++;
+        if (running == cpu->rq.idle) {
+            cpu->idle_ticks++;
+            cpu->window_idle++;
+        } else if (from_user) {
+            cpu->user_ticks++;
+            running->utime_ticks++;
+        } else {
+            cpu->system_ticks++;
+            running->stime_ticks++;
+        }
+        cpupower::tick(cpu);
     }
 
     u64 now = clock::now_ns();
@@ -471,7 +551,10 @@ void timer_tick(bool from_user) {
         else
             cur->slice_left = TIME_SLICE_TICKS; // nobody waiting: keep running
     }
+    bool backlog = cur != rq.idle && !rq.ready.empty() && cpu->ticks % 4 == 0;
     rq.lock.unlock();
+    if (backlog)
+        kick_idle_cpu(cpu);
 }
 
 void prepare_cpu(Cpu* cpu) {

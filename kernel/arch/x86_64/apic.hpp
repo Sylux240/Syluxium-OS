@@ -18,6 +18,7 @@ void eoi();
 void calibrate_timer();
 void start_timer(u32 hz);
 u32 timer_ticks_per_ms();
+void timer_oneshot_ns(u64 ns); // one interrupt after `ns` (idle CPUs; start_timer resumes ticking)
 
 void send_ipi(u32 lapic_id, u8 vector);
 void broadcast_ipi_others(u8 vector);

@@ -151,6 +151,17 @@ void start_timer(u32 hz) {
 
 u32 timer_ticks_per_ms() { return g_ticks_per_ms; }
 
+void timer_oneshot_ns(u64 ns) {
+    u64 count = ns * g_ticks_per_ms / 1'000'000;
+    if (count < 1)
+        count = 1;
+    if (count > 0xFFFFFFFFull)
+        count = 0xFFFFFFFFull;
+    write(REG_TIMER_DIV, 0x3);
+    write(REG_LVT_TIMER, interrupts::VEC_TIMER); // one-shot
+    write(REG_TIMER_INIT, static_cast<u32>(count));
+}
+
 void send_ipi(u32 lapic_id, u8 vector) { write_icr(lapic_id, vector | ICR_ASSERT); }
 
 void broadcast_ipi_others(u8 vector) { write_icr(0, vector | ICR_ASSERT | ICR_ALL_BUT_SELF); }

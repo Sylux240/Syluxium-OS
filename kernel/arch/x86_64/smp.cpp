@@ -1,3 +1,4 @@
+#include <power/cpupower.hpp>
 #include <arch/x86_64/apic.hpp>
 #include <arch/x86_64/fpu.hpp>
 #include <arch/x86_64/gdt.hpp>
@@ -27,6 +28,7 @@ namespace {
     fpu::init_ap();
     syscall::init_cpu();
     apic::init_ap();
+    cpupower::init_cpu();
     apic::start_timer(sched::TICK_HZ);
 
     sched::enter();          // switch to this CPU's idle thread; marks us online
