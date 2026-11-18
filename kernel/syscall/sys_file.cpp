@@ -1249,6 +1249,33 @@ long sys_fchmodat(SYSCALL_ARGS) {
     return chmod_inode(n, a2);
 }
 
+// fchmodat2(dirfd, path, mode, flags): fchmodat with flags (Linux 6.6+;
+// coreutils uses it). AT_SYMLINK_NOFOLLOW on a symlink: links have no mode.
+long sys_fchmodat2(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    Process* p = proc::current();
+    UserPath path(a1);
+    if (path.error())
+        return path.error();
+    Inode* n;
+    u32 flags = static_cast<u32>(a3);
+    if (path.c_str()[0] == 0 && (flags & AT_EMPTY_PATH)) {
+        FileRef f(p, static_cast<i32>(a0));
+        if (!f)
+            return -err::BADF;
+        n = f->inode;
+    } else {
+        Inode* base;
+        if (long r = dir_for(p, static_cast<i32>(a0), path.c_str(), &base); r < 0)
+            return r;
+        if (long r = resolve(path.c_str(), base, !(flags & AT_SYMLINK_NOFOLLOW), &n); r < 0)
+            return r;
+        if (is_lnk(n->mode))
+            return -err::OPNOTSUPP;
+    }
+    return chmod_inode(n, a2);
+}
+
 // Networking arrives in phase 6; programs probing for sockets get clean errors.
 long sys_socket(SYSCALL_ARGS) { SYSCALL_UNUSED; return -97; /* EAFNOSUPPORT */ }
 long sys_not_socket(SYSCALL_ARGS) { SYSCALL_UNUSED; return -88; /* ENOTSOCK */ }
@@ -1583,6 +1610,7 @@ void register_file() {
     set(266, sys_symlinkat, "symlinkat");
     set(267, sys_readlinkat, "readlinkat");
     set(268, sys_fchmodat, "fchmodat");
+    set(452, sys_fchmodat2, "fchmodat2");
     set(269, sys_faccessat, "faccessat");
     set(292, sys_dup3, "dup3");
     set(439, sys_faccessat, "faccessat2");

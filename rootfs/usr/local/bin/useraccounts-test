@@ -1,0 +1,17 @@
+#!/bin/sh
+# Bring-up aid: start the login screen, log in (the caller presses Enter),
+# then open the user-accounts tools on the user's desktop.
+startdesktop &
+sleep "${1:-60}"
+export DISPLAY=:0
+su syluxium -s /bin/sh -c "env HOME=/home/syluxium XDG_RUNTIME_DIR=/run/user/1000 ICEAUTHORITY=/run/user/1000/ICEauthority DISPLAY=:0 /opt/trinity/bin/tdecmshell kcm_useraccount > /tmp/kcm.log 2>&1 &"
+XAUTHORITY="$(ls /var/run/xauth/A:0-* | head -1)" /opt/trinity/bin/kuser > /tmp/kuser.log 2>&1 &
+sleep "${2:-20}"
+{
+    echo "=== command-line account tools:"
+    useradd -m -s /bin/bash -c "Test Person" -G sudo,audio,video testperson && echo "useradd ok"
+    echo "testperson:Secret123" | chpasswd && echo "chpasswd ok"
+    grep testperson /etc/passwd /etc/group | head -5; grep -c '^testperson:\$' /etc/shadow
+    ls -ld /home/testperson; su testperson -s /bin/sh -c id
+    userdel -r testperson && echo "userdel ok"; ls -d /home/testperson 2>&1
+    echo "=== kcm:"; tail -5 /tmp/kcm.log; echo "=== kuser:"; tail -5 /tmp/kuser.log; } > /dev/console 2>&1

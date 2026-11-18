@@ -1,0 +1,14 @@
+# Syluxium: User Accounts (KUser) defaults.
+[general]
+showsys=false
+
+[connection-default]
+source=Files
+shell=/bin/bash
+homepath=/home/%U
+firstUID=1000
+firstGID=1000
+createHomeDir=true
+copySkel=true
+userPrivateGroup=true
+md5shadow=true

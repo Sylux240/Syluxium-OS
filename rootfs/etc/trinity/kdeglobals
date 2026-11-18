@@ -1,0 +1,5 @@
+# Syluxium: system-wide TDE defaults.
+# "Run as administrator" asks for your own password (sudo; members of the
+# "sudo" group are administrators). root has no password.
+[super-user-command]
+super-user-command=sudo

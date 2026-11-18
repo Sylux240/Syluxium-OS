@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=User Accounts
+GenericName=User Accounts
+Comment=Add, remove and change user accounts, passwords and account types
+Exec=kuser
+Icon=kuser
+X-TDE-SubstituteUID=true
+Categories=Qt;TDE;Settings;System;
