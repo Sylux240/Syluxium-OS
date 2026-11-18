@@ -135,6 +135,12 @@ tools/smoke-test.sh   headless QEMU boot: serial log + screenshot
       - [ ] 9-firefox: Firefox (firefox-esr) is the default web browser; Konqueror only for files
       - [ ] 9-usb: USB plug and play: hot-plugged Ethernet adapters, Wi-Fi adapters and other
             peripherals just work (driver binding + desktop notification)
+      - [ ] 9-android: run **Android apps** that feel native: a Waydroid-style Android
+            userspace (LineageOS-based image) in a container, on kernel-side Android support
+            (binder/binderfs, ashmem-compatible memfd, namespaces/cgroups); each app in its own
+            desktop window with taskbar entry, start-menu shortcut and icon, shared clipboard,
+            files, sound, network, input; install .apk by double-click and from the App Store
+            (F-Droid/Aurora sources; Google Play Services can't be bundled, user-installable)
       - [ ] 9-wine: run Windows .exe programs out of the box (Wine, preconfigured; double-click an
             .exe and it runs, no user setup)
       - [x] 9b (first part): green glossy **"Start"** button (Syluxium's own tiles,
