@@ -251,6 +251,7 @@ void discover_hardware() {
     nvme::register_driver();
     xhci::register_driver();
     ehci::register_driver();
+    uhci::register_driver();
     net::init(); // loopback first: it becomes ifindex 1, like Linux
     e1000::register_driver();
     virtio_net::register_driver();
@@ -269,6 +270,7 @@ void discover_hardware() {
     });
     xhci::enumerate_all();
     ehci::enumerate_all();
+    uhci::enumerate_all();
     mount_disk_root(); // root= on the command line: an installed system on disk
     dev::probe_all();
     sysfs::populate_devices();

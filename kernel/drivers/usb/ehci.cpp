@@ -43,7 +43,7 @@ constexpr u32 PORT_RW1C = PORT_CSC | PORT_PEC | (1u << 5);
 // Link pointer bits.
 constexpr u32 LINK_TERMINATE = 1, TYPE_QH = 2;
 // qTD token.
-constexpr u32 TOKEN_ACTIVE = 1u << 7, TOKEN_HALTED = 1u << 6, TOKEN_ERRORS = 0x7C, TOKEN_IOC = 1u << 15;
+constexpr u32 TOKEN_ACTIVE = 1u << 7, TOKEN_HALTED = 1u << 6, TOKEN_IOC = 1u << 15;
 constexpr u32 PID_OUT = 0, PID_IN = 1, PID_SETUP = 2;
 
 struct alignas(32) Qtd {
