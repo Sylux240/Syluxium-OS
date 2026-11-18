@@ -259,6 +259,25 @@ tools/smoke-test.sh   headless QEMU boot: serial log + screenshot
       - Network stack: TCP sequence randomization, SYN flood handling, malformed packet tests
       - Responsible process: findings tracked, regression test per fixed bug
 
+- [ ] **Platform features** (firmware and CPU), in this order:
+      1. [ ] **CPU power states**: P-states (intel_pstate/HWP, AMD amd-pstate/CPPC, ACPI _PSS) and
+         C-states (MWAIT/ACPI _CST idle) - battery life, laptop heat and fan noise
+      2. [ ] **UEFI runtime services**: the installer makes itself the default boot entry
+         (BootOrder variables), firmware clock, "restart into firmware setup"; later firmware
+         updates (capsules through fwupd)
+      3. [ ] **TPM 2.0**: TIS and CRB drivers (found through ACPI's TPM2 table), /dev/tpm0 and
+         /dev/tpmrm0 like Linux so tpm2-tools work; then measured boot and TPM-unlocked disk
+         encryption (with an encrypted-disk option in the installer); tested with QEMU's swtpm
+      4. [ ] **IOMMU** (Intel VT-d via DMAR, AMD-Vi via IVRS): DMA remapping per device so a
+         malicious Thunderbolt/USB4 device can't read memory (part of the security review);
+         needed for GPU passthrough to VMs
+      5. [ ] **Resizable BAR** (with Phase 10): keep the firmware's setting and resize the GPU's
+         BAR when it didn't, so the CPU sees all of the VRAM
+      6. [ ] **Hypervisor** (VT-x/AMD-V, KVM-compatible /dev/kvm; with the Android work): virtual
+         machines, Android as a fast VM, QEMU/virt-manager acceleration
+      7. [ ] **Thunderbolt / USB4**: the controller stack (hot-plug docks, PCIe tunneling)
+      (Secure Boot: set aside for now)
+
 - [ ] **Phase 11**: **App Store** + package installer (.deb only; .rpm dropped): a Play Store-like
       app with screenshots, icons, descriptions, ratings/details, categories and search, pulling
       .deb packages from several repositories (Debian, Ubuntu, third-party apt repos); double-click
