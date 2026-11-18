@@ -145,6 +145,11 @@ void register_driver(); // USB 2.0 controllers
 void enumerate_all();   // scan their root ports (after all PCI drivers are probed)
 }
 
+namespace ohci {
+void register_driver(); // USB 1.1 (AMD, NVIDIA, SiS, Apple, servers)
+void enumerate_all();
+}
+
 namespace uhci {
 void register_driver(); // USB 1.1 (Intel; EHCI's companions until ~2011)
 void enumerate_all();
