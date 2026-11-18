@@ -1,3 +1,7 @@
 # One desktop (no virtual-desktop switching), like Windows.
 [Desktops]
 Number=1
+
+# New windows (installer steps, dialogs) get the keyboard, as on Windows.
+[Windows]
+FocusStealingPreventionLevel=0
