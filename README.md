@@ -155,7 +155,9 @@ tools/smoke-test.sh   headless QEMU boot: serial log + screenshot
             (PAM), a first-boot / installer step that creates the first account, and a **User
             Accounts** control panel: add/remove users, change password and picture, account type
             (administrator / standard), sudo-style "run as administrator" prompts, lock screen
-      - [ ] 9-install: Syluxium's own on-disk filesystem + a GUI installer run from the live USB
+      - [x] 9-install: graphical installer on the live desktop (wizard: disk, name, user, password,
+            computer name, progress) -> GPT + ext4 (journaled) + Limine UEFI/BIOS; installed
+            disk boots and logs in. Later: dual boot/manual partitions, time zone, keyboard, language
       - [ ] 9-power: real power off / restart: ACPI S5 power-off, ACPI reset register or keyboard
             controller restart, sync + unmount first; working `poweroff`/`reboot`/`halt`; TDE
             Start → Shut Down / Restart call them (TDE shutdown backend or its shutdown-command fallback)
@@ -163,7 +165,7 @@ tools/smoke-test.sh   headless QEMU boot: serial log + screenshot
             lid, keyboard/mouse; Start → Sleep, lid close) and later Hibernate (S4); **screen
             timeout**: blank/power off the display after N minutes idle (DPMS), lock optional,
             settings in Control Panel → Power Options
-      - [ ] 9-sound: sound enabled by default in TDE (aRts on, or TDE using ALSA directly)
+      - [x] 9-sound: sound on by default (aRts runs; the "cpu overload" abort was a CPU-time clock bug)
       - [ ] 9-firefox: Firefox (firefox-esr) is the default web browser; Konqueror only for files
       - [ ] 9-usb: USB plug and play: hot-plugged Ethernet adapters, Wi-Fi adapters and other
             peripherals just work (driver binding + desktop notification)
