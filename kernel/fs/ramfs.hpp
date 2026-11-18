@@ -25,6 +25,16 @@ public:
     usize child_count() const { return m_count; }
     // Swap the inode an existing entry points to (mount/umount); returns the old one.
     vfs::Inode* replace(const char* name, usize len, vfs::Inode* node);
+    long link(const char* name, usize len, vfs::Inode* target) override {
+        if (!target->shared_mappable()) // RAM files only (not device or proc nodes)
+            return -err::XDEV;
+        long r = attach(name, len, target);
+        if (r == 0) {
+            target->nlink++;
+            target->ctime = vfs::now();
+        }
+        return r;
+    }
 
 private:
     struct Child {

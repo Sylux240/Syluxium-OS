@@ -35,7 +35,10 @@ rm -f "$SOCK" "$LOG" "$PPM"
 # Boot a private copy so this works even while `make run` has the image open.
 # KEEP_DISK=1 reuses the copy from the previous run (persistence tests).
 DISK="$OUT/disk-$MODE.img"
-if [[ -z ${KEEP_DISK:-} || ! -f $DISK ]]; then
+# BOOTDISK=<img> boots that disk image as it is (an installed system).
+if [[ -n ${BOOTDISK:-} ]]; then
+    DISK=$BOOTDISK
+elif [[ -z ${KEEP_DISK:-} || ! -f $DISK ]]; then
     cp "$IMAGE" "$DISK"
     # Tests type at the text console, so boot the "text console" entry
     # unless DESKTOP=1 (boot straight into TDE like a real install).
@@ -88,7 +91,8 @@ trap 'kill $QEMU_PID 2>/dev/null || true' EXIT
 # Wait for the shell prompt (or give up after <seconds>): with KVM the system
 # is usually ready long before the limit.
 waited=0
-until grep -q "root@syluxium" "$LOG" 2>/dev/null; do
+# READY=<text>: wait for that instead (e.g. a login screen, no shell prompt).
+until grep -q "${READY:-root@syluxium}" "$LOG" 2>/dev/null; do
     sleep 0.5
     waited=$((waited + 1))
     if (( waited >= SECONDS_TO_RUN * 2 )) || ! kill -0 $QEMU_PID 2>/dev/null; then

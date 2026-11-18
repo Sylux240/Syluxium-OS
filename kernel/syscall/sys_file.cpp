@@ -722,14 +722,12 @@ long do_linkat(long olddirfd, u64 old_user, long newdirfd, u64 new_user, u32 fla
     // protected_hardlinks: only to files we own or could read and write.
     if (!proc::owns(target) && proc::permission(target, proc::MAY_READ | proc::MAY_WRITE) < 0)
         return -err::PERM;
-    if (!dir->is_ramfs_dir() || !target->shared_mappable())
-        return -err::XDEV; // hard links exist only within tmpfs for now
     if (dir->lookup(name, len))
         return -err::EXIST;
-    if (long r = static_cast<ramfs::Dir*>(dir)->attach(name, len, target); r < 0)
+    if (target->dev != dir->dev)
+        return -err::XDEV;
+    if (long r = dir->link(name, len, target); r < 0)
         return r;
-    target->nlink++;
-    target->ctime = vfs::now();
     inotify::child_event(dir, inotify::IN_CREATE, name, len);
     return 0;
 }

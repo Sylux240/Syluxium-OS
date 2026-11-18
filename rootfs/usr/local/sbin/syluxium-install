@@ -1,0 +1,104 @@
+#!/bin/bash
+# Install Syluxium from the running (live) system onto a disk.
+#   syluxium-install --disk /dev/sdX --user NAME --password PASS
+#                    [--fullname "Full Name"] [--hostname NAME] [--progress CMD]
+# Everything on the disk is erased: GPT with a BIOS boot partition (for
+# Limine on BIOS PCs), a FAT32 EFI system partition and an ext4 root. Boots with UEFI and BIOS (Limine). --progress CMD is run as
+# "CMD <step> <text>" after each step (the graphical installer's progress bar).
+set -e
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+BOOT=/usr/lib/syluxium/boot
+TARGET=/mnt/syluxium-target
+DISK= USERNAME= PASSWORD= FULLNAME= HOSTNAME_NEW=syluxium PROGRESS=
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --disk) DISK=$2; shift ;;
+        --user) USERNAME=$2; shift ;;
+        --password) PASSWORD=$2; shift ;;
+        --fullname) FULLNAME=$2; shift ;;
+        --hostname) HOSTNAME_NEW=$2; shift ;;
+        --progress) PROGRESS=$2; shift ;;
+        *) echo "unknown option $1" >&2; exit 2 ;;
+    esac
+    shift
+done
+[ "$(id -u)" = 0 ] || { echo "syluxium-install: must run as root" >&2; exit 1; }
+[ -b "$DISK" ] && [ -n "$USERNAME" ] && [ -n "$PASSWORD" ] || { echo "usage: see the top of $0" >&2; exit 2; }
+echo "$USERNAME" | grep -Eq '^[a-z_][a-z0-9_-]{0,31}$' || { echo "invalid user name: $USERNAME" >&2; exit 2; }
+[ -n "$FULLNAME" ] || FULLNAME=$USERNAME
+
+step() { echo "[install] $1/9 $2"; [ -z "$PROGRESS" ] || $PROGRESS "$1" "$2" || true; }
+part() { case "$DISK" in *[0-9]) echo "${DISK}p$1" ;; *) echo "${DISK}$1" ;; esac; }
+
+step 1 "Preparing $DISK"
+for m in $(awk -v d="$DISK" 'index($1, d) == 1 {print $2}' /proc/mounts | sort -r); do umount "$m"; done
+
+step 2 "Creating partitions"
+sfdisk --quiet --wipe always --label gpt "$DISK" <<PARTS
+size=1MiB, type=21686148-6449-6E6F-744E-656564454649, name="BIOS boot"
+size=512MiB, type=uefi, name="EFI system"
+type=linux, name="Syluxium"
+PARTS
+sleep 1
+ESP=$(part 2) ROOT=$(part 3)
+[ -b "$ESP" ] && [ -b "$ROOT" ] || { echo "partitions $ESP / $ROOT did not appear" >&2; exit 1; }
+
+step 3 "Formatting"
+mkfs.vfat -F 32 -n SYLUXEFI "$ESP" > /dev/null
+mkfs.ext4 -q -F -L Syluxium "$ROOT"
+UUID=$(dumpe2fs -h "$ROOT" 2>/dev/null | awk '/^Filesystem UUID:/ {print $3}')
+[ -n "$UUID" ] || { echo "could not read the new file system's UUID" >&2; exit 1; }
+
+step 4 "Copying Syluxium (this takes a few minutes)"
+mkdir -p "$TARGET"
+mount -t ext4 "$ROOT" "$TARGET"
+for entry in /*; do
+    name=${entry#/}
+    case "$name" in proc|sys|dev|run|tmp|mnt|media|lost+found) continue ;; esac
+    cp -a "$entry" "$TARGET/"
+done
+mkdir -p "$TARGET"/{proc,sys,dev,run,mnt,media,tmp,boot/efi}
+chmod 1777 "$TARGET/tmp"
+rm -rf "$TARGET/home/"* "$TARGET/root/.ICEauthority" "$TARGET/root/.trinity/socket-"* 2>/dev/null || true
+
+step 5 "Creating your account"
+userdel -P "$TARGET" syluxium 2>/dev/null || true
+groupdel -P "$TARGET" syluxium 2>/dev/null || true
+useradd -P "$TARGET" -m -s /bin/bash -c "$FULLNAME" -G sudo,audio,video,input,plugdev,netdev,users "$USERNAME"
+echo "$USERNAME:$PASSWORD" | chpasswd -P "$TARGET"
+sed -i "s/^DefaultUser=.*/DefaultUser=$USERNAME/" "$TARGET/etc/trinity/tdm/tdmrc"
+
+step 6 "Setting the computer name"
+echo "$HOSTNAME_NEW" > "$TARGET/etc/hostname"
+sed -i "s/^127\.0\.1\.1.*/127.0.1.1\t$HOSTNAME_NEW/" "$TARGET/etc/hosts"
+
+step 7 "Installing the boot loader"
+mount -t vfat "$ESP" "$TARGET/boot/efi"
+mkdir -p "$TARGET/boot/efi/EFI/BOOT" "$TARGET/boot/efi/boot/limine"
+cp "$BOOT/BOOTX64.EFI" "$TARGET/boot/efi/EFI/BOOT/"
+cp "$BOOT/syluxium.elf" "$TARGET/boot/efi/boot/"
+cp "$BOOT/limine-bios.sys" "$TARGET/boot/efi/boot/limine/"
+cat > "$TARGET/boot/efi/boot/limine/limine.conf" <<CONF
+timeout: 3
+default_entry: 1
+
+/Syluxium
+    protocol: limine
+    path: boot():/boot/syluxium.elf
+    cmdline: root=UUID=$UUID desktop
+
+/Syluxium (text console)
+    protocol: limine
+    path: boot():/boot/syluxium.elf
+    cmdline: root=UUID=$UUID
+CONF
+"$BOOT/limine" bios-install "$DISK" > /dev/null
+
+step 8 "Saving"
+sync
+umount "$TARGET/boot/efi"
+umount "$TARGET"
+sync
+
+step 9 "Done"
+echo "[install] Syluxium is installed on $DISK (root UUID $UUID)."

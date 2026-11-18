@@ -14,7 +14,13 @@ while IFS=: read -r name _ uid gid _ home _; do
     if [ ! -d "$home" ]; then
         mkdir -p "$home" && cp -a /etc/skel/. "$home/" 2>/dev/null
     fi
-    if [ "$(stat -c %u "$home")" != "$uid" ]; then
+    # The live system (root in RAM): an "Install Syluxium" icon on the desktop.
+    if [ "$(awk '$2 == "/" {print $3}' /proc/mounts)" = ramfs ]; then
+        mkdir -p "$home/Desktop"
+        cp /usr/share/applications/syluxium-installer.desktop "$home/Desktop/Install Syluxium.desktop"
+        chmod +x "$home/Desktop/Install Syluxium.desktop"
+    fi
+    if [ "$(stat -c %u "$home")" != "$uid" ] || [ "$(stat -c %u "$home/Desktop" 2>/dev/null)" = 0 ]; then
         chown -R "$uid:$gid" "$home" && chmod 750 "$home"
     fi
 done < /etc/passwd

@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Install Syluxium
+Comment=Install Syluxium on this computer's disk
+Exec=syluxium-installer
+Icon=system-software-install
+X-TDE-SubstituteUID=true
+Categories=Qt;TDE;System;

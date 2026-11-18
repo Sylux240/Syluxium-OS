@@ -1,0 +1,76 @@
+#!/bin/bash
+# The graphical installer (runs as root: started through the "Install
+# Syluxium" icon, which asks for an administrator password). A wizard of
+# kdialog windows; syluxium-install does the work.
+export PATH=/opt/trinity/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+TITLE="Install Syluxium"
+die() { kdialog --title "$TITLE" --error "$1"; exit 1; }
+[ "$(id -u)" = 0 ] || exec tdesudo -c "$0" -- "$@"
+
+kdialog --title "$TITLE" --yesno "Welcome to Syluxium!
+
+This will install Syluxium on your computer's disk, so it starts without
+the USB stick and keeps your files.
+
+Continue?" || exit 0
+
+# Disks: whole disks, not the one the live system was started from.
+live_disk=$(awk '$2 == "/boot/efi" {print $1}' /proc/mounts | sed 's/[0-9]*$//; s/p$//')
+items=()
+for d in /dev/sd? /dev/nvme?n? /dev/vd?; do
+    [ -b "$d" ] || continue
+    [ "$d" = "$live_disk" ] && continue
+    kib=$(sfdisk --show-size "$d" 2>/dev/null) || continue
+    [ "$kib" -ge 8000000 ] 2>/dev/null || [ "$kib" -ge 3000000 ] || continue
+    model=$(cat "/sys/class/block/${d#/dev/}/device/model" 2>/dev/null | tr -s ' ')
+    items+=("$d  -  $((kib / 1048576)) GB  ${model:-disk}")
+done
+[ ${#items[@]} -gt 0 ] || die "No disk to install on was found (at least 3 GB is needed)."
+choice=$(kdialog --title "$TITLE" --combobox "Where should Syluxium be installed?" "${items[@]}") || exit 0
+disk=${choice%% *}
+[ -b "$disk" ] || die "Please choose a disk."
+
+kdialog --title "$TITLE" --warningcontinuecancel "Everything on $disk will be erased.
+
+All files, programs and other operating systems on this disk will be
+permanently deleted." --continue-label "Erase and install" || exit 0
+
+fullname=$(kdialog --title "$TITLE" --inputbox "Your name:" "") || exit 0
+suggest=$(echo "$fullname" | awk '{print tolower($1)}' | tr -cd 'a-z0-9_-')
+[ -n "$suggest" ] || suggest=user
+while :; do
+    user=$(kdialog --title "$TITLE" --inputbox "User name (for signing in; small letters and numbers):" "$suggest") || exit 0
+    echo "$user" | grep -Eq '^[a-z_][a-z0-9_-]{0,31}$' && [ "$user" != root ] && break
+    kdialog --title "$TITLE" --sorry "\"$user\" can't be used: use small letters, numbers, - and _ (starting with a letter)."
+done
+while :; do
+    pass1=$(kdialog --title "$TITLE" --password "Choose a password for $user:") || exit 0
+    pass2=$(kdialog --title "$TITLE" --password "Type the password again:") || exit 0
+    [ -z "$pass1" ] && { kdialog --title "$TITLE" --sorry "The password can't be empty."; continue; }
+    [ "$pass1" = "$pass2" ] && break
+    kdialog --title "$TITLE" --sorry "The passwords don't match. Please try again."
+done
+host=$(kdialog --title "$TITLE" --inputbox "Computer name (how it appears on the network):" "${user}-pc") || exit 0
+host=$(echo "$host" | tr -cd 'A-Za-z0-9-'); [ -n "$host" ] || host=syluxium
+
+ref=$(kdialog --title "$TITLE" --progressbar "Installing Syluxium on $disk..." 9)
+progress() { dcop $ref setProgress "$1" > /dev/null 2>&1; dcop $ref setLabel "$2" > /dev/null 2>&1; }
+export -f progress; export ref
+if syluxium-install --disk "$disk" --user "$user" --password "$pass1" --fullname "$fullname" \
+       --hostname "$host" --progress progress > /var/log/syluxium-install.log 2>&1; then
+    dcop $ref close > /dev/null 2>&1
+    if kdialog --title "$TITLE" --yesno "Syluxium is installed!
+
+Remove the USB stick, then restart the computer.
+Sign in as \"$user\" with the password you chose.
+
+Restart now?"; then
+        reboot 2>/dev/null || kdialog --title "$TITLE" --msgbox "Please restart the computer now."
+    fi
+else
+    dcop $ref close > /dev/null 2>&1
+    kdialog --title "$TITLE" --error "The installation failed.
+
+$(tail -5 /var/log/syluxium-install.log)"
+    exit 1
+fi

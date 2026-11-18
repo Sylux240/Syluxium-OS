@@ -91,6 +91,8 @@ public:
     // open() of this node opens another inode instead (/dev/tty -> the
     // caller's controlling terminal).
     virtual Inode* open_redirect() { return this; }
+    // Add a hard link `name` -> `target` in this directory (same file system).
+    virtual long link(const char* name, usize len, Inode* target) { return -err::XDEV; }
     // Change mode (permission bits, type unchanged) and ownership (chmod,
     // chown, new files). Disk file systems persist them.
     virtual long set_owner(u32 new_mode, u32 new_uid, u32 new_gid) {

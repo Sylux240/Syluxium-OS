@@ -1520,6 +1520,29 @@ public:
         return 0;
     }
 
+    long link(const char* name, usize len, vfs::Inode* target_inode) override {
+        auto* target = static_cast<Node*>(target_inode);
+        if (target->dev != dev || target->vol != vol)
+            return -err::XDEV;
+        if (!writable())
+            return -err::ROFS;
+        if (len > 255)
+            return -err::NAMETOOLONG;
+        if (vfs::is_dir(target->mode))
+            return -err::PERM;
+        LockGuard guard(vol->lock);
+        if (find_locked(name, len))
+            return -err::EXIST;
+        if (target->nlink >= 65000)
+            return -err::MLINK;
+        if (long r = add_entry(name, len, target->number, type_for_mode(target->mode)); r < 0)
+            return r;
+        target->nlink++;
+        target->ctime = vfs::now();
+        target->save();
+        return 0;
+    }
+
     long rename(const char* old_name, usize old_len, vfs::Inode* new_dir_inode, const char* new_name,
                 usize new_len) override {
         auto* new_dir = static_cast<Node*>(new_dir_inode);

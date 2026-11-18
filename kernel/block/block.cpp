@@ -7,6 +7,8 @@
 #include <mm/heap.hpp>
 #include <mm/layout.hpp>
 #include <mm/pmm.hpp>
+#include <proc/process.hpp>
+#include <proc/uaccess.hpp>
 #include <sched/sched.hpp>
 #include <sched/sync.hpp>
 
@@ -175,6 +177,8 @@ public:
     }
     long flush() override { return m_parent->flush(); }
 
+    u64 start_lba() const { return m_start; }
+
 private:
     Device* m_parent;
     u64 m_start;
@@ -204,6 +208,53 @@ public:
         count = min<u64>(count, m_dev->size_bytes() - offset);
         long r = block::write(m_dev, offset, buf, count);
         return r < 0 ? r : static_cast<isize>(count);
+    }
+
+    // The Linux block-device ioctls disk tools use (sfdisk, mkfs, blkid, dd).
+    long ioctl(u64 request, u64 arg) override {
+        constexpr u64 BLKROGET = 0x125e, BLKRRPART = 0x125f, BLKGETSIZE = 0x1260, BLKFLSBUF = 0x1261,
+                      BLKSSZGET = 0x1268, BLKIOMIN = 0x1278, BLKIOOPT = 0x1279, BLKALIGNOFF = 0x127a,
+                      BLKPBSZGET = 0x127b, BLKDISCARDZEROES = 0x127c, BLKGETSIZE64 = 0x80081272,
+                      HDIO_GETGEO = 0x0301;
+        void* uarg = reinterpret_cast<void*>(arg);
+        switch (request) {
+        case BLKGETSIZE64: {
+            u64 bytes = m_dev->size_bytes();
+            return uaccess::put(static_cast<u64*>(uarg), bytes);
+        }
+        case BLKGETSIZE: {
+            u64 sectors = m_dev->size_bytes() / 512;
+            return uaccess::put(static_cast<u64*>(uarg), sectors);
+        }
+        case BLKSSZGET:
+        case BLKPBSZGET:
+        case BLKIOMIN: {
+            i32 v = static_cast<i32>(m_dev->sector_size);
+            return uaccess::put(static_cast<i32*>(uarg), v);
+        }
+        case BLKIOOPT: case BLKALIGNOFF: case BLKROGET: case BLKDISCARDZEROES: {
+            i32 zero = 0;
+            return uaccess::put(static_cast<i32*>(uarg), zero);
+        }
+        case HDIO_GETGEO: {
+            struct { u8 heads, sectors; u16 cylinders; u64 start; } g{255, 63, 0, 0};
+            u64 cyl = m_dev->size_bytes() / 512 / (255 * 63);
+            g.cylinders = static_cast<u16>(cyl > 0xFFFF ? 0xFFFF : cyl);
+            if (m_dev->parent)
+                g.start = static_cast<Partition*>(m_dev)->start_lba();
+            return uaccess::copy_to(uarg, &g, sizeof(g));
+        }
+        case BLKFLSBUF:
+            return sync_device(m_dev);
+        case BLKRRPART:
+            if (m_dev->parent)
+                return -err::INVAL; // only whole disks have partition tables
+            if (!proc::capable())
+                return -err::ACCES;
+            return rescan_partitions(m_dev);
+        default:
+            return -err::NOTTY;
+        }
     }
 
 private:
@@ -327,6 +378,44 @@ void unregister_disk(Device* disk) {
     // The letter may be handed out again (the next stick becomes sdb again).
     if (disk->name[0] == 's' && disk->name[1] == 'd' && disk->name[2] >= 'a' && disk->name[2] <= 'z' && !disk->name[3])
         __atomic_and_fetch(&g_sd_taken, ~(1u << (disk->name[2] - 'a')), __ATOMIC_RELAXED);
+}
+
+long rescan_partitions(Device* disk) {
+    sync_device(disk);
+    {
+        LockGuard guard(g_cache_lock);
+        // Forget the old partitions: their cached blocks and /dev nodes. (The
+        // objects stay allocated, as on unplug: a stale mount may point at them.)
+        for (CacheBlock* b = g_lru.front(); b;) {
+            CacheBlock* next = g_lru.next_of(b);
+            if (b->dev->parent == disk) {
+                write_back(b);
+                drop_block(b);
+            }
+            b = next;
+        }
+        usize kept = 0;
+        for (usize i = 0; i < g_device_count; i++) {
+            Device* d = g_devices[i];
+            if (d->parent == disk) {
+                char path[32];
+                snprintf(path, sizeof(path), "/dev/%s", d->name);
+                vfs::remove_node(path);
+                continue;
+            }
+            g_devices[kept++] = d;
+        }
+        g_device_count = kept;
+        // The disk's own cached copy of the table area may be stale too.
+        for (CacheBlock* b = g_lru.front(); b;) {
+            CacheBlock* next = g_lru.next_of(b);
+            if (b->dev == disk && !b->dirty)
+                drop_block(b);
+            b = next;
+        }
+    }
+    scan_partitions(disk);
+    return 0;
 }
 
 Device* find(const char* name) {

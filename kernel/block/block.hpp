@@ -38,6 +38,10 @@ Device* find(const char* name);
 // allocated - a mounted file system may still point at them - and the
 // driver makes their I/O fail from now on.
 void unregister_disk(Device* disk);
+
+// Re-read a disk's partition table (BLKRRPART, after sfdisk/fdisk wrote a
+// new one): old partition devices go away, new ones appear as /dev/<name>N.
+long rescan_partitions(Device* disk);
 // Lowest free SCSI-style disk name: "sda", "sdb", ... (shared by SATA and USB storage).
 void next_sd_name(char* out, usize size);
 void for_each(void (*fn)(Device* d, void* ctx), void* ctx);
