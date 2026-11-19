@@ -44,6 +44,7 @@ class Node;
 class Volume {
 public:
     block::Device* dev;
+    MountOptions opts;
     u32 cluster_size;
     u64 fat_start;   // byte offset of the first FAT
     u64 fat_bytes;   // size of one FAT
@@ -205,7 +206,9 @@ public:
         : vol(v), first_cluster(cluster), dirent_offset(dirent), is_directory(dir) {
         ino = vfs::next_ino();
         dev = v->fs_dev;
-        mode = dir ? (vfs::S_IFDIR | 0755) : (vfs::S_IFREG | 0755);
+        mode = dir ? (vfs::S_IFDIR | (0777 & ~v->opts.dmask)) : (vfs::S_IFREG | (0777 & ~v->opts.fmask));
+        uid = v->opts.uid;
+        gid = v->opts.gid;
         nlink = dir ? 2 : 1;
         size = file_size;
         mtime = ctime = atime = vfs::Timespec{static_cast<i64>(mtime_s), 0};
@@ -782,7 +785,7 @@ bool probe(block::Device* dev) {
     return bs[510] == 0x55 && bs[511] == 0xAA && memcmp(bs + 82, "FAT32", 5) == 0;
 }
 
-long mount(block::Device* dev, vfs::Inode** root) {
+long mount(block::Device* dev, vfs::Inode** root, const MountOptions& opts) {
     u8 bs[512];
     if (block::read(dev, 0, bs, 512) != 0)
         return -err::IO;
@@ -806,6 +809,7 @@ long mount(block::Device* dev, vfs::Inode** root) {
         return -err::INVAL;
 
     auto* v = new Volume;
+    v->opts = opts;
     v->dev = dev;
     v->cluster_size = static_cast<u32>(bytes_per_sector) * sectors_per_cluster;
     v->fat_start = static_cast<u64>(reserved) * bytes_per_sector;

@@ -37,4 +37,6 @@ dbus-uuidgen --ensure=/etc/machine-id 2>/dev/null
 cp /etc/machine-id /var/lib/dbus/machine-id 2>/dev/null
 [ -S /run/dbus/system_bus_socket ] || dbus-daemon --system --fork > /var/log/dbus-system.log 2>&1
 
+# USB sticks: mounted at /media/<label> when plugged in (AutoPlay box in the session).
+syluxium-automount > /var/log/automount.log 2>&1 &
 exec tdm -nodaemon ${TDM_DEBUG:+-debug $TDM_DEBUG} -error /var/log/tdm.log > /var/log/tdm.out 2>&1

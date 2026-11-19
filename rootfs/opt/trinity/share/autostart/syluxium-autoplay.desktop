@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Syluxium AutoPlay
+Comment=Asks what to do when a USB drive is connected
+Exec=syluxium-autoplay
+X-TDE-autostart-phase=2
+NoDisplay=true

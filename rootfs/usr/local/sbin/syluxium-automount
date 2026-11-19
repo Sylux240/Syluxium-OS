@@ -1,0 +1,70 @@
+#!/bin/sh
+# Syluxium automounter (runs as root, started by startdesktop): USB sticks
+# and card readers (/sys/block/<disk>/removable = 1) are mounted at
+# /media/<label> as soon as they appear, owned by the desktop user, and
+# unmounted when they're unplugged. The desktop's AutoPlay box
+# (syluxium-autoplay) reacts to the new folder in /media.
+mkdir -p /media
+STATE=/run/syluxium-automount
+mkdir -p $STATE
+
+desktop_user() {
+    # The logged-in desktop user: the owner of the newest /run/user/<uid>.
+    for d in $(ls -1dt /run/user/* 2>/dev/null); do
+        u=$(basename "$d"); [ "$u" -ge 1000 ] 2>/dev/null && { echo "$u"; return; }
+    done
+    echo 1000
+}
+
+is_removable() { # partition or disk name -> its disk is removable?
+    disk=$(echo "$1" | sed 's/[0-9]*$//')
+    [ "$(cat /sys/block/$disk/removable 2>/dev/null)" = 1 ]
+}
+
+mounted() { grep -q "^/dev/$1 " /proc/mounts; }
+
+try_mount() {
+    dev=$1
+    # blkid prints: /dev/sdb: LABEL="USBSTICK" UUID="..." TYPE="vfat"
+    info=$(blkid /dev/$dev 2>/dev/null)
+    type=$(echo "$info" | sed -n 's/.* TYPE="\([^"]*\)".*/\1/p')
+    label=$(echo "$info" | sed -n 's/.* LABEL="\([^"]*\)".*/\1/p')
+    case "$type" in vfat|exfat|ext2|ext3|ext4) ;; *) return ;; esac
+    name=$(echo "${label:-$dev}" | tr -c 'A-Za-z0-9._-' '_' | sed 's/_*$//')
+    dir=/media/$name
+    [ -e "$dir" ] && dir=/media/${name}_$dev
+    mkdir -p "$dir"
+    u=$(desktop_user); g=$(id -g "$u" 2>/dev/null || echo "$u")
+    case "$type" in
+        vfat|exfat) mount -t "$type" -o "uid=$u,gid=$g,umask=022" "/dev/$dev" "$dir" ;;
+        *) mount -t "$type" "/dev/$dev" "$dir" ;;
+    esac
+    if [ $? = 0 ]; then
+        echo "$dir" > "$STATE/$dev"
+    else
+        rmdir "$dir" 2>/dev/null
+    fi
+}
+
+while :; do
+    # New devices: whole disks without partitions, and partitions.
+    for dev in $(ls /dev 2>/dev/null | grep '^sd[a-z][0-9]*$'); do
+        [ -e "$STATE/$dev" ] && continue
+        is_removable "$dev" || continue
+        mounted "$dev" && continue
+        # A disk with partitions: mount the partitions, not the disk.
+        if echo "$dev" | grep -q '[a-z]$' && ls /dev | grep -q "^${dev}[0-9]"; then continue; fi
+        try_mount "$dev"
+        [ -e "$STATE/$dev" ] || : > "$STATE/$dev" # handled (not mountable): don't retry
+    done
+    # Removed devices: unmount and clean up.
+    for f in "$STATE"/*; do
+        [ -e "$f" ] || continue
+        dev=$(basename "$f")
+        [ -e "/dev/$dev" ] && continue
+        dir=$(cat "$f")
+        if [ -n "$dir" ]; then umount -l "$dir" 2>/dev/null; rmdir "$dir" 2>/dev/null; fi
+        rm -f "$f"
+    done
+    sleep 1
+done

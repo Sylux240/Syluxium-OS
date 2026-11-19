@@ -167,6 +167,7 @@ bool probe(Device* d, const Interface& intf) {
     }
     block::next_sd_name(disk->name, sizeof(disk->name));
     disk->hw = d->entry;
+    disk->removable = true;
     block::register_disk(disk);
     d->add_binding(disconnect, disk);
     return true;

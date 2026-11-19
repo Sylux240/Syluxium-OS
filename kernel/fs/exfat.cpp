@@ -133,6 +133,7 @@ class Node;
 
 class Volume {
 public:
+    fat::MountOptions opts;
     block::Device* dev;
     u32 cluster_size;
     u64 fat_offset;
@@ -275,7 +276,9 @@ public:
             valid_length = size;
             mtime = ctime = atime = vfs::now();
         }
-        mode = is_directory ? (vfs::S_IFDIR | 0755) : (vfs::S_IFREG | 0755);
+        mode = is_directory ? (vfs::S_IFDIR | (0777 & ~v->opts.dmask)) : (vfs::S_IFREG | (0777 & ~v->opts.fmask));
+        uid = v->opts.uid;
+        gid = v->opts.gid;
         if (attributes & ATTR_READONLY)
             mode &= ~0222u;
         nlink = is_directory ? 2 : 1;
@@ -836,7 +839,7 @@ bool probe(block::Device* dev) {
     return memcmp(bs + 3, "EXFAT   ", 8) == 0 && bs[510] == 0x55 && bs[511] == 0xAA;
 }
 
-long mount(block::Device* dev, vfs::Inode** root) {
+long mount(block::Device* dev, vfs::Inode** root, const fat::MountOptions& opts) {
     if (!probe(dev))
         return -err::INVAL;
     u8 bs[512];
@@ -851,6 +854,7 @@ long mount(block::Device* dev, vfs::Inode** root) {
         return -err::INVAL;
 
     auto* v = new Volume;
+    v->opts = opts;
     v->dev = dev;
     v->cluster_size = 1u << (sector_shift + cluster_shift);
     v->fat_offset = static_cast<u64>(fat_off) << sector_shift;

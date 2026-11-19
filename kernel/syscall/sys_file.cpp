@@ -1563,6 +1563,34 @@ long sys_mount(SYSCALL_ARGS) {
     char abs[512];
     join_path(proc::current()->cwd_path, target.c_str(), abs, sizeof(abs));
 
+    // vfat/exfat options: uid=, gid=, umask=, fmask=, dmask= (octal masks).
+    fat::MountOptions fat_opts;
+    fat_opts.uid = proc::current()->cred.euid;
+    fat_opts.gid = proc::current()->cred.egid;
+    if (a4) {
+        UserPath data(a4);
+        if (!data.error()) {
+            const char* o = data.c_str();
+            while (*o) {
+                auto num = [](const char* q, int base) {
+                    u32 v = 0;
+                    while ((*q >= '0' && *q <= '9') && (base == 10 || *q < '8'))
+                        v = v * base + static_cast<u32>(*q++ - '0');
+                    return v;
+                };
+                if (strncmp(o, "uid=", 4) == 0) fat_opts.uid = num(o + 4, 10);
+                else if (strncmp(o, "gid=", 4) == 0) fat_opts.gid = num(o + 4, 10);
+                else if (strncmp(o, "umask=", 6) == 0) fat_opts.fmask = fat_opts.dmask = num(o + 6, 8);
+                else if (strncmp(o, "fmask=", 6) == 0) fat_opts.fmask = num(o + 6, 8);
+                else if (strncmp(o, "dmask=", 6) == 0) fat_opts.dmask = num(o + 6, 8);
+                while (*o && *o != ',')
+                    o++;
+                if (*o == ',')
+                    o++;
+            }
+        }
+    }
+
     const char* t = type.c_str();
     // No type (or "auto"): detect it from the device.
     if ((!t[0] || strcmp(t, "auto") == 0) && !source.error()) {
@@ -1581,7 +1609,7 @@ long sys_mount(SYSCALL_ARGS) {
         if (!dev)
             return -err::NODEV;
         Inode* root;
-        if (long r = exfat::mount(dev, &root); r < 0)
+        if (long r = exfat::mount(dev, &root, fat_opts); r < 0)
             return r;
         return vfs::mount_at(abs, root, source.c_str(), "exfat");
     }
@@ -1594,7 +1622,7 @@ long sys_mount(SYSCALL_ARGS) {
         if (!dev)
             return -err::NODEV;
         Inode* root;
-        if (long r = fat::mount(dev, &root); r < 0)
+        if (long r = fat::mount(dev, &root, fat_opts); r < 0)
             return r;
         return vfs::mount_at(abs, root, source.c_str(), "vfat");
     }

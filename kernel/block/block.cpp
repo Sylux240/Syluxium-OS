@@ -1,5 +1,6 @@
 #include <block/block.hpp>
 #include <core/log.hpp>
+#include <fs/genfs.hpp>
 #include <fs/vfs.hpp>
 #include <lib/format.hpp>
 #include <lib/list.hpp>
@@ -335,8 +336,34 @@ void writeback_thread(void*) {
 
 } // namespace
 
+// /sys/block/<disk>/{removable,size}: how user space (the automounter)
+// tells USB sticks from internal disks.
+void publish_sysfs(Device* disk) {
+    char dir[48], path[80], text[32];
+    snprintf(dir, sizeof(dir), "/sys/block/%s", disk->name);
+    if (vfs::mkdir_p(dir, 0755) < 0)
+        return;
+    snprintf(path, sizeof(path), "%s/removable", dir);
+    genfs::static_file(path, disk->removable ? "1\n" : "0\n");
+    snprintf(path, sizeof(path), "%s/size", dir);
+    snprintf(text, sizeof(text), "%lu\n", disk->size_bytes() / 512);
+    genfs::static_file(path, text);
+}
+
+void unpublish_sysfs(Device* disk) {
+    char path[80];
+    snprintf(path, sizeof(path), "/sys/block/%s/removable", disk->name);
+    vfs::remove_node(path);
+    snprintf(path, sizeof(path), "/sys/block/%s/size", disk->name);
+    vfs::remove_node(path);
+    vfs::Inode* blockdir;
+    if (vfs::resolve("/sys/block", nullptr, true, &blockdir) == 0)
+        blockdir->unlink(disk->name, strlen(disk->name), true);
+}
+
 void register_disk(Device* disk) {
     add_device(disk);
+    publish_sysfs(disk);
     klog::ok("Disk %s: %s, %lu MiB", disk->name, disk->model, disk->size_bytes() / MiB);
     scan_partitions(disk);
 }
@@ -355,6 +382,7 @@ void next_sd_name(char* out, usize size) {
 }
 
 void unregister_disk(Device* disk) {
+    unpublish_sysfs(disk);
     LockGuard guard(g_cache_lock);
     for (CacheBlock* b = g_lru.front(); b;) {
         CacheBlock* next = g_lru.next_of(b);

@@ -21,6 +21,7 @@ public:
     u32 sector_size = 512;
     dev::Device* hw = nullptr;
     Device* parent = nullptr;  // partitions: the disk they're on
+    bool removable = false;    // USB sticks, card readers (/sys/block/<name>/removable)
 
     u64 size_bytes() const { return sector_count * sector_size; }
 

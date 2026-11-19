@@ -1,5 +1,6 @@
 #pragma once
 
+#include <fs/fat.hpp>
 #include <block/block.hpp>
 #include <fs/vfs.hpp>
 
@@ -8,6 +9,6 @@
 namespace exfat {
 
 bool probe(block::Device* dev);
-long mount(block::Device* dev, vfs::Inode** root);
+long mount(block::Device* dev, vfs::Inode** root, const fat::MountOptions& opts = {});
 
 } // namespace exfat

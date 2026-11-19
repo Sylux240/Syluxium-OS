@@ -1,0 +1,30 @@
+#!/bin/sh
+# Syluxium AutoPlay (desktop session): when a USB drive appears in /media
+# (mounted by syluxium-automount), ask what to do with it - like Windows.
+known=" "
+first=1
+while :; do
+    now=" "
+    for dir in $(awk '$2 ~ "^/media/" {print $2}' /proc/mounts); do
+        now="$now$dir "
+        case "$known" in *" $dir "*) continue ;; esac
+        [ $first = 1 ] && continue # drives already there at login: no popup
+        name=$(basename "$dir")
+        size=$(df -h "$dir" 2>/dev/null | awk 'NR==2 {print $2}')
+        choice=$(kdialog --title "AutoPlay" --icon drive-removable-media --radiolist \
+            "<b>$name</b> ($size) was connected.<br>What do you want to do?" \
+            open "Open folder to view files" on \
+            media "Play media files (Kaffeine)" off \
+            none "Take no action" off 2>/dev/null)
+        case "$choice" in
+            open) konqueror "$dir" >/dev/null 2>&1 & ;;
+            media) kaffeine "$dir" >/dev/null 2>&1 & ;;
+        esac
+    done
+    for dir in $known; do
+        case "$now" in *" $dir "*) ;; *) [ $first = 0 ] && kdialog --title "AutoPlay" --passivepopup "$(basename "$dir") was removed." 4 2>/dev/null & ;; esac
+    done
+    known=$now
+    first=0
+    sleep 1
+done
