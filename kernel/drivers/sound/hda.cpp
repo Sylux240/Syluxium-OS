@@ -165,6 +165,7 @@ public:
     // The codec we drive.
     u8 codec = 0;
     u32 vendor_id = 0;
+    u32 subsystem_id = 0;
     u8 afg = 0;
     Widget w[MAX_NID];
     u8 nid_start = 0, nid_count = 0;
@@ -195,6 +196,7 @@ public:
     u32 verb(u8 nid, u32 verb, u32 payload);
     u32 param(u8 nid, u32 id) { return verb(nid, VERB_GET_PARAM, id); }
     bool probe_codec(u8 addr);
+    void apply_quirks();
     void read_widget(u8 nid);
     bool find_path(u8 from, bool to_dac, const u8* preferred, u32 npreferred, Path* out);
     void enable_output_path(const Path& p, bool headphone);
@@ -412,7 +414,47 @@ bool Controller::probe_codec(u8 addr) {
         x = Widget{};
     for (u32 n = nid_start; n < nid_start + nid_count && n < MAX_NID; n++)
         read_widget(static_cast<u8>(n));
+    apply_quirks();
     return true;
+}
+
+// Codec/machine specific fixes the generic parser can't discover (codec
+// facts as documented by Linux's HDA codec drivers).
+void Controller::apply_quirks() {
+    u32 ssid = verb(afg, 0xF20, 0); // subsystem ID: board vendor << 16 | model
+    subsystem_id = ssid;
+    if (vendor_id == 0x10134208 && (ssid >> 16) == 0x106B) {
+        // Cirrus Logic CS4208 in Macs (MacBook Air 2013+, MacBook Pro 11/12,
+        // Mac mini 7, iMac 16): vendor processing block on...
+        verb(0x24, 0x703, 0x01);   // processing state: on
+        verb(0x24, 0x5, 0x0033);   // coefficient index
+        verb(0x24, 0x4, 0x0001);   // A1 ICS
+        verb(0x24, 0x5, 0x0034);
+        verb(0x24, 0x4, 0x1C01);   // A1 enable, threshold 300 mV
+        u16 model = ssid & 0xFFFF;
+        if (model == 0x7100 || model == 0x7200) {
+            // MacBook Air 6,1 / 6,2: the firmware's pin table is wrong.
+            static const struct { u8 nid; u32 config; } pins[] = {
+                {0x10, 0x032120F0}, // headphones
+                {0x11, 0x500000F0}, {0x12, 0x90100010}, // speaker
+                {0x13, 0x500000F0}, {0x14, 0x500000F0}, {0x15, 0x770000F0}, {0x16, 0x770000F0},
+                {0x17, 0x430000F0}, {0x18, 0x43AB9030}, // mic jack
+                {0x19, 0x770000F0}, {0x1A, 0x770000F0}, {0x1B, 0x770000F0},
+                {0x1C, 0x90A00090}, // internal mic
+                {0x1D, 0x500000F0}, {0x1E, 0x500000F0}, {0x1F, 0x500000F0}, {0x20, 0x500000F0},
+                {0x21, 0x430000F0}, {0x22, 0x430000F0},
+            };
+            for (const auto& pc : pins)
+                if (pc.nid < MAX_NID && w[pc.nid].type == W_PIN)
+                    w[pc.nid].config = pc.config;
+        }
+        // The speaker amplifier hangs off GPIO0: on.
+        verb(afg, 0x716, 0x01); // GPIO mask
+        verb(afg, 0x717, 0x01); // GPIO direction: output
+        verb(afg, 0x715, 0x01); // GPIO data: amp on
+        klog::info("hda: Apple CS4208 (board %04x): processing block, %sspeaker amplifier (GPIO0) on", model,
+                   (model == 0x7100 || model == 0x7200) ? "MacBook Air pin table, " : "");
+    }
 }
 
 u8 pin_device(const Widget& x) { return (x.config >> 20) & 0xF; }
