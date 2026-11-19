@@ -428,10 +428,10 @@ FaceSource=PreferAdmin
 # If true, krootimage will be automatically started by TDM; otherwise, the
 # Setup script should be used to setup the background.
 # Default is true
-#UseBackground=false
+UseBackground=true
 # The configuration file to be used by krootimage.
 # Default is "/etc/trinity/tdm/backgroundrc"
-#BackgroundCfg=
+BackgroundCfg=/etc/trinity/tdm/backgroundrc
 # Hold the X-server grabbed the whole time the greeter is visible. This
 # may be more secure, but it will disable any background and other
 # X-clients started from the Setup script.

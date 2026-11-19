@@ -58,6 +58,7 @@ elif [[ -z ${KEEP_DISK:-} || ! -f $DISK ]]; then
     fi
 fi
 
+# VM size: VM_RAM (default 8G) and VM_CPUS (default 8); e.g. VM_RAM=2G to test a small machine.
 # Hardware virtualization when available (10-50x faster boots); KVM=0 forces
 # software emulation (TCG), useful to rule out KVM-specific behaviour.
 if [[ ${KVM:-1} != 0 && -r /dev/kvm && -w /dev/kvm ]]; then
@@ -65,7 +66,7 @@ if [[ ${KVM:-1} != 0 && -r /dev/kvm && -w /dev/kvm ]]; then
 else
     ACCEL="-cpu max"
 fi
-args=(-M q35 -m 2G -smp 4 $ACCEL
+args=(-M q35 -m ${VM_RAM:-8G} -smp ${VM_CPUS:-8} $ACCEL
       -drive "file=$DISK,format=raw,if=ide"
       ${ROOTDISK:+-drive "file=$ROOTDISK,format=raw,if=ide,index=3"}
       -display none -serial "file:$LOG"

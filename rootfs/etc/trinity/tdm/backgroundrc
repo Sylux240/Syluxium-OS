@@ -1,0 +1,7 @@
+# The Syluxium wallpaper, scaled and cropped to fill the screen.
+[Desktop0]
+BackgroundMode=Flat
+Color1=0,51,153
+Wallpaper=/opt/trinity/share/wallpapers/syluxium-default.jpg
+WallpaperMode=ScaleAndCrop
+MultiWallpaperMode=NoMulti
