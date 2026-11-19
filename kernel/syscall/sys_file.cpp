@@ -245,7 +245,9 @@ long do_openat(long dirfd, u64 user_path, u32 flags, u32 mode) {
     return fd;
 }
 
-long do_fstatat(long dirfd, u64 user_path, u64 user_stat, u32 flags) {
+// The inode fstatat/statx look at: path relative to dirfd, or the fd itself
+// (AT_EMPTY_PATH with an empty path).
+long stat_target(long dirfd, u64 user_path, u32 flags, Inode** out) {
     Process* p = proc::current();
     Inode* inode;
     UserPath path(user_path);
@@ -270,9 +272,74 @@ long do_fstatat(long dirfd, u64 user_path, u64 user_stat, u32 flags) {
         if (long r = resolve(path.c_str(), base, !(flags & AT_SYMLINK_NOFOLLOW), &inode); r < 0)
             return r;
     }
+    *out = inode;
+    return 0;
+}
+
+long do_fstatat(long dirfd, u64 user_path, u64 user_stat, u32 flags) {
+    Inode* inode;
+    if (long r = stat_target(dirfd, user_path, flags, &inode); r < 0)
+        return r;
     LinuxStat st;
     fill_stat(inode, &st);
     return uaccess::put(reinterpret_cast<LinuxStat*>(user_stat), st);
+}
+
+// statx(2): the same information in struct statx (glibc's stat() uses it
+// when available; Wine asks for it directly).
+struct StatxTimestamp {
+    i64 tv_sec;
+    u32 tv_nsec;
+    i32 reserved;
+};
+
+struct Statx {
+    u32 stx_mask, stx_blksize;
+    u64 stx_attributes;
+    u32 stx_nlink, stx_uid, stx_gid;
+    u16 stx_mode, pad0;
+    u64 stx_ino, stx_size, stx_blocks, stx_attributes_mask;
+    StatxTimestamp stx_atime, stx_btime, stx_ctime, stx_mtime;
+    u32 stx_rdev_major, stx_rdev_minor, stx_dev_major, stx_dev_minor;
+    u64 spare[14];
+};
+static_assert(sizeof(Statx) == 256);
+
+long sys_statx(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    constexpr u32 STATX_BASIC_STATS = 0x7ff; // type, mode, nlink, uid, gid, times, ino, size, blocks
+    constexpr u32 AT_STATX_SYNC_TYPE = 0x6000, AT_NO_AUTOMOUNT = 0x800;
+    u32 flags = static_cast<u32>(a2);
+    if (flags & ~(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH | AT_NO_AUTOMOUNT | AT_STATX_SYNC_TYPE))
+        return -err::INVAL;
+    if ((flags & AT_STATX_SYNC_TYPE) == AT_STATX_SYNC_TYPE)
+        return -err::INVAL;
+    Inode* inode;
+    if (long r = stat_target(static_cast<i32>(a0), a1, flags, &inode); r < 0)
+        return r;
+    LinuxStat st;
+    fill_stat(inode, &st);
+    // Linux's dev_t encoding: 12-bit major, 20-bit minor.
+    auto major = [](u64 d) { return static_cast<u32>(((d >> 8) & 0xfff) | ((d >> 32) & ~0xfffull)); };
+    auto minor = [](u64 d) { return static_cast<u32>((d & 0xff) | ((d >> 12) & ~0xffull)); };
+    Statx x{};
+    x.stx_mask = STATX_BASIC_STATS;
+    x.stx_blksize = static_cast<u32>(st.st_blksize);
+    x.stx_nlink = static_cast<u32>(st.st_nlink);
+    x.stx_uid = st.st_uid;
+    x.stx_gid = st.st_gid;
+    x.stx_mode = static_cast<u16>(st.st_mode);
+    x.stx_ino = st.st_ino;
+    x.stx_size = static_cast<u64>(st.st_size);
+    x.stx_blocks = static_cast<u64>(st.st_blocks);
+    x.stx_atime = {st.st_atime_sec, static_cast<u32>(st.st_atime_nsec), 0};
+    x.stx_mtime = {st.st_mtime_sec, static_cast<u32>(st.st_mtime_nsec), 0};
+    x.stx_ctime = {st.st_ctime_sec, static_cast<u32>(st.st_ctime_nsec), 0};
+    x.stx_rdev_major = major(st.st_rdev);
+    x.stx_rdev_minor = minor(st.st_rdev);
+    x.stx_dev_major = major(st.st_dev);
+    x.stx_dev_minor = minor(st.st_dev);
+    return uaccess::put(reinterpret_cast<Statx*>(a4), x);
 }
 
 // ---- handlers ----
@@ -562,6 +629,28 @@ long sys_chdir(SYSCALL_ARGS) {
     snprintf(p->cwd_path, sizeof(p->cwd_path), "%s", abs);
     return 0;
 }
+
+// fchdir: into the directory an fd refers to (wineserver: its config dir).
+long sys_fchdir(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    Process* p = proc::current();
+    FileRef f(p, static_cast<long>(a0));
+    if (!f)
+        return -err::BADF;
+    if (!is_dir(f->inode->mode))
+        return -err::NOTDIR;
+    if (long r = proc::permission(f->inode, proc::MAY_EXEC); r < 0)
+        return r;
+    p->cwd = f->inode;
+    // The path it was opened by (always absolute); getcwd reports it.
+    snprintf(p->cwd_path, sizeof(p->cwd_path), "%s", f->path ? f->path : "/");
+    return 0;
+}
+
+// name_to_handle_at: none of our file systems can export file handles,
+// which is what Linux answers for such file systems (Wine asks, then falls
+// back to paths).
+long sys_name_to_handle_at(SYSCALL_ARGS) { SYSCALL_UNUSED; return -err::OPNOTSUPP; }
 
 long do_mkdirat(long dirfd, u64 user_path, u32 mode) {
     Process* p = proc::current();
@@ -1579,6 +1668,8 @@ void register_file() {
     set(77, sys_ftruncate, "ftruncate");
     set(79, sys_getcwd, "getcwd");
     set(80, sys_chdir, "chdir");
+    set(81, sys_fchdir, "fchdir");
+    set(303, sys_name_to_handle_at, "name_to_handle_at");
     set(133, sys_mknod, "mknod");
     set(259, sys_mknodat, "mknodat");
     set(82, sys_rename, "rename");
@@ -1632,6 +1723,7 @@ void register_file() {
     set(258, sys_mkdirat, "mkdirat");
     set(260, sys_fchownat, "fchownat");
     set(262, sys_newfstatat, "newfstatat");
+    set(332, sys_statx, "statx");
     set(263, sys_unlinkat, "unlinkat");
     set(266, sys_symlinkat, "symlinkat");
     set(267, sys_readlinkat, "readlinkat");

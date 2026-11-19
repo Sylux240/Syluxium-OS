@@ -254,6 +254,29 @@ long c_get_thread_area(SYSCALL_ARGS) {
     return uaccess::put(uptr<compat::UserDesc>(a0), d);
 }
 
+// i386 stack_t: { u32 ss_sp; int ss_flags; u32 ss_size; }
+long c_sigaltstack(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    struct StackT32 {
+        u32 ss_sp;
+        i32 ss_flags;
+        u32 ss_size;
+    };
+    signal::AltStack ns, os;
+    if (a0) {
+        StackT32 u;
+        if (uaccess::get(&u, uptr<const StackT32>(a0)) < 0)
+            return -err::FAULT;
+        ns = signal::AltStack{u.ss_sp, static_cast<u32>(u.ss_flags), u.ss_size};
+    }
+    if (long r = signal::sigaltstack(a0 ? &ns : nullptr, &os, frame->rsp & 0xFFFFFFFF); r < 0)
+        return r;
+    if (a1)
+        return uaccess::put(uptr<StackT32>(a1), StackT32{static_cast<u32>(os.sp), static_cast<i32>(os.flags),
+                                                         static_cast<u32>(os.size)});
+    return 0;
+}
+
 long c_sigreturn(SYSCALL_ARGS) { SYSCALL_UNUSED; return compat::sigreturn(frame, false); }
 long c_rt_sigreturn(SYSCALL_ARGS) { SYSCALL_UNUSED; return compat::sigreturn(frame, true); }
 
@@ -540,58 +563,6 @@ STAT_WRAPPER(c_stat, nr64::stat, 1, put_old_stat, a0, 0, 0, 0)
 STAT_WRAPPER(c_lstat, nr64::lstat, 1, put_old_stat, a0, 0, 0, 0)
 STAT_WRAPPER(c_fstat, nr64::fstat, 1, put_old_stat, a0, 0, 0, 0)
 #undef STAT_WRAPPER
-
-// statx(dirfd, path, flags, mask, struct statx*): the struct is the same for
-// every architecture. 32-bit glibc prefers it for all stat calls.
-struct StatxTimestamp {
-    i64 tv_sec;
-    u32 tv_nsec;
-    i32 reserved;
-};
-
-struct Statx {
-    u32 stx_mask, stx_blksize;
-    u64 stx_attributes;
-    u32 stx_nlink, stx_uid, stx_gid;
-    u16 stx_mode, spare0;
-    u64 stx_ino, stx_size, stx_blocks, stx_attributes_mask;
-    StatxTimestamp stx_atime, stx_btime, stx_ctime, stx_mtime;
-    u32 stx_rdev_major, stx_rdev_minor, stx_dev_major, stx_dev_minor;
-    u64 stx_mnt_id;
-    u32 stx_dio_mem_align, stx_dio_offset_align;
-    u64 spare3[12];
-};
-static_assert(sizeof(Statx) == 256);
-
-u32 dev_major(u64 d) { return static_cast<u32>(((d >> 8) & 0xFFF) | ((d >> 32) & ~0xFFFull)); }
-u32 dev_minor(u64 d) { return static_cast<u32>((d & 0xFF) | ((d >> 12) & ~0xFFull)); }
-
-long c_statx(SYSCALL_ARGS) {
-    SYSCALL_UNUSED;
-    constexpr u32 AT_SYMLINK_NOFOLLOW = 0x100, AT_EMPTY_PATH = 0x1000, STATX_BASIC_STATS = 0x7FF;
-    Stat64Native n;
-    u32 flags = static_cast<u32>(a2) & (AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH);
-    if (long r = native_stat(frame, nr64::newfstatat, a0, a1, 0, flags, 2, &n); r < 0)
-        return r;
-    Statx sx{};
-    sx.stx_mask = STATX_BASIC_STATS;
-    sx.stx_blksize = static_cast<u32>(n.st_blksize);
-    sx.stx_nlink = static_cast<u32>(n.st_nlink);
-    sx.stx_uid = n.st_uid;
-    sx.stx_gid = n.st_gid;
-    sx.stx_mode = static_cast<u16>(n.st_mode);
-    sx.stx_ino = n.st_ino;
-    sx.stx_size = static_cast<u64>(n.st_size);
-    sx.stx_blocks = static_cast<u64>(n.st_blocks);
-    sx.stx_atime = {n.st_atime_sec, static_cast<u32>(n.st_atime_nsec), 0};
-    sx.stx_mtime = {n.st_mtime_sec, static_cast<u32>(n.st_mtime_nsec), 0};
-    sx.stx_ctime = {n.st_ctime_sec, static_cast<u32>(n.st_ctime_nsec), 0};
-    sx.stx_rdev_major = dev_major(n.st_rdev);
-    sx.stx_rdev_minor = dev_minor(n.st_rdev);
-    sx.stx_dev_major = dev_major(n.st_dev);
-    sx.stx_dev_minor = dev_minor(n.st_dev);
-    return uaccess::put(uptr<Statx>(a4), sx);
-}
 
 struct StatfsNative {
     i64 f_type, f_bsize;
@@ -1195,7 +1166,7 @@ struct Mapping {
 // i386 number -> x86_64 number for calls whose arguments need no translation.
 constexpr Mapping IDENTICAL[] = {
     {1, 60, "exit"}, {2, 57, "fork"}, {3, 0, "read"}, {4, 1, "write"}, {5, 2, "open"}, {6, 3, "close"},
-    {8, 85, "creat"}, {10, 87, "unlink"}, {12, 80, "chdir"}, {15, 90, "chmod"}, {16, 94, "lchown16"},
+    {8, 85, "creat"}, {10, 87, "unlink"}, {12, 80, "chdir"}, {133, 81, "fchdir"}, {383, 332, "statx"}, {341, 303, "name_to_handle_at"}, {15, 90, "chmod"}, {16, 94, "lchown16"},
     {20, 39, "getpid"}, {21, 165, "mount"}, {23, 105, "setuid16"}, {24, 102, "getuid16"}, {27, 37, "alarm"},
     {29, 34, "pause"}, {33, 21, "access"}, {36, 162, "sync"}, {37, 62, "kill"}, {38, 82, "rename"},
     {39, 83, "mkdir"}, {40, 84, "rmdir"}, {41, 32, "dup"}, {42, 22, "pipe"}, {45, 12, "brk"},
@@ -1206,7 +1177,7 @@ constexpr Mapping IDENTICAL[] = {
     {118, 74, "fsync"}, {122, 63, "uname"}, {125, 10, "mprotect"}, {132, 121, "getpgid"}, {147, 124, "getsid"},
     {148, 75, "fdatasync"}, {158, 24, "sched_yield"}, {168, 7, "poll"}, {172, 157, "prctl"},
     {175, 14, "rt_sigprocmask"}, {179, 130, "rt_sigsuspend"}, {182, 92, "chown16"}, {183, 79, "getcwd"},
-    {186, 131, "sigaltstack"}, {190, 58, "vfork"}, {198, 94, "lchown32"}, {199, 102, "getuid32"},
+{190, 58, "vfork"}, {198, 94, "lchown32"}, {199, 102, "getuid32"},
     {200, 104, "getgid32"}, {201, 107, "geteuid32"}, {202, 108, "getegid32"}, {203, 105, "setreuid32"},
     {204, 106, "setregid32"}, {207, 93, "fchown32"}, {208, 105, "setresuid32"}, {210, 106, "setresgid32"},
     {212, 92, "chown32"}, {213, 105, "setuid32"}, {214, 106, "setgid32"}, {215, 122, "setfsuid32"},
@@ -1286,6 +1257,7 @@ void register_compat() {
     set32(225, c_zero, "readahead");
     set32(240, c_futex, "futex");
     set32(243, c_set_thread_area, "set_thread_area");
+    set32(186, c_sigaltstack, "sigaltstack");
     set32(244, c_get_thread_area, "get_thread_area");
     set32(250, c_zero, "fadvise64");
     set32(265, c_clock_gettime, "clock_gettime");
@@ -1303,7 +1275,6 @@ void register_compat() {
     set32(345, c_sendmmsg, "sendmmsg");
     set32(370, c_sendmsg, "sendmsg");
     set32(372, c_recvmsg, "recvmsg");
-    set32(383, c_statx, "statx");
     set32(407, c_clock_nanosleep64, "clock_nanosleep_time64");
     set32(412, c_utimensat64, "utimensat_time64");
     set32(413, c_pselect6_64, "pselect6_time64");

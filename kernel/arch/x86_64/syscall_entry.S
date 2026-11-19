@@ -13,8 +13,8 @@
 
 #define OFFSET_KERNEL_STACK 24
 #define OFFSET_USER_RSP     32
-#define USER_DATA_SEL       0x1b
-#define USER_CODE_SEL       0x23
+#define USER_DATA_SEL       0x2b   /* gdt::USER_DATA */
+#define USER_CODE_SEL       0x33   /* gdt::USER_CODE */
 
 .section .text
 

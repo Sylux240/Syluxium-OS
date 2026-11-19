@@ -110,14 +110,24 @@ sched::Thread* make_user_thread(Process* p, const interrupts::Frame& frame, int 
     return t;
 }
 
-int signal_for(u64 vector) {
+// The signal a CPU exception in user mode raises, with siginfo's si_code and
+// si_addr as Linux fills them (Wine, JITs and debuggers look at them).
+struct FaultInfo {
+    int sig;
+    i32 code;
+    bool addr_is_ip; // si_addr = the faulting instruction (else 0)
+};
+
+FaultInfo fault_info_for(u64 vector) {
+    constexpr i32 FPE_INTDIV = 1, ILL_ILLOPN = 2, BUS_ADRALN = 1, TRAP_BRKPT = 1;
     switch (vector) {
-    case interrupts::VEC_DIVIDE_ERROR:   return signal::SIGFPE;
-    case interrupts::VEC_BREAKPOINT:     return signal::SIGTRAP;
-    case interrupts::VEC_INVALID_OPCODE: return signal::SIGILL;
-    case 16: case 19:                    return signal::SIGFPE;
-    case 17:                             return signal::SIGBUS;
-    default:                             return signal::SIGSEGV;
+    case interrupts::VEC_DIVIDE_ERROR:   return {signal::SIGFPE, FPE_INTDIV, true};
+    case interrupts::VEC_DEBUG:          return {signal::SIGTRAP, TRAP_BRKPT, false};
+    case interrupts::VEC_BREAKPOINT:     return {signal::SIGTRAP, signal::SI_KERNEL, false};
+    case interrupts::VEC_INVALID_OPCODE: return {signal::SIGILL, ILL_ILLOPN, true};
+    case 16: case 19:                    return {signal::SIGFPE, 0, true};
+    case 17:                             return {signal::SIGBUS, BUS_ADRALN, false};
+    default:                             return {signal::SIGSEGV, signal::SI_KERNEL, false}; // #GP & co.
     }
 }
 
@@ -125,10 +135,13 @@ int signal_for(u64 vector) {
 // signal (and doesn't block it), queue it for this thread - it runs on the
 // way back to user mode, like on Linux (JITs, Wine and garbage collectors
 // rely on catching SIGSEGV). Otherwise the process dies.
-void fault_signal(const char* what, u64 address, u64 ip, int sig) {
+void fault_signal(const char* what, u64 address, u64 ip, int sig, i32 code, u64 si_addr) {
     Process* p = current();
     sched::Thread* t = sched::current();
     if (p->sigactions[sig].handler > 1 && !(t->sigmask & (1ull << (sig - 1)))) {
+        t->fault_sig = sig;
+        t->fault_code = code;
+        t->fault_addr = si_addr;
         signal::send_thread(t, sig);
         return;
     }
@@ -139,17 +152,21 @@ void user_fault(interrupts::Frame* frame) {
     if (!current())
         return; // not a process: let the kernel report it
     arch::sti();
+    FaultInfo fi = fault_info_for(frame->vector);
     fault_signal(interrupts::exception_name(frame->vector),
                  frame->vector == interrupts::VEC_PAGE_FAULT ? arch::read_cr2() : 0, frame->rip,
-                 signal_for(frame->vector));
+                 fi.sig, fi.code, fi.addr_is_ip ? frame->rip : 0);
 }
 
 void page_fault(interrupts::Frame* frame) {
+    constexpr i32 SEGV_MAPERR = 1, SEGV_ACCERR = 2;
     u64 addr = arch::read_cr2();
     sched::current()->last_fault_code = frame->error_code;
     bool write = frame->error_code & 2;
     bool from_user = frame->cs & 3;
     Process* p = current();
+    if (from_user)
+        sched::current()->fault_cr2 = addr;
 
     if (p && p->mem && addr < mm::USER_END) {
         // Resolving may sleep on the memory lock; fine with interrupts on.
@@ -159,14 +176,15 @@ void page_fault(interrupts::Frame* frame) {
             return;
         if (from_user) {
             arch::sti();
-            fault_signal((frame->error_code & 1) ? "protection fault" : "segmentation fault", addr, frame->rip,
-                         signal::SIGSEGV);
+            bool prot = frame->error_code & 1;
+            fault_signal(prot ? "protection fault" : "segmentation fault", addr, frame->rip,
+                         signal::SIGSEGV, prot ? SEGV_ACCERR : SEGV_MAPERR, addr);
             return;
         }
     }
     if (from_user && p) {
         arch::sti();
-        fault_signal("segmentation fault", addr, frame->rip, signal::SIGSEGV);
+        fault_signal("segmentation fault", addr, frame->rip, signal::SIGSEGV, SEGV_MAPERR, addr);
         return;
     }
     interrupts::fatal_exception(frame);
@@ -432,8 +450,11 @@ long clone_thread(interrupts::Frame* frame, u64 flags, u64 new_sp, u64 parent_ti
     memcpy(t->fpu_state, me->fpu_state, fpu::state_size());
     t->fs_base = (flags & CLONE_SETTLS) ? tls : me->fs_base;
     t->gs_base = arch::rdmsr(MSR_KERNEL_GS_BASE);
-    if (p->compat) // 32-bit: TLS is a GDT descriptor (tls points at a user_desc)
-        compat::clone_tls(t, me, flags & CLONE_SETTLS, tls);
+    // TLS descriptors/selectors are inherited (64-bit programs have them too:
+    // Wine). For 32-bit programs CLONE_SETTLS's tls points at a user_desc.
+    compat::clone_tls(t, me, p->compat && (flags & CLONE_SETTLS), tls);
+    if (!p->compat && (flags & CLONE_SETTLS))
+        t->user_fs_sel = 0; // 64-bit: the new base wins over an inherited selector
     t->sigmask = me->sigmask;
     snprintf(t->name, sizeof(t->name), "%s", p->name);
 
@@ -517,8 +538,9 @@ long do_clone(interrupts::Frame* frame, u64 flags, u64 new_sp, u64 parent_tid, u
     memcpy(t->fpu_state, parent_thread->fpu_state, fpu::state_size());
     t->fs_base = (flags & CLONE_SETTLS) ? tls : parent_thread->fs_base;
     t->gs_base = arch::rdmsr(MSR_KERNEL_GS_BASE);
-    if (child->compat)
-        compat::clone_tls(t, parent_thread, flags & CLONE_SETTLS, tls);
+    compat::clone_tls(t, parent_thread, child->compat && (flags & CLONE_SETTLS), tls);
+    if (!child->compat && (flags & CLONE_SETTLS))
+        t->user_fs_sel = 0;
 
     if (flags & CLONE_PARENT_SETTID)
         uaccess::put(reinterpret_cast<i32*>(parent_tid), pid);

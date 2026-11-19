@@ -32,8 +32,10 @@ bool g_warned[MAX_SYSCALLS];
 void init_cpu() {
     arch::wrmsr(MSR_EFER, arch::rdmsr(MSR_EFER) | EFER_SCE);
     // STAR[47:32]: kernel CS (SS = +8). STAR[63:48]: base for SYSRET
-    // (user SS = +8, user CS = +16), i.e. 0x10 -> SS 0x1b, CS 0x23.
-    arch::wrmsr(MSR_STAR, (static_cast<u64>(gdt::KERNEL_DATA) << 48) | (static_cast<u64>(gdt::KERNEL_CODE) << 32));
+    // (32-bit user CS = +0, user SS = +8, 64-bit user CS = +16), i.e. Linux's
+    // 0x20 -> CS32 0x23, SS 0x2b, CS 0x33. (We return with iretq, but keep it right.)
+    static_assert(gdt::USER_DATA == gdt::USER32_CODE + 8 && gdt::USER_CODE == gdt::USER32_CODE + 16);
+    arch::wrmsr(MSR_STAR, (static_cast<u64>(gdt::USER32_CODE & ~3) << 48) | (static_cast<u64>(gdt::KERNEL_CODE) << 32));
     arch::wrmsr(MSR_LSTAR, reinterpret_cast<u64>(&syscall_entry));
     // 32-bit programs: SYSCALL from compatibility mode (AMD) enters at CSTAR.
     // SYSENTER stays disabled (CS MSR 0 -> #GP -> SIGSEGV); our vsyscall

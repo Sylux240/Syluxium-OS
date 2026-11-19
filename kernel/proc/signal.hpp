@@ -48,4 +48,23 @@ void deliver(interrupts::Frame* frame);
 // rt_sigreturn: restore the context saved by deliver().
 long sigreturn(interrupts::Frame* frame);
 
+// Alternate signal stacks (sigaltstack, SA_ONSTACK), per thread.
+constexpr u32 SS_ONSTACK = 1, SS_DISABLE = 2, SS_AUTODISARM = 1u << 31;
+constexpr u64 SA_ONSTACK = 0x08000000;
+struct AltStack {
+    u64 sp;
+    u32 flags;
+    u64 size;
+};
+// sigaltstack(2): install *ns (if given), report the previous one in *os.
+// `user_sp` is the stack pointer the thread had in user mode.
+long sigaltstack(const AltStack* ns, AltStack* os, u64 user_sp);
+// For a handler frame: the stack to build it on (the top of the alternate
+// stack when the action has SA_ONSTACK and the thread isn't on it already,
+// else `user_sp`; *switched says which), and the uc_stack value to save.
+// Disarms an SS_AUTODISARM stack, as Linux does.
+u64 handler_stack(sched::Thread* t, u64 act_flags, u64 user_sp, bool* switched, AltStack* uc_stack);
+// rt_sigreturn: re-install the uc_stack saved in the frame (errors ignored).
+void restore_altstack(const AltStack& uc_stack, u64 user_sp);
+
 } // namespace signal

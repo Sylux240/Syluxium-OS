@@ -203,6 +203,8 @@ def main() -> None:
     ap.add_argument("--arch", default="amd64", help="Debian architecture (amd64, i386, ...)")
     ap.add_argument("--repo", action="append", default=[],
                     help="extra repository BASEURL|SUITE|COMP1,COMP2 (packages there override Debian's)")
+    ap.add_argument("--no-deps", action="store_true",
+                    help="only the named packages, not their dependencies (to pick files out of them)")
     ap.add_argument("packages", nargs="+")
     args = ap.parse_args()
     global ARCH
@@ -220,7 +222,7 @@ def main() -> None:
 
     index = load_index(args.suite, args.cache, args.repo)
     exclude = {e for e in args.exclude.split(",") if e}
-    order = resolve(index, args.packages, exclude)
+    order = list(args.packages) if args.no_deps else resolve(index, args.packages, exclude)
     total = 0
     for name in order:
         total += extract(download(index, name, args.cache), args.out)

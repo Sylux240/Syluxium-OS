@@ -16,8 +16,8 @@
 
 #define OFFSET_KERNEL_STACK 24
 #define OFFSET_USER_RSP     32
-#define USER_DATA_SEL       0x1b
-#define USER32_CODE_SEL     0x3b
+#define USER_DATA_SEL       0x2b   /* gdt::USER_DATA */
+#define USER32_CODE_SEL     0x23   /* gdt::USER32_CODE */
 
 .macro PUSH_REGS
     pushq %rax

@@ -23,7 +23,8 @@ void save(sched::Thread* t);
 //    GDT, load DS/ES with the flat user data segment (compatibility mode,
 //    unlike 64-bit mode, really uses them) and reload FS/GS. t->fs_base /
 //    t->gs_base are refreshed from the loaded descriptors.
-//  - 64-bit threads: drop selectors a 32-bit thread may have left behind.
+//  - 64-bit threads: the same if they loaded a TLS selector themselves
+//    (Wine's 32-bit TEB in %fs), else drop selectors another thread left.
 void load(Cpu* cpu, sched::Thread* t, bool compat);
 
 // execve: forget the old program's TLS descriptors and selectors and load
@@ -33,6 +34,11 @@ void reset(sched::Thread* t, bool compat);
 // set_thread_area on the running thread: make the new descriptor visible
 // immediately (the program loads %gs right after the call).
 void install_current(sched::Thread* t);
+
+// arch_prctl(ARCH_SET_FS / ARCH_SET_GS) on the running thread: a 64-bit
+// base replaces whatever selector was loaded (Linux does the same).
+void clear_fs();
+void clear_gs();
 
 // Live selector values (for clone/fork: the child starts with the parent's).
 u16 read_fs();

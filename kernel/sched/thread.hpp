@@ -54,6 +54,15 @@ struct Thread {
     u64 sig_pending = 0;                 // signals sent to this thread only (tgkill)
     i64 cur_syscall = -1;                // the system call it's in (-1: none), /proc/<pid>/syscall
     u64 last_fault_code = 0;             // page-fault error code of the last fault (crash reports)
+    u64 fault_cr2 = 0;                   // address of the last page fault (sigcontext.cr2)
+    // The synchronous signal a CPU exception raised (SIGSEGV on a page
+    // fault...), with its siginfo: si_code and si_addr. 0 = none pending.
+    int fault_sig = 0;
+    i32 fault_code = 0;
+    u64 fault_addr = 0;
+    // sigaltstack: where handlers with SA_ONSTACK run (ss_flags: 0 or SS_DISABLE / SS_AUTODISARM).
+    u64 altstack_sp = 0, altstack_size = 0;
+    u32 altstack_flags = 2;              // SS_DISABLE
     u64 cur_args[3] = {};
     i32 sig_code[65] = {}, sig_pid[65] = {}; u32 sig_uid[65] = {}; // who sent each (siginfo)
     u64 sigmask = 0;                     // blocked signals (per thread, as on Linux)

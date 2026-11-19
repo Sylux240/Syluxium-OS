@@ -217,6 +217,68 @@ int dequeue(u64 mask) {
     }
 }
 
+namespace {
+
+bool on_altstack(const sched::Thread* t, u64 sp) {
+    if ((t->altstack_flags & SS_AUTODISARM) && !t->altstack_size)
+        return false;
+    return sp > t->altstack_sp && sp - t->altstack_sp <= t->altstack_size;
+}
+
+u32 altstack_state(const sched::Thread* t, u64 sp) {
+    if (!t->altstack_size)
+        return SS_DISABLE;
+    return on_altstack(t, sp) ? SS_ONSTACK : 0;
+}
+
+} // namespace
+
+long sigaltstack(const AltStack* ns, AltStack* os, u64 user_sp) {
+    constexpr u64 MINSIGSTKSZ = 2048;
+    sched::Thread* t = sched::current();
+    if (os)
+        *os = AltStack{t->altstack_sp, altstack_state(t, user_sp) | (t->altstack_flags & SS_AUTODISARM),
+                       t->altstack_size};
+    if (ns) {
+        if (on_altstack(t, user_sp))
+            return -err::PERM; // can't change the stack the handler is running on
+        u32 mode = ns->flags & ~SS_AUTODISARM;
+        if (mode != SS_DISABLE && mode != SS_ONSTACK && mode != 0)
+            return -err::INVAL;
+        if (mode == SS_DISABLE) {
+            t->altstack_sp = t->altstack_size = 0;
+            t->altstack_flags = SS_DISABLE;
+        } else {
+            if (ns->size < MINSIGSTKSZ)
+                return -err::NOMEM;
+            t->altstack_sp = ns->sp;
+            t->altstack_size = ns->size;
+            t->altstack_flags = ns->flags & SS_AUTODISARM;
+        }
+    }
+    return 0;
+}
+
+u64 handler_stack(sched::Thread* t, u64 act_flags, u64 user_sp, bool* switched, AltStack* uc_stack) {
+    *uc_stack = AltStack{t->altstack_sp, altstack_state(t, user_sp) | (t->altstack_flags & SS_AUTODISARM),
+                         t->altstack_size};
+    *switched = false;
+    u64 sp = user_sp;
+    if ((act_flags & SA_ONSTACK) && altstack_state(t, user_sp) == 0) {
+        sp = t->altstack_sp + t->altstack_size;
+        *switched = true;
+    }
+    if (t->altstack_flags & SS_AUTODISARM)
+        t->altstack_sp = t->altstack_size = 0;
+    return sp;
+}
+
+void restore_altstack(const AltStack& uc_stack, u64 user_sp) {
+    AltStack ns = uc_stack;
+    ns.flags &= ~SS_ONSTACK; // the saved state, not a mode
+    sigaltstack(&ns, nullptr, user_sp);
+}
+
 void deliver(interrupts::Frame* frame) {
     proc::Process* p = proc::current();
     sched::Thread* t = sched::current();
@@ -238,10 +300,18 @@ void deliver(interrupts::Frame* frame) {
     int sig;
     i32 si_code, si_pid;
     u32 si_uid;
+    u64 si_addr = 0;
+    bool fault = false;
     if (mine) {
         sig = __builtin_ctzll(mine) + 1;
         __atomic_and_fetch(&t->sig_pending, ~bit(sig), __ATOMIC_RELEASE);
         si_code = t->sig_code[sig], si_pid = t->sig_pid[sig], si_uid = t->sig_uid[sig];
+        if (sig == t->fault_sig) { // raised by a CPU exception: siginfo describes the fault
+            fault = true;
+            si_code = t->fault_code;
+            si_addr = t->fault_addr;
+            t->fault_sig = 0;
+        }
     } else {
         sig = __builtin_ctzll(shared) + 1;
         __atomic_and_fetch(&p->sig_pending, ~bit(sig), __ATOMIC_RELEASE);
@@ -283,7 +353,11 @@ void deliver(interrupts::Frame* frame) {
     }
 
     usize fp_size = fpu::state_size();
-    uptr sp = frame->rsp - 128;                      // skip the red zone
+    bool switched;
+    AltStack uc_stack;
+    uptr sp = handler_stack(t, act.flags, frame->rsp, &switched, &uc_stack);
+    if (!switched)
+        sp -= 128;                                   // skip the red zone
     sp = align_down<uptr>(sp - fp_size, 64);         // FPU/AVX state
     uptr fp_addr = sp;
     sp = align_down<uptr>(sp - sizeof(RtSigFrame), 16) - 8; // handler sees an ABI-aligned stack
@@ -296,14 +370,29 @@ void deliver(interrupts::Frame* frame) {
     c.rdi = frame->rdi; c.rsi = frame->rsi; c.rbp = frame->rbp; c.rbx = frame->rbx;
     c.rdx = frame->rdx; c.rax = frame->rax; c.rcx = frame->rcx; c.rsp = frame->rsp;
     c.rip = frame->rip; c.eflags = frame->rflags;
-    c.cs = gdt::USER_CODE; c.ss = gdt::USER_DATA;
+    // The interrupted code segment: 64-bit, or 32-bit code a 64-bit process
+    // runs itself (Wine's WoW64). The handler always starts in 64-bit mode.
+    c.cs = static_cast<u16>(frame->cs); c.ss = static_cast<u16>(frame->ss);
+    if (frame->vector < 32) { // a CPU exception: what and where (Wine dispatches on trapno)
+        c.trapno = frame->vector;
+        c.err = frame->error_code;
+        if (frame->vector == interrupts::VEC_PAGE_FAULT)
+            c.cr2 = t->fault_cr2;
+    }
     c.oldmask = restore_mask;
     c.fpstate = fp_addr;
+    constexpr u64 UC_SIGCONTEXT_SS = 2, UC_STRICT_RESTORE_SS = 4;
+    f.uc.uc_flags = UC_SIGCONTEXT_SS | UC_STRICT_RESTORE_SS;
+    f.uc.uc_stack = StackT{uc_stack.sp, static_cast<i32>(uc_stack.flags), 0, uc_stack.size};
     f.uc.sigmask = restore_mask;
     f.info.si_signo = sig;
     f.info.si_code = si_code;
-    memcpy(f.info.fields, &si_pid, 4);     // si_pid
-    memcpy(f.info.fields + 4, &si_uid, 4); // si_uid
+    if (fault) {
+        memcpy(f.info.fields, &si_addr, 8); // si_addr
+    } else {
+        memcpy(f.info.fields, &si_pid, 4);     // si_pid
+        memcpy(f.info.fields + 4, &si_uid, 4); // si_uid
+    }
 
     fpu::save(t->fpu_state);
     arch::sti(); // writing user memory may fault pages in (and sleep)
@@ -320,6 +409,8 @@ void deliver(interrupts::Frame* frame) {
     frame->rsi = sp + __builtin_offsetof(RtSigFrame, info);
     frame->rdx = sp + __builtin_offsetof(RtSigFrame, uc);
     frame->rax = 0;
+    frame->cs = gdt::USER_CODE;
+    frame->ss = gdt::USER_DATA;
     frame->rflags &= ~(0x400ull | 0x100ull); // clear DF and TF for the handler
     (void)SA_SIGINFO;
 }
@@ -341,10 +432,14 @@ long sigreturn(interrupts::Frame* frame) {
     frame->rdx = c.rdx; frame->rax = c.rax; frame->rcx = c.rcx; frame->rsp = c.rsp;
     frame->rip = c.rip;
     frame->rflags = (frame->rflags & ~FIX_EFLAGS) | (c.eflags & FIX_EFLAGS) | arch::RFLAGS_IF;
-    frame->cs = gdt::USER_CODE;
+    // Back to 64-bit code, or to 32-bit code of a 64-bit process (Wine's
+    // WoW64): those are the only two code segments user mode can have.
+    frame->cs = c.cs == gdt::USER32_CODE ? gdt::USER32_CODE : gdt::USER_CODE;
     frame->ss = gdt::USER_DATA;
     frame->vector = 0; // not a restartable syscall frame any more
     t->sigmask = f.uc.sigmask & ~UNBLOCKABLE;
+    restore_altstack(AltStack{f.uc.uc_stack.ss_sp, static_cast<u32>(f.uc.uc_stack.ss_flags), f.uc.uc_stack.ss_size},
+                     frame->rsp);
 
     if (c.fpstate) {
         usize size = fpu::state_size();

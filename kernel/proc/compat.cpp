@@ -94,7 +94,6 @@ constexpr usize FPSTATE_HEADER = 112;
 constexpr u16 X86_FXSR_MAGIC = 0x0000; // "the FXSR image follows"
 
 constexpr u64 SA_SIGINFO = 0x4, SA_RESTORER = 0x04000000;
-constexpr u32 SS_DISABLE = 2;
 constexpr u64 FIX_EFLAGS = 0x50DD5; // AC OF DF TF SF ZF AF PF CF RF: what sigreturn may change
 constexpr u64 UNBLOCKABLE = (1ull << (signal::SIGKILL - 1)) | (1ull << (signal::SIGSTOP - 1));
 
@@ -248,7 +247,10 @@ bool setup_signal_frame(interrupts::Frame* frame, int sig, const proc::SigAction
     usize fp_size = fpu::state_size();
 
     // FPU state above the frame, its FXSAVE/XSAVE image 64-byte aligned.
-    uptr esp = frame->rsp & 0xFFFFFFFF;
+    // On the alternate signal stack if the handler wants it (SA_ONSTACK).
+    bool switched;
+    signal::AltStack uc_stack;
+    uptr esp = signal::handler_stack(t, act.flags, frame->rsp & 0xFFFFFFFF, &switched, &uc_stack);
     uptr fp_addr = align_down<uptr>(esp - fp_size, 64) - FPSTATE_HEADER;
     usize frame_size = rt ? sizeof(RtSigFrame32) : sizeof(SigFrame32);
     // As on Linux: the handler starts with ((esp + 4) & 15) == 0, i.e. as if
@@ -269,7 +271,8 @@ bool setup_signal_frame(interrupts::Frame* frame, int sig, const proc::SigAction
         f.pinfo = static_cast<u32>(sp + __builtin_offsetof(RtSigFrame32, info));
         f.puc = static_cast<u32>(sp + __builtin_offsetof(RtSigFrame32, uc));
         f.info.si_signo = sig;
-        f.uc.uc_stack.ss_flags = SS_DISABLE;
+        f.uc.uc_stack = StackT32{static_cast<u32>(uc_stack.sp), static_cast<i32>(uc_stack.flags),
+                                 static_cast<u32>(uc_stack.size)};
         fill_sigcontext(&f.uc.mcontext, frame, blocked, static_cast<u32>(fp_addr));
         f.uc.sigmask[0] = static_cast<u32>(blocked);
         f.uc.sigmask[1] = static_cast<u32>(blocked >> 32);
@@ -320,6 +323,9 @@ long sigreturn(interrupts::Frame* frame, bool rt) {
         if (uaccess::copy_from(&f, reinterpret_cast<void*>(esp - 4), sizeof(f)) < 0)
             proc::exit_current(signal::SIGSEGV);
         restore_sigcontext(frame, f.uc.mcontext);
+        signal::restore_altstack(signal::AltStack{f.uc.uc_stack.ss_sp, static_cast<u32>(f.uc.uc_stack.ss_flags),
+                                                  f.uc.uc_stack.ss_size},
+                                 frame->rsp & 0xFFFFFFFF);
         mask = f.uc.sigmask[0] | (static_cast<u64>(f.uc.sigmask[1]) << 32);
         fpstate = f.uc.mcontext.fpstate;
     } else {

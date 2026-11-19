@@ -84,8 +84,7 @@ void save_thread_state(Thread* t) {
         fpu::save(t->fpu_state);
     if (t->process) {
         t->gs_base = arch::rdmsr(MSR_KERNEL_GS_BASE);
-        if (t->process->compat)
-            compat_segments::save(t);
+        compat_segments::save(t); // 64-bit programs may load TLS selectors too (Wine)
     }
 }
 
