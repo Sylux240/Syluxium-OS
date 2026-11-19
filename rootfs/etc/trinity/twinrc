@@ -5,3 +5,11 @@ Number=1
 # New windows (installer steps, dialogs) get the keyboard, as on Windows.
 [Windows]
 FocusStealingPreventionLevel=0
+
+# Window frames: the Redmond decoration (gradient title bar from the colour
+# scheme above), buttons on the right like Windows.
+[Style]
+PluginLib=twin3_redmond
+ButtonsOnLeft=M
+ButtonsOnRight=IAX
+CustomButtonPositions=true

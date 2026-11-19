@@ -1,0 +1,13 @@
+# Clock on the blue taskbar: white text, no box.
+[General]
+Type=Plain
+
+[Digital]
+Foreground_Color=255,255,255
+Background_Color=36,92,214
+Show_Date=true
+Use_Custom_Font=false
+
+[Plain]
+Foreground_Color=255,255,255
+Show_Date=true

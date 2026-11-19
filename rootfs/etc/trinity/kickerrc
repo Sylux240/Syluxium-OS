@@ -3,6 +3,11 @@
 # Panel contents: Start, Home and Web Browser buttons, task list, system
 # tray, clock. No desktop pager (Syluxium uses a single desktop).
 [General]
+# Blue XP-era taskbar (tools/make-taskbar.py).
+UseBackgroundTheme=true
+BackgroundTheme=/opt/trinity/share/apps/kicker/wallpapers/syluxium_taskbar.png
+ColorizeBackground=false
+RotateBackground=false
 Applets2=KMenuButton_1,ServiceButton_1,ServiceButton_2,Applet_2,Applet_3,Applet_4
 
 [KMenuButton_1]

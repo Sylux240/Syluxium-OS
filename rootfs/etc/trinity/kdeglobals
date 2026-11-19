@@ -7,3 +7,33 @@ super-user-command=sudo
 # Firefox is the web browser; Konqueror stays the file manager.
 [General]
 BrowserApplication=firefox-esr
+# XP-era "Luna" colours (beige windows, blue selection).
+background=236,233,216
+foreground=0,0,0
+windowBackground=255,255,255
+windowForeground=0,0,0
+buttonBackground=236,233,216
+buttonForeground=0,0,0
+selectBackground=49,106,197
+selectForeground=255,255,255
+linkColor=0,0,255
+visitedLinkColor=128,0,128
+alternateBackground=244,242,232
+widgetStyle=plastik
+
+[KDE]
+widgetStyle=plastik
+contrast=7
+
+# Window title bars: blue gradient, white bold titles (Redmond decoration).
+[WM]
+activeBackground=0,84,227
+activeBlend=61,149,255
+activeForeground=255,255,255
+activeTitleBtnBg=0,84,227
+inactiveBackground=122,150,223
+inactiveBlend=157,185,235
+inactiveForeground=216,228,248
+inactiveTitleBtnBg=122,150,223
+activeFont=DejaVu Sans,10,-1,5,75,0,0,0,0,0
+
