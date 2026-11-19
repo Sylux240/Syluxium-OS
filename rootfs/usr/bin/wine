@@ -16,7 +16,8 @@ export WINEPREFIX
 
 if [ ! -e "$WINEPREFIX" ]; then
     if [ -d "$TEMPLATE" ]; then
-        mkdir -p "$(dirname "$WINEPREFIX")" && cp -a "$TEMPLATE" "$WINEPREFIX"
+        # -RP: links stay links; no -a (a user can't preserve root's ownership)
+        mkdir -p "$(dirname "$WINEPREFIX")" && cp -RP "$TEMPLATE" "$WINEPREFIX"
     else
         # No template (the image was built without one): Wine creates the
         # prefix itself. Skip .NET (Mono) and the HTML engine (Gecko), which
@@ -25,8 +26,10 @@ if [ ! -e "$WINEPREFIX" ]; then
     fi
 fi
 
-# Debian's default: errors and warnings, not the endless "fixme" lines.
-: "${WINEDEBUG:=fixme-all}"
+# Debian's default (errors and warnings, not the endless "fixme" lines),
+# without the "starting ... in experimental wow64 mode" notice every 32-bit
+# program would print.
+: "${WINEDEBUG:=fixme-all,err-environ}"
 export WINEDEBUG
 
 exec /usr/lib/wine/wine64 "$@"

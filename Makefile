@@ -36,6 +36,9 @@ USER_PROGS  := $(patsubst userspace/%.c,$(TESTS_DIR)/%,$(wildcard userspace/*.c)
 # 32-bit (i386) test programs for the compat layer (host gcc multilib, static).
 USER32_CFLAGS := -m32 -static -O2 -Wall -pthread
 USER32_PROGS  := $(patsubst userspace/ia32/%.c,$(TESTS_DIR)/%,$(wildcard userspace/ia32/*.c))
+# Windows test programs for Wine (x86-64 and i386 PE), built with clang +
+# lld-link against import libraries made from userspace/windows/*.def.
+WIN_PROGS     := $(TESTS_DIR)/winhello64.exe $(TESTS_DIR)/winhello32.exe $(TESTS_DIR)/winbox32.exe
 
 # Official Debian packages (and their dependencies) that make up the userland.
 DEBIAN_SUITE := trixie
@@ -54,9 +57,9 @@ DEBIAN_I386_PKGS  := hello busybox bash
 # fbdev driver doesn't use; it returns with real GPU drivers (phase 10).
 # Wine (9-wine): libwine links the multimedia/hardware libraries below only
 # from optional Unix-side modules (winegstreamer, winepulse, gphoto2, wpcap,
-# winscard, capi, opencl); without them those modules don't load and the rest
+# capi, opencl); without them those modules don't load and the rest
 # of Wine works. FFmpeg + GStreamer alone would add ~150 MB.
-WINE_EXCLUDE := libavcodec61,libavformat61,libavutil59,libgstreamer-plugins-base1.0-0,libgstreamer1.0-0,libgphoto2-6t64,libgphoto2-port12t64,libpcap0.8t64,libpcsclite1,libpulse0,libcapi20-3t64,ocl-icd-libopencl1
+WINE_EXCLUDE := libavcodec61,libavformat61,libavutil59,libgstreamer-plugins-base1.0-0,libgstreamer1.0-0,libgphoto2-6t64,libgphoto2-port12t64,libpcap0.8t64,libpulse0,libcapi20-3t64,ocl-icd-libopencl1
 DEBIAN_EXCLUDE := mesa-libgallium,libllvm19,libz3-4,libgl1-mesa-dri,libglx-mesa0,libegl-mesa0,cpp,cpp-14,cpp-14-x86-64-linux-gnu,cpp-x86-64-linux-gnu,man-db,groff-base,systemd,udev,debconf,debconf-2.0,xbase-clients,systemd-sysv,libpam-systemd,dbus-user-session,$(WINE_EXCLUDE)
 DEBIAN_I386_EXCLUDE := base-files,debianutils,gawk,libmpfr6,libgmp10,libsigsegv2,readline-common,libreadline8t64
 DEBIAN_I386_PROGS := hello busybox bash
@@ -218,6 +221,31 @@ $(TESTS_DIR)/%: userspace/ia32/%.c
 	@echo "  USER32 $<"
 	@$(USER_CC) $(USER32_CFLAGS) $< -o $@
 
+$(TESTS_DIR)/winhello64.exe: userspace/windows/winhello.c userspace/windows/kernel32-x86_64.def userspace/windows/user32-x86_64.def
+	@mkdir -p $(TESTS_DIR)/win64
+	@echo "  WIN64 $<"
+	@llvm-dlltool -m i386:x86-64 -d userspace/windows/kernel32-x86_64.def -l $(TESTS_DIR)/win64/kernel32.lib
+	@llvm-dlltool -m i386:x86-64 -d userspace/windows/user32-x86_64.def -l $(TESTS_DIR)/win64/user32.lib
+	@$(CC) --target=x86_64-pc-windows-msvc -O2 -fno-stack-protector -c $< -o $(TESTS_DIR)/win64/winhello.obj
+	@lld-link -nodefaultlib -entry:start -subsystem:console -out:$@ $(TESTS_DIR)/win64/winhello.obj \
+	    $(TESTS_DIR)/win64/kernel32.lib $(TESTS_DIR)/win64/user32.lib
+
+$(TESTS_DIR)/winhello32.exe: userspace/windows/winhello.c userspace/windows/kernel32-i386.def userspace/windows/user32-i386.def
+	@mkdir -p $(TESTS_DIR)/win32
+	@echo "  WIN32 $<"
+	@llvm-dlltool -m i386 -k -d userspace/windows/kernel32-i386.def -l $(TESTS_DIR)/win32/kernel32.lib
+	@llvm-dlltool -m i386 -k -d userspace/windows/user32-i386.def -l $(TESTS_DIR)/win32/user32.lib
+	@$(CC) --target=i686-pc-windows-msvc -O2 -fno-stack-protector -c $< -o $(TESTS_DIR)/win32/winhello.obj
+	@lld-link -nodefaultlib -entry:start@0 -subsystem:console -out:$@ $(TESTS_DIR)/win32/winhello.obj \
+	    $(TESTS_DIR)/win32/kernel32.lib $(TESTS_DIR)/win32/user32.lib
+
+$(TESTS_DIR)/winbox32.exe: $(TESTS_DIR)/winhello32.exe
+	@echo "  WIN32 $@"
+	@$(CC) --target=i686-pc-windows-msvc -O2 -fno-stack-protector -DALWAYS_BOX -c userspace/windows/winhello.c \
+	    -o $(TESTS_DIR)/win32/winbox.obj
+	@lld-link -nodefaultlib -entry:start@0 -subsystem:windows -out:$@ $(TESTS_DIR)/win32/winbox.obj \
+	    $(TESTS_DIR)/win32/kernel32.lib $(TESTS_DIR)/win32/user32.lib
+
 $(DEBIAN_STAMP): tools/debian-fetch.py Makefile
 	@echo "  DEB   $(DEBIAN_PKGS) (+ dependencies, Debian $(DEBIAN_SUITE))"
 	@python3 tools/debian-fetch.py --suite $(DEBIAN_SUITE) --out $(DEBIAN_ROOT) --cache deps/debian --exclude $(DEBIAN_EXCLUDE) --repo "$(TRINITY_REPO)" $(DEBIAN_PKGS) $(TRINITY_PKGS)
@@ -233,7 +261,7 @@ $(WINE_I386_STAMP): tools/debian-fetch.py Makefile
 	@python3 tools/debian-fetch.py --arch i386 --suite $(DEBIAN_SUITE) --out $(WINE_I386_ROOT) --cache deps/debian --no-deps libwine
 	@touch $@
 
-$(INITRAMFS): $(KERNEL) tools/mkfontdir.py tools/wine-setup.sh tools/wine-prefix-links.py $(DEBIAN_STAMP) $(DEBIAN_I386_STAMP) $(WINE_I386_STAMP) $(USER_PROGS) $(USER32_PROGS) $(shell find rootfs -type f 2>/dev/null) $(shell find rootfs -type d 2>/dev/null) Makefile
+$(INITRAMFS): $(KERNEL) tools/mkfontdir.py tools/wine-setup.sh tools/wine-prefix-links.py $(DEBIAN_STAMP) $(DEBIAN_I386_STAMP) $(WINE_I386_STAMP) $(USER_PROGS) $(USER32_PROGS) $(WIN_PROGS) $(shell find rootfs -type f 2>/dev/null) $(shell find rootfs -type d 2>/dev/null) Makefile
 	@echo "  ROOT  $(ROOTFS)"
 	@rm -rf $(ROOTFS)
 	@cp -a $(DEBIAN_ROOT) $(ROOTFS)
@@ -244,7 +272,7 @@ $(INITRAMFS): $(KERNEL) tools/mkfontdir.py tools/wine-setup.sh tools/wine-prefix
 	        ln -s busybox $(ROOTFS)/usr/bin/$$applet; done
 	@ln -sf busybox $(ROOTFS)/usr/bin/sh
 	@mkdir -p $(ROOTFS)/opt/syluxium/tests
-	@cp $(USER_PROGS) $(USER32_PROGS) $(ROOTFS)/opt/syluxium/tests/
+	@cp $(USER_PROGS) $(USER32_PROGS) $(WIN_PROGS) $(ROOTFS)/opt/syluxium/tests/
 	@# 32-bit Debian userland (multiarch, as on Debian): libraries in
 	@# /usr/lib/i386-linux-gnu, ld-linux.so.2, programs installed as <name>-i386
 	@mkdir -p $(ROOTFS)/usr/lib/i386-linux-gnu

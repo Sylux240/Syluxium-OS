@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Wine Windows Program Loader
+GenericName=Windows Program
+Comment=Run a Windows program
+Exec=wine start /unix %f
+MimeType=application/x-msdos-program;application/x-ms-dos-executable;application/x-msdownload;application/x-msi;application/x-ms-shortcut;application/x-bat;application/x-mswinurl;
+Icon=wine
+NoDisplay=true
+StartupNotify=true
+InitialPreference=10

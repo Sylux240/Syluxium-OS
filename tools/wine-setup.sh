@@ -12,6 +12,7 @@
 #  - Debian ships the Windows DLLs with DWARF debug info: 1.3 GB; stripped
 #    they're 480 MB.
 #  - wine-stable/winecfg/... names (update-alternatives).
+#  - TDE file types: .exe/.msi open with Wine (double-click).
 #  - A template Wine prefix for /usr/bin/wine to copy on first use, made by
 #    running the image's own Wine in a sandbox (bwrap). Without bwrap the
 #    image just has no template and Wine creates prefixes itself.
@@ -45,6 +46,18 @@ for prog in msiexec regedit regsvr32 wineboot winecfg wineconsole winedbg winefi
 done
 ln -sf wine "$ROOTFS/usr/bin/wine-stable"
 
+# The desktop (TDE) file types: .exe files get Wine's icon, open with Wine
+# (/usr/share/applications/wine.desktop) and are no longer "also" Linux
+# executables, which Konqueror would try to run directly when they have
+# the x bit (as everything on a FAT stick does). .msi files get a type.
+MIMELNK=$ROOTFS/opt/trinity/share/mimelnk/application
+if [ -f "$MIMELNK/x-msdos-program.desktop" ]; then
+    sed -i -e '/^X-TDE-IsAlso=/d' -e 's/^Icon=.*/Icon=exec_wine/' \
+        -e 's/^MimeType=.*/&\nPatterns=*.exe;*.EXE;/' "$MIMELNK/x-msdos-program.desktop"
+    printf '[Desktop Entry]\nComment=Windows Installer Package\nIcon=exec_wine\nType=MimeType\nMimeType=application/x-msi\nPatterns=*.msi;*.MSI;\n' \
+        > "$MIMELNK/x-msi.desktop"
+fi
+
 # The template prefix.
 TEMPLATE=/usr/lib/syluxium/wine-prefix
 rm -rf "$ROOTFS$TEMPLATE"
@@ -64,4 +77,5 @@ sandbox /usr/lib/wine/wine64 wineboot.exe --init
 # file types such as .txt in the desktop's associations.
 sandbox /usr/lib/wine/wine64 reg.exe add 'HKCU\Software\Wine\FileOpenAssociations' /v Enable /d N /f > /dev/null
 sandbox /usr/lib/wine/wineserver64 -w
+rm -f "$ROOTFS$TEMPLATE/wineserver" # the build-time server's info file (mode 0400)
 python3 tools/wine-prefix-links.py "$ROOTFS" "$ROOTFS$TEMPLATE"

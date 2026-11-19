@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Wine Configuration
+GenericName=Windows Compatibility Settings
+Comment=Windows version, drives, graphics and audio settings for Windows programs
+Exec=winecfg
+Icon=wine
+Categories=X-Syluxium-Wine;

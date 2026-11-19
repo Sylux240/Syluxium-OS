@@ -60,6 +60,8 @@ tools/debian-fetch.py  downloads official Debian packages (+ dependencies, SHA25
 rootfs/               files copied into the initramfs (/etc, ...)
 tools/psf2cpp.py      converts a PSF console font into kernel/video/font_*.cpp
 tools/smoke-test.sh   headless QEMU boot: serial log + screenshot
+tools/wine-setup.sh   finishes Wine in the rootfs: WoW64 DLLs, stripping, template prefix (+ wine-prefix-links.py)
+userspace/windows/    Windows test programs (clang + lld-link) for Wine
 ```
 
 ## Roadmap
@@ -189,8 +191,19 @@ tools/smoke-test.sh   headless QEMU boot: serial log + screenshot
             desktop window with taskbar entry, start-menu shortcut and icon, shared clipboard,
             files, sound, network, input; install .apk by double-click and from the App Store
             (F-Droid/Aurora sources; Google Play Services can't be bundled, user-installable)
-      - [ ] 9-wine: run Windows .exe programs out of the box (Wine, preconfigured; double-click an
-            .exe and it runs, no user setup)
+      - [x] 9-wine: run Windows .exe programs out of the box: Debian's Wine 10 (wine64; 32-bit
+            programs through Wine's WoW64 mode with the 32-bit Windows DLLs of i386 libwine, no
+            i386 Linux libraries), DLLs stripped of debug info; `wine` copies a template prefix
+            (built at image build time, DLLs as symlinks: ~10 MB per user) on first use, so no
+            setup wait and no Mono/Gecko dialogs. `wine notepad`, `wine winemine`, `wine cmd`,
+            real 64/32-bit .exe files (/opt/syluxium/tests/winhello*.exe) work from the console
+            and the desktop; double-clicking an .exe runs it (Wine icon, MIME association), Start
+            menu → Windows Programs (Notepad, Minesweeper, File Manager, Command Prompt, Wine
+            Configuration, Add/Remove Programs, Registry Editor). Kernel: Linux GDT selectors
+            (WoW64 needs CS32 0x23), TLS descriptors/%fs for 64-bit processes, sigaltstack,
+            fault trapno/err/cr2 + si_addr, statx, fchdir. Image +141 MB (342 → 483 MB).
+            `wine-gui-test` = desktop check. Not yet: no FFmpeg/GStreamer/PulseAudio modules
+            (media in Windows programs), no Vulkan/OpenGL (Mesa excluded), Mono/Gecko not shipped
       - [x] 9b (first part): green glossy **"Start"** button (Syluxium's own tiles,
             tools/make-start-tiles.py), no desktop pager, a single desktop (/etc/trinity defaults)
       - [x] 9b: boots straight into TDE (boot menu: "Syluxium" = desktop, "Syluxium (text

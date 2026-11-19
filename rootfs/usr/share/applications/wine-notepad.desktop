@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Notepad
+GenericName=Text Editor (Windows)
+Comment=Windows Notepad, running with Wine
+Exec=wine notepad
+Icon=wine
+Categories=X-Syluxium-Wine;

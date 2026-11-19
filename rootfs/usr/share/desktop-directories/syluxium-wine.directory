@@ -1,0 +1,5 @@
+[Desktop Entry]
+Type=Directory
+Name=Windows Programs
+Comment=Windows programs running with Wine
+Icon=wine

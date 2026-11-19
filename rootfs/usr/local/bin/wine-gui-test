@@ -1,0 +1,36 @@
+#!/bin/sh
+# Bring-up aid: log in on the desktop, then start Windows programs with Wine
+# as the live user. Their output goes to the console afterwards.
+#   wine-gui-test [login wait] [session wait] [program wait] [programs...]
+# Default programs: Notepad (64-bit), Minesweeper (32-bit, WoW64) and a
+# message box from a real 32-bit .exe opened like a double-click on the
+# desktop ("open:FILE" = what Konqueror/the desktop do on a double-click).
+startdesktop &
+sleep "${1:-50}"
+export DISPLAY=:0 XAUTHORITY="$(ls /var/run/xauth/A:0-* | head -1)"
+xdotool key Return # the login screen: Enter logs the passwordless live user in
+sleep "${2:-45}"
+waitp=${3:-40}
+shift 3 2>/dev/null
+progs=${*:-notepad c:/windows/syswow64/winemine.exe open:Desktop/winbox32.exe}
+cp /opt/syluxium/tests/winbox32.exe /home/syluxium/Desktop/ && chmod 755 /home/syluxium/Desktop/winbox32.exe &&
+    chown syluxium: /home/syluxium/Desktop/winbox32.exe
+# Run in the user's desktop session environment (taken from kdesktop): DCOP
+# and the ICE authority are needed for kfmclient, i.e. for the desktop's
+# own "open this file" path.
+sess=$(pidof kdesktop | cut -d' ' -f1)
+senv=$(tr '\0' '\n' < /proc/$sess/environ | grep -E '^(ICEAUTHORITY|DCOPSERVER|DCOPAUTHORITY|SESSION_MANAGER|PATH|TDEHOME|XDG_[A-Z_]*)=' | sed "s/'/'\\\\''/g; s/^\([^=]*\)=\(.*\)/export \1='\2';/" | tr '\n' ' ')
+n=0
+for prog in $progs; do
+    n=$((n + 1))
+    case $prog in
+    open:*) cmd="/opt/trinity/bin/kfmclient exec \$HOME/${prog#open:}" ;;
+    *) cmd="wine $prog" ;;
+    esac
+    su syluxium -c "cd; $senv export DISPLAY=:0 XAUTHORITY=\$HOME/.Xauthority; $cmd > /tmp/wine-$n.log 2>&1 &"
+    sleep 3
+done
+sleep "$waitp"
+{ echo "=== wine processes:"; ps -A -o pid,user,args | grep -i '[w]ine\|\.exe' | cut -c1-110
+  echo "=== windows:"; for w in $(xdotool search --onlyvisible --name . 2>/dev/null); do xdotool getwindowname "$w"; done | sort -u | head -20
+  for f in /tmp/wine-*.log; do echo "=== $f:"; tail -15 "$f"; done; } > /dev/console 2>&1
