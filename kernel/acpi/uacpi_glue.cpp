@@ -30,6 +30,7 @@ struct IrqSlot {
     u32 count;          // interrupts in the current one-second window
     u64 window_start;
     bool masked;
+    bool level, active_low;
 };
 IrqSlot g_irq[256];
 
@@ -279,7 +280,7 @@ uacpi_status uacpi_kernel_install_interrupt_handler(uacpi_u32 irq, uacpi_interru
     u8 vector = interrupts::allocate_vector();
     if (!vector)
         return UACPI_STATUS_INTERNAL_ERROR;
-    g_irq[vector] = IrqSlot{handler, ctx, 0, 0, 0, false};
+    g_irq[vector] = IrqSlot{handler, ctx, 0, 0, 0, false, true, true};
     interrupts::set_handler(vector, irq_trampoline);
     u32 gsi = irq;
     bool level = true, active_low = true;
@@ -292,6 +293,8 @@ uacpi_status uacpi_kernel_install_interrupt_handler(uacpi_u32 irq, uacpi_interru
         }
     }
     g_irq[vector].gsi = gsi;
+    g_irq[vector].level = level;
+    g_irq[vector].active_low = active_low;
     if (!ioapic::route_gsi(gsi, vector, this_cpu()->lapic_id, level, active_low))
         return UACPI_STATUS_INTERNAL_ERROR;
     *out = reinterpret_cast<uacpi_handle>(static_cast<uptr>(vector));
@@ -299,7 +302,7 @@ uacpi_status uacpi_kernel_install_interrupt_handler(uacpi_u32 irq, uacpi_interru
 }
 
 uacpi_status uacpi_kernel_uninstall_interrupt_handler(uacpi_interrupt_handler, uacpi_handle h) {
-    g_irq[reinterpret_cast<uptr>(h) & 0xFF] = IrqSlot{nullptr, nullptr, 0, 0, 0, false};
+    g_irq[reinterpret_cast<uptr>(h) & 0xFF] = IrqSlot{nullptr, nullptr, 0, 0, 0, false, true, true};
     return UACPI_STATUS_OK;
 }
 
@@ -328,3 +331,23 @@ uacpi_status uacpi_kernel_wait_for_work_completion(void) {
 }
 
 } // extern "C"
+
+namespace acpi {
+
+// After the EC and GPEs are set up: a storm masked during initialization
+// (events nobody handled yet) gets another chance; the guard masks it
+// again if it keeps going.
+void rearm_interrupts() {
+    for (u32 v = 0; v < 256; v++) {
+        IrqSlot& s = g_irq[v];
+        if (!s.handler || !s.masked)
+            continue;
+        s.count = 0;
+        s.window_start = clock::now_ns();
+        s.masked = false;
+        ioapic::route_gsi(s.gsi, static_cast<u8>(v), this_cpu()->lapic_id, s.level, s.active_low);
+        klog::info("ACPI: GSI %u unmasked again (event handlers are installed now)", s.gsi);
+    }
+}
+
+} // namespace acpi

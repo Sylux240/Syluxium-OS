@@ -119,6 +119,9 @@ namespace hid {
 bool probe(Device* d, const Interface& intf);
 void run_selftest(); // report-descriptor parser + input mapping, with real descriptors
 }
+namespace bcm5974 {
+bool probe(Device* d, const Interface& intf); // Apple USB trackpads (MacBook Air/Pro 2013+)
+}
 namespace xpad {
 bool probe(Device* d, const Interface& intf); // Xbox 360 / One controllers (vendor class)
 void run_selftest();

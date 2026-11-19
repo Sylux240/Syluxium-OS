@@ -175,26 +175,31 @@ void attach(Device* d) {
     auto offer = [&]() {
         if (!have_intf || intf.alt_setting != 0)
             return;
-        if (bound)
-            return; // one driver per device for now (the first interface that binds names it)
-        entry->category = category_for(intf.cls);
-        entry->class_code = (static_cast<u32>(intf.cls) << 16) | (static_cast<u32>(intf.subclass) << 8) | intf.protocol;
-        if (xpad::probe(d, intf)) {
-            entry->category = dev::Category::Input;
-            entry->driver_name = "xpad";
-            bound = true;
+        // Every interface gets offered (composite devices: Apple keyboard +
+        // trackpad, keyboards with a media-key interface); the device list
+        // shows the first driver that bound.
+        const char* name = nullptr;
+        dev::Category category = category_for(intf.cls);
+        if (bcm5974::probe(d, intf)) {
+            category = dev::Category::Input;
+            name = "bcm5974";
+        } else if (xpad::probe(d, intf)) {
+            category = dev::Category::Input;
+            name = "xpad";
         } else if (hid::probe(d, intf)) {
-            entry->driver_name = "usbhid";
-            bound = true;
+            name = "usbhid";
         } else if (storage::probe(d, intf)) {
-            entry->driver_name = "usb-storage";
-            bound = true;
+            name = "usb-storage";
         } else if (hub::probe(d, intf)) {
-            entry->driver_name = "hub";
-            bound = true;
+            name = "hub";
         } else if (cdc_ether::probe(d, intf)) {
-            entry->category = dev::Category::Network;
-            entry->driver_name = "cdc_ether";
+            category = dev::Category::Network;
+            name = "cdc_ether";
+        }
+        if (name && !bound) {
+            entry->category = category;
+            entry->class_code = (static_cast<u32>(intf.cls) << 16) | (static_cast<u32>(intf.subclass) << 8) | intf.protocol;
+            entry->driver_name = name;
             bound = true;
         }
     };

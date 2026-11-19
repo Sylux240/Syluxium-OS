@@ -253,6 +253,7 @@ void start_interpreter() {
         return;
     }
     uacpi_finalize_gpe_initialization();
+    rearm_interrupts();
     g_ready = true;
     uacpi_install_fixed_event_handler(UACPI_FIXED_EVENT_POWER_BUTTON, fixed_power_button, nullptr);
     uacpi_find_devices("PNP0C0C", found_power_button, nullptr);
