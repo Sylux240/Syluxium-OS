@@ -412,42 +412,6 @@ long ControlNode::ioctl_file(vfs::File* f, u64 req, u64 arg) {
     }
 }
 
-// /dev/snd/timer: libasound only needs it to exist and answer queries; we
-// have no ALSA timers to offer (applications fall back to PCM wakeups).
-class TimerNode : public vfs::Inode {
-public:
-    TimerNode() {
-        ino = vfs::next_ino();
-        mode = vfs::S_IFCHR | 0660;
-        gid = vfs::GID_AUDIO;
-        rdev = (116u << 8) | 33;
-        gid = 29;
-        atime = mtime = ctime = vfs::now();
-    }
-    bool seekable() const override { return false; }
-    isize read_file(vfs::File*, u64, void*, usize) override { return -err::AGAIN; }
-    u16 poll(vfs::File*) override { return 0; }
-    long ioctl_file(vfs::File*, u64 req, u64 arg) override {
-        if (ioc_type(req) != 'T')
-            return -err::NOTTY;
-        switch (ioc_nr(req)) {
-        case TIMER_PVERSION:
-            return put_arg<i32>(arg, TIMER_VERSION);
-        case TIMER_NEXT_DEVICE: {
-            TimerId id;
-            if (long r = get_arg(&id, arg); r < 0)
-                return r;
-            id = TimerId{-1, 0, -1, -1, -1}; // SNDRV_TIMER_CLASS_NONE: no (more) timers
-            return put_arg(arg, id);
-        }
-        case TIMER_TREAD:
-            return 0;
-        default:
-            return -err::NODEV;
-        }
-    }
-};
-
 } // namespace
 
 Control* control_add(Card* card, const Control& tmpl) {
@@ -469,8 +433,6 @@ void register_control_node(Card* card, const char* path) {
         card->events = new EventHub;
     vfs::add_node(path, new ControlNode(card));
 }
-
-void register_timer_node() { vfs::add_node("/dev/snd/timer", new TimerNode); }
 
 } // namespace internal
 

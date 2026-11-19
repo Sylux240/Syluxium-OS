@@ -133,6 +133,11 @@ bool update_locked(Substream* s) {
     if (is_playback(s) && delta && s->silence_size >= s->boundary)
         silence(s, old_hw, delta);
 
+    if (delta && s->cfg.period_size) {
+        u64 ps = s->cfg.period_size, laps = s->boundary / ps;
+        u64 crossed = (new_hw / ps + laps - old_hw / ps) % laps;
+        internal::timer_ticks(s, crossed);
+    }
     s->hw_ptr_base = base;
     s->status->hw_ptr = new_hw;
     s->status->tstamp = now_ts(s);
@@ -162,7 +167,10 @@ void wake(Substream* s) {
 long start_locked(Substream* s) {
     if (state(s) != STATE_PREPARED)
         return -snderr::BADFD;
-    if (is_playback(s) && hw_avail(s) <= 0)
+    // Starting playback with nothing queued is an underrun - unless the
+    // stream never stops (stop_threshold >= boundary: dmix, PulseAudio),
+    // which runs on silence (Linux's snd_pcm_playback_data()).
+    if (is_playback(s) && s->stop_threshold < s->boundary && hw_avail(s) <= 0)
         return -err::PIPE;
     long r = s->ops->trigger(s, TRIGGER_START);
     if (r < 0)
@@ -707,15 +715,24 @@ public:
     bool seekable() const override { return false; }
 
     void on_open(vfs::File* f) override {
-        // One opener at a time, like a Linux PCM with a single subdevice.
-        // open() can't fail here, so a second opener gets a file whose every
-        // operation returns -EBUSY (libasound fails its first ioctl).
+        // One opener at a time, like a Linux PCM with a single subdevice -
+        // except that an open with O_APPEND joins an already open stream
+        // (dmix/dsnoop's secondary clients). open() can't fail
+        // here, so a refused opener gets a file whose every operation
+        // returns -EBUSY (libasound fails its first ioctl).
         LockGuard guard(m_s->wait.lock());
+        bool append = f->flags & vfs::O_APPEND;
         if (m_s->open) {
-            f->private_data = nullptr;
+            if (append) { // Linux: an O_APPEND open joins a busy stream
+                m_s->open_count++;
+                f->private_data = m_s;
+            } else {
+                f->private_data = nullptr;
+            }
             return;
         }
         m_s->open = true;
+        m_s->open_count = 1;
         f->private_data = m_s;
     }
 
@@ -723,6 +740,14 @@ public:
         if (f->private_data != m_s)
             return;
         Substream* s = m_s;
+        {
+            LockGuard guard(s->wait.lock());
+            if (s->open_count > 1) { // others still share the stream
+                s->open_count--;
+                return;
+            }
+            s->open_count = 0;
+        }
         if (Substream* peer = linked(s); peer) {
             (void)peer;
             unlink_stream(s);

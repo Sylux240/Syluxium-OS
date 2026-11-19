@@ -118,6 +118,8 @@ struct Substream {
     abi::Timespec trigger_tstamp = {};
     sched::Mutex config_lock;  // serializes the configuration ioctls (may sleep)
     sched::WaitQueue wait;     // its lock protects status/control/state; writers/readers sleep here
+    void* timers = nullptr;    // PCM timer instances bound to this stream (timer.cpp)
+    u32 open_count = 0;        // opens sharing the stream (O_APPEND: dmix's secondary clients)
 };
 
 struct Pcm {
@@ -209,6 +211,7 @@ long refine(const Substream* s, abi::HwParams* params);   // HW_REFINE
 long choose(const Substream* s, abi::HwParams* params);   // HW_PARAMS: refine + pick single values
 void timer_kick(); // a stream started: make the position-update thread poll
 bool update_running(Substream* s); // poll one stream's position; true if it is running
+void timer_ticks(Substream* s, u64 periods); // PCM timers: the stream passed period boundaries
 } // namespace internal
 
 } // namespace sound
