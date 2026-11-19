@@ -66,7 +66,7 @@ void lkpi_warn(const char* file, int line, const char* cond);
 #define BUG() lkpi_bug(__FILE__, __LINE__)
 #define BUG_ON(c) do { if (unlikely(c)) BUG(); } while (0)
 #define WARN_ON(c) ({ int __w = !!(c); if (unlikely(__w)) lkpi_warn(__FILE__, __LINE__, #c); unlikely(__w); })
-#define WARN_ON_ONCE(c) WARN_ON(c)
+#define WARN_ON_ONCE(c) ({ static bool __warned; int __w = !!(c); if (unlikely(__w) && !__warned) { __warned = true; lkpi_warn(__FILE__, __LINE__, #c); } unlikely(__w); })
 #define WARN(c, fmt, ...) ({ int __w = !!(c); if (unlikely(__w)) { printk(KERN_WARNING fmt, ##__VA_ARGS__); lkpi_warn(__FILE__, __LINE__, #c); } unlikely(__w); })
 #define WARN_ONCE(c, fmt, ...) WARN(c, fmt, ##__VA_ARGS__)
 #ifdef __cplusplus
@@ -317,7 +317,7 @@ struct task_struct* lkpi_current(void);
 #ifndef __cplusplus
 #define current lkpi_current()
 #define in_interrupt() 0
-#define softirq_count() 0
+#define softirq_count() (1 << 8) /* callers may assume BH-disabled context: LinuxKPI code never runs in a hard IRQ */
 #define in_serving_softirq() 0
 #define hardirq_count() 0
 #define in_hardirq() 0

@@ -257,11 +257,16 @@ long set_link(const u8* p, usize len) {
     Interface* f = find_link(index, p + 16, len - 16);
     if (!f)
         return -err::NODEV;
-    if (change == 0)
-        change = 0xFFFFFFFF; // old tools: ifi_change 0 means "all flags"
+    // As in Linux: flags change only if ifi_flags or ifi_change is set; a
+    // zero ifi_change (old tools) means "all flags". Requests that only set
+    // attributes (wpa_supplicant/hostapd's IFLA_OPERSTATE) send both as 0.
     long result = 0;
-    if ((change & IFF_UP) && ((flags ^ f->flags) & IFF_UP))
-        result = f->set_up(flags & IFF_UP);
+    if (flags || change) {
+        if (change == 0)
+            change = 0xFFFFFFFF;
+        if ((change & IFF_UP) && ((flags ^ f->flags) & IFF_UP))
+            result = f->set_up(flags & IFF_UP);
+    }
     for_each_attr(p + 16, len - 16, [&](u16 type, const u8* data, usize alen) {
         if (type == IFLA_MTU && alen >= 4) {
             u32 mtu;
