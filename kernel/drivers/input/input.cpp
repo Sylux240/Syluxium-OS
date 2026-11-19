@@ -208,7 +208,33 @@ private:
 
 } // namespace
 
+// event0 / event1: every keyboard and every mouse combined (like Linux's
+// /dev/input/mice), registered first so their numbers never change. The X
+// server (no udev hot-plug here) opens these two and so sees every
+// keyboard and mouse, built in or plugged in later.
+Device g_all_keyboards, g_all_pointers;
+
+void mirror(Device* d, u16 type, u16 code, i32 value) {
+    if (d == &g_all_keyboards || d == &g_all_pointers)
+        return;
+    if (type == EV_KEY && code > 0 && code < BTN_MISC) {
+        g_all_keyboards.report(type, code, value ? 1 : 0); // its own repeat tracking
+        d->mirror_pending |= 1;
+    } else if ((type == EV_KEY && code >= BTN_LEFT && code <= BTN_EXTRA && (d->ev_bits & (1ull << EV_REL))) ||
+               type == EV_REL) {
+        g_all_pointers.report(type, code, value);
+        d->mirror_pending |= 2;
+    } else if (type == EV_SYN && d->mirror_pending) {
+        if (d->mirror_pending & 1)
+            g_all_keyboards.sync();
+        if (d->mirror_pending & 2)
+            g_all_pointers.sync();
+        d->mirror_pending = 0;
+    }
+}
+
 void Device::report(u16 type, u16 code, i32 value) {
+    mirror(this, type, code, value);
     if (type == EV_KEY && code <= KEY_MAX) {
         bool was_down = key_down[code / 64] & (1ull << (code % 64));
         if (value == 1 && was_down)
@@ -284,6 +310,26 @@ void unregister_device(Device* d) {
     poll::notify();
 }
 
-void init() { vfs::mkdir_p("/dev/input"); }
+void init() {
+    vfs::mkdir_p("/dev/input");
+    auto name = [](Device& d, const char* n) {
+        for (usize i = 0; n[i] && i < sizeof(d.name) - 1; i++)
+            d.name[i] = n[i];
+    };
+    name(g_all_keyboards, "Syluxium combined keyboards");
+    g_all_keyboards.bustype = BUS_VIRTUAL;
+    g_all_keyboards.ev_bits = (1ull << EV_KEY) | (1ull << EV_REP);
+    for (u16 k = 1; k < BTN_MISC; k++)
+        g_all_keyboards.set_key(k);
+    register_device(&g_all_keyboards); // event0
+    name(g_all_pointers, "Syluxium combined mice");
+    g_all_pointers.bustype = BUS_VIRTUAL;
+    g_all_pointers.ev_bits = (1ull << EV_KEY) | (1ull << EV_REL);
+    g_all_pointers.rel_bits = (1ull << REL_X) | (1ull << REL_Y) | (1ull << REL_WHEEL) | (1ull << REL_HWHEEL);
+    for (u16 b = BTN_LEFT; b <= BTN_EXTRA; b++)
+        g_all_pointers.set_key(b);
+    g_all_pointers.props = 1u << INPUT_PROP_POINTER;
+    register_device(&g_all_pointers); // event1
+}
 
 } // namespace input

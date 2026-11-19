@@ -68,6 +68,7 @@ public:
     u64 key_down[KEY_MAX / 64 + 1] = {};
     i32 abs_value[ABS_MAX + 1] = {};  // current axis values (for EVIOCGABS)
     u32 index = 0; // N in eventN
+    u8 mirror_pending = 0; // bit 0: keyboard events, bit 1: pointer events since the last sync
 };
 
 // Register a device: creates /dev/input/eventN.

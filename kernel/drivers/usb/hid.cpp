@@ -60,10 +60,20 @@ public:
     }
 
     HidInput hid;
+    char name[48] = {};
+    u8 logged = 0;
 };
 
 void report_received(void* ctx, const u8* data, u32 length) {
-    static_cast<ReportDevice*>(ctx)->hid.process(data, length);
+    auto* r = static_cast<ReportDevice*>(ctx);
+    if (r->logged < 2) { // real-hardware diagnostics: do reports arrive, and what do they look like?
+        r->logged++;
+        char hex[3 * 16 + 1] = {};
+        for (u32 i = 0; i < length && i < 16; i++)
+            snprintf(hex + 3 * i, 4, "%02x ", data[i]);
+        klog::info("usb-hid: %s: report of %u bytes: %s", r->name, length, hex);
+    }
+    r->hid.process(data, length);
 }
 
 void report_disconnect(void* ctx) {
@@ -228,6 +238,7 @@ bool probe(Device* d, const Interface& intf) {
         input::register_device(&hid.devices[i]);
         named++;
     }
+    snprintf(r->name, sizeof(r->name), "%s if%u", d->product_name, intf.number);
     d->add_binding(report_disconnect, r);
     u32 length = hid.max_report_bytes();
     if (length < ep->max_packet)
