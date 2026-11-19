@@ -65,17 +65,9 @@ void lkpi_local_irq_restore(unsigned long f);
 #define local_irq_save(f) do { (f) = lkpi_local_irq_save(); } while (0)
 #define local_irq_restore(f) lkpi_local_irq_restore(f)
 
-/* RCU: readers are plain sections; synchronize_rcu waits a scheduler tick on every CPU. */
-#define rcu_read_lock() do { } while (0)
-#define rcu_read_unlock() do { } while (0)
-#define rcu_dereference(p) READ_ONCE(p)
-#define rcu_dereference_protected(p, c) (p)
-#define rcu_access_pointer(p) READ_ONCE(p)
-#define rcu_assign_pointer(p, v) smp_store_release(&(p), (v))
-#define RCU_INIT_POINTER(p, v) ((p) = (v))
-void synchronize_rcu(void);
-#define synchronize_net() synchronize_rcu()
 
 LKPI_EXTERN_C_END
+
+#include <linux/rcupdate.h>
 
 #endif

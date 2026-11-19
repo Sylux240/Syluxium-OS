@@ -368,6 +368,19 @@ void register_interface(Interface* iface) {
     }
 }
 
+void link_up(Interface* iface) {
+    iface->link_up = true;
+    dhcp_kick(iface);
+}
+
+void unregister_interface(Interface* iface) {
+    LockGuard guard(g_lock);
+    iface->flags &= ~(IFF_UP | IFF_RUNNING);
+    iface->link_up = false;
+    iface->addr = 0;
+    iface->netmask = 0;
+}
+
 Interface* interface_by_index(u32 index) { return index >= 1 && index <= g_iface_count ? g_ifaces[index - 1] : nullptr; }
 
 Interface* interface_by_name(const char* name) {
@@ -464,9 +477,9 @@ void ip_transmit(Interface* f, u32 hop, u32 dst, const u8* packet, usize total) 
 
 } // namespace
 
-long ip_send(u32 src, u32 dst, u8 proto, const u8* payload, usize len, u8 ttl) {
-    u32 hop;
-    Interface* f = route(dst, &hop);
+long ip_send(u32 src, u32 dst, u8 proto, const u8* payload, usize len, u8 ttl, Interface* via) {
+    u32 hop = dst;
+    Interface* f = via ? via : route(dst, &hop);
     if (!f)
         return -101; // ENETUNREACH
     if (len + 20 > MAX_IP_PAYLOAD)

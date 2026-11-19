@@ -105,6 +105,8 @@ struct ethtool_ops {
     int (*get_eeprom)(struct net_device*, struct ethtool_eeprom*, u8*);
     int (*set_eeprom)(struct net_device*, struct ethtool_eeprom*, u8*);
     void (*get_ringparam)(struct net_device*, struct ethtool_ringparam*, struct kernel_ethtool_ringparam*, struct netlink_ext_ack*);
+    int (*set_ringparam)(struct net_device*, struct ethtool_ringparam*, struct kernel_ethtool_ringparam*, struct netlink_ext_ack*);
+    void (*get_channels)(struct net_device*, void*);
     void (*get_pauseparam)(struct net_device*, struct ethtool_pauseparam*);
     int (*set_pauseparam)(struct net_device*, struct ethtool_pauseparam*);
     void (*get_strings)(struct net_device*, u32 stringset, u8*);

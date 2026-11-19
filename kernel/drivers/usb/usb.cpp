@@ -1,3 +1,4 @@
+#include <linuxkpi/linuxkpi.hpp>
 #include <core/log.hpp>
 #include <drivers/usb/usb.hpp>
 #include <lib/format.hpp>
@@ -180,7 +181,12 @@ void attach(Device* d) {
         // shows the first driver that bound.
         const char* name = nullptr;
         dev::Category category = category_for(intf.cls);
-        if (bcm5974::probe(d, intf)) {
+        const char* linux_driver = nullptr;
+        if (linuxkpi::usb_probe(d, intf, &linux_driver)) {
+            // A Linux driver (LinuxKPI) whose id_table matches: Wi-Fi dongles.
+            category = dev::Category::Network;
+            name = linux_driver;
+        } else if (bcm5974::probe(d, intf)) {
             category = dev::Category::Input;
             name = "bcm5974";
         } else if (xpad::probe(d, intf)) {

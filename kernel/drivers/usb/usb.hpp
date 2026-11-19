@@ -50,6 +50,11 @@ public:
     // when data comes (network adapters' receive endpoint).
     virtual long transfer_wait(u8 ep_address, void* data, u32 length) { return transfer(ep_address, data, length); }
 
+    // Abort the transfer in progress on a bulk/interrupt endpoint (its
+    // waiter returns an error at once), e.g. to cancel a receive that may
+    // wait forever. Host controllers that can't do it leave it running.
+    virtual void cancel(u8 ep_address) { (void)ep_address; }
+
     // Keep an interrupt IN endpoint polled; `cb` runs for every report (in
     // the host controller's event thread: it must not sleep).
     virtual long start_interrupt_in(u8 ep_address, u32 length, InterruptCallback cb, void* ctx) = 0;

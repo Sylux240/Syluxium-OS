@@ -8,8 +8,16 @@ LKPI_EXTERN_C_BEGIN
 /* HZ = 1000: one jiffy is one millisecond of Syluxium's monotonic clock. */
 unsigned long lkpi_jiffies(void);
 u64 lkpi_ktime_ns(void);
+#ifdef __cplusplus
 #define jiffies lkpi_jiffies()
+#else
+/* A real variable, as in Linux (struct fields called "jiffies" exist):
+ * refreshed on every scheduler tick and on LinuxKPI thread wakeups. */
+extern volatile unsigned long jiffies;
+#endif
 #define jiffies_64 ((u64)lkpi_jiffies())
+#define typecheck(type, x) ({ type __dummy; __typeof__(x) __dummy2; (void)(&__dummy == &__dummy2); 1; })
+typedef s64 time64_t;
 #define get_jiffies_64() ((u64)lkpi_jiffies())
 #define MAX_SCHEDULE_TIMEOUT LONG_MAX
 #define INITIAL_JIFFIES 0UL
@@ -51,6 +59,31 @@ static inline ktime_t ms_to_ktime(u64 ms) { return (ktime_t)(ms * 1000000); }
 #define ktime_after(a, b) ((a) > (b))
 #define ktime_before(a, b) ((a) < (b))
 #define ktime_get_ns() ((u64)lkpi_ktime_ns())
+u64 lkpi_ktime_real_ns(void);
+#define ktime_get_real() ((ktime_t)lkpi_ktime_real_ns())
+#define ktime_get_real_seconds() ((s64)(lkpi_ktime_real_ns() / 1000000000ULL))
+#define ktime_set(secs, nsecs) ((ktime_t)(secs) * 1000000000LL + (nsecs))
+#define ktime_to_timespec64(kt) ({ struct timespec64 __ts = { (kt) / 1000000000LL, (kt) % 1000000000LL }; __ts; })
+#define ktime_get_coarse_boottime() ktime_get()
+#define ktime_get_boottime_seconds() ktime_get_seconds()
+#define ktime_get_mono_fast_ns() ktime_get_ns()
+#define ktime_get_coarse_boottime_ns() ktime_get_boottime_ns()
+#define ktime_us_delta_lkpi ktime_us_delta
+#define ns_to_ktime_lkpi ns_to_ktime
+#define us_to_ktime(us) ((ktime_t)(us) * 1000)
+#define ktime_sub_ns(t, n) ((t) - (s64)(n))
+#define ktime_to_timespec(kt) ktime_to_timespec64(kt)
+#define nsecs_to_jiffies(ns) ((unsigned long)((ns) / 1000000ULL))
+#define jiffies_to_nsecs(j) ((u64)(j) * 1000000ULL)
+#define jiffies_delta_to_msecs(d) ((d) > 0 ? jiffies_to_msecs(d) : 0)
+#define time_is_before_eq_jiffies(a) time_after_eq(jiffies, a)
+#define time_is_after_eq_jiffies(a) time_before_eq(jiffies, a)
+#define secs_to_jiffies(s) ((unsigned long)(s) * HZ)
+struct timespec64 { s64 tv_sec; long tv_nsec; };
+static inline u64 timespec64_to_ns(const struct timespec64* ts) { return (u64)ts->tv_sec * 1000000000ULL + ts->tv_nsec; }
+#define ktime_get_real_ts64(ts) do { u64 __n = lkpi_ktime_real_ns(); (ts)->tv_sec = __n / 1000000000ULL; (ts)->tv_nsec = __n % 1000000000ULL; } while (0)
+#define ktime_get_boottime_ts64(ts) do { u64 __n = lkpi_ktime_ns(); (ts)->tv_sec = __n / 1000000000ULL; (ts)->tv_nsec = __n % 1000000000ULL; } while (0)
+#define ktime_get_ts64 ktime_get_boottime_ts64
 #define ktime_get_boottime_ns() ((u64)lkpi_ktime_ns())
 #define ktime_get_real_ns() ((u64)lkpi_ktime_ns())
 #define ktime_get_seconds() ((s64)(lkpi_ktime_ns() / 1000000000ULL))

@@ -40,6 +40,16 @@ void lkpi_init_delayed_work(struct delayed_work* d, work_func_t fn);
 #define INIT_DEFERRABLE_WORK(d, fn) lkpi_init_delayed_work(d, fn)
 #define DECLARE_WORK(name, fn) struct work_struct name = {fn, 0, 0, 0}
 #define to_delayed_work(w) container_of(w, struct delayed_work, work)
+void lkpi_delayed_work_timer(struct timer_list* t);
+#define DECLARE_DELAYED_WORK(n, f) struct delayed_work n = { .work = { .func = (f) }, .timer = { .function = lkpi_delayed_work_timer } }
+#define DECLARE_DEFERRABLE_WORK(n, f) DECLARE_DELAYED_WORK(n, f)
+#define work_busy(w) work_pending(w)
+#define current_work() ((struct work_struct*)0)
+#define enable_and_queue_work(wq, w) queue_work(wq, w)
+#define disable_work_sync(w) cancel_work_sync(w)
+#define disable_delayed_work_sync(d) cancel_delayed_work_sync(d)
+#define WQ_PERCPU 0
+#define WQ_BH 0
 
 struct workqueue_struct* alloc_workqueue(const char* fmt, unsigned int flags, int max_active, ...);
 #define alloc_ordered_workqueue(fmt, flags, ...) alloc_workqueue(fmt, flags, 1, ##__VA_ARGS__)

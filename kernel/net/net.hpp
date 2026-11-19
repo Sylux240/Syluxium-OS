@@ -19,6 +19,14 @@ public:
     // drop the frame when the hardware queue is full.
     virtual long transmit(const u8* frame, usize len) = 0;
 
+    // "ip link set X up/down" / SIOCSIFFLAGS changed IFF_UP. Drivers that
+    // must start or stop the hardware (Linux drivers: ndo_open/ndo_stop)
+    // override it; returns 0 or -errno.
+    virtual long set_up(bool up) {
+        flags = up ? (flags | IFF_UP) : (flags & ~IFF_UP);
+        return 0;
+    }
+
     char name[16] = {};          // "eth0", "lo"
     u8 mac[6] = {};
     u32 mtu = 1500;
@@ -37,6 +45,14 @@ void register_interface(Interface* iface);
 
 // Called by drivers for every received frame (from their RX thread).
 void receive(Interface* iface, const u8* frame, usize len);
+
+// The link came up (cable plugged in, Wi-Fi associated): renew the DHCP
+// lease on that interface right away. Safe from any context.
+void link_up(Interface* iface);
+
+// The device is gone (hot-unplug): the interface stays in the table (ifindex
+// numbering) but is down, has no link and no address.
+void unregister_interface(Interface* iface);
 
 // Start the stack: loopback, timers, DHCP on every Ethernet interface.
 // Waits up to `dhcp_wait_ms` for the first address so the shell starts online.

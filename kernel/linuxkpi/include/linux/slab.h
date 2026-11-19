@@ -56,6 +56,26 @@ size_t ksize(const void* p);
 #define devm_kmalloc(dev, s, f) kmalloc(s, f)
 #define devm_kcalloc(dev, n, s, f) kcalloc(n, s, f)
 #define devm_kfree(dev, p) kfree(p)
+#define devm_kmemdup(dev, src, len, gfp) kmemdup(src, len, gfp)
+#define devm_kstrdup(dev, s, gfp) kstrdup(s, gfp)
+#define alloc_hooks(x) (x)
+#define kmemdup_noprof(src, len, gfp) kmemdup(src, len, gfp)
+bool lkpi_is_vmalloc_addr(const void* p);
+#define is_vmalloc_addr(p) lkpi_is_vmalloc_addr(p)
+#define kmalloc_obj(p, gfp) kmalloc(sizeof(*(p)), gfp)
+#define kmalloc_track_caller kmalloc
+#define kmemdup_nul(s, len, gfp) kstrndup(s, len, gfp)
+#define kvrealloc(p, n, gfp) krealloc(p, n, gfp)
+#define krealloc_array(p, n, s, gfp) krealloc(p, (n) * (s), gfp)
+#define kmem_cache_alloc_node(c, f, n) kmem_cache_alloc(c, f)
+#define KMALLOC_MAX_SIZE (1UL << 22)
+#define __GFP_COMP 0
+#define __GFP_NOFAIL 0
+#define __GFP_MEMALLOC 0
+#define __GFP_RETRY_MAYFAIL 0
+#define __GFP_HIGHMEM 0
+#define GFP_HIGHUSER 0x1u
+#define gfpflags_allow_blocking(f) (((f) & GFP_ATOMIC) == 0)
 
 /* Virtually contiguous (large) allocations. */
 void* vmalloc(size_t size);

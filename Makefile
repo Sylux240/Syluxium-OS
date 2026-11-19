@@ -47,7 +47,7 @@ TRINITY_REPO := https://mirror.ppa.trinitydesktop.org/trinity/deb/trinity-r14.1.
 TRINITY_PKGS := dbus tdebase-trinity-bin twin-trinity kicker-trinity kdesktop-trinity konsole-trinity tdm-trinity kuser-trinity tdepasswd-trinity tdesudo-trinity tdepowersave-trinity \
                 konqueror-trinity kcontrol-trinity ksmserver-trinity tdebase-data-trinity kmix-trinity kmail-trinity kaffeine-trinity
 DEBIAN_PKGS  := bash busybox hello ncurses-base pciutils pci.ids netbase alsa-utils xserver-xorg-core xserver-xorg-video-fbdev xserver-xorg-input-evdev xinit x11-xserver-utils x11-xkb-utils xterm twm xfonts-base sudo libpam-runtime libpam-modules login fdisk e2fsprogs dosfstools xdotool firefox-esr \
-                wine wine64
+                wine wine64 iw wpasupplicant wireless-regdb hostapd
 DEBIAN_ROOT  := $(BUILD)/rootfs-debian
 DEBIAN_STAMP := $(DEBIAN_ROOT)/.fetched
 # A few i386 packages for testing 32-bit dynamic linking (Steam is 32-bit).
@@ -196,6 +196,22 @@ $(OBJDIR)/%.c.o: %.c
 	@mkdir -p $(dir $@)
 	@echo "  CC    $<"
 	@$(CC) $(CFLAGS) -MJ $@.json -c $< -o $@
+
+# Linux sources (kernel/linuxkpi: the wireless stack, drivers, lib/) see the
+# LinuxKPI kernel configuration and Linux's own code-generation flags; the
+# module name is the directory (cfg80211 = net/wireless, mac80211, mt7601u, ...).
+LKPI_LINUX_CFLAGS := -I$(LKPI_INCLUDE) -include linux/kconfig.h -Werror=implicit-function-declaration -Werror=int-conversion \
+    -Werror=incompatible-pointer-types -D__KERNEL__ -fno-strict-overflow -fno-delete-null-pointer-checks \
+    -Wno-unused-function -Wno-unused-variable -Wno-unused-but-set-variable -Wno-gnu-variable-sized-type-not-at-end \
+    -Wno-initializer-overrides -Wno-unused-const-variable -Wno-implicit-fallthrough -Wno-format-zero-length \
+    -Wno-missing-field-initializers -Wno-sign-compare -Wno-address-of-packed-member -Wno-tautological-constant-out-of-range-compare \
+    -Wno-default-const-init-field-unsafe -Wno-unknown-warning-option
+lkpi_modname = $(patsubst virtual,mac80211_hwsim,$(patsubst wireless,cfg80211,$(notdir $(patsubst %/,%,$(dir $<)))))
+$(OBJDIR)/kernel/linuxkpi/%.c.o: kernel/linuxkpi/%.c
+	@mkdir -p $(dir $@)
+	@echo "  CC    $<"
+	@$(CC) $(filter-out -isystem $(LKPI_INCLUDE),$(CFLAGS)) $(LKPI_LINUX_CFLAGS) -DKBUILD_MODNAME='"$(lkpi_modname)"' -DKBUILD_BASENAME='"$(basename $(notdir $<))"' \
+	    -MJ $@.json -c $< -o $@
 
 $(OBJDIR)/%.S.o: %.S
 	@mkdir -p $(dir $@)

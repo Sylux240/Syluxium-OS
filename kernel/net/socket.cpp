@@ -325,7 +325,13 @@ long Socket::ioctl(u64 request, u64 arg) {
         return -err::NODEV;
     switch (request) {
     case 0x8913: req.flags = static_cast<u16>(f->flags | (f->link_up ? IFF_RUNNING : 0)); break; // SIOCGIFFLAGS
-    case 0x8914: f->flags = (f->flags & IFF_LOOPBACK) | (req.flags & ~IFF_LOOPBACK); return 0;     // SIOCSIFFLAGS
+    case 0x8914: {                                                                                 // SIOCSIFFLAGS
+        if ((req.flags ^ f->flags) & IFF_UP)
+            if (long r = f->set_up(req.flags & IFF_UP); r < 0)
+                return r;
+        f->flags = (f->flags & (IFF_LOOPBACK | IFF_UP)) | (req.flags & ~(IFF_LOOPBACK | IFF_UP));
+        return 0;
+    }
     case 0x8915: put_addr(&req.addr, f->addr); break;                                             // SIOCGIFADDR
     case 0x8916: f->addr = be32(req.addr.addr); return 0;                                         // SIOCSIFADDR
     case 0x8917: put_addr(&req.addr, 0); break;                                                   // SIOCGIFDSTADDR
@@ -439,11 +445,12 @@ long sys_socket(SYSCALL_ARGS) {
     case AF_NETLINK:
         if (type != SOCK_RAW && type != SOCK_DGRAM)
             return -EPROTONOSUPPORT;
-        // Route (0) is answered; uevent listeners (15) just hear nothing.
+        // Route (0) is answered; uevent listeners (15) just hear nothing;
+        // generic netlink (16: nl80211 & co.) goes to the LinuxKPI.
         // Protocols whose users wait for answers (audit: PAM/login, sock_diag,
-        // generic netlink, ...) are refused, as by a kernel built without
-        // them: libaudit then quietly skips auditing instead of timing out.
-        if (protocol != 0 && protocol != 15)
+        // ...) are refused, as by a kernel built without them: libaudit
+        // then quietly skips auditing instead of timing out.
+        if (protocol != 0 && protocol != 15 && protocol != 16)
             return -EPROTONOSUPPORT;
         s = create_netlink(type, protocol);
         break;

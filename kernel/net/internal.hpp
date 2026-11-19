@@ -84,7 +84,7 @@ u16 l4_checksum(const Endpoint& src, const Endpoint& dst, u8 proto, const u8* se
 
 // IPv4 output: builds the header, routes, resolves the next hop and
 // fragments when needed. `src` 0 picks the outgoing interface's address. Lock held.
-long ip_send(u32 src, u32 dst, u8 proto, const u8* payload, usize len, u8 ttl = 64);
+long ip_send(u32 src, u32 dst, u8 proto, const u8* payload, usize len, u8 ttl = 64, Interface* via = nullptr);
 // The source address the stack would use to reach `dst` (0 if unroutable).
 u32 source_for(u32 dst);
 bool is_local_address(u32 addr);
@@ -186,6 +186,7 @@ void tcp_timer(u64 now_ms); // retransmissions, TIME_WAIT (lock held)
 // DHCP client hook: UDP datagrams to port 68 go here.
 void dhcp_input(Interface* in, const u8* data, usize len);
 void dhcp_start(Interface* iface);
+void dhcp_kick(Interface* iface);
 bool dhcp_configured();
 u32 dns_server();
 void set_gateway(u32 gw);

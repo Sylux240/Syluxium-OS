@@ -106,7 +106,15 @@ userspace/windows/    Windows test programs (clang + lld-link) for Wine
             firmware loading); edu test driver 9/9
       - [x] 7b: networking layer (net_device, sk_buff, NAPI, MII, ethtool); Linux's own 8139too
             and 8139cp drivers compiled unmodified, 8139cp runs QEMU's RTL8139 (DHCP, ping, wget)
-      - [ ] 7c: USB in LinuxKPI, cfg80211/mac80211, then Wi-Fi drivers (need real hardware to test)
+      - [ ] 7c: **Linux's own wireless stack runs**: cfg80211 + nl80211 + mac80211 (minstrel_ht) compiled
+            from Linux 6.12 unmodified (kernel/linuxkpi/net/), with generic netlink behind Syluxium's
+            AF_NETLINK sockets, sk_buff/net_device/notifiers/RCU/rhashtable/crypto (CCM, GCM, CMAC) in
+            the LinuxKPI; **USB in the LinuxKPI** (usb_driver, URBs on per-endpoint workers, id_table
+            matching in the USB core); Debian's `iw`, `hostapd`, `wpa_supplicant`, wireless-regdb.
+            Verified with mac80211_hwsim (`mac80211_hwsim.radios=2` on the command line): wlan0 up,
+            `iw dev`, `iw dev wlan0 scan` finds a hostapd AP, `iw dev wlan0 connect` associates.
+            mt7601u (MediaTek) is built in, still untested on the real dongle; next: WPA2 via
+            wpa_supplicant, rtl8xxxu (Realtek), then PCIe drivers (iwlwifi, ath9k/10k, mt76, rtw88)
 - [ ] **Phase 8**: **audio**: ALSA-compatible kernel interface (so libasound, PipeWire and
       PulseAudio apps work), drivers for Intel HD Audio, USB audio, virtio-sound; volume control
       - [x] 8a: ALSA core (/dev/snd, /proc/asound, full PCM + control ioctl ABI, mmap, poll),

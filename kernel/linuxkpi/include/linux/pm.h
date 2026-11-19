@@ -2,6 +2,8 @@
 #define _LKPI_LINUX_PM_H
 #include <linux/kernel.h>
 struct device;
+typedef struct pm_message { int event; } pm_message_t;
+#define PMSG_SUSPEND ((pm_message_t){ .event = 2 })
 struct dev_pm_ops {
     int (*suspend)(struct device* dev);
     int (*resume)(struct device* dev);
