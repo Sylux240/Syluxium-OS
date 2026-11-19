@@ -6,6 +6,7 @@
 #include <boot/limine_requests.hpp>
 #include <acpi/acpi.hpp>
 #include <acpi/devices.hpp>
+#include <acpi/ec.hpp>
 #include <acpi/power.hpp>
 #include <block/block.hpp>
 #include <core/log.hpp>
@@ -242,7 +243,11 @@ void start_interpreter() {
     if (r == UACPI_STATUS_OK)
         r = uacpi_namespace_load();
     if (r == UACPI_STATUS_OK)
+        ec::early_init(); // the firmware's _INI/_REG may already need the EC
+    if (r == UACPI_STATUS_OK)
         r = uacpi_namespace_initialize();
+    if (r == UACPI_STATUS_OK)
+        ec::late_init();
     if (r != UACPI_STATUS_OK) {
         klog::warn("ACPI: interpreter not started (%s)", uacpi_status_to_string(r));
         return;
