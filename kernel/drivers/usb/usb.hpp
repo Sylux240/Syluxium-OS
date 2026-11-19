@@ -32,6 +32,7 @@ struct Interface {
 };
 
 using InterruptCallback = void (*)(void* ctx, const u8* data, u32 length);
+using IsoFill = u32 (*)(void* ctx, u8* buffer, u32 max);
 
 class Device {
 public:
@@ -52,6 +53,15 @@ public:
     // Keep an interrupt IN endpoint polled; `cb` runs for every report (in
     // the host controller's event thread: it must not sleep).
     virtual long start_interrupt_in(u8 ep_address, u32 length, InterruptCallback cb, void* ctx) = 0;
+
+    // Isochronous OUT streaming (audio): keeps a few one-packet transfers
+    // queued; `fill` (event thread, must not sleep) writes the next
+    // packet's bytes (at most `max`) and returns how many.
+    virtual long start_iso_out(u8 ep_address, u32 max_packet, IsoFill fill, void* ctx) {
+        (void)ep_address; (void)max_packet; (void)fill; (void)ctx;
+        return -95; // EOPNOTSUPP: this host controller can't do isochronous transfers
+    }
+    virtual void stop_iso(u8 ep_address) { (void)ep_address; }
 
     // Hubs: tell the host controller this device is a hub, then create the
     // device that appeared on one of its ports (already reset). Speeds use
@@ -118,6 +128,9 @@ void start_hotplug();
 namespace hid {
 bool probe(Device* d, const Interface& intf);
 void run_selftest(); // report-descriptor parser + input mapping, with real descriptors
+}
+namespace audio {
+bool probe(Device* d, const Interface& intf); // USB Audio Class 1 playback
 }
 namespace bcm5974 {
 bool probe(Device* d, const Interface& intf); // Apple USB trackpads (MacBook Air/Pro 2013+)

@@ -110,7 +110,15 @@ struct EndpointState {
     // Interrupt IN polling.
     usb::InterruptCallback callback = nullptr;
     void* callback_ctx = nullptr;
+    // Isochronous OUT streaming: ISO_SLOTS one-packet TRBs in flight.
+    usb::IsoFill iso_fill = nullptr;
+    void* iso_ctx = nullptr;
+    u32 iso_stride = 0, iso_next = 0, iso_queued = 0;
+    IrqSpinlock iso_lock; // refills come from the event thread and from start_iso_out
 };
+
+constexpr u32 ISO_SLOTS = 8;
+constexpr u32 TRB_ISOCH = 5;
 
 class UsbDevice : public usb::Device {
 public:
@@ -135,6 +143,9 @@ public:
     }
     long transfer_ms(u8 ep_address, void* data, u32 length, u64 timeout_ms);
     long start_interrupt_in(u8 ep_address, u32 length, usb::InterruptCallback cb, void* ctx) override;
+    long start_iso_out(u8 ep_address, u32 max_packet, usb::IsoFill fill, void* ctx) override;
+    void stop_iso(u8 ep_address) override;
+    void queue_iso(u8 dci);
     void disable() override;
 
     void on_transfer_event(u8 dci, u64 trb, u32 code, u32 residual);
@@ -564,6 +575,16 @@ void UsbDevice::on_transfer_event(u8 dci, u64 trb, u32 code, u32 residual) {
     if (dci >= 32 || gone)
         return;
     EndpointState& ep = m_eps[dci];
+    if (ep.iso_fill) {
+        // Every completion (also missed-service / underrun ones) frees a slot: refill.
+        {
+            LockGuard guard(ep.iso_lock);
+            if (ep.iso_queued)
+                ep.iso_queued--;
+        }
+        queue_iso(dci);
+        return;
+    }
     if (ep.callback) {
         if (code == CC_SUCCESS || code == CC_SHORT_PACKET)
             ep.callback(ep.callback_ctx, ep.buffer, ep.requested - residual);
@@ -611,7 +632,7 @@ long UsbDevice::control(u8 type, u8 request, u16 value, u16 index, void* data, u
 long UsbDevice::open_endpoint(const usb::Endpoint& e) {
     u8 num = e.address & 0xF;
     u8 dci = static_cast<u8>(num * 2 + (e.is_in() ? 1 : 0));
-    if (!alloc_endpoint(dci, e.type() == 2 ? 64 * 1024 : 4096))
+    if (!alloc_endpoint(dci, e.type() == 2 ? 64 * 1024 : e.type() == 1 ? ISO_SLOTS * 1024 : 4096))
         return -err::NOMEM;
 
     memset(m_in, 0, 4096);
@@ -627,7 +648,11 @@ long UsbDevice::open_endpoint(const usb::Endpoint& e) {
 
     u32 ep_type = e.type() == 2 ? (e.is_in() ? 6 : 2) : e.type() == 3 ? (e.is_in() ? 7 : 3) : (e.is_in() ? 5 : 1);
     u32 interval = 0;
-    if (e.type() == 3) {
+    if (e.type() == 1) {
+        // Isochronous: bInterval is an exponent (2^(n-1) frames, or microframes at high speed).
+        u32 n = e.interval ? e.interval : 1;
+        interval = (speed == 3 || speed >= 4) ? n - 1 : n - 1 + 3;
+    } else if (e.type() == 3) {
         if (speed == 3 || speed >= 4) {
             interval = e.interval ? e.interval - 1u : 0; // already 2^(n-1) x 125 us
         } else {
@@ -639,10 +664,12 @@ long UsbDevice::open_endpoint(const usb::Endpoint& e) {
     }
     auto* ctx = reinterpret_cast<u32*>(in_ctx(dci + 1));
     ctx[0] = interval << 16;
-    ctx[1] = (3u << 1) | (ep_type << 3) | (static_cast<u32>(e.max_packet) << 16);
+    u32 error_count = e.type() == 1 ? 0 : 3; // must be 0 for isochronous endpoints
+    ctx[1] = (error_count << 1) | (ep_type << 3) | (static_cast<u32>(e.max_packet) << 16);
     ctx[2] = static_cast<u32>(m_eps[dci].ring.phys) | 1;
     ctx[3] = static_cast<u32>(m_eps[dci].ring.phys >> 32);
-    ctx[4] = (e.type() == 2 ? 1024u : 8u) | (static_cast<u32>(e.max_packet) << 16);
+    u32 avg_trb = e.type() == 2 ? 1024u : e.type() == 1 ? e.max_packet : 8u;
+    ctx[4] = avg_trb | (static_cast<u32>(e.max_packet) << 16);
     return m_hc->command(m_in_phys, 0, (TRB_CONFIGURE_EP << 10) | (static_cast<u32>(m_slot) << 24), nullptr);
 }
 
@@ -669,6 +696,45 @@ long UsbDevice::transfer_ms(u8 ep_address, void* data, u32 length, u64 timeout_m
     if (in)
         memcpy(data, ep.buffer, actual);
     return actual;
+}
+
+void UsbDevice::queue_iso(u8 dci) {
+    EndpointState& ep = m_eps[dci];
+    LockGuard guard(ep.iso_lock);
+    bool queued = false;
+    while (!gone && ep.iso_fill && ep.iso_queued < ISO_SLOTS) {
+        u8* buf = ep.buffer + ep.iso_next * ep.iso_stride;
+        u32 len = ep.iso_fill(ep.iso_ctx, buf, ep.iso_stride);
+        // One packet per TD, "start isochronous ASAP" (no frame number), interrupt on completion.
+        ep.ring.push(ep.buffer_phys + ep.iso_next * ep.iso_stride, len,
+                     (TRB_ISOCH << 10) | (1u << 5) | (1u << 31));
+        ep.iso_next = (ep.iso_next + 1) % ISO_SLOTS;
+        ep.iso_queued++;
+        queued = true;
+    }
+    if (queued)
+        m_hc->doorbells[m_slot] = dci;
+}
+
+long UsbDevice::start_iso_out(u8 ep_address, u32 max_packet, usb::IsoFill fill, void* ctx) {
+    u8 dci = static_cast<u8>((ep_address & 0xF) * 2);
+    EndpointState& ep = m_eps[dci];
+    if (!ep.buffer || max_packet * ISO_SLOTS > ep.buffer_size)
+        return -err::INVAL;
+    ep.iso_stride = max_packet;
+    ep.iso_next = 0;
+    ep.iso_queued = 0;
+    ep.iso_ctx = ctx;
+    __atomic_store_n(&ep.iso_fill, fill, __ATOMIC_RELEASE);
+    queue_iso(dci);
+    return 0;
+}
+
+void UsbDevice::stop_iso(u8 ep_address) {
+    u8 dci = static_cast<u8>((ep_address & 0xF) * 2);
+    // No more refills; the queued packets drain within ISO_SLOTS ms.
+    __atomic_store_n(&m_eps[dci].iso_fill, static_cast<usb::IsoFill>(nullptr), __ATOMIC_RELEASE);
+    sched::sleep_ms(ISO_SLOTS + 4);
 }
 
 void UsbDevice::queue_interrupt(u8 dci) {

@@ -195,6 +195,9 @@ void attach(Device* d) {
         } else if (cdc_ether::probe(d, intf)) {
             category = dev::Category::Network;
             name = "cdc_ether";
+        } else if (audio::probe(d, intf)) {
+            category = dev::Category::Audio;
+            name = "snd-usb-audio";
         }
         if (name && !bound) {
             entry->category = category;
