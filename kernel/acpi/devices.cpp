@@ -19,7 +19,9 @@
 #include <proc/signal.hpp>
 #include <sched/sched.hpp>
 
+#include <arch/x86_64/cpu.hpp>
 #include <uacpi/event.h>
+#include <uacpi/sleep.h>
 #include <uacpi/notify.h>
 #include <uacpi/uacpi.h>
 #include <uacpi/utilities.h>
@@ -272,5 +274,16 @@ void start_interpreter() {
 }
 
 bool interpreter_ready() { return g_ready; }
+
+void enter_s5() {
+    uacpi_status r = uacpi_prepare_for_sleep_state(UACPI_SLEEP_STATE_S5); // runs AML: may sleep
+    if (r != UACPI_STATUS_OK) {
+        klog::warn("ACPI: preparing for power off failed (%s)", uacpi_status_to_string(r));
+        return;
+    }
+    arch::cli();
+    r = uacpi_enter_sleep_state(UACPI_SLEEP_STATE_S5);
+    klog::warn("ACPI: power off through the interpreter failed (%s)", uacpi_status_to_string(r));
+}
 
 } // namespace acpi

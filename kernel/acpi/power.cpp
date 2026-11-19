@@ -8,6 +8,7 @@
 // Restart: the FADT reset register, then the 8042 keyboard controller's
 // reset line, then the PCI reset control port 0xCF9, then a triple fault.
 
+#include <acpi/devices.hpp>
 #include <acpi/acpi.hpp>
 #include <acpi/power.hpp>
 #include <arch/x86_64/cpu.hpp>
@@ -164,6 +165,11 @@ void enable_acpi_mode() {
 }
 
 [[noreturn]] void power_off() {
+    // With the AML interpreter: the firmware's full sequence (_PTS, wake
+    // events disabled, then S5) - without it some machines wake right up
+    // again, which looks like a reboot. Falls through if it fails.
+    if (interpreter_ready())
+        enter_s5();
     arch::cli();
     if (g_fadt.pm1a_cnt && g_s5.found) {
         enable_acpi_mode();

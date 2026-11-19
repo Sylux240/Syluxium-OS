@@ -8,5 +8,6 @@ void rearm_interrupts(); // uacpi_glue: unmask an SCI masked by the storm guard
 
 void start_interpreter();
 bool interpreter_ready();
+void enter_s5(); // power off through uACPI (_PTS, wake GPEs off, S5); returns only on failure
 
 } // namespace acpi
