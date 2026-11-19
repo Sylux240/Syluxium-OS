@@ -198,6 +198,8 @@ public:
     bool probe_codec(u8 addr);
     void apply_quirks();
     void start_jack_sense();
+    void silence_unused();
+    void log_codec();
     bool apple_gpio_amp = false;
     void read_widget(u8 nid);
     bool find_path(u8 from, bool to_dac, const u8* preferred, u32 npreferred, Path* out);
@@ -505,6 +507,62 @@ void jack_thread(void* arg) {
 }
 
 } // namespace
+
+// Nothing we don't route may make sound: mixers off our paths get every
+// input muted (analog loopbacks feed microphones to the speakers), unused
+// pins are switched off (no output, no mic bias).
+void Controller::silence_unused() {
+    bool used[MAX_NID] = {};
+    for (u32 i = 0; i < nout; i++)
+        for (u8 k = 0; k < out_paths[i].len; k++)
+            used[out_paths[i].nodes[k]] = true;
+    if (has_input)
+        for (u8 k = 0; k < in_path.len; k++)
+            used[in_path.nodes[k]] = true;
+    for (u32 n = 0; n < MAX_NID; n++) {
+        Widget& x = w[n];
+        if (!x.present || used[n])
+            continue;
+        if (x.type == W_MIXER && (x.caps & WCAP_IN_AMP))
+            for (u8 k = 0; k < x.nconn; k++) {
+                Amp a{static_cast<u8>(n), false, k, x.amp_in};
+                set_amp(a, -1, 0, true);
+            }
+        if (x.type == W_PIN && !(x.caps & WCAP_DIGITAL))
+            verb(static_cast<u8>(n), VERB_SET_PIN_CTL, 0);
+    }
+}
+
+// The codec's widget graph in the kernel log (real-hardware diagnostics).
+void Controller::log_codec() {
+    klog::info("hda: codec %08x subsystem %08x widgets:", vendor_id, subsystem_id);
+    static const char* const types[] = {"DAC", "ADC", "MIX", "SEL", "PIN", "PWR", "VOL", "BEEP"};
+    for (u32 n = 0; n < MAX_NID; n++) {
+        const Widget& x = w[n];
+        if (!x.present)
+            continue;
+        char conn[64] = {};
+        u32 len = 0;
+        for (u8 k = 0; k < x.nconn && len + 4 < sizeof(conn); k++)
+            len += snprintf(conn + len, sizeof(conn) - len, "%02x ", x.conn[k]);
+        klog::info("hda:  %02x %s caps %08x pin %08x cfg %08x ampin %08x ampout %08x conn %s", n,
+                   x.type < 8 ? types[x.type] : "?", x.caps, x.pincaps, x.config, x.amp_in, x.amp_out, conn);
+    }
+    for (u32 i = 0; i < nout; i++) {
+        char p[48] = {};
+        u32 len = 0;
+        for (u8 k = 0; k < out_paths[i].len && len + 4 < sizeof(p); k++)
+            len += snprintf(p + len, sizeof(p) - len, "%02x ", out_paths[i].nodes[k]);
+        klog::info("hda:  output path %u: %s", i, p);
+    }
+    if (has_input) {
+        char p[48] = {};
+        u32 len = 0;
+        for (u8 k = 0; k < in_path.len && len + 4 < sizeof(p); k++)
+            len += snprintf(p + len, sizeof(p) - len, "%02x ", in_path.nodes[k]);
+        klog::info("hda:  input path: %s", p);
+    }
+}
 
 void Controller::start_jack_sense() {
     auto* js = new JackState;
@@ -1127,6 +1185,18 @@ bool match(const dev::Device* d) { return d->bus == dev::Bus::Pci && (d->class_c
 long probe(dev::Device* d) {
     pci::Function* f = pci::function_of(d);
     pci::enable(*f);
+    if (d->vendor == 0x8086) {
+        // Intel: DMA must snoop the CPU caches, or the controller plays stale
+        // memory while fresh samples sit in the cache (crackling). Traffic
+        // class 0, and clear the "no snoop" bit firmware may leave set (Linux
+        // does both for every Intel HDA controller).
+        pci::write8(*f, 0x44, pci::read8(*f, 0x44) & ~0x07);
+        u16 devc = pci::read16(*f, 0x78);
+        if (devc & (1u << 11)) {
+            pci::write16(*f, 0x78, devc & ~(1u << 11));
+            klog::info("hda %s: snooping turned on (firmware left it off)", d->bus_id);
+        }
+    }
     // Snooped DMA: Intel's traffic-class select must be TC0, and ATI/AMD
     // controllers have an explicit "enable snoop" bit; otherwise audio
     // reads stale cache contents on real hardware.
@@ -1209,6 +1279,8 @@ long probe(dev::Device* d) {
     }
     if (hc->has_input)
         hc->enable_input_path(hc->in_path);
+    hc->silence_unused();
+    hc->log_codec();
     hc->start_jack_sense();
 
     // Card and PCM.
