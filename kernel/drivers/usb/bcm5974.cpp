@@ -53,8 +53,9 @@ void report(void* ctx, const u8* data, u32 length) {
         const u8* f = data + m.header + i * m.finger_size;
         if (le16s(f + 16) == 0) // touch_major: 0 = not touching
             continue;
-        // Apple's y grows downwards from the top edge; flip so it grows up.
-        fingers[n++] = {le16s(f + 2), m.y_min + m.y_max - le16s(f + 4)};
+        // Apple's y already grows upwards (towards the keyboard), which is
+        // what TouchpadMouse expects (Linux flips it for screen coordinates).
+        fingers[n++] = {le16s(f + 2), le16s(f + 4)};
     }
     bool button = data[m.button] != 0;
     t->mouse.frame(fingers, n, button);
