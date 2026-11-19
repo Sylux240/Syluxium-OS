@@ -26,13 +26,34 @@ namespace {
 struct IrqSlot {
     uacpi_interrupt_handler handler;
     uacpi_handle ctx;
+    u32 gsi;
+    u32 count;          // interrupts in the current one-second window
+    u64 window_start;
+    bool masked;
 };
 IrqSlot g_irq[256];
 
+// A firmware event nothing acknowledges (e.g. one for the embedded
+// controller, which has no driver yet) keeps a level-triggered SCI
+// asserted: the machine would spend all its time here, starving the
+// keyboard and everything else. Past 2000/s the line is masked.
 void irq_trampoline(interrupts::Frame* frame) {
     IrqSlot& s = g_irq[frame->vector & 0xFF];
-    if (s.handler)
-        s.handler(s.ctx);
+    if (!s.handler || s.masked)
+        return;
+    u64 now = clock::now_ns();
+    if (now - s.window_start > 1'000'000'000) {
+        s.window_start = now;
+        s.count = 0;
+    }
+    if (++s.count > 2000) {
+        s.masked = true;
+        ioapic::mask_gsi(s.gsi);
+        klog::warn("ACPI: interrupt storm on GSI %u (an unhandled firmware event) - masked; "
+                   "the power button and battery events won't work", s.gsi);
+        return;
+    }
+    s.handler(s.ctx);
 }
 
 // ---- work queue (GPE handlers, Notify) ----
@@ -258,7 +279,7 @@ uacpi_status uacpi_kernel_install_interrupt_handler(uacpi_u32 irq, uacpi_interru
     u8 vector = interrupts::allocate_vector();
     if (!vector)
         return UACPI_STATUS_INTERNAL_ERROR;
-    g_irq[vector] = IrqSlot{handler, ctx};
+    g_irq[vector] = IrqSlot{handler, ctx, 0, 0, 0, false};
     interrupts::set_handler(vector, irq_trampoline);
     u32 gsi = irq;
     bool level = true, active_low = true;
@@ -270,6 +291,7 @@ uacpi_status uacpi_kernel_install_interrupt_handler(uacpi_u32 irq, uacpi_interru
             active_low = m.overrides[i].active_low || irq == 9;
         }
     }
+    g_irq[vector].gsi = gsi;
     if (!ioapic::route_gsi(gsi, vector, this_cpu()->lapic_id, level, active_low))
         return UACPI_STATUS_INTERNAL_ERROR;
     *out = reinterpret_cast<uacpi_handle>(static_cast<uptr>(vector));
@@ -277,7 +299,7 @@ uacpi_status uacpi_kernel_install_interrupt_handler(uacpi_u32 irq, uacpi_interru
 }
 
 uacpi_status uacpi_kernel_uninstall_interrupt_handler(uacpi_interrupt_handler, uacpi_handle h) {
-    g_irq[reinterpret_cast<uptr>(h) & 0xFF] = IrqSlot{nullptr, nullptr};
+    g_irq[reinterpret_cast<uptr>(h) & 0xFF] = IrqSlot{nullptr, nullptr, 0, 0, 0, false};
     return UACPI_STATUS_OK;
 }
 

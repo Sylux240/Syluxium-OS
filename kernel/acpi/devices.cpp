@@ -2,6 +2,7 @@
 // battery, the AC adapter and the lid. Batteries and adapters appear in
 // /sys/class/power_supply like on Linux (TDE's battery monitor reads them).
 
+#include <boot/limine_requests.hpp>
 #include <acpi/acpi.hpp>
 #include <acpi/devices.hpp>
 #include <acpi/power.hpp>
@@ -231,6 +232,10 @@ void publish_power_supplies() {
 void start_interpreter() {
     if (!rsdp_phys())
         return;
+    if (strstr(boot::cmdline(), "acpi=noaml")) {
+        klog::info("ACPI: AML interpreter disabled (acpi=noaml)");
+        return;
+    }
     uacpi_status r = uacpi_initialize(0);
     if (r == UACPI_STATUS_OK)
         r = uacpi_namespace_load();

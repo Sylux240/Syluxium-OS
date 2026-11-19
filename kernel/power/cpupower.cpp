@@ -1,3 +1,4 @@
+#include <boot/limine_requests.hpp>
 #include <arch/x86_64/cpu.hpp>
 #include <arch/x86_64/percpu.hpp>
 #include <core/log.hpp>
@@ -186,8 +187,13 @@ bool gen_cpufreq(genfs::TextBuffer& out, const void* ctx) {
 } // namespace
 
 void init_cpu() {
-    if (!g_detected)
+    if (!g_detected) {
         detect();
+        if (strstr(boot::cmdline(), "idle=hlt")) {
+            g_mwait_deep = false;
+            g_cstate_name = "C1 (hlt, idle=hlt)";
+        }
+    }
     setup_this_cpu();
 }
 
@@ -207,16 +213,17 @@ void publish() {
                                                          reinterpret_cast<const void*>(static_cast<uptr>((i << 8) | f))));
         }
     }
-    g_tickless = true;
+    g_tickless = !strstr(boot::cmdline(), "nohz=off");
     const char* driver = g_driver == Driver::Hwp    ? "Intel HWP (hardware P-states)"
                          : g_driver == Driver::Cppc ? "AMD CPPC"
                          : g_driver == Driver::Legacy ? "SpeedStep, load-based governor"
                                                       : "firmware-controlled";
     if (g_min_khz)
-        klog::ok("CPU power: %s, %u-%u MHz; idle %s, tickless", driver, g_min_khz / 1000, g_max_khz / 1000,
-                 g_cstate_name);
+        klog::ok("CPU power: %s, %u-%u MHz; idle %s, %s", driver, g_min_khz / 1000, g_max_khz / 1000,
+                 g_cstate_name, g_tickless ? "tickless" : "periodic tick (nohz=off)");
     else
-        klog::ok("CPU power: frequency %s; idle %s, tickless", driver, g_cstate_name);
+        klog::ok("CPU power: frequency %s; idle %s, %s", driver, g_cstate_name,
+                 g_tickless ? "tickless" : "periodic tick (nohz=off)");
 }
 
 bool tickless_enabled() { return g_tickless; }
