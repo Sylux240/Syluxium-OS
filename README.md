@@ -110,8 +110,14 @@ tools/smoke-test.sh   headless QEMU boot: serial log + screenshot
       - [x] 8a: ALSA core (/dev/snd, /proc/asound, full PCM + control ioctl ABI, mmap, poll),
             Intel HD Audio (generic codec graph, mixer with dB scales), virtio-sound;
             Debian aplay/arecord/amixer/speaker-test work (verified by WAV capture analysis)
-      - [ ] later: USB Audio (needs xHCI isochronous), SysV shm for dmix/PulseAudio/PipeWire,
-            HDA jack sensing + Realtek quirks, HDMI audio
+      - [x] 8b: **USB Audio** (UAC1 playback over xHCI isochronous transfers), **several programs
+            at once** (dmix/dsnoop default: PCM timers, shared O_APPEND opens), **headphone jack
+            sensing** (speakers mute when headphones are plugged in), **volume control in the tray**
+            (KMix), Intel HDA cache snooping (crackling on real hardware), unused codec paths
+            silenced (feedback), Apple CS4208 fix (MacBook Air 2013+: processing block, pin table,
+            speaker amp GPIO), codec graph in the boot log
+      - [ ] later: USB Audio capture + UAC2, more codec quirks as hardware reports come in,
+            HDMI/DisplayPort audio (needs the GPU driver: Phase 10), PipeWire
 - [ ] **Phase 9**: Desktop: port the **Trinity Desktop Environment (TDE)** on the real Xorg X server
       (TDE's Debian packages), customized to the XP/7 look: the start button says **"Start"**
       (instead of TDE's logo), theme/taskbar/start menu restyled. Later: a desktop-environment
