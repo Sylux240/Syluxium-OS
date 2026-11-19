@@ -1,3 +1,4 @@
+#include <core/bootlog.hpp>
 #include <fs/ext2.hpp>
 #include <block/block.hpp>
 #include <acpi/power.hpp>
@@ -747,6 +748,7 @@ long sys_reboot(SYSCALL_ARGS) {
     if (cmd != RESTART && cmd != RESTART2 && cmd != HALT && cmd != POWER_OFF)
         return -err::INVAL;
     klog::info("System %s: flushing disks...", cmd == POWER_OFF ? "power off" : cmd == HALT ? "halt" : "restart");
+    bootlog::save();
     block::sync_all();
     ext2::shutdown_all();
     block::sync_all();

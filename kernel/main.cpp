@@ -1,3 +1,4 @@
+#include <core/bootlog.hpp>
 #include <power/cpupower.hpp>
 #include <acpi/acpi.hpp>
 #include <acpi/power.hpp>
@@ -281,7 +282,11 @@ void discover_hardware() {
     fbdev::init(); // /dev/fb0 (after the PCI devices are in /sys: fb0 may belong to one)
 
     // The EFI system partition (FAT32) appears at /boot/efi, as on Linux.
-    block::for_each([](block::Device* d, void*) {
+    // First pass: only the one Syluxium booted from (boot/syluxium.elf) -
+    // not another system's EFI partition on the internal disk.
+    for (int pass = 0; pass < 2; pass++)
+    block::for_each([](block::Device* d, void* ctx) {
+        bool ours_only = *static_cast<int*>(ctx) == 0;
         vfs::Inode* existing;
         if (vfs::resolve("/boot/efi", nullptr, false, &existing) == 0 && existing->mode != 0 &&
             vfs::is_dir(existing->mode) && existing->lookup("EFI", 3))
@@ -294,12 +299,17 @@ void discover_hardware() {
         vfs::Inode* efi_dir = root->lookup("EFI", 3);
         if (!efi_dir || !vfs::is_dir(efi_dir->mode))
             return; // a FAT volume, but not an EFI system partition (USB stick, SD card)
+        if (ours_only) {
+            vfs::Inode* boot_dir = root->lookup("boot", 4);
+            if (!boot_dir || !vfs::is_dir(boot_dir->mode) || !boot_dir->lookup("syluxium.elf", 12))
+                return;
+        }
         vfs::mkdir_p("/boot/efi");
         char source[32];
         snprintf(source, sizeof(source), "/dev/%s", d->name);
         if (vfs::mount_at("/boot/efi", root, source, "vfat") == 0)
             klog::ok("Mounted %s (FAT32) on /boot/efi", source);
-    }, nullptr);
+    }, &pass);
 
     // The first Linux (ext2/3/4) volume becomes /data: persistent storage.
     block::for_each([](block::Device* d, void* ctx) {
@@ -483,6 +493,7 @@ void kernel_main_thread(void*) {
     cpupower::publish(); // cpufreq files; idle CPUs go tickless from here
     discover_hardware();
     acpi::start_interpreter(); // AML: power button, battery, lid (after PCI)
+    bootlog::start(); // the log onto the boot USB stick (machines without working input)
     u64 reclaimed = pmm::reclaim_bootloader_memory();
     klog::ok("Reclaimed %lu KiB of bootloader memory", reclaimed / KiB);
 

@@ -25,7 +25,7 @@ int print_unlocked(const char* fmt, ...) {
 }
 
 // Ring buffer of log lines (oldest bytes are overwritten).
-constexpr usize RING = 128 * 1024;
+constexpr usize RING = 512 * 1024;
 char g_ring[RING];
 usize g_ring_start = 0, g_ring_len = 0;
 

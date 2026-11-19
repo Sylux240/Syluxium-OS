@@ -2,6 +2,7 @@
 // battery, the AC adapter and the lid. Batteries and adapters appear in
 // /sys/class/power_supply like on Linux (TDE's battery monitor reads them).
 
+#include <core/bootlog.hpp>
 #include <boot/limine_requests.hpp>
 #include <acpi/acpi.hpp>
 #include <acpi/devices.hpp>
@@ -46,6 +47,7 @@ void shutdown_thread(void*) {
             break;
     }
     proc::for_each([](proc::Process* p, void*) { signal::send(p, signal::SIGKILL); }, nullptr);
+    bootlog::save();
     block::sync_all();
     ext2::shutdown_all();
     block::sync_all();
