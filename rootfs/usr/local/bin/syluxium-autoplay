@@ -11,11 +11,18 @@ while :; do
         [ $first = 1 ] && continue # drives already there at login: no popup
         name=$(basename "$dir")
         size=$(df -h "$dir" 2>/dev/null | awk 'NR==2 {print $2}')
-        choice=$(kdialog --title "AutoPlay" --icon drive-removable-media --radiolist \
+        # Lower right corner, just above the clock; gone after 15 s if unanswered.
+        out=/tmp/.autoplay-$$
+        kdialog --title "AutoPlay" --icon drive-removable-media --geometry 330x175-8-36 --radiolist \
             "<b>$name</b> ($size) was connected.<br>What do you want to do?" \
             open "Open folder to view files" on \
             media "Play media files (Kaffeine)" off \
-            none "Take no action" off 2>/dev/null)
+            none "Take no action" off > "$out" 2>/dev/null &
+        pid=$!
+        n=0
+        while kill -0 $pid 2>/dev/null && [ $n -lt 15 ]; do sleep 1; n=$((n + 1)); done
+        kill $pid 2>/dev/null
+        choice=$(cat "$out" 2>/dev/null); rm -f "$out"
         case "$choice" in
             open) konqueror "$dir" >/dev/null 2>&1 & ;;
             media) kaffeine "$dir" >/dev/null 2>&1 & ;;
