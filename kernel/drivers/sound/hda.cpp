@@ -197,6 +197,8 @@ public:
     u32 param(u8 nid, u32 id) { return verb(nid, VERB_GET_PARAM, id); }
     bool probe_codec(u8 addr);
     void apply_quirks();
+    void start_jack_sense();
+    bool apple_gpio_amp = false;
     void read_widget(u8 nid);
     bool find_path(u8 from, bool to_dac, const u8* preferred, u32 npreferred, Path* out);
     void enable_output_path(const Path& p, bool headphone);
@@ -448,13 +450,81 @@ void Controller::apply_quirks() {
                 if (pc.nid < MAX_NID && w[pc.nid].type == W_PIN)
                     w[pc.nid].config = pc.config;
         }
-        // The speaker amplifier hangs off GPIO0: on.
+        // The speaker amplifier hangs off GPIO0: on (off while headphones are in).
+        apple_gpio_amp = true;
         verb(afg, 0x716, 0x01); // GPIO mask
         verb(afg, 0x717, 0x01); // GPIO direction: output
         verb(afg, 0x715, 0x01); // GPIO data: amp on
         klog::info("hda: Apple CS4208 (board %04x): processing block, %sspeaker amplifier (GPIO0) on", model,
                    (model == 0x7100 || model == 0x7200) ? "MacBook Air pin table, " : "");
     }
+}
+
+u8 pin_device(const Widget& x);
+u8 pin_connectivity(const Widget& x);
+
+// ---- headphone jack sensing ----
+// Plugging headphones in mutes the speakers (and their amplifier), like
+// every laptop does. Pins are polled (pin sense verb) every 300 ms.
+namespace {
+
+struct JackState {
+    Controller* hc;
+    u8 hp[4], nhp = 0;
+    u8 spk[4], nspk = 0;
+    bool last = false;
+};
+
+constexpr u32 PINCAP_TRIGGER = 1u << 1, PINCAP_PRESENCE = 1u << 2;
+
+bool pin_present(Controller* hc, u8 pin) {
+    if (hc->w[pin].pincaps & PINCAP_TRIGGER) {
+        hc->verb(pin, 0x709, 0); // execute pin sense
+        sched::sleep_ms(1);
+    }
+    return hc->verb(pin, 0xF09, 0) & 0x80000000u;
+}
+
+void jack_thread(void* arg) {
+    auto* js = static_cast<JackState*>(arg);
+    Controller* hc = js->hc;
+    for (;;) {
+        bool any = false;
+        for (u8 i = 0; i < js->nhp; i++)
+            any |= pin_present(hc, js->hp[i]);
+        if (any != js->last) {
+            js->last = any;
+            for (u8 i = 0; i < js->nspk; i++)
+                hc->verb(js->spk[i], 0x707 /* pin control */, any ? 0 : 0x40 /* out */);
+            if (hc->apple_gpio_amp)
+                hc->verb(hc->afg, 0x715, any ? 0x00 : 0x01);
+            klog::info("hda: headphones %s: speakers %s", any ? "plugged in" : "unplugged", any ? "off" : "on");
+        }
+        sched::sleep_ms(300);
+    }
+}
+
+} // namespace
+
+void Controller::start_jack_sense() {
+    auto* js = new JackState;
+    js->hc = this;
+    for (u32 i = 0; i < nout; i++) {
+        u8 pin = out_paths[i].nodes[0];
+        const Widget& x = w[pin];
+        u8 dev = pin_device(x);
+        bool jack = pin_connectivity(x) == 0;          // an external jack
+        bool detect = !(x.config & (1u << 8));         // "jack detect override" not set
+        if (dev == DEV_HP_OUT && jack && detect && (x.pincaps & PINCAP_PRESENCE) && js->nhp < 4)
+            js->hp[js->nhp++] = pin;
+        else if (dev == DEV_SPEAKER && js->nspk < 4)
+            js->spk[js->nspk++] = pin;
+    }
+    if (!js->nhp || !js->nspk) {
+        delete js; // nothing to switch
+        return;
+    }
+    sched::spawn("hda-jack", jack_thread, js, -1, true);
 }
 
 u8 pin_device(const Widget& x) { return (x.config >> 20) & 0xF; }
@@ -1139,6 +1209,7 @@ long probe(dev::Device* d) {
     }
     if (hc->has_input)
         hc->enable_input_path(hc->in_path);
+    hc->start_jack_sense();
 
     // Card and PCM.
     char longname[80];
