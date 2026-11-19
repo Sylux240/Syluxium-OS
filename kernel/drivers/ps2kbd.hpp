@@ -7,6 +7,7 @@ namespace ps2kbd {
 
 bool init();
 bool mouse_present();
+void late_init(); // after the USB BIOS handoff: set the controller up again; polling fallback
 
 // Feed a key (Linux key code) to the console terminal; used by every keyboard driver.
 void console_key(u16 keycode, bool pressed);

@@ -264,8 +264,15 @@ $(IMAGE): $(KERNEL) $(INITRAMFS) limine.conf $(LIMINE_DIR)/limine
 	 mb=$$(( ($$(stat -c %s $(KERNEL)) + $$(stat -c %s $(INITRAMFS))) / 1048576 + 32 )); \
 	 [ $$mb -lt 128 ] && mb=128; \
 	 dd if=/dev/zero of=$$tmp bs=1M count=$$mb status=none; \
+	 dd if=/dev/zero bs=1M count=40 status=none >> $$tmp; \
+	 p1=$$(( (mb - 1) * 2048 )); \
 	 echo 'label: dos' | sfdisk --quiet $$tmp; \
-	 echo 'start=2048, type=ef, bootable' | sfdisk --quiet --append $$tmp; \
+	 echo "start=2048, size=$$p1, type=ef, bootable" | sfdisk --quiet --append $$tmp; \
+	 echo "start=$$(( 2048 + p1 )), type=c" | sfdisk --quiet --append $$tmp; \
+	 logs=$$tmp@@$$(( (2048 + p1) * 512 )); \
+	 mformat -i $$logs -F -c 1 -v SYLUXLOGS ::; \
+	 printf 'Syluxium writes its boot log here (syluxium-log.txt).\r\nSend that file when reporting a problem.\r\n' > $$tmp.txt; \
+	 mcopy -i $$logs $$tmp.txt ::/README.TXT; rm -f $$tmp.txt; \
 	 mformat -i $$tmp@@1M -F -v SYLUXIUM ::; \
 	 mmd   -i $$tmp@@1M ::/EFI ::/EFI/BOOT ::/boot ::/boot/limine; \
 	 mcopy -i $$tmp@@1M $(KERNEL) ::/boot/syluxium.elf; \

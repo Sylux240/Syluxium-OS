@@ -13,6 +13,8 @@
 #include <drivers/input/input.hpp>
 #include <drivers/ps2kbd.hpp>
 #include <drivers/tty.hpp>
+#include <lib/spinlock.hpp>
+#include <sched/sched.hpp>
 #include <time/clock.hpp>
 
 namespace ps2kbd {
@@ -123,10 +125,18 @@ void mouse_byte(u8 b) {
     g_mouse.sync();
 }
 
-void irq(interrupts::Frame*) {
+// The interrupt handler and the polling fallback both drain the
+// controller; whoever holds the lock does it.
+RawSpinlock g_drain_lock;
+bool g_initialized = false;
+u64 g_irq_count = 0, g_polled_bytes = 0;
+
+void drain_locked(bool polled) {
     while (arch::inb(STATUS) & STATUS_OUTPUT_FULL) {
         u8 status = arch::inb(STATUS);
         u8 b = arch::inb(DATA);
+        if (polled)
+            g_polled_bytes++;
         if (status & STATUS_AUX) {
             if (g_have_mouse)
                 mouse_byte(b);
@@ -134,6 +144,14 @@ void irq(interrupts::Frame*) {
             keyboard_byte(b);
         }
     }
+}
+
+void irq(interrupts::Frame*) {
+    g_irq_count++;
+    if (!g_drain_lock.try_lock())
+        return; // the poller or the late setup has it
+    drain_locked(false);
+    g_drain_lock.unlock();
 }
 
 // ---- controller commands (polled, before interrupts are routed) ----
@@ -365,7 +383,65 @@ bool init() {
     ioapic::route_isa_irq(1, vector, this_cpu()->lapic_id);
     if (g_have_mouse)
         ioapic::route_isa_irq(12, vector, this_cpu()->lapic_id); // same handler: it checks the aux bit
+    g_initialized = true;
     return true;
+}
+
+namespace {
+
+// Safety net for machines where the keyboard's interrupt never arrives
+// (routing, firmware): bytes left in the controller are picked up here.
+void poll_thread(void*) {
+    u64 start = clock::now_ns();
+    bool reported30 = false, reported120 = false;
+    for (;;) {
+        bool irqs_work = g_irq_count > 0 && g_polled_bytes == 0;
+        sched::sleep_ms(irqs_work ? 250 : 20);
+        if (arch::inb(STATUS) & STATUS_OUTPUT_FULL) {
+            bool was = arch::interrupts_enabled();
+            arch::cli();
+            if (g_drain_lock.try_lock()) {
+                drain_locked(true);
+                g_drain_lock.unlock();
+            }
+            if (was)
+                arch::sti();
+        }
+        u64 secs = (clock::now_ns() - start) / 1'000'000'000;
+        if ((secs >= 30 && !reported30) || (secs >= 120 && !reported120)) {
+            (secs >= 120 ? reported120 : reported30) = true;
+            klog::info("PS/2: %lu interrupt(s), %lu byte(s) picked up by polling%s", g_irq_count, g_polled_bytes,
+                       g_polled_bytes && !g_irq_count ? " - the keyboard interrupt never arrives" : "");
+        }
+    }
+}
+
+} // namespace
+
+// After the USB controllers are taken from the firmware: its PS/2
+// emulation (which intercepts ports 0x60/0x64) is gone and may have left
+// the real controller with the keyboard or its interrupt off - set it up
+// again, like Linux, which takes USB over before touching PS/2.
+void late_init() {
+    if (!g_initialized) {
+        if (!init())
+            return;
+        klog::ok("PS/2 controller found after the USB handoff");
+    } else {
+        bool was = arch::interrupts_enabled();
+        arch::cli();
+        g_drain_lock.lock();
+        flush_output();
+        setup_controller();
+        if (g_have_mouse)
+            init_mouse();
+        for (int i = 0; i < 64 && (arch::inb(STATUS) & STATUS_OUTPUT_FULL); i++)
+            arch::inb(DATA);
+        g_drain_lock.unlock();
+        if (was)
+            arch::sti();
+    }
+    sched::spawn("ps2-poll", poll_thread, nullptr, -1, true);
 }
 
 bool mouse_present() { return g_have_mouse; }

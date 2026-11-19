@@ -493,6 +493,7 @@ void kernel_main_thread(void*) {
     cpupower::publish(); // cpufreq files; idle CPUs go tickless from here
     discover_hardware();
     acpi::start_interpreter(); // AML: power button, battery, lid (after PCI)
+    ps2kbd::late_init(); // after the USB handoff (firmware PS/2 emulation off)
     bootlog::start(); // the log onto the boot USB stick (machines without working input)
     u64 reclaimed = pmm::reclaim_bootloader_memory();
     klog::ok("Reclaimed %lu KiB of bootloader memory", reclaimed / KiB);
