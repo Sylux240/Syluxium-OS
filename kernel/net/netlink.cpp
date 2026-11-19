@@ -13,11 +13,17 @@
 #include <net/internal.hpp>
 #include <proc/process.hpp>
 
+extern "C" {
+void lkpi_genl_rcv(u32 portid, const void* data, usize len);
+void lkpi_netlink_release(int protocol, u32 portid);
+}
+
 namespace net {
 
 namespace {
 
 constexpr int NETLINK_ROUTE = 0;
+constexpr int NETLINK_GENERIC = 16;
 constexpr u16 NLMSG_ERROR = 2, NLMSG_DONE = 3;
 constexpr u16 NLM_F_REQUEST = 0x1, NLM_F_MULTI = 0x2, NLM_F_ACK = 0x4, NLM_F_DUMP = 0x300;
 constexpr u16 RTM_NEWLINK = 16, RTM_DELLINK = 17, RTM_GETLINK = 18, RTM_SETLINK = 19, RTM_NEWADDR = 20,
@@ -253,9 +259,9 @@ long set_link(const u8* p, usize len) {
         return -err::NODEV;
     if (change == 0)
         change = 0xFFFFFFFF; // old tools: ifi_change 0 means "all flags"
-    if (change & IFF_UP)
-        f->flags = (f->flags & ~IFF_UP) | (flags & IFF_UP);
     long result = 0;
+    if ((change & IFF_UP) && ((flags ^ f->flags) & IFF_UP))
+        result = f->set_up(flags & IFF_UP);
     for_each_attr(p + 16, len - 16, [&](u16 type, const u8* data, usize alen) {
         if (type == IFLA_MTU && alen >= 4) {
             u32 mtu;
@@ -470,6 +476,7 @@ public:
 
     NetlinkSocket* next = nullptr;
     u32 portid = 0, groups = 0;
+    u64 mc_groups[2] = {}; // multicast memberships, group n = bit n - 1 (bind bitmask + NETLINK_ADD_MEMBERSHIP)
     bool registered = false;
     sched::Mutex qlock;
     Datagram* head = nullptr;
@@ -512,7 +519,8 @@ public:
         memcpy(&grp, sa.data + 8, 4);
         if (long r = assign_port(pid); r < 0)
             return r;
-        groups = grp; // multicast events are never sent, but remember the subscription
+        groups = grp; // rtnetlink events are never sent, but remember the subscription
+        mc_groups[0] = (mc_groups[0] & ~0xFFFFFFFFull) | grp;
         bound = true;
         return 0;
     }
@@ -543,6 +551,10 @@ public:
             memcpy(&dst, to->data + 4, 4);
             if (dst != 0)
                 return static_cast<isize>(len); // unicast to another program: nobody listens
+        }
+        if (protocol == NETLINK_GENERIC) {
+            lkpi_genl_rcv(portid, data, len); // replies arrive through lkpi_sylux_netlink_deliver()
+            return static_cast<isize>(len);
         }
         if (protocol != NETLINK_ROUTE)
             return static_cast<isize>(len);
@@ -695,8 +707,28 @@ public:
         return head ? head->len : 0;
     }
 
-    long set_option(int level, int, const u8*, u32) override {
-        return level == 270 ? 0 : OPT_UNHANDLED; // SOL_NETLINK: memberships, extended acks, strict checks
+    long set_option(int level, int name, const u8* val, u32 len) override {
+        if (level != 270)
+            return OPT_UNHANDLED;
+        // SOL_NETLINK: NETLINK_ADD_MEMBERSHIP (1) / DROP (2); extended acks,
+        // strict checks & co. are accepted and ignored.
+        if ((name == 1 || name == 2) && len >= 4) {
+            u32 group;
+            memcpy(&group, val, 4);
+            if (group == 0 || group > 128)
+                return -err::INVAL;
+            LockGuard guard(g_nl);
+            u64 bit = 1ull << ((group - 1) % 64);
+            if (name == 1)
+                mc_groups[(group - 1) / 64] |= bit;
+            else
+                mc_groups[(group - 1) / 64] &= ~bit;
+        }
+        return 0;
+    }
+
+    bool member_of(u32 group) const {
+        return group >= 1 && group <= 128 && (mc_groups[(group - 1) / 64] & (1ull << ((group - 1) % 64)));
     }
     long get_option(int level, int, u8* val, u32* len) override {
         if (level != 270)
@@ -707,6 +739,7 @@ public:
     }
 
     void close() override {
+        bool was_registered;
         {
             LockGuard guard(g_nl);
             NetlinkSocket** link = &g_sockets;
@@ -714,7 +747,10 @@ public:
                 link = &(*link)->next;
             if (*link)
                 *link = next;
+            was_registered = registered;
         }
+        if (was_registered && protocol == NETLINK_GENERIC)
+            lkpi_netlink_release(protocol, portid); // nl80211 drops what this socket owned
         while (head) {
             Datagram* d = head;
             head = d->next;
@@ -727,5 +763,47 @@ public:
 } // namespace
 
 Socket* create_netlink(int type, int protocol) { return new NetlinkSocket(type, protocol); }
+
+namespace {
+
+Datagram* make_datagram(const void* data, usize len) {
+    auto* d = static_cast<Datagram*>(kmalloc(sizeof(Datagram) + len));
+    if (d) {
+        d->next = nullptr;
+        d->len = len;
+        memcpy(d->data, data, len);
+    }
+    return d;
+}
+
+} // namespace
+
+} // namespace net
+
+// Messages from the kernel side of generic netlink (the LinuxKPI's
+// genetlink: nl80211 replies and events). Called in process context.
+extern "C" int lkpi_sylux_netlink_deliver(int protocol, u32 portid, const void* data, usize len) {
+    using namespace net;
+    LockGuard guard(g_nl);
+    for (NetlinkSocket* s = g_sockets; s; s = s->next) {
+        if (s->protocol == protocol && s->portid == portid) {
+            if (Datagram* d = make_datagram(data, len))
+                s->queue(d);
+            return 0;
+        }
+    }
+    return -111; // ECONNREFUSED: nobody listens on that port
+}
+
+extern "C" void lkpi_sylux_netlink_multicast(int protocol, u32 group, u32 exclude_portid, const void* data, usize len) {
+    using namespace net;
+    LockGuard guard(g_nl);
+    for (NetlinkSocket* s = g_sockets; s; s = s->next)
+        if (s->protocol == protocol && s->member_of(group) && (exclude_portid == 0 || s->portid != exclude_portid))
+            if (Datagram* d = make_datagram(data, len))
+                s->queue(d);
+}
+
+namespace net {
 
 } // namespace net

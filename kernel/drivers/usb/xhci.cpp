@@ -36,7 +36,7 @@ static_assert(sizeof(Trb) == 16);
 constexpr u32 TRB_NOOP = 8;
 constexpr u32 TRB_NORMAL = 1, TRB_SETUP = 2, TRB_DATA = 3, TRB_STATUS = 4, TRB_LINK = 6, TRB_ENABLE_SLOT = 9,
               TRB_DISABLE_SLOT = 10, TRB_ADDRESS_DEVICE = 11, TRB_CONFIGURE_EP = 12, TRB_EVALUATE_CTX = 13,
-              TRB_TRANSFER_EVENT = 32, TRB_COMMAND_COMPLETION = 33, TRB_PORT_STATUS_CHANGE = 34;
+              TRB_STOP_EP = 15, TRB_SET_TR_DEQUEUE = 16, TRB_TRANSFER_EVENT = 32, TRB_COMMAND_COMPLETION = 33, TRB_PORT_STATUS_CHANGE = 34;
 constexpr u32 CC_SUCCESS = 1, CC_SHORT_PACKET = 13;
 constexpr u32 CC_DEVICE_GONE = 0x100; // ours, not the controller's: the device was unplugged
 
@@ -142,6 +142,7 @@ public:
         return transfer_ms(ep_address, data, length, 1ull << 40); // practically forever
     }
     long transfer_ms(u8 ep_address, void* data, u32 length, u64 timeout_ms);
+    void cancel(u8 ep_address) override;
     long start_interrupt_in(u8 ep_address, u32 length, usb::InterruptCallback cb, void* ctx) override;
     long start_iso_out(u8 ep_address, u32 max_packet, usb::IsoFill fill, void* ctx) override;
     void stop_iso(u8 ep_address) override;
@@ -696,6 +697,28 @@ long UsbDevice::transfer_ms(u8 ep_address, void* data, u32 length, u64 timeout_m
     if (in)
         memcpy(data, ep.buffer, actual);
     return actual;
+}
+
+// Stop the endpoint (the pending TRB completes with "stopped", which
+// fails its waiter) and move the dequeue pointer past it, so the stale TRB
+// never receives data.
+void UsbDevice::cancel(u8 ep_address) {
+    Active active(this);
+    if (!active.ok)
+        return;
+    u8 dci = static_cast<u8>((ep_address & 0xF) * 2 + ((ep_address & 0x80) ? 1 : 0));
+    EndpointState& ep = m_eps[dci];
+    if (!ep.buffer || ep.callback || ep.iso_fill)
+        return;
+    u32 target = (static_cast<u32>(m_slot) << 24) | (static_cast<u32>(dci) << 16);
+    m_hc->command(0, 0, (TRB_STOP_EP << 10) | target, nullptr);
+    u64 dequeue = (ep.ring.phys + ep.ring.enqueue * sizeof(Trb)) | ep.ring.cycle;
+    m_hc->command(dequeue, 0, (TRB_SET_TR_DEQUEUE << 10) | target, nullptr);
+    if (!ep.done) { // no "stopped" event (the TRB had completed or never started): fail the waiter
+        ep.code = CC_DEVICE_GONE + 1;
+        ep.done = true;
+    }
+    m_hc->completions.wake_all();
 }
 
 void UsbDevice::queue_iso(u8 dci) {

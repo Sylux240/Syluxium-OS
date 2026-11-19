@@ -20,6 +20,8 @@ int request_firmware(const struct firmware** fw, const char* name, struct device
 int request_firmware_nowait(void* module, bool uevent, const char* name, struct device* dev, gfp_t gfp, void* context,
                             void (*cont)(const struct firmware* fw, void* context));
 void release_firmware(const struct firmware* fw);
+#define firmware_request_cache(dev, name) 0
+#define request_firmware_into_buf(fw, name, dev, buf, size) request_firmware(fw, name, dev)
 
 LKPI_EXTERN_C_END
 

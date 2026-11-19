@@ -1,0 +1,25 @@
+/* LinuxKPI: the common core every small compatibility header pulls in. */
+#ifndef _LKPI_LINUX_ALL_H
+#define _LKPI_LINUX_ALL_H
+#include <linux/kernel.h>
+#include <linux/atomic.h>
+#include <linux/bitops.h>
+#include <linux/jiffies.h>
+#include <linux/list.h>
+#include <linux/slab.h>
+#include <linux/spinlock.h>
+#include <linux/mutex.h>
+#include <linux/wait.h>
+#include <linux/workqueue.h>
+#include <linux/module.h>
+#include <linux/rcupdate.h>
+#include <linux/delay.h>
+#include <linux/interrupt.h>
+#include <linux/percpu.h>
+#include <linux/device.h>
+#include <linux/hrtimer.h>
+#include <linux/random.h>
+#include <linux/idr.h>
+#include <linux/jump_label.h>
+#include <linux/notifier.h>
+#endif

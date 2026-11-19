@@ -21,6 +21,16 @@
 #include <sched/sched.hpp>
 #include <sched/sync.hpp>
 #include <time/clock.hpp>
+#include <time/rtc.hpp>
+#include <lib/random.hpp>
+#include <arch/x86_64/percpu.hpp>
+#include <boot/limine_requests.hpp>
+#include <arch/x86_64/cpu_local.hpp>
+
+// Linux's jiffies is a variable (struct fields share the name, so it can't
+// be a macro in C): refreshed every millisecond by the timer thread.
+extern "C" volatile unsigned long lkpi_jiffies_var asm("jiffies");
+volatile unsigned long lkpi_jiffies_var = 0;
 
 namespace {
 
@@ -688,10 +698,25 @@ void lkpi_local_irq_restore(unsigned long f) {
         arch::sti();
 }
 
+// RCU readers run with preemption disabled (like Linux's non-preemptible
+// RCU), so a CPU that has switched threads (or is idle) has left every
+// read-side section it was in.
+void lkpi_rcu_read_lock(void) { cpu_local::preempt_disable(); }
+void lkpi_rcu_read_unlock(void) {
+    if (cpu_local::preempt_dec() && cpu_local::need_resched() && arch::interrupts_enabled())
+        sched_preempt_point();
+}
+void lkpi_preempt_disable(void) { cpu_local::preempt_disable(); }
+void lkpi_preempt_enable(void) { lkpi_rcu_read_unlock(); }
+int lkpi_preempt_count(void) { return sched::running() ? cpu_local::preempt_count() : 0; }
+int lkpi_smp_processor_id(void) { return static_cast<int>(this_cpu()->index); }
+
 void synchronize_rcu(void) {
-    // Readers never sleep inside rcu_read_lock() sections; a short sleep lets
-    // every CPU pass through the scheduler at least once (1 kHz tick).
-    sched::sleep_ms(3);
+    // A grace period: wait until no CPU can still be inside a read-side
+    // section that started before this call. Sleeping is a context switch
+    // here; every other CPU must switch or be idle. A short sleep also
+    // covers CPUs we can't observe.
+    sched::sleep_ms(2);
 }
 
 void mutex_init(struct mutex* m) { memset(m, 0, sizeof(*m)); }
@@ -837,6 +862,105 @@ long wait_for_completion_interruptible_timeout(struct completion* c, unsigned lo
 // ======================= time =======================
 
 unsigned long lkpi_jiffies(void) { return clock::now_ms(); }
+u64 lkpi_ktime_real_ns(void) { return rtc::realtime_ns(); }
+
+void get_random_bytes(void* buf, size_t len) { random::fill(buf, len); }
+u32 get_random_u32(void) { return static_cast<u32>(random::next_u64()); }
+bool lkpi_is_vmalloc_addr(const void* p) { return mm::is_vmalloc_address(p); }
+
+// ======================= RCU callbacks =======================
+// call_rcu()/kfree_rcu() callbacks wait for a grace period on the
+// "lkpi-rcu" thread. A callback whose function pointer is a small number
+// is a kfree_rcu(): the number is the rcu_head's offset in the object.
+
+static IrqSpinlock g_rcu_lock;
+static struct callback_head* g_rcu_pending = nullptr;
+static struct callback_head** g_rcu_tail = &g_rcu_pending;
+static sched::WaitQueue g_rcu_wait;
+static sched::WaitQueue g_rcu_done;
+static volatile u64 g_rcu_queued = 0, g_rcu_completed = 0;
+
+void call_rcu(struct callback_head* head, rcu_callback_t func) {
+    head->func = func;
+    head->next = nullptr;
+    {
+        LockGuard guard(g_rcu_lock);
+        *g_rcu_tail = head;
+        g_rcu_tail = &head->next;
+        g_rcu_queued++;
+    }
+    g_rcu_wait.wake_all();
+}
+
+void lkpi_kfree_rcu(struct callback_head* head, unsigned long offset) {
+    call_rcu(head, reinterpret_cast<rcu_callback_t>(offset));
+}
+
+void rcu_barrier(void) {
+    u64 target = g_rcu_queued;
+    g_rcu_done.wait_until([&] { return g_rcu_completed >= target; });
+}
+
+static void rcu_thread(void*) {
+    for (;;) {
+        g_rcu_wait.wait_until([] { return g_rcu_pending != nullptr; });
+        struct callback_head* list;
+        u64 count = 0;
+        {
+            LockGuard guard(g_rcu_lock);
+            list = g_rcu_pending;
+            g_rcu_pending = nullptr;
+            g_rcu_tail = &g_rcu_pending;
+        }
+        synchronize_rcu();
+        while (list) {
+            struct callback_head* next = list->next;
+            auto fn = reinterpret_cast<uptr>(list->func);
+            if (fn < 4096)
+                lkpi_kfree(reinterpret_cast<char*>(list) - fn);
+            else
+                list->func(list);
+            list = next;
+            count++;
+        }
+        __atomic_add_fetch(&g_rcu_completed, count, __ATOMIC_SEQ_CST);
+        g_rcu_done.wake_all();
+    }
+}
+
+// ======================= threads =======================
+
+namespace {
+struct KthreadStart {
+    int (*fn)(void*);
+    void* data;
+};
+void kthread_entry(void* arg) {
+    auto* s = static_cast<KthreadStart*>(arg);
+    auto fn = s->fn;
+    void* data = s->data;
+    delete s;
+    fn(data);
+    sched::exit(0);
+}
+struct task_struct g_task_dummy = {};
+} // namespace
+
+struct task_struct* lkpi_kthread_run(int (*fn)(void*), void* data, const char* name) {
+    auto* s = new KthreadStart{fn, data};
+    sched::spawn(name, kthread_entry, s, -1, true);
+    return &g_task_dummy;
+}
+
+struct task_struct* lkpi_current(void) {
+    // Per-call snapshot (only comm/pid are read, for log messages).
+    static struct task_struct t;
+    sched::Thread* th = sched::current();
+    snprintf(t.comm, sizeof(t.comm), "%s", th ? th->name : "kernel");
+    t.pid = 0;
+    t.tgid = 0;
+    return &t;
+}
 u64 lkpi_ktime_ns(void) { return clock::now_ns(); }
 
 void udelay(unsigned long us) { clock::busy_wait_ns(us * 1000); }
@@ -907,6 +1031,7 @@ void timer_thread(void*) {
     for (;;) {
         sched::sleep_ms(1);
         unsigned long now = clock::now_ms();
+        lkpi_jiffies_var = now;
         for (;;) {
             struct timer_list* due = nullptr;
             {
@@ -985,7 +1110,7 @@ struct workqueue_struct {
 
 namespace {
 
-constexpr int WORK_QUEUED = 1, WORK_RUNNING = 2;
+constexpr int WORK_QUEUED = 1;
 
 void worker(void* arg) {
     auto* wq = static_cast<workqueue_struct*>(arg);
@@ -1006,15 +1131,14 @@ void worker(void* arg) {
             w->lkpi_next = nullptr;
             wq->running = w;
             __atomic_fetch_and(&w->lkpi_state, ~WORK_QUEUED, __ATOMIC_SEQ_CST);
-            __atomic_fetch_or(&w->lkpi_state, WORK_RUNNING, __ATOMIC_SEQ_CST);
         }
-        w->func(w); // may free or requeue w: don't touch it afterwards except by address
+        // The function may free or requeue w: it is not touched afterwards
+        // ("running" is tracked by address in wq->running, as in Linux).
+        w->func(w);
         {
             LockGuard guard(wq->lock);
-            if (wq->running == w)
-                wq->running = nullptr;
+            wq->running = nullptr;
         }
-        __atomic_fetch_and(&w->lkpi_state, ~WORK_RUNNING, __ATOMIC_SEQ_CST);
         wq->idle.wake_all();
     }
 }
@@ -1026,12 +1150,14 @@ workqueue_struct* make_wq(const char* name) {
     return wq;
 }
 
-void delayed_work_timer(struct timer_list* t) {
+extern "C" void lkpi_delayed_work_timer(struct timer_list* t);
+void delayed_work_timer(struct timer_list* t) { lkpi_delayed_work_timer(t); }
+} // namespace
+extern "C" void lkpi_delayed_work_timer(struct timer_list* t) {
     auto* d = container_of(t, struct delayed_work, timer);
     queue_work(d->wq ? d->wq : system_wq, &d->work);
 }
 
-} // namespace
 
 extern "C" {
 
@@ -1146,8 +1272,8 @@ bool flush_work(struct work_struct* w) {
     workqueue_struct* wq = w->lkpi_wq;
     if (!wq)
         return false;
-    bool busy = w->lkpi_state != 0;
-    wq->idle.wait_until([&] { return (__atomic_load_n(&w->lkpi_state, __ATOMIC_SEQ_CST) & (WORK_QUEUED | WORK_RUNNING)) == 0; });
+    bool busy = w->lkpi_state != 0 || wq->running == w;
+    wq->idle.wait_until([&] { return !(__atomic_load_n(&w->lkpi_state, __ATOMIC_SEQ_CST) & WORK_QUEUED) && wq->running != w; });
     return busy;
 }
 
@@ -1157,7 +1283,7 @@ bool cancel_work_sync(struct work_struct* w) {
     bool was = dequeue(w);
     workqueue_struct* wq = w->lkpi_wq;
     if (wq)
-        wq->idle.wait_until([&] { return !(__atomic_load_n(&w->lkpi_state, __ATOMIC_SEQ_CST) & WORK_RUNNING); });
+        wq->idle.wait_until([&] { return wq->running != w; });
     return was;
 }
 
@@ -1178,16 +1304,60 @@ bool flush_delayed_work(struct delayed_work* d) {
 
 // ======================= startup =======================
 
+extern "C" const struct lkpi_param __lkpi_params_start[];
+extern "C" const struct lkpi_param __lkpi_params_end[];
+
+namespace {
+
+// <module>.<param>=<value> on the kernel command line.
+void apply_module_params() {
+    const char* cmd = boot::cmdline();
+    for (const struct lkpi_param* p = __lkpi_params_start; p < __lkpi_params_end; p++) {
+        usize n = strlen(p->name);
+        for (const char* s = cmd; (s = strstr(s, p->name)) != nullptr; s += n) {
+            if ((s != cmd && s[-1] != ' ') || s[n] != '=')
+                continue;
+            const char* v = s + n + 1;
+            char buf[64];
+            usize len = 0;
+            while (v[len] && v[len] != ' ' && len + 1 < sizeof(buf)) {
+                buf[len] = v[len];
+                len++;
+            }
+            buf[len] = 0;
+            long value = static_cast<long>(simple_strtoul(buf[0] == '-' ? buf + 1 : buf, nullptr, 0));
+            if (buf[0] == '-')
+                value = -value;
+            bool yes = buf[0] == 'y' || buf[0] == 'Y' || buf[0] == '1';
+            switch (p->type) {
+            case 'i': case 'u': *static_cast<int*>(p->var) = static_cast<int>(value); break;
+            case 'l': case 'L': *static_cast<long*>(p->var) = value; break;
+            case 's': case 'S': *static_cast<short*>(p->var) = static_cast<short>(value); break;
+            case 'b': *static_cast<unsigned char*>(p->var) = static_cast<unsigned char>(value); break;
+            case 'B': *static_cast<bool*>(p->var) = yes; break;
+            case 'I': *static_cast<bool*>(p->var) = !yes; break;
+            default: continue; // charp: not supported
+            }
+            klog::info("linuxkpi: %s = %s", p->name, buf);
+        }
+    }
+}
+
+} // namespace
+
 extern "C" lkpi_initcall_t __lkpi_initcalls_start[];
 extern "C" lkpi_initcall_t __lkpi_initcalls_end[];
 
 namespace linuxkpi {
 
 void init() {
+    lkpi_jiffies_var = clock::now_ms();
     sched::spawn("lkpi-timers", timer_thread, nullptr, -1, true);
+    sched::spawn("lkpi-rcu", rcu_thread, nullptr, -1, true);
     system_wq = make_wq("lkpi-events");
     system_highpri_wq = system_long_wq = system_unbound_wq = system_freezable_wq = system_power_efficient_wq = system_wq;
     init_pci();
+    apply_module_params();
     int count = 0, failed = 0;
     for (lkpi_initcall_t* call = __lkpi_initcalls_start; call < __lkpi_initcalls_end; call++) {
         count++;

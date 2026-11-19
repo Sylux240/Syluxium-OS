@@ -22,6 +22,7 @@ struct Client {
     u8 reply[576];
     usize reply_len = 0;
     bool waiting = false;
+    volatile bool kick = false; // link (re)gained: start over now
 };
 
 constexpr usize MAX_CLIENTS = 4;
@@ -56,7 +57,7 @@ void send_packet(Client* c, u8 type, u32 requested, u32 server) {
     memcpy(udp + 8, pkt, sizeof(pkt));
     put16(udp + 6, pseudo_checksum(0, 0xFFFFFFFF, PROTO_UDP, udp, sizeof(udp)));
     LockGuard guard(g_lock);
-    ip_send(0, 0xFFFFFFFF, PROTO_UDP, udp, sizeof(udp));
+    ip_send(0, 0xFFFFFFFF, PROTO_UDP, udp, sizeof(udp), 64, c->iface);
 }
 
 struct Reply {
@@ -68,9 +69,11 @@ bool wait_reply(Client* c, u8 want1, u8 want2, Reply* out, u64 timeout_ms) {
     u64 deadline = clock::now_ms() + timeout_ms;
     for (;;) {
         u64 now = clock::now_ms();
-        if (now >= deadline)
+        if (now >= deadline || c->kick)
             return false;
         if (!c->reply_ready.wait_timeout((deadline - now) * 1'000'000))
+            return false;
+        if (c->kick)
             return false;
         const u8* p = c->reply;
         usize len = c->reply_len;
@@ -114,6 +117,15 @@ void client_thread(void* arg) {
     auto* c = static_cast<Client*>(arg);
     u64 backoff = 1000;
     for (;;) {
+        if (c->kick) {
+            c->kick = false;
+            backoff = 1000;
+        }
+        if (!c->iface->link_up || !(c->iface->flags & IFF_UP)) {
+            // No link yet (Wi-Fi not associated, cable out): wait for link_up().
+            c->reply_ready.wait_timeout(2000ull * 1'000'000);
+            continue;
+        }
         c->xid = static_cast<u32>(clock::now_ns() ^ (c->iface->mac[5] << 24));
         send_packet(c, DISCOVER, 0, 0);
         Reply offer;
@@ -148,7 +160,11 @@ void client_thread(void* arg) {
         // Renew at half the lease (simplified: a fresh REQUEST for the same address).
         u64 lease = ack.lease ? ack.lease : 3600;
         for (;;) {
-            sched::sleep_ms(lease * 500);
+            u64 renew_at = clock::now_ms() + lease * 500;
+            while (!c->kick && clock::now_ms() < renew_at)
+                c->reply_ready.wait_timeout((renew_at - clock::now_ms()) * 1'000'000);
+            if (c->kick)
+                break; // new link (maybe another network): start over
             c->xid++;
             send_packet(c, REQUEST, ack.yiaddr, ack.server);
             Reply renew;
@@ -179,6 +195,16 @@ void dhcp_input(Interface* in, const u8* data, usize len) {
         memcpy(c->reply, data, len);
         c->reply_len = len;
         c->reply_ready.signal();
+    }
+}
+
+void dhcp_kick(Interface* iface) {
+    for (usize i = 0; i < g_client_count; i++) {
+        Client* c = &g_clients[i];
+        if (c->iface == iface) {
+            c->kick = true;
+            c->reply_ready.signal();
+        }
     }
 }
 

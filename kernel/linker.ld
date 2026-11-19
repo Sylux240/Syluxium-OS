@@ -55,8 +55,15 @@ SECTIONS
     /* module_init() functions of Linux drivers (LinuxKPI). */
     .lkpi_initcalls : {
         __lkpi_initcalls_start = .;
-        KEEP(*(.lkpi_initcalls))
+        KEEP(*(SORT(.lkpi_initcalls*)))
         __lkpi_initcalls_end = .;
+    } :data
+
+    /* module_param()s of Linux drivers (set from the command line). */
+    .lkpi_params : {
+        __lkpi_params_start = .;
+        KEEP(*(.lkpi_params))
+        __lkpi_params_end = .;
     } :data
 
     .bss : {
