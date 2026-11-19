@@ -212,12 +212,25 @@ $(DEBIAN_STAMP): tools/debian-fetch.py Makefile
 	@python3 tools/debian-fetch.py --suite $(DEBIAN_SUITE) --out $(DEBIAN_ROOT) --cache deps/debian --exclude $(DEBIAN_EXCLUDE) --repo "$(TRINITY_REPO)" $(DEBIAN_PKGS) $(TRINITY_PKGS)
 	@touch $@
 
+# Device firmware from Debian's non-free-firmware section: the packages are
+# huge (GPU firmware), so only the files our drivers load are kept.
+FIRMWARE_REPO  := http://deb.debian.org/debian|$(DEBIAN_SUITE)|non-free-firmware
+FIRMWARE_PKGS  := firmware-mediatek firmware-realtek
+FIRMWARE_FILES := mediatek/mt7601u.bin rtlwifi/rtl8188eufw.bin rtlwifi/rtl8723bu_nic.bin rtl_bt/rtl8723b_fw.bin
+FIRMWARE_ROOT  := $(BUILD)/firmware-debian
+FIRMWARE_STAMP := $(FIRMWARE_ROOT)/.fetched
+
+$(FIRMWARE_STAMP): tools/debian-fetch.py Makefile
+	@echo "  DEB   $(FIRMWARE_PKGS) (firmware: keeping $(words $(FIRMWARE_FILES)) files)"
+	@python3 tools/debian-fetch.py --suite $(DEBIAN_SUITE) --out $(FIRMWARE_ROOT) --cache deps/debian --exclude $(DEBIAN_EXCLUDE) --repo "$(FIRMWARE_REPO)" $(FIRMWARE_PKGS)
+	@touch $@
+
 $(DEBIAN_I386_STAMP): tools/debian-fetch.py Makefile
 	@echo "  DEB   $(DEBIAN_I386_PKGS) (i386, Debian $(DEBIAN_SUITE))"
 	@python3 tools/debian-fetch.py --arch i386 --suite $(DEBIAN_SUITE) --out $(DEBIAN_I386_ROOT) --cache deps/debian --exclude $(DEBIAN_I386_EXCLUDE) $(DEBIAN_I386_PKGS)
 	@touch $@
 
-$(INITRAMFS): $(KERNEL) tools/mkfontdir.py $(DEBIAN_STAMP) $(DEBIAN_I386_STAMP) $(USER_PROGS) $(USER32_PROGS) $(shell find rootfs -type f 2>/dev/null) $(shell find rootfs -type d 2>/dev/null) Makefile
+$(INITRAMFS): $(KERNEL) tools/mkfontdir.py $(DEBIAN_STAMP) $(DEBIAN_I386_STAMP) $(FIRMWARE_STAMP) $(USER_PROGS) $(USER32_PROGS) $(shell find rootfs -type f 2>/dev/null) $(shell find rootfs -type d 2>/dev/null) Makefile
 	@echo "  ROOT  $(ROOTFS)"
 	@rm -rf $(ROOTFS)
 	@cp -a $(DEBIAN_ROOT) $(ROOTFS)
@@ -237,6 +250,10 @@ $(INITRAMFS): $(KERNEL) tools/mkfontdir.py $(DEBIAN_STAMP) $(DEBIAN_I386_STAMP) 
 	@cp -a $(DEBIAN_I386_ROOT)/usr/lib/ld-linux.so.2 $(ROOTFS)/usr/lib/
 	@for prog in $(DEBIAN_I386_PROGS); do cp $(DEBIAN_I386_ROOT)/usr/bin/$$prog $(ROOTFS)/usr/bin/$$prog-i386; done
 	@cp -r rootfs/. $(ROOTFS)/
+	@for f in $(FIRMWARE_FILES); do \
+	    src=$$(ls $(FIRMWARE_ROOT)/usr/lib/firmware/$$f $(FIRMWARE_ROOT)/lib/firmware/$$f 2>/dev/null | head -1); \
+	    [ -n "$$src" ] || { echo "  warning: firmware $$f not found"; continue; }; \
+	    mkdir -p $(ROOTFS)/usr/lib/firmware/$$(dirname $$f); cp -L "$$src" $(ROOTFS)/usr/lib/firmware/$$f; done
 	@# What the installer puts on the new disk: kernel, Limine (UEFI + BIOS stages), its installer.
 	@mkdir -p $(ROOTFS)/usr/lib/syluxium/boot
 	@cp $(KERNEL) $(LIMINE_DIR)/BOOTX64.EFI $(LIMINE_DIR)/limine-bios.sys $(ROOTFS)/usr/lib/syluxium/boot/
