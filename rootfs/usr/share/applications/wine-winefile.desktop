@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Windows File Manager
+GenericName=File Manager (Windows)
+Comment=Browse the files Windows programs see (drive C: and your folders)
+Exec=wine winefile
+Icon=wine
+Categories=X-Syluxium-Wine;

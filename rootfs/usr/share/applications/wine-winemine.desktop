@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Minesweeper
+GenericName=Game (Windows)
+Comment=Windows Minesweeper, running with Wine
+Exec=wine winemine
+Icon=wine
+Categories=X-Syluxium-Wine;

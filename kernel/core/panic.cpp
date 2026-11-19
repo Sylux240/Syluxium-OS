@@ -21,7 +21,22 @@
     va_start(args, fmt);
     kvprintf(fmt, args);
     va_end(args);
-    kprintf("\x1b[0m\n\nSystem halted.\n");
+    kprintf("\x1b[0m\n");
+    // Call chain (the kernel keeps frame pointers): addr2line -e build/syluxium.elf <addresses>
+    kprintf("Backtrace:");
+    const u64* fp = static_cast<const u64*>(__builtin_frame_address(0));
+    for (int i = 0; i < 16 && reinterpret_cast<u64>(fp) >= 0xFFFF800000000000ull &&
+                    (reinterpret_cast<u64>(fp) & 7) == 0; i++) {
+        u64 ret = fp[1];
+        if (ret < 0xFFFF800000000000ull)
+            break;
+        kprintf(" %016lx", ret);
+        const u64* next = reinterpret_cast<const u64*>(fp[0]);
+        if (next <= fp)
+            break;
+        fp = next;
+    }
+    kprintf("\n\nSystem halted.\n");
 
     arch::halt_forever();
 }

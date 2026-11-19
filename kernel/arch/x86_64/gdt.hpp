@@ -4,20 +4,24 @@
 
 namespace gdt {
 
-// Segment selectors. The user data/code order (data before code) is what
-// the SYSRET instruction expects, which we'll use for system calls.
+// Segment selectors: the same values as Linux, because user programs depend
+// on them. Wine's WoW64 mode (32-bit Windows programs in a 64-bit process)
+// far-jumps to the hard-coded 32-bit user code selector 0x23, and the
+// 32-bit/64-bit code and data order is also what SYSRET expects
+// (STAR[63:48] = 0x20: 32-bit CS 0x23, SS 0x2b, 64-bit CS 0x33).
 constexpr u16 KERNEL_CODE = 0x08;
 constexpr u16 KERNEL_DATA = 0x10;
-constexpr u16 USER_DATA   = 0x18 | 3;
-constexpr u16 USER_CODE   = 0x20 | 3;
-constexpr u16 TSS         = 0x28;
 // ia32 (compatibility mode) user code: L=0, D=1. 32-bit programs run with
-// this CS; their data/stack segment is the flat USER_DATA above.
-constexpr u16 USER32_CODE = 0x38 | 3;
-// Thread-local storage descriptors for 32-bit programs (set_thread_area).
-// Each thread owns TLS_ENTRIES descriptors that the scheduler copies into
-// this CPU's GDT slots when the thread is switched in, like Linux does.
-constexpr int TLS_FIRST_ENTRY = 8;
+// this CS; their data/stack segment is the flat USER_DATA below.
+constexpr u16 USER32_CODE = 0x20 | 3;
+constexpr u16 USER_DATA   = 0x28 | 3;
+constexpr u16 USER_CODE   = 0x30 | 3;
+constexpr u16 TSS         = 0x38;   // 16-byte descriptor: entries 7 and 8
+// Thread-local storage descriptors (set_thread_area; entries 12-14 =
+// selectors 0x63/0x6b/0x73, as on Linux). Each thread owns TLS_ENTRIES
+// descriptors that the scheduler copies into this CPU's GDT slots when the
+// thread is switched in, like Linux does.
+constexpr int TLS_FIRST_ENTRY = 12;
 constexpr int TLS_ENTRIES = 3;
 constexpr u16 tls_selector(int i) { return static_cast<u16>(((TLS_FIRST_ENTRY + i) << 3) | 3); }
 
@@ -42,7 +46,7 @@ static_assert(sizeof(Tss) == 104);
 
 // Every CPU has its own GDT (because each needs its own TSS descriptor).
 struct CpuTables {
-    // null, kcode, kdata, udata, ucode, TSS (2 slots), ucode32, TLS x3
+    // null, kcode, kdata, -, ucode32, udata, ucode, TSS (2 slots), -, -, -, TLS x3
     u64 entries[TLS_FIRST_ENTRY + TLS_ENTRIES];
     Tss tss;
 };

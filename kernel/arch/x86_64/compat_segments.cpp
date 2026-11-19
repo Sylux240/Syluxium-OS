@@ -73,14 +73,51 @@ void save(sched::Thread* t) {
 }
 
 void load(Cpu* cpu, sched::Thread* t, bool compat) {
-    if (!compat) {
+    // DS/ES: flat user data for everyone. 64-bit code ignores them, but a
+    // 64-bit process may run 32-bit code too (Wine's WoW64 far-jumps to the
+    // 32-bit code segment), and there they're checked on every access. Linux
+    // also starts 64-bit programs with DS = ES = __USER_DS.
+    load_data_segments();
+    // Every user thread gets its own TLS descriptors into this CPU's GDT
+    // (as Linux does on every switch): a 64-bit thread may load one of them
+    // into %fs itself at any time (Wine, entering 32-bit code), and must never
+    // find another thread's descriptor there.
+    gdt::install_tls(cpu->tables, t->tls_desc);
+    if (!compat && !t->user_fs_sel && !t->user_gs_sel) {
         if (read_fs() | read_gs())
             load_fs_gs(0, 0, nullptr, nullptr); // the caller writes the 64-bit bases next
         return;
     }
-    gdt::install_tls(cpu->tables, t->tls_desc);
-    load_data_segments();
-    load_fs_gs(sanitize(t, t->user_fs_sel), sanitize(t, t->user_gs_sel), &t->fs_base, &t->gs_base);
+    // A 32-bit program, or a 64-bit one that loaded a TLS selector itself
+    // (Wine: %fs for its 32-bit threads' TEB, via set_thread_area). A loaded
+    // selector's base comes from its descriptor; with the null selector a
+    // 64-bit thread keeps its own base (arch_prctl), as on Linux.
+    u16 fs = sanitize(t, t->user_fs_sel), gs = sanitize(t, t->user_gs_sel);
+    u64 fs_base = 0, gs_base = 0;
+    load_fs_gs(fs, gs, &fs_base, &gs_base);
+    if (compat || fs)
+        t->fs_base = fs_base;
+    if (compat || gs)
+        t->gs_base = gs_base;
+}
+
+void clear_fs() {
+    InterruptGuard guard;
+    if (read_fs()) {
+        u16 zero = 0;
+        asm volatile("movw %0, %%fs" : : "r"(zero) : "memory");
+    }
+}
+
+void clear_gs() {
+    InterruptGuard guard;
+    if (!read_gs())
+        return;
+    // As in load_fs_gs: the load clobbers the (kernel's) active GS base.
+    u64 kernel_gs = arch::rdmsr(MSR_GS_BASE);
+    u16 zero = 0;
+    asm volatile("movw %0, %%gs" : : "r"(zero) : "memory");
+    arch::wrmsr(MSR_GS_BASE, kernel_gs);
 }
 
 void reset(sched::Thread* t, bool compat) {

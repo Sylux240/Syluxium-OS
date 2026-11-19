@@ -1,0 +1,35 @@
+#!/bin/sh
+# Wine on Syluxium: runs 64-bit and 32-bit Windows programs with no setup.
+#
+# One 64-bit Wine runs both: 32-bit programs go through Wine's WoW64 layer
+# (32-bit Windows DLLs, 64-bit Unix side), so no i386 Linux libraries are
+# needed. Replaces Debian's wrapper, which looks for the wine32 package.
+#
+# The Wine prefix (~/.wine, or $WINEPREFIX) is copied on first use from a
+# template made when the image was built: no "creating the prefix" wait and
+# no Mono/Gecko download dialogs. Its DLLs are links to /usr/lib, so a fresh
+# prefix takes about 10 MB instead of 500 MB of RAM on the live system.
+
+TEMPLATE=/usr/lib/syluxium/wine-prefix
+: "${WINEPREFIX:=$HOME/.wine}"
+export WINEPREFIX
+
+if [ ! -e "$WINEPREFIX" ]; then
+    if [ -d "$TEMPLATE" ]; then
+        # -RP: links stay links; no -a (a user can't preserve root's ownership)
+        mkdir -p "$(dirname "$WINEPREFIX")" && cp -RP "$TEMPLATE" "$WINEPREFIX"
+    else
+        # No template (the image was built without one): Wine creates the
+        # prefix itself. Skip .NET (Mono) and the HTML engine (Gecko), which
+        # Wine would otherwise offer to download in a dialog.
+        export WINEDLLOVERRIDES="mscoree,mshtml=${WINEDLLOVERRIDES:+;$WINEDLLOVERRIDES}"
+    fi
+fi
+
+# Debian's default (errors and warnings, not the endless "fixme" lines),
+# without the "starting ... in experimental wow64 mode" notice every 32-bit
+# program would print.
+: "${WINEDEBUG:=fixme-all,err-environ}"
+export WINEDEBUG
+
+exec /usr/lib/wine/wine64 "$@"

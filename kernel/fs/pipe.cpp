@@ -2,8 +2,10 @@
 #include <fs/poll.hpp>
 #include <lib/string.hpp>
 #include <mm/heap.hpp>
+#include <mm/layout.hpp>
 #include <proc/process.hpp>
 #include <proc/signal.hpp>
+#include <proc/uaccess.hpp>
 
 namespace pipe {
 
@@ -11,6 +13,25 @@ namespace {
 
 constexpr usize CAPACITY = 64 * KiB;
 constexpr usize PIPE_BUF = 4096;
+
+// Callers pass user buffers (read/write) or kernel ones (sendfile, splice).
+bool is_kernel(const void* p) { return reinterpret_cast<uptr>(p) >= mm::USER_END; }
+
+long copy_out(void* dst, const void* src, usize n) {
+    if (is_kernel(dst)) {
+        memcpy(dst, src, n);
+        return 0;
+    }
+    return uaccess::copy_to(dst, src, n);
+}
+
+long copy_in(void* dst, const void* src, usize n) {
+    if (is_kernel(src)) {
+        memcpy(dst, src, n);
+        return 0;
+    }
+    return uaccess::copy_from(dst, src, n);
+}
 
 class Pipe : public vfs::Inode {
 public:
@@ -78,54 +99,84 @@ public:
         return m_count < CAPACITY ? poll::POLLOUT : 0;
     }
 
+    // User memory is only touched with the pipe's spinlock released: even a
+    // buffer that was faulted in can be unmapped or protected by another
+    // thread meanwhile (Wine does that), and the page fault then sleeps.
+    // The data goes through a kernel bounce buffer instead.
     isize read_file(vfs::File* f, u64, void* buf, usize count) override {
         if (count == 0)
             return 0;
+        usize chunk = min(count, CAPACITY);
+        auto* bounce = static_cast<u8*>(kmalloc(chunk));
+        if (!bounce)
+            return -err::NOMEM;
         for (;;) {
             m_wq.lock().lock();
             if (m_count > 0) {
-                usize n = min(count, m_count);
-                auto* out = static_cast<u8*>(buf);
-                for (usize i = 0; i < n; i++) // the user buffer was validated and faulted in
-                    out[i] = m_buf[(m_head + i) % CAPACITY];
+                usize n = min(chunk, m_count);
+                for (usize i = 0; i < n; i++)
+                    bounce[i] = m_buf[(m_head + i) % CAPACITY];
                 m_head = (m_head + n) % CAPACITY;
                 m_count -= n;
                 m_wq.lock().unlock();
                 m_wq.wake_all(); // room for writers
                 poll::notify();
-                return static_cast<isize>(n);
+                long r = copy_out(buf, bounce, n);
+                kfree(bounce);
+                return r < 0 ? r : static_cast<isize>(n);
             }
             bool eof = m_writers == 0;
             m_wq.lock().unlock();
+            isize r = 0;
             if (eof)
-                return 0;
-            if (f->flags & vfs::O_NONBLOCK)
-                return -err::AGAIN;
-            if (signal::interrupted())
-                return -err::INTR;
-            m_wq.wait_until([&] { return m_count > 0 || m_writers == 0 || signal::interrupted(); });
+                r = 0;
+            else if (f->flags & vfs::O_NONBLOCK)
+                r = -err::AGAIN;
+            else if (signal::interrupted())
+                r = -err::INTR;
+            else {
+                m_wq.wait_until([&] { return m_count > 0 || m_writers == 0 || signal::interrupted(); });
+                continue;
+            }
+            kfree(bounce);
+            return r;
         }
     }
 
     isize write_file(vfs::File* f, u64, const void* buf, usize count) override {
         auto* in = static_cast<const u8*>(buf);
+        usize chunk = min(count, CAPACITY);
+        auto* bounce = static_cast<u8*>(kmalloc(chunk ? chunk : 1));
+        if (!bounce)
+            return -err::NOMEM;
         usize written = 0;
+        usize staged = 0, staged_at = 0; // bounce holds in[staged_at .. staged_at + staged)
+        auto finish = [&](isize r) {
+            kfree(bounce);
+            return r;
+        };
         while (written < count) {
+            if (written >= staged_at + staged) { // refill from user memory (no lock held)
+                staged_at = written;
+                staged = min(count - written, chunk);
+                if (long r = copy_in(bounce, in + written, staged); r < 0)
+                    return finish(written ? static_cast<isize>(written) : r);
+            }
             usize want = count - written;
             bool done_chunk = false;
             {
                 LockGuard guard(m_wq.lock());
                 if (m_readers == 0) {
                     signal::send(proc::current(), signal::SIGPIPE);
-                    return written ? static_cast<isize>(written) : -err::PIPE;
+                    return finish(written ? static_cast<isize>(written) : -err::PIPE);
                 }
                 usize space = CAPACITY - m_count;
                 // Writes of up to PIPE_BUF bytes are atomic: wait for room for all of it.
                 usize needed = count <= PIPE_BUF ? want : 1;
                 if (space >= needed) {
-                    usize n = min(want, space);
+                    usize n = min(min(want, space), staged_at + staged - written);
                     for (usize i = 0; i < n; i++)
-                        m_buf[(m_head + m_count + i) % CAPACITY] = in[written + i];
+                        m_buf[(m_head + m_count + i) % CAPACITY] = bounce[written - staged_at + i];
                     m_count += n;
                     written += n;
                     done_chunk = true;
@@ -137,15 +188,15 @@ public:
                 continue;
             }
             if (f->flags & vfs::O_NONBLOCK)
-                return written ? static_cast<isize>(written) : -err::AGAIN;
+                return finish(written ? static_cast<isize>(written) : -err::AGAIN);
             if (signal::interrupted())
-                return written ? static_cast<isize>(written) : -err::INTR;
+                return finish(written ? static_cast<isize>(written) : -err::INTR);
             m_wq.wait_until([&] {
                 return CAPACITY - m_count >= (count <= PIPE_BUF ? count - written : 1) || m_readers == 0 ||
                        signal::interrupted();
             });
         }
-        return static_cast<isize>(written);
+        return finish(static_cast<isize>(written));
     }
 
 private:

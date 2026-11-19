@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Windows Command Prompt
+GenericName=Terminal (Windows)
+Comment=The Windows command interpreter, running with Wine
+Exec=wine wineconsole cmd
+Icon=wine
+Categories=X-Syluxium-Wine;

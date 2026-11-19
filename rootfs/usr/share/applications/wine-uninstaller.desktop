@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Add or Remove Windows Programs
+GenericName=Software (Windows)
+Comment=Uninstall Windows programs
+Exec=wine uninstaller
+Icon=wine
+Categories=X-Syluxium-Wine;

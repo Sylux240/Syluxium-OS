@@ -35,19 +35,19 @@ void load(CpuTables& t, const u64* ist_tops) {
     u64 base = reinterpret_cast<u64>(&t.tss);
     u64 limit = sizeof(Tss) - 1;
 
-    t.entries[0] = 0;
-    t.entries[1] = KERNEL_CODE_DESC;
-    t.entries[2] = KERNEL_DATA_DESC;
-    t.entries[3] = USER_DATA_DESC;
-    t.entries[4] = USER_CODE_DESC;
+    memset(t.entries, 0, sizeof(t.entries));
+    t.entries[KERNEL_CODE >> 3] = KERNEL_CODE_DESC;
+    t.entries[KERNEL_DATA >> 3] = KERNEL_DATA_DESC;
+    t.entries[USER32_CODE >> 3] = USER32_CODE_DESC;
+    t.entries[USER_DATA >> 3] = USER_DATA_DESC;
+    t.entries[USER_CODE >> 3] = USER_CODE_DESC;
     // 64-bit TSS descriptor is 16 bytes. Type 0x89 = present, available TSS.
-    t.entries[5] = (limit & 0xFFFF)
-                 | ((base & 0xFFFFFF) << 16)
-                 | (0x89ULL << 40)
-                 | (((limit >> 16) & 0xF) << 48)
-                 | (((base >> 24) & 0xFF) << 56);
-    t.entries[6] = base >> 32;
-    t.entries[7] = USER32_CODE_DESC;
+    t.entries[TSS >> 3] = (limit & 0xFFFF)
+                        | ((base & 0xFFFFFF) << 16)
+                        | (0x89ULL << 40)
+                        | (((limit >> 16) & 0xF) << 48)
+                        | (((base >> 24) & 0xFF) << 56);
+    t.entries[(TSS >> 3) + 1] = base >> 32;
     for (int i = 0; i < TLS_ENTRIES; i++)
         t.entries[TLS_FIRST_ENTRY + i] = 0; // not present until a 32-bit thread installs its own
 

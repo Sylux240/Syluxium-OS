@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Registry Editor
+GenericName=Windows Registry Editor
+Comment=Edit the Windows registry of your Windows programs
+Exec=regedit
+Icon=wine
+Categories=X-Syluxium-Wine;

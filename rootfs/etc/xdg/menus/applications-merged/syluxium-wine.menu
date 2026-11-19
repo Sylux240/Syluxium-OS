@@ -1,0 +1,16 @@
+<!DOCTYPE Menu PUBLIC "-//freedesktop//DTD Menu 1.0//EN"
+  "http://www.freedesktop.org/standards/menu-spec/1.0/menu.dtd">
+
+<!-- Start menu: "Windows Programs" with Wine's own tools (Syluxium's
+     wine-*.desktop files). Windows programs that get installed add their
+     own entries to the menu through Wine's winemenubuilder. -->
+<Menu>
+	<Name>Applications</Name>
+	<Menu>
+		<Name>Wine</Name>
+		<Directory>syluxium-wine.directory</Directory>
+		<Include>
+			<Category>X-Syluxium-Wine</Category>
+		</Include>
+	</Menu>
+</Menu>

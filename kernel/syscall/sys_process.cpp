@@ -1,3 +1,4 @@
+#include <arch/x86_64/compat_segments.hpp>
 #include <core/bootlog.hpp>
 #include <fs/ext2.hpp>
 #include <block/block.hpp>
@@ -486,18 +487,26 @@ long sys_arch_prctl(SYSCALL_ARGS) {
     constexpr u64 ARCH_SET_GS = 0x1001, ARCH_SET_FS = 0x1002, ARCH_GET_FS = 0x1003, ARCH_GET_GS = 0x1004;
     sched::Thread* t = sched::current();
     switch (a0) {
-    case ARCH_SET_FS:
+    case ARCH_SET_FS: {
         if (a1 >= mm::USER_END)
             return -err::PERM;
+        // A selector loaded in %fs (Wine's 32-bit TEB) gives way to the base,
+        // as on Linux; no context switch in between (it would reload it).
+        InterruptGuard guard;
+        compat_segments::clear_fs();
         t->fs_base = a1;
         arch::wrmsr(MSR_FS_BASE, a1);
         return 0;
-    case ARCH_SET_GS:
+    }
+    case ARCH_SET_GS: {
         if (a1 >= mm::USER_END)
             return -err::PERM;
+        InterruptGuard guard;
+        compat_segments::clear_gs();
         t->gs_base = a1;
         arch::wrmsr(MSR_KERNEL_GS_BASE, a1); // swapped in on return to user
         return 0;
+    }
     case ARCH_GET_FS:
         return uaccess::put(reinterpret_cast<u64*>(a1), t->fs_base);
     case ARCH_GET_GS:
@@ -578,7 +587,28 @@ long sys_rt_sigprocmask(SYSCALL_ARGS) {
     return 0;
 }
 
-long sys_sigaltstack(SYSCALL_ARGS) { SYSCALL_UNUSED; return 0; }
+// stack_t on x86_64: { void* ss_sp; int ss_flags; size_t ss_size; }
+long sys_sigaltstack(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    struct StackT {
+        u64 ss_sp;
+        i32 ss_flags;
+        i32 pad;
+        u64 ss_size;
+    };
+    signal::AltStack ns, os;
+    if (a0) {
+        StackT u;
+        if (uaccess::get(&u, reinterpret_cast<const StackT*>(a0)) < 0)
+            return -err::FAULT;
+        ns = signal::AltStack{u.ss_sp, static_cast<u32>(u.ss_flags), u.ss_size};
+    }
+    if (long r = signal::sigaltstack(a0 ? &ns : nullptr, &os, frame->rsp); r < 0)
+        return r;
+    if (a1)
+        return uaccess::put(reinterpret_cast<StackT*>(a1), StackT{os.sp, static_cast<i32>(os.flags), 0, os.size});
+    return 0;
+}
 
 struct RLimit {
     u64 cur, max;
@@ -858,6 +888,29 @@ long sys_sched_getaffinity(SYSCALL_ARGS) {
     return static_cast<long>(n);
 }
 
+// We don't pin threads to CPUs: accept any mask that names an online CPU
+// (what Linux requires) and keep scheduling everywhere. wineserver and
+// some games set their affinity.
+long sys_sched_setaffinity(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    if (static_cast<i32>(a0) < 0)
+        return -err::INVAL;
+    if (a0) {
+        LockGuard guard(proc::table_lock());
+        if (!proc::find_thread(static_cast<int>(a0)))
+            return -err::SRCH;
+    }
+    u32 cpus = percpu::online_count();
+    u8 mask[128] = {};
+    usize n = min<u64>(a1, sizeof(mask));
+    if (long r = uaccess::copy_from(mask, reinterpret_cast<const void*>(a2), n); r < 0)
+        return r;
+    for (u32 i = 0; i < cpus && i < n * 8; i++)
+        if (mask[i / 8] & (1 << (i % 8)))
+            return 0;
+    return -err::INVAL;
+}
+
 long sys_futex(SYSCALL_ARGS) {
     SYSCALL_UNUSED;
     constexpr u32 FUTEX_WAIT = 0, FUTEX_WAKE = 1, FUTEX_REQUEUE = 3, FUTEX_CMP_REQUEUE = 4,
@@ -971,6 +1024,7 @@ void register_process() {
     set(158, sys_arch_prctl, "arch_prctl");
     set(186, sys_gettid, "gettid");
     set(202, sys_futex, "futex");
+    set(203, sys_sched_setaffinity, "sched_setaffinity");
     set(204, sys_sched_getaffinity, "sched_getaffinity");
     set(218, sys_set_tid_address, "set_tid_address");
     set(231, sys_exit_group, "exit_group");
