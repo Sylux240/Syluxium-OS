@@ -99,7 +99,9 @@ Legend: ✅ done · 🟡 partly done · ⬜ to do
 
 **Boot**
 - ✅ Bootloader (Limine, BIOS + UEFI), 64-bit long mode, GDT/IDT, memory map
-- 🟡 ACPI: tables parsed; AML interpreter (port uACPI) for shutdown/sleep/battery still to do
+- ✅ Graphical UEFI boot picker (icons, mouse + keyboard, other systems detected) and boot splash
+     (logo + load bar; Esc = live verbose log)
+- ✅ ACPI: tables + AML interpreter (uACPI): power off / restart, power button, battery, AC adapter, lid
 
 **Kernel core**
 - ✅ Memory management, interrupts, APIC timer, preemptive SMP scheduler
@@ -107,38 +109,41 @@ Legend: ✅ done · 🟡 partly done · ⬜ to do
 - ✅ Pipes, signals
 - ✅ User-space threads + futexes
 - ✅ Unix domain sockets, shared memory (memfd + seals, POSIX shm, System V shm/semaphores, MAP_SHARED)
-- ✅ /proc (process list, per-process CPU/memory, cpuinfo, meminfo, stat) and /sys (CPUs;
-     devices come with the phase 5 driver model)
+- ✅ /proc (process list, per-process CPU/memory, cpuinfo, meminfo, stat) and /sys (CPUs, PCI
+     devices, power supplies)
 - ✅ 32-bit (ia32) program support
-- 🟡 High-resolution timers: ns clock done; precise timer interrupts to do
+- ✅ Timers: nanosecond clock, one-shot APIC timer, tickless idle
+- ✅ Users and permissions: real/effective user and group IDs, file permissions, sudo
 
 **Drivers**
-- ✅ Serial, PS/2 keyboard, firmware framebuffer
+- ✅ Serial, PS/2 keyboard and mouse (with wheel), firmware framebuffer
 - ✅ PCI/PCIe enumeration (ECAM, BARs, MSI/MSI-X) + device registry (/sys/bus/pci, lspci works,
      /sys/kernel/syluxium/devices for the Device Manager)
-- ✅ PS/2 mouse (with wheel)
-- ✅ USB (xHCI, USB 2/3 hubs, hot-plug): keyboards, mice, tablets, gamepads, Xbox pads, storage
+- ✅ USB: xHCI, EHCI, UHCI, USB 2/3 hubs, plug and play (unplugging never crashes): keyboards,
+     mice, tablets, gamepads, Xbox pads, storage, audio, Ethernet, Wi-Fi
 - ✅ Input event interface (/dev/input/eventN, Linux evdev ABI) for games and the desktop
+- 🟡 Touchpads: Apple USB trackpads (bcm5974) work; I2C-HID / Synaptics / Elantech precision touchpads to do
 - ✅ AHCI/SATA, NVMe (polled DMA; interrupts/NCQ later)
-- ✅ Wired network cards: Intel e1000/e1000e, virtio-net, RTL8139 (Linux 8139cp), Realtek r8169 (untested)
+- ✅ Wired network cards: Intel e1000/e1000e, virtio-net, RTL8139 (Linux 8139cp), USB Ethernet
+     (CDC-ECM), Realtek r8169 (untested)
 - 🟡 Linux driver compatibility layer (LinuxKPI): core, PCI, networking, USB, wireless (cfg80211/mac80211), DRM core and page model done; GPU drivers in progress
 - 🟡 Wi-Fi: Realtek USB (rtl8xxxu) works with WPA2 and plug and play; MediaTek USB (mt7601u) built in; Intel, Qualcomm, Broadcom, PCIe Realtek/MediaTek to do
-- 🟡 Audio: ALSA-compatible interface, Intel HDA, virtio-sound done; USB audio to do
+- ✅ Audio: ALSA-compatible interface, Intel HDA, virtio-sound, USB Audio (works on real laptops)
 - 🟡 GPU: DRM/KMS core + simpledrm + Xorg modesetting done; Intel i915 builds (hardware bring-up next);
      AMD + NVIDIA drivers, multi-monitor, vsync, Vulkan/OpenGL via Mesa to do
 
 **Storage**
 - ✅ VFS, RAM filesystem, initramfs
-- ✅ ext2/3/4: reads all three (extents, 64-bit); writes ext2-style volumes (e2fsck-clean).
-     ext4 is read-only by design (other systems' Linux partitions stay safe); a journal for
-     Syluxium's own volumes (crash safety) is planned before installing on real PCs
+- ✅ ext4 read-write with a jbd2 journal (crash safety); ext2/3 too
 - ✅ FAT32 and exFAT read/write with long file names (ESP mounted at /boot/efi)
 - ✅ Disk cache (4 KiB blocks, write-back every 5 s and on sync), MBR + GPT partitions
+- ✅ USB drives mounted automatically, AutoPlay bubble (open folder / play media)
 
 **Networking**
 - ✅ TCP/IP stack: Ethernet, ARP, IPv4 + IPv6, ICMP, UDP, TCP (window scaling), DHCP, SLAAC,
      fragments. Drivers: e1000/e1000e, virtio-net, RTL8139 (Linux 8139cp), r8169 (untested)
-- ✅ Sockets API: AF_INET/AF_INET6, AF_UNIX (fd passing), AF_NETLINK; epoll, eventfd, timerfd, signalfd, inotify
+- ✅ Sockets API: AF_INET/AF_INET6, AF_UNIX (fd passing), AF_NETLINK, AF_PACKET; epoll, eventfd,
+     timerfd, signalfd, inotify
 - ✅ Netlink: rtnetlink (ip, getifaddrs), generic netlink with nl80211 (Wi-Fi)
 
 **Linux compatibility**
@@ -146,31 +151,39 @@ Legend: ✅ done · 🟡 partly done · ⬜ to do
 - 🟡 System-call coverage (grows with every phase)
 
 **Desktop** (Syluxium's own; XP/7 style: clean, rounded, glossy)
-- ⬜ Desktop: Trinity (TDE) on Xorg, "Start" text button, XP/7 styling; desktop chooser in the Control Panel (later)
-- ⬜ Right-click menus: extract, compress, new file/folder, change icon, properties (TDE: Konqueror + Ark service menus; adapt)
-- ⬜ File manager with archive extraction (TDE: Konqueror + Ark)
-- ⬜ Display settings: resolution, refresh rate, scaling, multi-monitor (TDE Control Center via XRandR; needs a DRM/KMS driver for mode changes)
-- ⬜ Personalize: themes, colors, wallpapers, icons, cursors (TDE: Appearance & Themes)
-- ⬜ Control Panel / Settings (TDE Control Center, restyled)
-- ⬜ Task Manager with End Task (TDE: KSysGuard; maybe a Windows-style front end)
+- ✅ Desktop: Trinity (TDE) on Xorg with an XP-era look (original artwork), green "Start" button,
+     welcome-screen login, Windows keys (Win, Win+E/R/D/L, Ctrl+Alt+Del); desktop chooser later
+- 🟡 Right-click menus: file manager and desktop menus work; extract/compress, change icon to do
+- 🟡 File manager: Konqueror as My Computer / My Documents with the Address bar; archive extraction to do
+- 🟡 Display settings: resolution (applied at the next boot); live changes, refresh rate, multi-monitor
+     need the GPU drivers
+- 🟡 Personalize: themes, colors, wallpapers, icons (TDE Appearance & Themes); XP restyling of the dialogs to do
+- 🟡 Control Panel: TDE Control Center with XP category names; full restyle to do
+- 🟡 Task Manager with End Task (KSysGuard on Ctrl+Alt+Del / Ctrl+Shift+Esc); Windows-style front end to do
 - ⬜ System page: OS version, CPU, RAM, GPU, storage (TDE: KInfoCenter)
 - ⬜ Device Manager
 - ⬜ Disk Management, Computer Management
-- ⬜ File Explorer, Notepad, WordPad, Paint, Calculator, Character Map, Snipping Tool, Media Player (TDE: Konqueror, KWrite/Kate, KWord, KolourPaint, KCalc, KCharSelect, KSnapshot, Kaffeine/Amarok)
+- 🟡 Accessories: File Explorer (Konqueror), Media Player (Kaffeine), E-mail (KMail), Windows
+     Notepad (Wine); WordPad, Paint, Calculator, Character Map, Snipping Tool to do
 - ⬜ Magnifier, On-Screen Keyboard (TDE: KMag; on-screen keyboard to find)
-- ⬜ Network and Sharing Center, Firewall (kernel packet filter + rules UI), Remote Desktop client (TDE: KRDC)
+- 🟡 Networking UI: Wi-Fi chooser by the clock; adapter settings, Network and Sharing Center,
+     Firewall, Remote Desktop client to do
 - ⬜ Printing (CUPS-compatible print services, Devices and Printers) (TDE print manager + CUPS)
 - ⬜ Programming tools: KDevelop-like IDE (editor, build, gdb debugger front end) (TDE: KDevelop)
 - ⬜ Image Writer: flash .iso/.img to USB/SD with verification
-- ⬜ Firefox (Debian firefox-esr) preinstalled
-- ⬜ Notifications (TDE: KNotify)
+- ✅ Firefox (Debian firefox-esr) preinstalled and the default browser
+- ✅ Windows programs: double-click an .exe (Wine), Start menu → Windows Programs
+- 🟡 Notifications: XP-style bubbles for AutoPlay and Wi-Fi; system-wide notifications (KNotify) to do
 
 **Packages and system**
+- 🟡 Installer: graphical wizard (disk, computer name, user) → GPT + ext4 + Limine (UEFI/BIOS);
+     package and settings choices to do
 - 🟡 Package installer: build-time Debian fetcher done; App Store + double-click .deb on the device to do
 - ⬜ Running packages' maintainer (install) scripts
-- ⬜ Users and permissions (everything runs as root today)
-- 🟡 Security: NX, kernel W^X, guard pages done; ASLR, SMEP/SMAP to do
-- ⬜ Power management: sleep, battery, CPU frequency scaling
+- ✅ Accounts: graphical login, User Accounts (add/remove users, passwords), administrator prompts
+- 🟡 Security: NX, kernel W^X, guard pages, per-user permissions done; ASLR, SMEP/SMAP to do
+- 🟡 Power management: power off / restart, power button, battery and lid readings, idle CPU
+     states; sleep, CPU frequency scaling, battery icon to do
 - ⬜ Updates and recovery
 
-Tally: 27 done · 9 partly done · 29 to do.
+Tally: 32 done · 18 partly done · 9 to do.
