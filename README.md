@@ -34,6 +34,14 @@ The first build clones Limine into `deps/`. `make` also writes
 To boot real hardware, write the image to a USB stick
 (`sudo dd if=build/syluxium.img of=/dev/sdX bs=4M`). This erases the stick.
 
+Booting: on UEFI machines a graphical **boot picker** comes first (large icons for Syluxium,
+Text Console, Safe Mode and any Windows/macOS/Linux found on the disks; arrow keys, Enter,
+mouse; Esc = Limine's text menu), then the **boot splash** (logo + load bar) until the login
+screen. Press **Esc** during the splash for the verbose boot log. Boot options (Limine entry,
+`cmdline:`): `verbose` (no splash), `nodrm` / `xfbdev` (old framebuffer display path), `nogpu`
+(no GPU drivers), `noaccel` (GPU driver without acceleration), `acpi=noaml nohz=off idle=hlt`
+(safe mode).
+
 ## Layout
 
 ```
@@ -54,7 +62,9 @@ kernel/
   syscall/            Linux x86_64 system call layer
   tests/              boot-time self-tests
   time/               clock (TSC/HPET), RTC wall clock
-  video/              framebuffer, text console, font
+  video/              framebuffer, text console, font, boot splash, /dev/fb0
+  linuxkpi/           Linux driver compatibility layer + vendored Linux 6.12 drivers (Wi-Fi, DRM, ...)
+boot/picker/          graphical UEFI boot picker (runs before Limine)
 userspace/             test programs: built with the host gcc + glibc (static), i.e. real Linux binaries
 tools/debian-fetch.py  downloads official Debian packages (+ dependencies, SHA256-checked) into the rootfs
 rootfs/               files copied into the initramfs (/etc, ...)
@@ -115,6 +125,13 @@ userspace/windows/    Windows test programs (clang + lld-link) for Wine
             `iw dev`, `iw dev wlan0 scan` finds a hostapd AP, `iw dev wlan0 connect` associates.
             mt7601u (MediaTek) is built in, still untested on the real dongle; next: WPA2 via
             wpa_supplicant, rtl8xxxu (Realtek), then PCIe drivers (iwlwifi, ath9k/10k, mt76, rtw88)
+      - [x] 7c: real USB Wi-Fi: **rtl8xxxu** with a TP-Link TL-WN725N (RTL8188EUS): scan, WPA2
+            (wpa_supplicant over nl80211, EAPOL through AF_PACKET sockets); network chooser by the
+            clock (Wi-Fi button, lower-right bubble); **plug and play**: the adapter works when
+            present at boot or plugged in later, unplugging never crashes (interfaces of removed
+            hardware are cut off from their driver), a replugged adapter comes back as the same
+            wlan0 and wpa_supplicant follows it. Open: DHCP over Wi-Fi, onboard Wi-Fi (iwlwifi),
+            a panic when the dongle is plugged in during the boot sequence (to reproduce)
 - [ ] **Phase 8**: **audio**: ALSA-compatible kernel interface (so libasound, PipeWire and
       PulseAudio apps work), drivers for Intel HD Audio, USB audio, virtio-sound; volume control
       - [x] 8a: ALSA core (/dev/snd, /proc/asound, full PCM + control ioctl ABI, mmap, poll),
@@ -233,7 +250,19 @@ userspace/windows/    Windows test programs (clang + lld-link) for Wine
             = Start menu (xcape), Win+E/R/D/L, Ctrl+Alt+Del = Task Manager (ksysguard); welcome-
             screen login (TDM theme with user tiles, "Turn off computer") and session splash;
             XP-style Turn Off dialog wording; Control Panel categories with XP names
-      - [ ] 9b: DRM/KMS driver for display settings; XP-style balloons for the bubbles
+      - [x] 9b: no visible Trinity/TDE names (tools/syluxium_names.py: menus, Control Panel,
+            Start menu, KMail, Kaffeine, login; credits untouched); "About TDE" hidden; Wi-Fi and
+            AutoPlay bubbles in XP balloon colours (lower right, AutoPlay closes after 15 s)
+      - [x] 9b: **boot splash** (kernel/video/splash.cpp): the logo from the wallpaper
+            (tools/make-boot-logo.py) shown by Limine as soon as an entry is picked, then by the
+            kernel with an animated XP-style load bar until the login screen draws (TDM's Xsetup
+            writes /dev/splash); "Press Esc for verbose mode" switches to the live log at once
+      - [x] 9b: **graphical boot picker** (boot/picker, UEFI): OpenCore-style icons on a blurred
+            wallpaper, mouse (EFI pointer protocols) and keyboard, countdown, Restart/Shut Down;
+            entries from Limine's limine.conf, handed over with Limine's one-shot entry variable;
+            other systems' boot loaders started directly. Mouse untested in QEMU (OVMF delivers
+            no pointer events). Macs: Apple's pointer protocol still to add
+      - [ ] 9b: XP balloon shape (tail) for the bubbles; display settings through DRM/KMS
       Look: clean, glossy and rounded like Windows XP / Windows 7 (not Windows 11).
       - Right-click context menus everywhere: on files (Open, Open with, Extract Here / Extract
         to..., Compress, Rename, Delete, Properties, Change icon), on folders and empty space
@@ -276,6 +305,18 @@ userspace/windows/    Windows test programs (clang + lld-link) for Wine
       drivers, so Steam, Proton and other games and 3D apps run. **Required**: native Intel, AMD
       and NVIDIA hardware acceleration for the desktop too (Xorg on modesetting/amdgpu with glamor
       instead of today's unaccelerated fbdev), on real hardware, not just in QEMU
+      - [x] 10a: **Linux DRM core + simpledrm** run in the kernel (kernel/linuxkpi/drivers/gpu/drm):
+            page model (struct page over buddy-allocator pages, folios, vmap, sg tables, shmem
+            files for GEM), mmap of driver files (vm_ops->fault / remap_pfn_range, cache types,
+            closed on munmap), dma-buf / dma-fence / sync_file, platform bus with the firmware
+            framebuffer as "simple-framebuffer"; **/dev/dri/card0**, Xorg on the **modesetting**
+            driver. syluxium-display-config picks the X driver at every boot (modesetting on a
+            DRM device, glamor on real GPUs, fbdev fallback)
+      - [x] 10b: GPU groundwork: a GPU driver takes the display over from simpledrm (firmware
+            framebuffer back if it fails), TTM (proven with QEMU's bochs, opt-in), drminfo tool
+      - [ ] 10c: **Intel i915** compiles and links (257 files, Gen6+); bring-up on real hardware
+            (ThinkPad UHD 620, MacBook Air HD 5000), Mesa (iris/crocus) for glamor and 3D
+      - [ ] 10d: AMD (amdgpu, radeon) and NVIDIA (nouveau) on TTM; virtio-gpu (virgl) for VMs
       - [ ] 10-proton: kernel features Steam/Proton and anti-cheat need: user + mount namespaces,
             pivot_root (Steam's pressure-vessel / bubblewrap container), futex_waitv (fsync),
             /dev/ntsync (Windows sync objects), syscall user dispatch (games that make Windows
@@ -354,11 +395,11 @@ Legend: ✅ done · 🟡 partly done · ⬜ to do
 - ✅ Input event interface (/dev/input/eventN, Linux evdev ABI) for games and the desktop
 - ✅ AHCI/SATA, NVMe (polled DMA; interrupts/NCQ later)
 - ✅ Wired network cards: Intel e1000/e1000e, virtio-net, RTL8139 (Linux 8139cp), Realtek r8169 (untested)
-- 🟡 Linux driver compatibility layer (LinuxKPI): core + PCI + networking done, real Linux drivers run; USB, wireless and DRM parts to do
-- ⬜ Wi-Fi: Intel, Qualcomm, MediaTek, Realtek, Broadcom
+- 🟡 Linux driver compatibility layer (LinuxKPI): core, PCI, networking, USB, wireless (cfg80211/mac80211), DRM core and page model done; GPU drivers in progress
+- 🟡 Wi-Fi: Realtek USB (rtl8xxxu) works with WPA2 and plug and play; MediaTek USB (mt7601u) built in; Intel, Qualcomm, Broadcom, PCIe Realtek/MediaTek to do
 - 🟡 Audio: ALSA-compatible interface, Intel HDA, virtio-sound done; USB audio to do
-- ⬜ GPU: AMD + NVIDIA kernel drivers, DRM/KMS (resolution, refresh, multi-monitor, vsync,
-     Vulkan/OpenGL via Mesa)
+- 🟡 GPU: DRM/KMS core + simpledrm + Xorg modesetting done; Intel i915 builds (hardware bring-up next);
+     AMD + NVIDIA drivers, multi-monitor, vsync, Vulkan/OpenGL via Mesa to do
 
 **Storage**
 - ✅ VFS, RAM filesystem, initramfs
@@ -372,7 +413,7 @@ Legend: ✅ done · 🟡 partly done · ⬜ to do
 - ✅ TCP/IP stack: Ethernet, ARP, IPv4 + IPv6, ICMP, UDP, TCP (window scaling), DHCP, SLAAC,
      fragments. Drivers: e1000/e1000e, virtio-net, RTL8139 (Linux 8139cp), r8169 (untested)
 - ✅ Sockets API: AF_INET/AF_INET6, AF_UNIX (fd passing), AF_NETLINK; epoll, eventfd, timerfd, signalfd, inotify
-- 🟡 Netlink: rtnetlink done (ip, getifaddrs); nl80211 (Wi-Fi) to do
+- ✅ Netlink: rtnetlink (ip, getifaddrs), generic netlink with nl80211 (Wi-Fi)
 
 **Linux compatibility**
 - ✅ ELF loader, dynamic linking, Debian userland running unmodified
