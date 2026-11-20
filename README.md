@@ -1,6 +1,6 @@
 # Syluxium
 
-A from-scratch x86_64 operating system written in C++20: monolithic kernel,
+A from-scratch x86_64 operating system written in C++20: monolithic kernel, (Aided with AI for more efficient workflows and productivity)
 booted by [Limine](https://github.com/limine-bootloader/limine).
 
 ## Screenshots
@@ -16,7 +16,7 @@ From power-on to the desktop, in the order a computer shows them:
 | **5. Desktop** | |
 | ![Desktop](docs/screenshots/5-desktop.png) | |
 
-## Requirements (Arch / CachyOS)
+## Made On Linux (Arch / CachyOS) 
 
 ```sh
 sudo pacman -S clang lld make git python mtools util-linux cpio gcc qemu-full
