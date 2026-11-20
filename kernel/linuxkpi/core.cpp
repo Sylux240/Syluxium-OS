@@ -27,7 +27,9 @@
 #include <lib/random.hpp>
 #include <arch/x86_64/percpu.hpp>
 #include <boot/limine_requests.hpp>
+#include <video/console.hpp>
 #include <video/framebuffer.hpp>
+#include <video/splash.hpp>
 #include <arch/x86_64/cpu_local.hpp>
 
 // Linux's jiffies is a variable (struct fields share the name, so it can't
@@ -1398,6 +1400,9 @@ void apply_module_params() {
 } // namespace
 
 extern "C" void lkpi_register_boot_framebuffer(u64 phys, u32 width, u32 height, u32 pitch, u32 red_shift);
+extern "C" void lkpi_boot_fb_set_range(u64 base, u64 size);
+extern "C" bool lkpi_boot_fb_wanted(void);
+extern "C" bool lkpi_boot_fb_taken(void);
 extern "C" lkpi_initcall_t __lkpi_initcalls_start[];
 extern "C" lkpi_initcall_t __lkpi_initcalls_end[];
 
@@ -1411,6 +1416,12 @@ void init() {
     system_highpri_wq = system_long_wq = system_unbound_wq = system_freezable_wq = system_power_efficient_wq = system_wq;
     init_pci();
     apply_module_params();
+    // GPU drivers (module_init below) take the display over from the
+    // firmware framebuffer when it lies in their memory (glue/gpu.c).
+    video::Framebuffer& fb = video::primary_framebuffer();
+    bool use_fb = fb.valid() && !strstr(boot::cmdline(), "nodrm");
+    if (fb.valid())
+        lkpi_boot_fb_set_range(mm::direct_virt_to_phys(fb.base()), static_cast<u64>(fb.pitch()) * fb.height());
     int count = 0, failed = 0;
     for (lkpi_initcall_t* call = __lkpi_initcalls_start; call < __lkpi_initcalls_end; call++) {
         count++;
@@ -1421,9 +1432,18 @@ void init() {
     }
     klog::ok("Linux driver layer (LinuxKPI): %d driver%s registered%s", count, count == 1 ? "" : "s",
              failed ? " (some failed)" : "");
-    // The firmware framebuffer for simpledrm (/dev/dri/card0), unless "nodrm".
-    video::Framebuffer& fb = video::primary_framebuffer();
-    if (fb.valid() && !strstr(boot::cmdline(), "nodrm"))
+    // A GPU driver now owns the display: the kernel must stop drawing into
+    // the firmware framebuffer (it may be GPU memory the driver reuses).
+    if (lkpi_boot_fb_taken() && !lkpi_boot_fb_wanted() && fb.valid()) {
+        klog::info("linuxkpi: a GPU driver drives the display; boot console output continues on serial/log only");
+        splash::handover();
+        splash::finish();
+        console::set_graphics(true);
+        return;
+    }
+    // The firmware framebuffer for simpledrm (/dev/dri/card0), unless "nodrm"
+    // (also when a GPU driver claimed it but failed: lkpi_boot_fb_wanted()).
+    if (use_fb)
         lkpi_register_boot_framebuffer(mm::direct_virt_to_phys(fb.base()), fb.width(), fb.height(), fb.pitch(),
                                        fb.red_shift());
 }

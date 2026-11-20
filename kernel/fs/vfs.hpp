@@ -98,6 +98,14 @@ public:
     // A mapping (VMA) referring to this inode was created (+1) or removed (-1):
     // keeps unlinked-but-mapped files alive.
     virtual void mmap_ref(int delta) {}
+    // Device mappings set up by mmap_prepare(): a mapping using file offset
+    // `offset` (the start of what mmap_prepare returned, or a later part of
+    // it) was created (+1) or removed (-1). mmap_prepare's own reference is
+    // dropped by mmap() once the mapping exists. The last one lets the
+    // driver tear its per-mapping state down (LinuxKPI: vm_ops->close).
+    virtual void mmap_range_ref(u64 offset, int delta) {}
+    // Cache attributes for the device page at `offset`: vmm::CACHE_WC / CACHE_UC or 0.
+    virtual u32 mmap_cache_flags(u64 offset) { return 0; }
     // memfd seals (fcntl F_ADD_SEALS / F_GET_SEALS): returns the seal set or -errno.
     virtual long seals(bool add, u32 bits) { return -err::INVAL; }
     // The last directory entry naming this inode was removed.

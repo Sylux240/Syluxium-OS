@@ -1,23 +1,42 @@
 #!/bin/sh
 # Chooses the X display driver for this machine, at every boot (the same
 # disk moves between computers):
-#   a kernel display driver (DRM: GPU driver or simpledrm) -> modesetting
-#   otherwise                                              -> fbdev (/dev/fb0)
-# Boot option "xfbdev" forces fbdev.
+#   a GPU driver (i915, amdgpu, radeon, nouveau) -> modesetting + glamor (OpenGL acceleration)
+#   another kernel display driver (simpledrm, virtio-gpu) -> modesetting, no acceleration
+#   no kernel display driver                     -> fbdev (/dev/fb0)
+# Boot options: "xfbdev" forces fbdev, "noaccel" turns acceleration off,
+# "nogpu" (kernel) keeps GPU drivers from loading at all.
 out=/etc/X11/xorg.conf.d/20-display.conf
 log=/boot/logs/display.txt
 card=$(ls /dev/dri/card* 2>/dev/null | head -1)
+drminfo=$(command -v drminfo || echo /opt/syluxium/tests/drminfo)
+driver=""
+info=""
+if [ -n "$card" ] && [ -x "$drminfo" ]; then
+    info=$("$drminfo" "$card" 2>&1)
+    driver=$("$drminfo" -n "$card" 2>/dev/null)
+fi
+accel=none
+case "$driver" in
+    i915|amdgpu|radeon|nouveau) accel=glamor ;;
+esac
+# glamor needs Mesa's OpenGL drivers.
+if [ "$accel" = glamor ] && ! ls /usr/lib/x86_64-linux-gnu/libgallium-*.so /usr/lib/x86_64-linux-gnu/dri/*_dri.so >/dev/null 2>&1; then
+    accel=none
+    info="$info (no Mesa: acceleration off)"
+fi
+grep -qw noaccel /proc/cmdline && accel=none
 if [ -n "$card" ] && ! grep -qw xfbdev /proc/cmdline; then
     cat > "$out" <<CFG
-# Written at boot by syluxium-display-config: kernel display driver ($card).
+# Written at boot by syluxium-display-config: kernel display driver ${driver:-?} ($card).
 Section "Device"
     Identifier "Display"
     Driver     "modesetting"
     Option     "kmsdev" "$card"
-    Option     "AccelMethod" "none"
+    Option     "AccelMethod" "$accel"
 EndSection
 CFG
-    choice="modesetting on $card"
+    choice="modesetting on $card, driver ${driver:-unknown}, acceleration $accel"
 else
     cat > "$out" <<CFG
 # Written at boot by syluxium-display-config: firmware framebuffer.
@@ -29,5 +48,17 @@ EndSection
 CFG
     choice="fbdev on /dev/fb0"
 fi
-mkdir -p /boot/logs 2>/dev/null && echo "display: $choice" > "$log" 2>/dev/null
+if mkdir -p /boot/logs 2>/dev/null; then
+    {
+        echo "display: $choice"
+        [ -n "$info" ] && echo "drm: $info"
+        echo "cmdline: $(cat /proc/cmdline)"
+        for d in /sys/bus/pci/devices/*; do
+            [ -r "$d/class" ] || continue
+            case "$(cat "$d/class")" in
+                0x03*) echo "gpu: ${d##*/} $(cat "$d/vendor"):$(cat "$d/device") class $(cat "$d/class")" ;;
+            esac
+        done
+    } > "$log" 2>/dev/null
+fi
 echo "display: $choice"

@@ -2,6 +2,8 @@
 // interrupts (MSI/MSI-X vectors), DMA, MMIO mappings and firmware loading.
 
 #include <arch/x86_64/interrupts.hpp>
+#include <boot/limine_requests.hpp>
+#include <lib/string.hpp>
 #include <core/log.hpp>
 #include <cxx/runtime.hpp>
 #include <dev/device.hpp>
@@ -160,7 +162,18 @@ const pci_device_id* find_id(const pci_driver* drv, const dev::Device* d) {
 }
 
 bool lkpi_match(const dev::Driver* drv, const dev::Device* d) {
-    return d->bus == dev::Bus::Pci && find_id(static_cast<const pci_driver*>(drv->ctx), d);
+    if (d->bus != dev::Bus::Pci || !find_id(static_cast<const pci_driver*>(drv->ctx), d))
+        return false;
+    // "nogpu": leave display controllers to the firmware framebuffer
+    // (simpledrm), for GPUs whose driver misbehaves.
+    if ((d->class_code >> 16) == 0x03 && strstr(boot::cmdline(), "nogpu")) {
+        static bool said;
+        if (!said)
+            klog::info("linuxkpi: nogpu: not binding GPU drivers (firmware framebuffer only)");
+        said = true;
+        return false;
+    }
+    return true;
 }
 
 long lkpi_probe(const dev::Driver* drv, dev::Device* d) {

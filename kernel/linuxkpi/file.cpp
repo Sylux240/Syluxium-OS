@@ -10,6 +10,7 @@
 #include <lib/errno.hpp>
 #include <lib/format.hpp>
 #include <lib/string.hpp>
+#include <mm/vmm.hpp>
 #include <proc/process.hpp>
 
 extern "C" {
@@ -23,7 +24,19 @@ file* get_file(file* f);
 file* lkpi_chrdev_open(unsigned int major, unsigned int minor, unsigned int flags, int* err);
 long lkpi_file_mmap(file* f, unsigned long offset, unsigned long len, bool writable, unsigned long* handle);
 long lkpi_vma_phys(unsigned long off, u64* phys);
+void lkpi_vma_ref(unsigned long off, int delta);
+int lkpi_vma_cache(unsigned long off);
 }
+
+namespace {
+u32 cache_flags(u64 off) {
+    switch (lkpi_vma_cache(off)) {
+    case 1: return vmm::CACHE_WC;
+    case 2: return vmm::CACHE_UC;
+    default: return 0;
+    }
+}
+} // namespace
 
 namespace {
 
@@ -65,6 +78,8 @@ public:
         return r;
     }
     long mmap_phys(u64 offset, u64* phys) override { return lkpi_vma_phys(offset, phys); }
+    void mmap_range_ref(u64 offset, int delta) override { lkpi_vma_ref(offset, delta); }
+    u32 mmap_cache_flags(u64 offset) override { return cache_flags(offset); }
     bool seekable() const override { return false; }
     isize read_file(vfs::File* f, u64, void* buf, usize n) override { return do_read(m_file, f, buf, n); }
     isize write_file(vfs::File* f, u64, const void* buf, usize n) override { return do_write(m_file, f, buf, n); }
@@ -99,6 +114,8 @@ public:
         return r;
     }
     long mmap_phys(u64 offset, u64* phys) override { return lkpi_vma_phys(offset, phys); }
+    void mmap_range_ref(u64 offset, int delta) override { lkpi_vma_ref(offset, delta); }
+    u32 mmap_cache_flags(u64 offset) override { return cache_flags(offset); }
     void on_open(vfs::File* f) override {
         int err = 0;
         if (m_major == 226) // DRM: a display server takes the screen

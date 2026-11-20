@@ -8,6 +8,8 @@
 #include <linux/kernel.h>
 #include <linux/mod_devicetable.h>
 #include <linux/module.h>
+#include <linux/pci_ids.h>
+#include <uapi/linux/pci_regs.h>
 
 LKPI_EXTERN_C_BEGIN
 
@@ -16,22 +18,6 @@ LKPI_EXTERN_C_BEGIN
 #define PCI_DEVICE_SUB(vend, dev, sv, sd) .vendor = (vend), .device = (dev), .subvendor = (sv), .subdevice = (sd)
 #define PCI_VDEVICE(vend, dev) .vendor = PCI_VENDOR_ID_##vend, .device = (dev), .subvendor = PCI_ANY_ID, .subdevice = PCI_ANY_ID, 0, 0
 #define PCI_DEVICE_CLASS(cls, mask) .class = (cls), .class_mask = (mask), .vendor = PCI_ANY_ID, .device = PCI_ANY_ID, .subvendor = PCI_ANY_ID, .subdevice = PCI_ANY_ID
-
-#define PCI_VENDOR_ID_INTEL 0x8086
-#define PCI_VENDOR_ID_AMD 0x1022
-#define PCI_VENDOR_ID_ATI 0x1002
-#define PCI_VENDOR_ID_NVIDIA 0x10de
-#define PCI_VENDOR_ID_REALTEK 0x10ec
-#define PCI_VENDOR_ID_BROADCOM 0x14e4
-#define PCI_VENDOR_ID_ATHEROS 0x168c
-#define PCI_VENDOR_ID_QCOM 0x17cb
-#define PCI_VENDOR_ID_MEDIATEK 0x14c3
-#define PCI_VENDOR_ID_REDHAT_QUMRANET 0x1af4
-#define PCI_DEVICE_ID_REALTEK_8139 0x8139
-#define PCI_DEVICE_ID_TTTECH_MC322 0x000a
-#define PCI_VENDOR_ID_DLINK 0x1186
-#define PCI_VENDOR_ID_TTTECH 0x0357
-#define PCI_VENDOR_ID_SIEMENS 0x110a
 
 #define DEVICE_COUNT_RESOURCE 6
 #define IORESOURCE_IO 0x100
@@ -154,35 +140,6 @@ static inline const char* pci_name(const struct pci_dev* d) { return dev_name(&d
 #define pcie_aspm_enabled(d) 0
 #define pci_is_pcie(d) 1
 #define pci_dev_msi_enabled(d) ((d)->msi_enabled || (d)->msix_enabled)
-
-/* Config space offsets used by drivers. */
-#define PCI_VENDOR_ID 0x00
-#define PCI_DEVICE_ID 0x02
-#define PCI_COMMAND 0x04
-#define PCI_COMMAND_IO 0x1
-#define PCI_COMMAND_MEMORY 0x2
-#define PCI_COMMAND_MASTER 0x4
-#define PCI_COMMAND_INTX_DISABLE 0x400
-#define PCI_STATUS 0x06
-#define PCI_REVISION_ID 0x08
-#define PCI_CLASS_REVISION 0x08
-#define PCI_CACHE_LINE_SIZE 0x0c
-#define PCI_LATENCY_TIMER 0x0d
-#define PCI_BASE_ADDRESS_0 0x10
-#define PCI_SUBSYSTEM_VENDOR_ID 0x2c
-#define PCI_SUBSYSTEM_ID 0x2e
-#define PCI_CAPABILITY_LIST 0x34
-#define PCI_INTERRUPT_LINE 0x3c
-#define PCI_INTERRUPT_PIN 0x3d
-#define PCI_CAP_ID_PM 0x01
-#define PCI_CAP_ID_MSI 0x05
-#define PCI_CAP_ID_EXP 0x10
-#define PCI_CAP_ID_MSIX 0x11
-#define PCI_EXP_DEVCTL 8
-#define PCI_EXP_LNKCTL 16
-#define PCI_EXP_LNKSTA 18
-#define PCI_EXP_DEVCTL2 40
-#define PCI_EXT_CAP_ID_ERR 0x01
 
 LKPI_EXTERN_C_END
 

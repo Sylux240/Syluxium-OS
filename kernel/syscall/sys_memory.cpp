@@ -26,6 +26,7 @@ long sys_mmap(SYSCALL_ARGS) {
 
     vfs::Inode* file = nullptr;
     vfs::File* f = nullptr;
+    bool prepared = false; // mmap_prepare's reference on the device mapping, dropped below
     if (!(flags & MAP_ANONYMOUS)) {
         f = fd_get(p, fd);
         if (!f)
@@ -36,12 +37,15 @@ long sys_mmap(SYSCALL_ARGS) {
             // Check the first and last page now so mmap() fails cleanly.
             u64 phys;
             long r = !(flags & MAP_SHARED) ? -err::INVAL : f->inode->mmap_prepare(f, offset, len, prot & PROT_WRITE, &offset);
+            prepared = r == 0;
             u64 last = offset + align_up<u64>(len, 4096) - 4096;
             if (r == 0)
                 r = f->inode->mmap_phys(offset, &phys);
             if (r == 0)
                 r = f->inode->mmap_phys(last, &phys);
             if (r < 0) {
+                if (prepared)
+                    f->inode->mmap_range_ref(offset, -1);
                 vfs::file_put(f);
                 return r;
             }
@@ -75,6 +79,8 @@ long sys_mmap(SYSCALL_ARGS) {
     // MAP_SHARED of disk files (ext2, FAT) is still a private copy.
     uptr result;
     long r = p->mem->map(addr, len, prot, flags, file, offset, ~0ull, &result);
+    if (prepared)
+        file->mmap_range_ref(offset, -1); // the mapping holds its own reference now (or failed)
     if (f)
         vfs::file_put(f); // the mapping keeps its own reference (Inode::mmap_ref)
     return r < 0 ? r : static_cast<long>(result);

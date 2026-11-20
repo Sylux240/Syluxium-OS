@@ -292,9 +292,6 @@ extern struct cpuinfo_x86 boot_cpu_data;
 struct component_ops { int (*bind)(struct device *, struct device *, void *); void (*unbind)(struct device *, struct device *, void *); };
 #define component_add(dev, ops) 0
 #define component_del(dev, ops) do { } while (0)
-#define aperture_remove_conflicting_devices(base, size, name) 0
-#define aperture_remove_conflicting_pci_devices(pdev, name) 0
-#define devm_aperture_acquire_for_platform_device(pdev, base, size) 0
 
 /* Device tree (PCs have none). */
 struct device_node;

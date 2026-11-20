@@ -18,7 +18,6 @@ typedef struct { unsigned long pgprot; } pgprot_t;
 #define PAGE_KERNEL __pgprot(0)
 #define PAGE_KERNEL_IO __pgprot(LKPI_PROT_UC)
 #endif
-#define pgprot_noncached(p) (p)
 #define pgprot_decrypted(p) (p)
 
 typedef unsigned int vm_fault_t;
