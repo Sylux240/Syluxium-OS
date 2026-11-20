@@ -349,6 +349,8 @@ bool bindings_overlap(const Endpoint& a, const Endpoint& b);
 Socket* create_unix(int type);
 long unix_socketpair(int type, Socket** a, Socket** b);
 Socket* create_netlink(int type, int protocol);
+Socket* create_packet(int type, int protocol_be); // AF_PACKET (packet.cpp)
+void packet_deliver(Interface* iface, const u8* frame, usize len);
 
 Socket* create_udp(int type, int protocol, u16 domain = AF_INET);
 Socket* create_tcp(u16 domain = AF_INET);

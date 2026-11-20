@@ -427,6 +427,7 @@ void receive(Interface* iface, const u8* frame, usize len) {
     iface->rx_packets++;
     iface->rx_bytes += len;
     u16 type = get16(frame + 12);
+    packet_deliver(iface, frame, len); // AF_PACKET listeners (EAPOL for wpa_supplicant, DHCP, tcpdump)
     LockGuard guard(g_lock);
     if (type == ETH_IPV4)
         ip_input(iface, frame + 14, len - 14);

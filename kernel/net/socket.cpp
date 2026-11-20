@@ -454,6 +454,13 @@ long sys_socket(SYSCALL_ARGS) {
             return -EPROTONOSUPPORT;
         s = create_netlink(type, protocol);
         break;
+    case 17: // AF_PACKET
+        if (type != SOCK_RAW && type != SOCK_DGRAM)
+            return -EPROTONOSUPPORT;
+        if (!proc::capable())
+            return -err::PERM;
+        s = create_packet(type, protocol);
+        break;
     case AF_INET:
         if (type == SOCK_STREAM && (protocol == 0 || protocol == PROTO_TCP))
             s = create_tcp();
