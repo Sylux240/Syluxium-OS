@@ -935,11 +935,30 @@ int device_add(struct device* dev)
 	if (!dev->lkpi_registry && dev->parent)
 		dev->lkpi_registry = dev->parent->lkpi_registry;
 	dev->lkpi_added = true;
+	/* Character devices get their /dev node, named as udev would
+	 * (the class's devnode(), e.g. dri/card0, else the device name). */
+	if (dev->devt) {
+		char path[96], *name = NULL;
+		umode_t mode = 0;
+		if (dev->class && dev->class->devnode)
+			name = dev->class->devnode(dev, &mode);
+		snprintf(path, sizeof(path), "/dev/%s", name ? name : dev_name(dev));
+		kfree(name);
+		lkpi_chrdev_node(path, MAJOR(dev->devt), MINOR(dev->devt), mode ? mode : 0666);
+	}
 	return 0;
 }
 
 void device_del(struct device* dev)
 {
+	if (dev->devt && dev->lkpi_added) {
+		char path[96], *name = NULL;
+		if (dev->class && dev->class->devnode)
+			name = dev->class->devnode(dev, NULL);
+		snprintf(path, sizeof(path), "/dev/%s", name ? name : dev_name(dev));
+		kfree(name);
+		lkpi_chrdev_node_remove(path);
+	}
 	dev->lkpi_added = false;
 }
 
@@ -1036,13 +1055,101 @@ void platform_device_put(struct platform_device* pdev)
 		put_device(&pdev->dev);
 }
 
-struct platform_device* platform_device_register_simple(const char* name, int id, const void* res, unsigned int num)
+/* ---- platform bus: devices and drivers matched by name ---- */
+#define LKPI_MAX_PLATFORM 32
+static struct platform_device *lkpi_pdevs[LKPI_MAX_PLATFORM];
+static struct platform_driver *lkpi_pdrvs[LKPI_MAX_PLATFORM];
+static DEFINE_MUTEX(lkpi_platform_lock);
+
+static bool platform_match(struct platform_device *pdev, struct platform_driver *drv)
 {
-	struct platform_device* pdev = platform_device_alloc(name, id);
+	const struct platform_device_id *id;
+	if (drv->id_table) {
+		for (id = drv->id_table; id->name[0]; id++) {
+			if (!strcmp(id->name, pdev->name)) {
+				pdev->id_entry = id;
+				return true;
+			}
+		}
+	}
+	return drv->driver.name && !strcmp(drv->driver.name, pdev->name);
+}
+
+static void platform_try_bind(struct platform_device *pdev, struct platform_driver *drv)
+{
+	int r;
+	if (pdev->lkpi_driver || !drv->probe || !platform_match(pdev, drv))
+		return;
+	pdev->dev.driver = &drv->driver;
+	pdev->lkpi_driver = drv;
+	r = drv->probe(pdev);
+	if (r) {
+		printk(KERN_WARNING "%s: probe failed (%d)\n", pdev->name, r);
+		pdev->dev.driver = NULL;
+		pdev->lkpi_driver = NULL;
+	}
+}
+
+static void platform_track(struct platform_device *pdev)
+{
+	mutex_lock(&lkpi_platform_lock);
+	for (int i = 0; i < LKPI_MAX_PLATFORM; i++) {
+		if (!lkpi_pdevs[i]) {
+			lkpi_pdevs[i] = pdev;
+			break;
+		}
+	}
+	for (int i = 0; i < LKPI_MAX_PLATFORM; i++)
+		if (lkpi_pdrvs[i])
+			platform_try_bind(pdev, lkpi_pdrvs[i]);
+	mutex_unlock(&lkpi_platform_lock);
+}
+
+int lkpi_dev_is_platform(const struct device *dev)
+{
+	for (int i = 0; i < LKPI_MAX_PLATFORM; i++)
+		if (lkpi_pdevs[i] && &lkpi_pdevs[i]->dev == dev)
+			return 1;
+	return 0;
+}
+
+struct resource *lkpi_platform_get_resource(struct platform_device *pdev, unsigned int type, unsigned int num)
+{
+	for (unsigned int i = 0; i < pdev->num_resources; i++)
+		if ((pdev->resource[i].flags & type) && num-- == 0)
+			return &pdev->resource[i];
+	return NULL;
+}
+
+struct platform_device *platform_device_register_full(const struct platform_device_info *info)
+{
+	struct platform_device *pdev = platform_device_alloc(info->name, info->id);
 	if (!pdev)
 		return ERR_PTR(-ENOMEM);
+	pdev->dev.parent = info->parent;
+	if (info->num_res) {
+		pdev->resource = kmemdup(info->res, info->num_res * sizeof(struct resource), GFP_KERNEL);
+		pdev->num_resources = info->num_res;
+	}
+	if (info->data && info->size_data)
+		pdev->dev.platform_data = kmemdup(info->data, info->size_data, GFP_KERNEL);
 	platform_device_add(pdev);
+	platform_track(pdev);
 	return pdev;
+}
+
+struct platform_device *platform_device_register_resndata(struct device *parent, const char *name, int id,
+							  const struct resource *res, unsigned int num,
+							  const void *data, size_t size)
+{
+	struct platform_device_info info = { .parent = parent, .name = name, .id = id, .res = res,
+					     .num_res = num, .data = data, .size_data = size };
+	return platform_device_register_full(&info);
+}
+
+struct platform_device* platform_device_register_simple(const char* name, int id, const void* res, unsigned int num)
+{
+	return platform_device_register_resndata(NULL, name, id, res, num, NULL, 0);
 }
 
 void platform_device_unregister(struct platform_device* pdev)
@@ -1053,8 +1160,42 @@ void platform_device_unregister(struct platform_device* pdev)
 	put_device(&pdev->dev);
 }
 
-int platform_driver_register(struct platform_driver* drv) { return 0; }
-void platform_driver_unregister(struct platform_driver* drv) {}
+int platform_driver_register(struct platform_driver* drv)
+{
+	mutex_lock(&lkpi_platform_lock);
+	for (int i = 0; i < LKPI_MAX_PLATFORM; i++) {
+		if (!lkpi_pdrvs[i]) {
+			lkpi_pdrvs[i] = drv;
+			break;
+		}
+	}
+	for (int i = 0; i < LKPI_MAX_PLATFORM; i++)
+		if (lkpi_pdevs[i])
+			platform_try_bind(lkpi_pdevs[i], drv);
+	mutex_unlock(&lkpi_platform_lock);
+	return 0;
+}
+void platform_driver_unregister(struct platform_driver* drv)
+{
+	mutex_lock(&lkpi_platform_lock);
+	for (int i = 0; i < LKPI_MAX_PLATFORM; i++)
+		if (lkpi_pdrvs[i] == drv)
+			lkpi_pdrvs[i] = NULL;
+	mutex_unlock(&lkpi_platform_lock);
+}
+
+/* The firmware's framebuffer as Linux's sysfb registers it: a
+ * "simple-framebuffer" device simpledrm drives until a GPU driver
+ * takes over. */
+#include <linux/platform_data/simplefb.h>
+void lkpi_register_boot_framebuffer(u64 phys, u32 width, u32 height, u32 pitch, u32 red_shift)
+{
+	struct simplefb_platform_data pd = { .width = width, .height = height, .stride = pitch,
+					     .format = red_shift == 16 ? "x8r8g8b8" : "x8b8g8r8" };
+	struct resource res = { .name = "BOOTFB", .start = phys, .end = phys + (u64)pitch * height - 1,
+				.flags = IORESOURCE_MEM };
+	platform_device_register_resndata(NULL, "simple-framebuffer", 0, &res, 1, &pd, sizeof(pd));
+}
 
 /* ---- kthread workers ---- */
 struct kthread_worker *kthread_create_worker(unsigned int flags, const char namefmt[], ...)
@@ -1079,6 +1220,9 @@ void kthread_destroy_worker(struct kthread_worker *w)
 
 /* ---- xarray ---- */
 #include <linux/xarray.h>
+/* xa_alloc(NULL) reserves a slot: it reads as empty but isn't handed out again. */
+#define XA_RESERVED ((void *)1)
+#define xa_visible(e) ((e) == XA_RESERVED ? NULL : (e))
 static int xa_grow(struct xarray *xa, unsigned long index)
 {
 	unsigned long n = xa->size ? xa->size : 16;
@@ -1096,43 +1240,43 @@ static int xa_grow(struct xarray *xa, unsigned long index)
 void *xa_load(struct xarray *xa, unsigned long index)
 {
 	void *e;
-	spin_lock(&xa->xa_lock);
+	spin_lock(&xa->lkpi_lock);
 	e = index < xa->size ? xa->slots[index] : NULL;
-	spin_unlock(&xa->xa_lock);
-	return e;
+	spin_unlock(&xa->lkpi_lock);
+	return xa_visible(e);
 }
 void *xa_store(struct xarray *xa, unsigned long index, void *entry, gfp_t gfp)
 {
 	void *old = NULL;
-	spin_lock(&xa->xa_lock);
+	spin_lock(&xa->lkpi_lock);
 	if (index < xa->size || (entry && xa_grow(xa, index) == 0)) {
 		if (index < xa->size) {
 			old = xa->slots[index];
 			xa->slots[index] = entry;
 		}
 	}
-	spin_unlock(&xa->xa_lock);
-	return old;
+	spin_unlock(&xa->lkpi_lock);
+	return xa_visible(old);
 }
 void *xa_erase(struct xarray *xa, unsigned long index) { return xa_store(xa, index, NULL, 0); }
 int xa_alloc(struct xarray *xa, u32 *id, void *entry, struct xa_limit limit, gfp_t gfp)
 {
 	unsigned long i;
 	int r = -EBUSY;
-	spin_lock(&xa->xa_lock);
+	spin_lock(&xa->lkpi_lock);
 	for (i = limit.min; i <= limit.max; i++) {
 		if (i >= xa->size && xa_grow(xa, i)) {
 			r = -ENOMEM;
 			break;
 		}
 		if (!xa->slots[i]) {
-			xa->slots[i] = entry ? entry : (void *)1; /* reserved */
+			xa->slots[i] = entry ? entry : XA_RESERVED;
 			*id = (u32)i;
 			r = 0;
 			break;
 		}
 	}
-	spin_unlock(&xa->xa_lock);
+	spin_unlock(&xa->lkpi_lock);
 	return r;
 }
 bool xa_empty(const struct xarray *xa)
@@ -1316,3 +1460,22 @@ int i2c_add_adapter(struct i2c_adapter *adap)
 	return 0;
 }
 void i2c_del_adapter(struct i2c_adapter *adap) { }
+
+/* ---- llist (lock-free singly linked lists) ---- */
+#include <linux/llist.h>
+bool llist_add_batch(struct llist_node *new_first, struct llist_node *new_last, struct llist_head *head)
+{
+	struct llist_node *first = READ_ONCE(head->first);
+	do {
+		new_last->next = first;
+	} while (!__atomic_compare_exchange_n(&head->first, &first, new_first, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE));
+	return first == NULL;
+}
+
+/* video= on the kernel command line: not supported (modes come from EDID). */
+bool video_get_options(const char *name, char **option)
+{
+	if (option)
+		*option = NULL;
+	return false;
+}

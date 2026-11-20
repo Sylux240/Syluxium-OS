@@ -35,6 +35,7 @@ typedef unsigned long vm_flags_t;
 #define VM_EXEC 0x00000004
 #define VM_SHARED 0x00000008
 #define VM_MAYREAD 0x00000010
+#define VM_MAYSHARE 0x00000080
 #define VM_MAYWRITE 0x00000020
 #define VM_IO 0x00004000
 #define VM_DONTCOPY 0x00020000

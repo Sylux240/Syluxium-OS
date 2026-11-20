@@ -6,6 +6,9 @@ mkdir -p /var/log /var/lib/tdm /tmp/.X11-unix /tmp/.ICE-unix /run/dbus /var/lib/
 chmod 1777 /tmp/.X11-unix /tmp/.ICE-unix
 chmod 755 /run/user
 
+# X display driver for this machine (modesetting on a DRM device, else fbdev).
+syluxium-display-config > /dev/null 2>&1
+
 # Home folders: make any missing ones from /etc/skel and give them to
 # their owners (the live system's files all start out as root's).
 while IFS=: read -r name _ uid gid _ home _; do

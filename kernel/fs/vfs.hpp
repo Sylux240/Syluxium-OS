@@ -78,6 +78,13 @@ public:
     // as the inode exists; it's mapped as is (no copy-on-write, never freed
     // by the address space). -ENODEV: this inode can't be mapped.
     virtual long mmap_phys(u64 offset, u64* phys) { return -err::NODEV; }
+    // Before a device mapping is made: drivers that set up per-mapping state
+    // (LinuxKPI: f_op->mmap) do it here and may replace the file offset
+    // the mapping (and so mmap_phys) will use.
+    virtual long mmap_prepare(File* f, u64 offset, u64 len, bool writable, u64* new_offset) {
+        *new_offset = offset;
+        return 0;
+    }
     // Regular files whose pages can be mapped MAP_SHARED (ramfs/tmpfs): the
     // mapping uses mmap_phys() and writes are seen by every process.
     virtual bool shared_mappable() const { return false; }

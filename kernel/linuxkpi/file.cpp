@@ -8,6 +8,7 @@
 #include <fs/vfs.hpp>
 #include <lib/errno.hpp>
 #include <lib/format.hpp>
+#include <lib/string.hpp>
 #include <proc/process.hpp>
 
 extern "C" {
@@ -19,6 +20,8 @@ unsigned int lkpi_file_poll(file* f);
 void fput(file* f);
 file* get_file(file* f);
 file* lkpi_chrdev_open(unsigned int major, unsigned int minor, unsigned int flags, int* err);
+long lkpi_file_mmap(file* f, unsigned long offset, unsigned long len, bool writable, unsigned long* handle);
+long lkpi_vma_phys(unsigned long off, u64* phys);
 }
 
 namespace {
@@ -53,6 +56,14 @@ public:
     }
     ~LinuxFileNode() override { fput(m_file); }
     void* linux_file(vfs::File*) override { return m_file; }
+    long mmap_prepare(vfs::File* f, u64 offset, u64 len, bool writable, u64* new_offset) override {
+        unsigned long h;
+        long r = lkpi_file_mmap(static_cast<file*>(linux_file(f)), offset, len, writable, &h);
+        if (r == 0)
+            *new_offset = h;
+        return r;
+    }
+    long mmap_phys(u64 offset, u64* phys) override { return lkpi_vma_phys(offset, phys); }
     bool seekable() const override { return false; }
     isize read_file(vfs::File* f, u64, void* buf, usize n) override { return do_read(m_file, f, buf, n); }
     isize write_file(vfs::File* f, u64, const void* buf, usize n) override { return do_write(m_file, f, buf, n); }
@@ -79,6 +90,14 @@ public:
     }
     bool seekable() const override { return false; }
     void* linux_file(vfs::File* f) override { return f->private_data; }
+    long mmap_prepare(vfs::File* f, u64 offset, u64 len, bool writable, u64* new_offset) override {
+        unsigned long h;
+        long r = lkpi_file_mmap(static_cast<file*>(linux_file(f)), offset, len, writable, &h);
+        if (r == 0)
+            *new_offset = h;
+        return r;
+    }
+    long mmap_phys(u64 offset, u64* phys) override { return lkpi_vma_phys(offset, phys); }
     void on_open(vfs::File* f) override {
         int err = 0;
         f->private_data = lkpi_chrdev_open(m_major, m_minor, f->flags, &err);
@@ -150,6 +169,17 @@ file* lkpi_vfs_fget(unsigned int fd) {
 }
 
 int lkpi_chrdev_node(const char* path, unsigned int major, unsigned int minor, unsigned short perms) {
+    // Subdirectories like /dev/dri are created on demand.
+    char dir[128];
+    snprintf(dir, sizeof(dir), "%s", path);
+    char* slash = nullptr;
+    for (char* c = dir; *c; c++)
+        if (*c == '/')
+            slash = c;
+    if (slash && slash != dir) {
+        *slash = 0;
+        vfs::mkdir_p(dir);
+    }
     vfs::add_node(path, new LinuxCharNode(major, minor, perms & 07777));
     return 0;
 }

@@ -27,6 +27,7 @@
 #include <lib/random.hpp>
 #include <arch/x86_64/percpu.hpp>
 #include <boot/limine_requests.hpp>
+#include <video/framebuffer.hpp>
 #include <arch/x86_64/cpu_local.hpp>
 
 // Linux's jiffies is a variable (struct fields share the name, so it can't
@@ -1396,6 +1397,7 @@ void apply_module_params() {
 
 } // namespace
 
+extern "C" void lkpi_register_boot_framebuffer(u64 phys, u32 width, u32 height, u32 pitch, u32 red_shift);
 extern "C" lkpi_initcall_t __lkpi_initcalls_start[];
 extern "C" lkpi_initcall_t __lkpi_initcalls_end[];
 
@@ -1419,6 +1421,11 @@ void init() {
     }
     klog::ok("Linux driver layer (LinuxKPI): %d driver%s registered%s", count, count == 1 ? "" : "s",
              failed ? " (some failed)" : "");
+    // The firmware framebuffer for simpledrm (/dev/dri/card0), unless "nodrm".
+    video::Framebuffer& fb = video::primary_framebuffer();
+    if (fb.valid() && !strstr(boot::cmdline(), "nodrm"))
+        lkpi_register_boot_framebuffer(mm::direct_virt_to_phys(fb.base()), fb.width(), fb.height(), fb.pitch(),
+                                       fb.red_shift());
 }
 
 } // namespace linuxkpi

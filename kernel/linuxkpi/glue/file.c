@@ -249,3 +249,116 @@ char *strndup_user(const char __user *s, long n)
 	p[n - 1] = 0;
 	return p;
 }
+
+/* ---- mmap: driver mappings (f_op->mmap) as Syluxium device mappings ----
+ * Each mmap() of a Linux file gets a vm_area_struct the driver sets up.
+ * The Syluxium mapping then uses a substitute file offset naming that VMA
+ * ((id + 1) << LKPI_VMA_SHIFT + offset within it), and page faults ask
+ * lkpi_vma_phys() for the physical page: the range a remap_pfn_range()
+ * gave, or whatever the driver's fault handler inserts. */
+#include <linux/mm.h>
+#define LKPI_VMA_SHIFT 36
+#define LKPI_MAX_VMAS 4096
+
+struct lkpi_vma {
+	struct vm_area_struct vma;
+	struct mutex lock;
+	unsigned long base_pfn; /* remap_pfn_range: pfn at vm_start */
+	bool remapped;
+	unsigned long fault_pfn;
+	bool fault_set;
+};
+static struct lkpi_vma *lkpi_vmas[LKPI_MAX_VMAS];
+static DEFINE_SPINLOCK(lkpi_vmas_lock);
+
+long lkpi_file_mmap(struct file *f, unsigned long offset, unsigned long len, bool writable, unsigned long *handle)
+{
+	struct lkpi_vma *m;
+	int id, r;
+	if (!f || !f->f_op || !f->f_op->mmap)
+		return -ENODEV;
+	m = kzalloc(sizeof(*m), GFP_KERNEL);
+	if (!m)
+		return -ENOMEM;
+	spin_lock(&lkpi_vmas_lock);
+	for (id = 0; id < LKPI_MAX_VMAS && lkpi_vmas[id]; id++)
+		;
+	if (id < LKPI_MAX_VMAS)
+		lkpi_vmas[id] = m;
+	spin_unlock(&lkpi_vmas_lock);
+	if (id == LKPI_MAX_VMAS) {
+		kfree(m);
+		return -ENOMEM;
+	}
+	mutex_init(&m->lock);
+	m->vma.vm_start = (unsigned long)(id + 1) << LKPI_VMA_SHIFT;
+	m->vma.vm_end = m->vma.vm_start + PAGE_ALIGN(len);
+	m->vma.vm_pgoff = offset >> PAGE_SHIFT;
+	m->vma.vm_flags = VM_SHARED | VM_MAYSHARE | VM_READ | VM_MAYREAD | (writable ? VM_WRITE | VM_MAYWRITE : 0);
+	m->vma.vm_page_prot = PAGE_KERNEL;
+	m->vma.vm_file = get_file(f);
+	m->vma.lkpi = m;
+	r = f->f_op->mmap(f, &m->vma);
+	if (r) {
+		fput(m->vma.vm_file);
+		spin_lock(&lkpi_vmas_lock);
+		lkpi_vmas[id] = NULL;
+		spin_unlock(&lkpi_vmas_lock);
+		kfree(m);
+		return r;
+	}
+	*handle = m->vma.vm_start;
+	return 0;
+}
+
+long lkpi_vma_phys(unsigned long off, u64 *phys)
+{
+	unsigned long id = (off >> LKPI_VMA_SHIFT) - 1;
+	struct lkpi_vma *m = id < LKPI_MAX_VMAS ? lkpi_vmas[id] : NULL;
+	unsigned long addr = off & ~(PAGE_SIZE - 1);
+	struct vm_fault vmf = { 0 };
+	vm_fault_t ret;
+	if (!m || addr >= m->vma.vm_end)
+		return -ENXIO;
+	if (m->remapped) {
+		*phys = PFN_PHYS(m->base_pfn) + (addr - m->vma.vm_start);
+		return 0;
+	}
+	if (!m->vma.vm_ops || !m->vma.vm_ops->fault)
+		return -ENXIO;
+	mutex_lock(&m->lock);
+	m->fault_set = false;
+	vmf.vma = &m->vma;
+	vmf.address = addr;
+	vmf.pgoff = m->vma.vm_pgoff + ((addr - m->vma.vm_start) >> PAGE_SHIFT);
+	ret = m->vma.vm_ops->fault(&vmf);
+	if (m->fault_set)
+		*phys = PFN_PHYS(m->fault_pfn);
+	else if (vmf.page && !(ret & (VM_FAULT_SIGBUS | VM_FAULT_OOM)))
+		*phys = page_to_phys(vmf.page);
+	else
+		ret |= VM_FAULT_SIGBUS;
+	mutex_unlock(&m->lock);
+	return (ret & (VM_FAULT_SIGBUS | VM_FAULT_OOM)) ? -EFAULT : 0;
+}
+
+int remap_pfn_range(struct vm_area_struct *vma, unsigned long addr, unsigned long pfn, unsigned long size, pgprot_t prot)
+{
+	struct lkpi_vma *m = vma->lkpi;
+	m->base_pfn = pfn - ((addr - vma->vm_start) >> PAGE_SHIFT);
+	m->remapped = true;
+	return 0;
+}
+
+vm_fault_t vmf_insert_pfn_prot(struct vm_area_struct *vma, unsigned long addr, unsigned long pfn, pgprot_t prot)
+{
+	struct lkpi_vma *m = vma->lkpi;
+	m->fault_pfn = pfn;
+	m->fault_set = true;
+	return VM_FAULT_NOPAGE;
+}
+
+vm_fault_t vmf_insert_pfn(struct vm_area_struct *vma, unsigned long addr, unsigned long pfn)
+{
+	return vmf_insert_pfn_prot(vma, addr, pfn, vma->vm_page_prot);
+}

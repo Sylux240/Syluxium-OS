@@ -35,8 +35,10 @@ long sys_mmap(SYSCALL_ARGS) {
             // driver must support it, and the mapping is always shared.
             // Check the first and last page now so mmap() fails cleanly.
             u64 phys;
+            long r = !(flags & MAP_SHARED) ? -err::INVAL : f->inode->mmap_prepare(f, offset, len, prot & PROT_WRITE, &offset);
             u64 last = offset + align_up<u64>(len, 4096) - 4096;
-            long r = !(flags & MAP_SHARED) ? -err::INVAL : f->inode->mmap_phys(offset, &phys);
+            if (r == 0)
+                r = f->inode->mmap_phys(offset, &phys);
             if (r == 0)
                 r = f->inode->mmap_phys(last, &phys);
             if (r < 0) {

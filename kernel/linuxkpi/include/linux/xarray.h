@@ -4,7 +4,8 @@
 #include <linux/lkpi_all.h>
 
 struct xarray {
-	spinlock_t xa_lock;
+	spinlock_t xa_lock;   /* for callers (xa_lock()), never taken inside */
+	spinlock_t lkpi_lock; /* guards slots inside the xa_* functions */
 	void **slots;
 	unsigned long size;
 	unsigned int flags;
@@ -15,7 +16,7 @@ struct xa_limit { u32 max, min; };
 #define xa_limit_31b XA_LIMIT(0, INT_MAX)
 #define XA_FLAGS_ALLOC 0x1
 #define XA_FLAGS_ALLOC1 0x3
-#define XARRAY_INIT(name, fl) { .xa_lock = __SPIN_LOCK_UNLOCKED(name.xa_lock), .slots = NULL, .size = 0, .flags = (fl) }
+#define XARRAY_INIT(name, fl) { .xa_lock = __SPIN_LOCK_UNLOCKED(name.xa_lock), .lkpi_lock = __SPIN_LOCK_UNLOCKED(name.lkpi_lock), .slots = NULL, .size = 0, .flags = (fl) }
 #define DEFINE_XARRAY_FLAGS(name, fl) struct xarray name = XARRAY_INIT(name, fl)
 #define DEFINE_XARRAY(name) DEFINE_XARRAY_FLAGS(name, 0)
 #define DEFINE_XARRAY_ALLOC(name) DEFINE_XARRAY_FLAGS(name, XA_FLAGS_ALLOC)
@@ -23,6 +24,7 @@ struct xa_limit { u32 max, min; };
 static inline void xa_init_flags(struct xarray *xa, unsigned int flags)
 {
 	spin_lock_init(&xa->xa_lock);
+	spin_lock_init(&xa->lkpi_lock);
 	xa->slots = NULL;
 	xa->size = 0;
 	xa->flags = flags;
@@ -42,4 +44,4 @@ void xa_destroy(struct xarray *xa);
 #define __xa_erase xa_erase
 #define xa_for_each(xa, index, entry) \
 	for ((index) = 0; (index) < (xa)->size; (index)++) \
-		if (((entry) = (xa)->slots[index]) != NULL)
+		if (((entry) = (xa)->slots[index]) != NULL && (entry) != (void *)1)

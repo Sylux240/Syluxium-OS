@@ -279,7 +279,7 @@ struct eventfd_ctx;
 #define fops_put(fops) do { } while (0)
 #define replace_fops(f, fops) do { (f)->f_op = (fops); } while (0)
 #define file_clone_open(f) ((struct file *)ERR_PTR(-EOPNOTSUPP))
-#define simple_pin_fs(type, mount, count) 0
+#define simple_pin_fs(type, mount, count) ({ if (!*(mount)) *(mount) = kern_mount(type); (*(count))++; *(mount) ? 0 : -ENOMEM; })
 #define simple_release_fs(mount, count) do { } while (0)
 
 /* Machine/platform queries. */
@@ -305,8 +305,9 @@ struct device_node;
 #define of_node_put(np) do { } while (0)
 #define of_address_to_resource(np, index, r) (-EINVAL)
 #define dev_fwnode(dev) ((struct fwnode_handle *)NULL)
-#define dev_is_platform(dev) false
-#define platform_get_resource(pdev, type, num) ((struct resource *)NULL)
+int lkpi_dev_is_platform(const struct device *dev);
+#define dev_is_platform(dev) lkpi_dev_is_platform(dev)
+#define platform_get_resource(pdev, type, num) lkpi_platform_get_resource(pdev, type, num)
 #define kobj_to_dev(k) container_of(k, struct device, kobj)
 struct kobject; struct file;
 struct bin_attribute {

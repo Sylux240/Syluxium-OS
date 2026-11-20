@@ -1,0 +1,33 @@
+#!/bin/sh
+# Chooses the X display driver for this machine, at every boot (the same
+# disk moves between computers):
+#   a kernel display driver (DRM: GPU driver or simpledrm) -> modesetting
+#   otherwise                                              -> fbdev (/dev/fb0)
+# Boot option "xfbdev" forces fbdev.
+out=/etc/X11/xorg.conf.d/20-display.conf
+log=/boot/logs/display.txt
+card=$(ls /dev/dri/card* 2>/dev/null | head -1)
+if [ -n "$card" ] && ! grep -qw xfbdev /proc/cmdline; then
+    cat > "$out" <<CFG
+# Written at boot by syluxium-display-config: kernel display driver ($card).
+Section "Device"
+    Identifier "Display"
+    Driver     "modesetting"
+    Option     "kmsdev" "$card"
+    Option     "AccelMethod" "none"
+EndSection
+CFG
+    choice="modesetting on $card"
+else
+    cat > "$out" <<CFG
+# Written at boot by syluxium-display-config: firmware framebuffer.
+Section "Device"
+    Identifier "Display"
+    Driver     "fbdev"
+    Option     "fbdev" "/dev/fb0"
+EndSection
+CFG
+    choice="fbdev on /dev/fb0"
+fi
+mkdir -p /boot/logs 2>/dev/null && echo "display: $choice" > "$log" 2>/dev/null
+echo "display: $choice"
