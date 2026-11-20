@@ -471,11 +471,11 @@ BackgroundCfg=/etc/trinity/tdm/backgroundrc
 Preloader=/opt/trinity/bin/preloadtde
 # Whether the greeter should be themed.
 # Default is false
-UseTheme=false
+UseTheme=true
 # The theme to use for the greeter. Can point to either a directory or an XML
 # file.
 # Default is ""
-Theme=
+Theme=/opt/trinity/share/apps/tdm/themes/syluxium
 
 # Core config for local displays
 [X-:*-Core]

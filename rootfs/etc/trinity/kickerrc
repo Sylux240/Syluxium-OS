@@ -8,6 +8,10 @@ UseBackgroundTheme=true
 BackgroundTheme=/opt/trinity/share/apps/kicker/wallpapers/syluxium_taskbar.png
 ColorizeBackground=false
 RotateBackground=false
+# Flat panel buttons (the Start button's own green tiles, no frame around
+# the tray); the task buttons get their XP-style frames from ktaskbarrc.
+ShowDeepButtons=false
+LegacyKMenu=true
 Applets2=KMenuButton_1,ServiceButton_1,ServiceButton_2,Applet_2,ServiceButton_3,Applet_3,Applet_4
 
 [KMenuButton_1]
@@ -44,9 +48,32 @@ ConfigFile=clock_panelappletrc
 DesktopFile=clockapplet.desktop
 FreeSpace2=1
 
+# The Start menu: a blue header with the user picture (tools/make-xp-theme.py),
+# no side banner, no search line; contents in
+# /opt/trinity/etc/xdg/menus/tde-applications.menu.
 [KMenu]
 ShowText=true
 Text=Start
+CustomIcon=/opt/trinity/share/apps/kicker/pics/syluxium_start.png
+UseSidePixmap=false
+UseTopSide=true
+LeftSideTopName=syluxium_menu_top_left.png
+RightSideTopName=syluxium_menu_top_right.png
+SideTopTileName=syluxium_menu_top_tile.png
+UseSearchBar=false
+UseTooltip=false
+
+# Menu entries show their name only ("My Computer", not "File Manager -
+# Konqueror"), no section titles, no Settings/System submenus (Control Panel
+# replaces them); the most used programs at the top.
+[menus]
+MenuEntryFormat=NameOnly
+ShowMenuTitles=false
+Extensions=
+UseBookmarks=false
+UseBrowser=false
+NumVisibleEntries=4
+RecentVsOften=false
 
 [button_tiles]
 EnableKMenuTiles=true
@@ -54,5 +81,5 @@ KMenuTile=syluxium_green
 
 [buttons]
 EnableTileBackground=true
-Font=DejaVu Sans,10,-1,5,75,0,0,0,0,0
+Font=Tahoma,11,-1,5,75,1,0,0,0,0
 TextColor=255,255,255

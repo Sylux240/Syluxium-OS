@@ -1,0 +1,3 @@
+# Fonts are sized for 96 dpi, like the XP-era desktop.
+[General]
+forceFontDPI=96

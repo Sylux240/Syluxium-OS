@@ -1,0 +1,7 @@
+[Desktop Entry]
+# Syluxium: XP-era Control Panel category name (TDE's own translations
+# dropped, they'd name the old category).
+Encoding=UTF-8
+Type=Directory
+Name=Taskbar, Desktop and Windows
+Icon=desktop

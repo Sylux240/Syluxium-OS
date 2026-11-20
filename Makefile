@@ -45,9 +45,10 @@ DEBIAN_SUITE := trixie
 # Trinity Desktop Environment (phase 9): Trinity's own Debian repository.
 TRINITY_REPO := https://mirror.ppa.trinitydesktop.org/trinity/deb/trinity-r14.1.x|trixie|main,deps
 TRINITY_PKGS := dbus tdebase-trinity-bin twin-trinity kicker-trinity kdesktop-trinity konsole-trinity tdm-trinity kuser-trinity tdepasswd-trinity tdesudo-trinity tdepowersave-trinity \
-                konqueror-trinity kcontrol-trinity ksmserver-trinity tdebase-data-trinity kmix-trinity kmail-trinity kaffeine-trinity
+                konqueror-trinity kcontrol-trinity ksmserver-trinity tdebase-data-trinity kmix-trinity kmail-trinity kaffeine-trinity \
+                tde-style-qtcurve-trinity twin-style-dekorator-trinity ksplash-trinity ksysguard-trinity
 DEBIAN_PKGS  := bash busybox hello ncurses-base pciutils pci.ids netbase alsa-utils xserver-xorg-core xserver-xorg-video-fbdev xserver-xorg-input-evdev xinit x11-xserver-utils x11-xkb-utils xterm twm xfonts-base sudo libpam-runtime libpam-modules login fdisk e2fsprogs dosfstools xdotool firefox-esr \
-                wine wine64 iw wpasupplicant wireless-regdb hostapd
+                wine wine64 iw wpasupplicant wireless-regdb hostapd fonts-wine xcape
 DEBIAN_ROOT  := $(BUILD)/rootfs-debian
 DEBIAN_STAMP := $(DEBIAN_ROOT)/.fetched
 # A few i386 packages for testing 32-bit dynamic linking (Steam is 32-bit).

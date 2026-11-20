@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Internet
+Comment=Firefox web browser
+Exec=firefox-esr %u
+Icon=firefox-esr
+Terminal=false
+# Shown only at the top level of the Start menu (tde-applications.menu).
+Categories=X-Syluxium-StartMenu;

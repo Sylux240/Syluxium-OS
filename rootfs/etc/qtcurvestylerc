@@ -1,0 +1,99 @@
+# Syluxium's widget style: QtCurve set up for the XP-era look (round
+# white-to-beige buttons, light blue scroll bars with grip lines, green
+# check marks and progress bars, flat white menus with a blue highlight,
+# tabs with a coloured top line). System-wide default; users may override
+# it in ~/.config/qtcurve/stylerc.
+# (version: the option format of QtCurve 1.8; older files get converted.)
+version=1.8.18
+appearance=gradient
+round=full
+buttonEffect=none
+coloredMouseOver=thickcolored
+defBtnIndicator=colored
+thinnerBtns=false
+darkerBorders=false
+highlightFactor=5
+embolden=false
+focus=standard
+# square: text fields, scroll views, list selection, tool tips, pop-up menus
+square=1549
+
+# scroll bars: XP layout (one arrow at each end), 17 px, light blue
+scrollbarType=windows
+sliderWidth=17
+sliderStyle=plain
+sliderThumbs=lines
+shadeSliders=#b8cdf8
+sliderAppearance=gradient
+sbarBgndAppearance=flat
+flatSbarButtons=false
+thinSbarGroove=false
+borderSbarGroove=true
+fillSlider=true
+colorSliderMouseOver=true
+
+# check boxes and radio buttons: green mark
+shadeCheckRadio=#21a121
+crHighlight=0
+crButton=true
+crSize=13
+xCheck=false
+
+# menus: beige menu bar, white pop-up menus, flat blue highlight
+menubarAppearance=flat
+shadeMenubars=none
+menubarMouseOver=true
+useHighlightForMenu=true
+menuitemAppearance=flat
+borderMenuitems=false
+lighterPopupMenuBgnd=30
+menuBgndAppearance=flat
+shadePopupMenu=false
+popupBorder=true
+menuStripe=false
+menuIcons=true
+menuDelay=225
+thinnerMenuItems=false
+roundMbTopOnly=true
+
+# tabs
+tabAppearance=gradient
+activeTabAppearance=gradient
+highlightTab=true
+colorSelTab=false
+roundAllTabs=true
+borderTab=true
+tabMouseOver=top
+
+# progress bars: XP-era green
+progressAppearance=gradient
+progressColor=#2fb83c
+progressGrooveAppearance=flat
+progressGrooveColor=base
+stripedProgress=none
+animatedProgress=false
+fillProgress=true
+borderProgress=true
+
+# tool bars, lists, frames
+toolbarAppearance=flat
+toolbarBorders=none
+toolbarSeparators=sunken
+handles=dots
+lvAppearance=gradient
+lvLines=false
+lvButton=false
+selectionAppearance=flat
+etchEntry=false
+gtkScrollViews=true
+highlightScrollViews=false
+sunkenAppearance=flat
+groupBox=frame
+gbLabel=0
+splitters=dots
+drawStatusBarFrames=false
+comboSplitter=true
+unifySpinBtns=false
+vArrows=true
+gtkComboMenus=false
+gtkButtonOrder=false

@@ -1,0 +1,13 @@
+[KSplash Theme: Syluxium]
+Name=Syluxium Welcome
+Description=Syluxium's welcome screen while the desktop starts.
+Author=Syluxium
+Engine=Redmond
+Welcome Text=welcome
+Welcome Font=Tahoma,36,-1,5,75,1,0,0,0,0
+Username Font=Tahoma,16,-1,5,75,0,0,0,0,0
+Action Font=Tahoma,10,-1,5,50,0,0,0,0,0
+Welcome Text Color=255,255,255
+Welcome Shadow Color=20,50,150
+Username Text Color=255,255,255
+Action Text Color=214,228,255

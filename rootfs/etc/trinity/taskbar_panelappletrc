@@ -1,6 +1,0 @@
-# Task buttons on the blue taskbar: readable white text.
-[General]
-UseCustomColors=true
-TaskTextColor=255,255,255
-ActiveTaskTextColor=255,255,255
-TaskBackgroundColor=61,128,232

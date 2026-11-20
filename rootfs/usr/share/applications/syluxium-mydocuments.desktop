@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=My Documents
+Comment=Your documents folder
+Exec=syluxium-open documents
+Icon=folder_wordprocessing
+Terminal=false
+# Shown only at the top level of the Start menu (tde-applications.menu).
+Categories=X-Syluxium-StartMenu;

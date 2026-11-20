@@ -1,0 +1,47 @@
+<!DOCTYPE Menu PUBLIC "-//freedesktop//DTD Menu 1.0//EN"
+  "http://www.freedesktop.org/standards/menu-spec/1.0/menu.dtd">
+
+<!-- Syluxium's Start menu, laid out like the XP-era one: the web browser
+     and e-mail at the top, "All Programs" (TDE's whole application menu,
+     syluxium-programs.menu), then the places and tools. Kicker adds
+     "Run...", "Lock Computer" and "Turn Off Computer..." at the bottom. -->
+<Menu>
+  <Name>Applications</Name>
+  <Directory>tde-main.directory</Directory>
+  <KDELegacyDirs/>
+  <DefaultAppDirs/>
+  <DefaultDirectoryDirs/>
+
+  <Include>
+    <Filename>syluxium-internet.desktop</Filename>
+    <Filename>syluxium-email.desktop</Filename>
+    <Filename>syluxium-mydocuments.desktop</Filename>
+    <Filename>syluxium-mypictures.desktop</Filename>
+    <Filename>syluxium-mycomputer.desktop</Filename>
+    <Filename>syluxium-network.desktop</Filename>
+    <Filename>syluxium-controlpanel.desktop</Filename>
+    <Filename>syluxium-search.desktop</Filename>
+  </Include>
+
+  <Menu>
+    <Name>All Programs</Name>
+    <MergeFile>syluxium-programs.menu</MergeFile>
+    <!-- after the merge: the last <Directory> wins -->
+    <Directory>syluxium-allprograms.directory</Directory>
+  </Menu>
+
+  <Layout>
+    <Filename>syluxium-internet.desktop</Filename>
+    <Filename>syluxium-email.desktop</Filename>
+    <Separator/>
+    <Menuname>All Programs</Menuname>
+    <Separator/>
+    <Filename>syluxium-mydocuments.desktop</Filename>
+    <Filename>syluxium-mypictures.desktop</Filename>
+    <Filename>syluxium-mycomputer.desktop</Filename>
+    <Filename>syluxium-network.desktop</Filename>
+    <Separator/>
+    <Filename>syluxium-controlpanel.desktop</Filename>
+    <Filename>syluxium-search.desktop</Filename>
+  </Layout>
+</Menu>
