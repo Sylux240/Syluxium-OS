@@ -1,6 +1,5 @@
 build/
 deps/
 compile_commands.json
-.idea/workspace.xml
-.claude/worktrees/
+.idea/
 __pycache__/
