@@ -179,3 +179,93 @@ long wait_woken(struct wait_queue_entry *e, unsigned mode, long timeout)
 	e->flags &= ~WQ_FLAG_WOKEN;
 	return timeout;
 }
+
+/* ---- tasklets ---- */
+static void tasklet_work(struct work_struct *w)
+{
+	struct tasklet_struct *t = container_of(w, struct tasklet_struct, work);
+	if (!tasklet_trylock(t)) { /* still running (called directly elsewhere): come back */
+		queue_work(system_highpri_wq, &t->work);
+		return;
+	}
+	if (atomic_read(&t->count)) { /* disabled: tasklet_enable() queues it again */
+		tasklet_unlock(t);
+		return;
+	}
+	if (test_and_clear_bit(TASKLET_STATE_SCHED, &t->state)) {
+		if (t->callback)
+			t->callback(t);
+		else if (t->func)
+			t->func(t->data);
+	}
+	tasklet_unlock(t);
+}
+
+void tasklet_init(struct tasklet_struct *t, void (*func)(unsigned long), unsigned long data)
+{
+	INIT_WORK(&t->work, tasklet_work);
+	t->func = func;
+	t->callback = NULL;
+	t->data = data;
+	t->state = 0;
+	atomic_set(&t->count, 0);
+}
+
+void tasklet_setup(struct tasklet_struct *t, void (*cb)(struct tasklet_struct *))
+{
+	tasklet_init(t, NULL, 0);
+	t->callback = cb;
+	t->use_callback = true;
+}
+
+void tasklet_schedule(struct tasklet_struct *t)
+{
+	if (!t->work.func) /* DECLARE_TASKLET: set up on first use */
+		INIT_WORK(&t->work, tasklet_work);
+	if (!test_and_set_bit(TASKLET_STATE_SCHED, &t->state))
+		queue_work(system_highpri_wq, &t->work);
+}
+
+bool tasklet_trylock(struct tasklet_struct *t)
+{
+	return !test_and_set_bit(TASKLET_STATE_RUN, &t->state);
+}
+
+void tasklet_unlock(struct tasklet_struct *t)
+{
+	smp_mb__before_atomic();
+	clear_bit(TASKLET_STATE_RUN, &t->state);
+}
+
+void tasklet_unlock_wait(struct tasklet_struct *t)
+{
+	while (test_bit(TASKLET_STATE_RUN, &t->state))
+		cpu_relax();
+}
+
+void tasklet_disable_nosync(struct tasklet_struct *t)
+{
+	atomic_inc(&t->count);
+	smp_mb__after_atomic();
+}
+
+void tasklet_disable(struct tasklet_struct *t)
+{
+	tasklet_disable_nosync(t);
+	tasklet_unlock_wait(t);
+	smp_mb();
+}
+
+void tasklet_enable(struct tasklet_struct *t)
+{
+	smp_mb__before_atomic();
+	if (atomic_dec_and_test(&t->count) && test_bit(TASKLET_STATE_SCHED, &t->state))
+		queue_work(system_highpri_wq, &t->work);
+}
+
+void tasklet_kill(struct tasklet_struct *t)
+{
+	cancel_work_sync(&t->work);
+	tasklet_unlock_wait(t);
+	clear_bit(TASKLET_STATE_SCHED, &t->state);
+}

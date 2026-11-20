@@ -3,10 +3,12 @@
 #pragma once
 #include <linux/lkpi_all.h>
 #include <linux/workqueue.h>
+#include <linux/llist.h>
 
 struct irq_work {
 	struct work_struct work;
 	void (*func)(struct irq_work *);
+	struct { struct llist_node llist; } node;
 };
 
 static inline void lkpi_irq_work_fn(struct work_struct *w)

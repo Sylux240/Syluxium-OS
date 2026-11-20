@@ -505,3 +505,32 @@ void zap_vma_ptes(struct vm_area_struct *vma, unsigned long address, unsigned lo
 	mutex_unlock(&m->lock);
 	lkpi_zap_user_range(address, size);
 }
+
+/* i915 (remap_io_mapping / remap_io_sg): pages [addr, addr + n pages) of a
+ * VMA map pfns pfn.. with the given cache type. */
+int lkpi_vma_insert_range(struct vm_area_struct *vma, unsigned long addr, unsigned long pfn,
+			  unsigned long npages, pgprot_t prot)
+{
+	struct lkpi_vma *m = vma->lkpi;
+	unsigned long pg = (addr - vma->vm_start) >> PAGE_SHIFT;
+	if (addr < vma->vm_start)
+		return -EINVAL;
+	for (unsigned long i = 0; i < npages && pg + i < m->npages; i++)
+		m->pages[pg + i] = PFN_PHYS(pfn + i) | LKPI_PTE_VALID | prot_bits(prot);
+	return 0;
+}
+
+/* get_file_active(): a reference to *f unless its last one is going away. */
+struct file *lkpi_get_file_active(struct file **f)
+{
+	struct file *file = READ_ONCE(*f);
+	long c;
+	if (!file)
+		return NULL;
+	c = atomic_long_read(&file->f_count);
+	do {
+		if (!c)
+			return NULL;
+	} while (!__atomic_compare_exchange_n(&file->f_count.counter, &c, c + 1, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST));
+	return file;
+}

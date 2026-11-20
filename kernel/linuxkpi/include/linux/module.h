@@ -100,6 +100,13 @@ struct lkpi_param {
     static const struct lkpi_param __lkpi_param_##name __attribute__((used, section(".lkpi_params"))) = { \
         KBUILD_MODNAME "." #name, (void*)&(var), __lkpi_param_type_##type}
 #define module_param(name, type, perm) module_param_named(name, name, type, perm)
+#define module_param_named_unsafe(name, var, type, perm) module_param_named(name, var, type, perm)
+struct kernel_param;
+#define module_param_cb_unsafe(name, ops, arg, perm) module_param_cb(name, ops, arg, perm)
+#define symbol_get(x) ((typeof(&x))NULL)
+#define symbol_put(x) do { } while (0)
+#define symbol_put_addr(p) do { } while (0)
+#define module_param_unsafe(name, type, perm) module_param_named(name, name, type, perm)
 #define module_param_array(name, type, nump, perm)
 #define MODULE_PARM_DESC(p, d)
 #define try_module_get(m) 1

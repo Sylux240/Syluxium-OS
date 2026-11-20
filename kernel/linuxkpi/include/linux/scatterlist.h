@@ -55,7 +55,6 @@ static inline struct scatterlist* sg_next(struct scatterlist* sg) {
         sg = sg_chain_ptr(sg);
     return sg;
 }
-#define __sg_next sg_next
 static inline int sg_nents(struct scatterlist* sg) { int n = 0; for (; sg; sg = sg_next(sg)) n++; return n; }
 #define for_each_sg(sglist, sg, nr, __i) for (__i = 0, sg = (sglist); __i < (nr); __i++, sg = sg_next(sg))
 #define sg_dma_address(sg) ((sg)->dma_address)

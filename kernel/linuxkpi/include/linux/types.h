@@ -63,6 +63,7 @@ typedef struct {
 } atomic64_t;
 typedef atomic64_t atomic_long_t;
 
+typedef struct { unsigned long pgprot; } pgprot_t;
 typedef int (*cmp_func_t)(const void *a, const void *b);
 typedef void (*swap_func_t)(void *a, void *b, int size);
 struct list_head {

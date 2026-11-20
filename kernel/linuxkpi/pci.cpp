@@ -319,28 +319,7 @@ void synchronize_irq(unsigned int irq) {
         __builtin_ia32_pause();
 }
 
-static void tasklet_work(struct work_struct* w) {
-    auto* t = container_of(w, struct tasklet_struct, work);
-    if (t->disabled)
-        return;
-    if (t->callback)
-        t->callback(t);
-    else if (t->func)
-        t->func(t->data);
-}
-void tasklet_init(struct tasklet_struct* t, void (*func)(unsigned long), unsigned long data) {
-    lkpi_init_work(&t->work, tasklet_work);
-    t->func = func;
-    t->callback = nullptr;
-    t->data = data;
-    t->disabled = 0;
-}
-void tasklet_setup(struct tasklet_struct* t, void (*cb)(struct tasklet_struct*)) {
-    tasklet_init(t, nullptr, 0);
-    t->callback = cb;
-}
-void tasklet_schedule(struct tasklet_struct* t) { queue_work(system_highpri_wq, &t->work); }
-void tasklet_kill(struct tasklet_struct* t) { cancel_work_sync(&t->work); }
+// Tasklets: glue/wait.c.
 
 // ---- PCI ----
 

@@ -20,6 +20,7 @@
 #include <mm/pmm.hpp>
 #include <mm/vmalloc.hpp>
 #include <proc/signal.hpp>
+#include <proc/uaccess.hpp>
 #include <sched/sched.hpp>
 #include <sched/sync.hpp>
 #include <time/clock.hpp>
@@ -1462,3 +1463,10 @@ void init() {
 extern "C" bool lkpi_capable(int) { return proc::capable(); }
 extern "C" int wbinvd_on_all_cpus(void) { asm volatile("wbinvd" ::: "memory"); return 0; }
 
+
+// ---- GPU drivers ----
+extern "C" bool lkpi_access_ok(const void* addr, unsigned long size) {
+    return uaccess::check(addr, size, false) == 0;
+}
+extern "C" u64 lkpi_local_clock(void) { return clock::now_ns(); }
+extern "C" unsigned long lkpi_tsc_khz(void) { return clock::tsc_frequency_hz() / 1000; }

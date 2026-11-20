@@ -24,6 +24,7 @@ struct debugfs_blob_wrapper { void* data; unsigned long size; };
     static void* __fops##_lkpi_refs[] __attribute__((unused)) = { (void*)(__get), (void*)(__set) }
 #define DEFINE_SIMPLE_ATTRIBUTE DEFINE_DEBUGFS_ATTRIBUTE
 #define DEFINE_SHOW_ATTRIBUTE(__name) static const struct file_operations __name##_fops __attribute__((unused)) = {}
+#define DEFINE_SHOW_STORE_ATTRIBUTE(__name) static const struct file_operations __name##_fops __attribute__((unused)) = {}
 static inline struct dentry* debugfs_create_dir(const char* name, struct dentry* parent) { return (struct dentry*)ERR_PTR(-ENODEV); }
 static inline struct dentry* debugfs_create_file(const char* name, unsigned short mode, struct dentry* parent, void* data, const struct file_operations* fops) { return (struct dentry*)ERR_PTR(-ENODEV); }
 #define debugfs_create_file_unsafe debugfs_create_file

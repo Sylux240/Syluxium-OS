@@ -5,6 +5,8 @@
 #include <linux/wait.h>
 wait_queue_head_t *bit_waitqueue(void *word, int bit);
 #define var_waitqueue(var) bit_waitqueue(var, 0)
+#define __var_waitqueue(var) bit_waitqueue((void *)(var), 0)
+#define ___wait_var_event(var, cond, state, excl, ret, cmd) ({ wait_event(*__var_waitqueue(var), cond); 0; })
 void wake_up_bit(void *word, int bit);
 #define wake_up_var(var) wake_up_bit(var, 0)
 #define wait_var_event(var, cond) wait_event(*var_waitqueue(var), cond)

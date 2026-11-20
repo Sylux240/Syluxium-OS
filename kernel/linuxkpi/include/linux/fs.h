@@ -9,7 +9,20 @@ struct file;
 struct inode;
 struct vm_area_struct;
 struct poll_table_struct;
-struct address_space { struct inode *host; void *lkpi; };
+struct address_space_operations;
+struct page;
+struct folio;
+struct address_space { struct inode *host; void *lkpi; const struct address_space_operations *a_ops; };
+enum writeback_sync_modes { WB_SYNC_NONE, WB_SYNC_ALL };
+struct writeback_control { long nr_to_write; enum writeback_sync_modes sync_mode; unsigned for_reclaim:1; loff_t range_start, range_end; };
+struct address_space_operations {
+	int (*writepage)(struct page *page, struct writeback_control *wbc);
+	int (*read_folio)(struct file *, struct folio *);
+	int (*writepages)(struct address_space *, struct writeback_control *);
+	int (*write_begin)(struct file *, struct address_space *mapping, loff_t pos, unsigned len, struct folio **foliop, void **fsdata);
+	int (*write_end)(struct file *, struct address_space *mapping, loff_t pos, unsigned len, unsigned copied, struct folio *folio, void *fsdata);
+};
+#define SB_KERNMOUNT (1 << 22)
 
 struct qstr { const char *name; unsigned int len; };
 struct dentry {

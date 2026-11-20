@@ -6,7 +6,6 @@
 #include <linux/lkpi_all.h>
 #include <linux/fs.h>
 
-typedef struct { unsigned long pgprot; } pgprot_t;
 #define __pgprot(x) ((pgprot_t){ (x) })
 #define pgprot_val(x) ((x).pgprot)
 #define LKPI_PROT_WC 0x10UL /* write-combining */

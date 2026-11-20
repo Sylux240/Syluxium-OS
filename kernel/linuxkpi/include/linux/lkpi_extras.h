@@ -52,6 +52,34 @@ static inline unsigned int read_seqretry(const seqlock_t *sl, unsigned int start
 #define write_seqlock_irqsave(sl, flags) do { (flags) = 0; write_seqlock(sl); } while (0)
 #define write_sequnlock_irqrestore(sl, flags) write_sequnlock(sl)
 #define seqcount_init(s) ((s)->seq = 0)
+typedef seqcount_t seqcount_mutex_t;
+typedef seqcount_t seqcount_spinlock_t;
+typedef seqcount_t seqcount_latch_t;
+#define seqcount_mutex_init(s, lock) seqcount_init(s)
+#define seqcount_spinlock_init(s, lock) seqcount_init(s)
+#define seqcount_latch_init(s) seqcount_init(s)
+#define write_seqcount_begin(s) do { __atomic_add_fetch(&(s)->seq, 1, __ATOMIC_RELEASE); __atomic_thread_fence(__ATOMIC_SEQ_CST); } while (0)
+#define write_seqcount_end(s) do { __atomic_thread_fence(__ATOMIC_SEQ_CST); __atomic_add_fetch(&(s)->seq, 1, __ATOMIC_RELEASE); } while (0)
+#define raw_write_seqcount_begin write_seqcount_begin
+#define raw_write_seqcount_end write_seqcount_end
+#define write_seqcount_invalidate(s) do { __atomic_add_fetch(&(s)->seq, 2, __ATOMIC_RELEASE); } while (0)
+static inline unsigned int lkpi_read_seqcount_begin(const seqcount_t *s)
+{
+	unsigned int v;
+	while ((v = __atomic_load_n(&s->seq, __ATOMIC_ACQUIRE)) & 1)
+		__builtin_ia32_pause();
+	return v;
+}
+#define read_seqcount_begin(s) lkpi_read_seqcount_begin(s)
+#define raw_read_seqcount_begin(s) lkpi_read_seqcount_begin(s)
+#define __read_seqcount_begin(s) lkpi_read_seqcount_begin(s)
+#define raw_read_seqcount(s) __atomic_load_n(&(s)->seq, __ATOMIC_ACQUIRE)
+#define read_seqcount_retry(s, start) (__atomic_thread_fence(__ATOMIC_ACQUIRE), __atomic_load_n(&(s)->seq, __ATOMIC_RELAXED) != (start))
+#define __read_seqcount_retry read_seqcount_retry
+#define raw_read_seqcount_latch(s) raw_read_seqcount(s)
+#define raw_read_seqcount_latch_retry(s, start) read_seqcount_retry(s, start)
+#define raw_write_seqcount_latch(s) write_seqcount_invalidate(s)
+#define seqprop_sequence(s) raw_read_seqcount(s)
 
 /* kmsg dumpers (panic log savers): never called. */
 enum kmsg_dump_reason { KMSG_DUMP_UNDEF, KMSG_DUMP_PANIC, KMSG_DUMP_OOPS, KMSG_DUMP_EMERG, KMSG_DUMP_SHUTDOWN, KMSG_DUMP_MAX };
