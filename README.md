@@ -222,7 +222,18 @@ userspace/windows/    Windows test programs (clang + lld-link) for Wine
             tools/make-start-tiles.py), no desktop pager, a single desktop (/etc/trinity defaults)
       - [x] 9b: boots straight into TDE (boot menu: "Syluxium" = desktop, "Syluxium (text
             console)"); logging out returns to the console; no first-run license/release-notes windows
-      - [ ] 9b: XP/7 theme (taskbar, window decorations, colors), DRM/KMS driver for display settings
+      - [x] 9b: XP-era look and feel, all original artwork (tools/make-xp-theme.py,
+            tools/make-xp-translations.py): glossy blue window frames with round top corners and a
+            red close button (twin deKorator theme), QtCurve widget style (rounded buttons, light
+            blue scroll bars, green checks/progress, white menus), Tahoma (Wine's free font) at 8 pt,
+            white text on the task buttons (ktaskbarrc), XP-style clock; Start menu with a user
+            picture header, Internet/E-mail, All Programs, My Documents/Pictures/Computer/Network
+            Places, Control Panel, Search, Run..., Turn Off Computer...; desktop icons My Computer,
+            My Documents, My Network Places, Recycle Bin, Internet; double-click to open; keys: Win
+            = Start menu (xcape), Win+E/R/D/L, Ctrl+Alt+Del = Task Manager (ksysguard); welcome-
+            screen login (TDM theme with user tiles, "Turn off computer") and session splash;
+            XP-style Turn Off dialog wording; Control Panel categories with XP names
+      - [ ] 9b: DRM/KMS driver for display settings; XP-style balloons for the bubbles
       Look: clean, glossy and rounded like Windows XP / Windows 7 (not Windows 11).
       - Right-click context menus everywhere: on files (Open, Open with, Extract Here / Extract
         to..., Compress, Rename, Delete, Properties, Change icon), on folders and empty space

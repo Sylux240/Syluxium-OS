@@ -1,0 +1,42 @@
+[Data]
+DataCount=1
+
+[Data_1]
+Comment=Windows-style keys of Syluxium.
+DataCount=1
+Enabled=true
+Name=Syluxium Keys
+SystemGroup=0
+Type=ACTION_DATA_GROUP
+AllowMerge=true
+
+[Data_1Conditions]
+ConditionsCount=0
+
+[Data_1_1]
+Comment=Win+E opens My Computer.
+Enabled=true
+Name=My Computer
+Type=COMMAND_URL_SHORTCUT_ACTION_DATA
+
+[Data_1_1Actions]
+ActionsCount=1
+
+[Data_1_1Actions0]
+CommandURL=syluxium-open computer
+Type=COMMAND_URL
+
+[Data_1_1Conditions]
+ConditionsCount=0
+
+[Data_1_1Triggers]
+Comment=Simple_action
+TriggersCount=1
+
+[Data_1_1Triggers0]
+Key=Win+E
+Type=SHORTCUT
+
+[Main]
+Version=2
+ImportId=syluxium_winkeys

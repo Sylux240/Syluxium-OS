@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=E-mail
+Comment=KMail
+Exec=kmail
+Icon=kmail
+Terminal=false
+# Shown only at the top level of the Start menu (tde-applications.menu).
+Categories=X-Syluxium-StartMenu;

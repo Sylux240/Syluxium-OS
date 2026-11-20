@@ -1,0 +1,14 @@
+#!/bin/sh
+# Open one of the places of the Start menu / desktop in the file manager
+# (Konqueror), like the XP-era "My ..." folders:
+#   syluxium-open documents|pictures|music|computer|network|home
+case "$1" in
+    documents) dir="$HOME/Documents" ;;
+    pictures)  dir="$HOME/Pictures" ;;
+    music)     dir="$HOME/Music" ;;
+    computer)  exec kfmclient openProfile filemanagement media:/ ;;
+    network)   exec kfmclient openProfile filemanagement remote:/ ;;
+    *)         dir="$HOME" ;;
+esac
+mkdir -p "$dir"
+exec kfmclient openProfile filemanagement "$dir"

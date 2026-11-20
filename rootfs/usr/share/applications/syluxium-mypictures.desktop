@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=My Pictures
+Comment=Your pictures folder
+Exec=syluxium-open pictures
+Icon=folder_image
+Terminal=false
+# Shown only at the top level of the Start menu (tde-applications.menu).
+Categories=X-Syluxium-StartMenu;

@@ -1,0 +1,44 @@
+/* Syluxium: GTK 3 programs (Firefox) in the desktop's XP-era colours:
+   GTK's built-in Adwaita theme with beige windows and a blue selection. */
+@import url("resource:///org/gtk/libgtk/theme/Adwaita/gtk-contained.css");
+
+@define-color theme_bg_color #ece9d8;
+@define-color theme_base_color #ffffff;
+@define-color theme_fg_color #000000;
+@define-color theme_text_color #000000;
+@define-color theme_selected_bg_color #316ac5;
+@define-color theme_selected_fg_color #ffffff;
+@define-color insensitive_bg_color #ece9d8;
+@define-color borders #aca899;
+
+* {
+  font-family: Tahoma, "DejaVu Sans", sans-serif;
+}
+
+window, .background, headerbar, menubar, toolbar {
+  background-color: #ece9d8;
+  background-image: none;
+  color: #000000;
+}
+
+menu, .menu, popover.menu, tooltip {
+  background-color: #ffffff;
+  color: #000000;
+}
+
+menu menuitem:hover, .menu menuitem:hover {
+  background-color: #316ac5;
+  color: #ffffff;
+}
+
+tooltip, tooltip.background {
+  background-color: #ffffe1;
+  color: #000000;
+  border: 1px solid #000000;
+  border-radius: 0;
+}
+
+selection, *:selected {
+  background-color: #316ac5;
+  color: #ffffff;
+}

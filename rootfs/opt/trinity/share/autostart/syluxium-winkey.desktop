@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Syluxium Start key
+Comment=The Windows key alone opens the Start menu
+# xcape: a Win key pressed and released on its own sends Alt+F1 (the
+# Start menu shortcut); Win+E, Win+R, ... keep working as shortcuts.
+Exec=xcape -e 'Super_L=Alt_L|F1;Super_R=Alt_L|F1'
+X-TDE-autostart-phase=2
+NoDisplay=true

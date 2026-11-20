@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=My Network Places
+Comment=Network places and remote computers
+Exec=syluxium-open network
+Icon=network
+Terminal=false
+# Shown only at the top level of the Start menu (tde-applications.menu).
+Categories=X-Syluxium-StartMenu;

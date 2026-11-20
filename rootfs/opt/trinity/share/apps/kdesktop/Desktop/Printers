@@ -1,0 +1,8 @@
+[Desktop Entry]
+# Not on Syluxium's desktop (no printing yet; the XP-era desktop didn't
+# have it either).
+Type=Application
+Name=Printers
+Exec=kjobviewer --all --show %i %m
+Icon=kjobviewer
+Hidden=true

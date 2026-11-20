@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Control Panel
+Comment=Change the settings of this computer
+Exec=kcontrol
+Icon=kcontrol
+Terminal=false
+# Shown only at the top level of the Start menu (tde-applications.menu).
+Categories=X-Syluxium-StartMenu;

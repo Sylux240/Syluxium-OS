@@ -1,13 +1,20 @@
-# Clock on the blue taskbar: white text, no box.
+# Clock on the blue taskbar, XP-style: just the time ("3:46 PM"), white,
+# no box; the date is in its tool tip.
 [General]
 Type=Plain
+
+[Plain]
+Foreground_Color=255,255,255
+Show_Date=false
+Show_DayOfWeek=false
+Show_Seconds=false
+Show_Frame=false
+Font=Tahoma,8,-1,5,50,0,0,0,0,0
 
 [Digital]
 Foreground_Color=255,255,255
 Background_Color=36,92,214
-Show_Date=true
-Use_Custom_Font=false
+Show_Date=false
 
-[Plain]
+[Date]
 Foreground_Color=255,255,255
-Show_Date=true

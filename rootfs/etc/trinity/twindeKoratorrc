@@ -1,0 +1,35 @@
+# Window frames: the deKorator decoration with Syluxium's own XP-era theme
+# (drawn by tools/make-xp-theme.py).
+[MISC]
+TitleAlignment=AlignLeft
+UseMenuImage=false
+IgnoreAppIconCol=true
+DblClkClose=true
+ShowBtmBorder=false
+UseShdtext=true
+ActiveShdtextX=1
+ActiveShdtextY=1
+ActiveShadowColor=0,32,120
+InActiveShdtextX=0
+InActiveShdtextY=0
+InActiveShadowColor=150,172,230
+BtnShiftX=0
+BtnShiftY=0
+
+[COLORS]
+Transparency=false
+ColorizeActFrames=false
+ColorizeActButtons=false
+ColorizeInActFrames=false
+ColorizeInActButtons=false
+UseAnimation=false
+ButtonsHoverType=None
+
+[BUTTONS]
+UseCustomButtonsColors=false
+
+[PATHS]
+FramesPath=/opt/trinity/share/apps/deKorator/themes/Syluxium-theme/deco
+ButtonsPath=/opt/trinity/share/apps/deKorator/themes/Syluxium-theme/buttons
+UseMasks=true
+MasksPath=/opt/trinity/share/apps/deKorator/themes/Syluxium-theme/masks

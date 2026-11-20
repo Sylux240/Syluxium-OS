@@ -1,0 +1,8 @@
+Id=syluxium_winkeys
+# Imports khotkeys/syluxium_winkeys.khotkeys (Win+E) into the user's
+# khotkeysrc once, like TDE's own printscreen preset.
+File=khotkeys_update
+Group=Dummy
+Options=overwrite
+ScriptArguments=--id syluxium_winkeys
+Script=khotkeys_update
