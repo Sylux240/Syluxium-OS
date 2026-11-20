@@ -81,7 +81,6 @@ struct device_type {
 /* The common part of every device (struct pci_dev embeds one). */
 struct device {
     struct device* parent;
-    dev_t devt;
     const char* init_name;
     char lkpi_name[32];
     void* driver_data;
@@ -103,6 +102,7 @@ struct device {
     struct device_node* of_node;
     struct fwnode_handle* fwnode;
     bool lkpi_added;
+    unsigned int devt; /* char device number (DRM minors); appended: C and C++ share this layout */
 };
 
 static inline void* dev_get_drvdata(const struct device* d) { return d->driver_data; }
