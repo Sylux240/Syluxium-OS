@@ -8,7 +8,7 @@ UseBackgroundTheme=true
 BackgroundTheme=/opt/trinity/share/apps/kicker/wallpapers/syluxium_taskbar.png
 ColorizeBackground=false
 RotateBackground=false
-Applets2=KMenuButton_1,ServiceButton_1,ServiceButton_2,Applet_2,Applet_3,Applet_4
+Applets2=KMenuButton_1,ServiceButton_1,ServiceButton_2,Applet_2,ServiceButton_3,Applet_3,Applet_4
 
 [KMenuButton_1]
 FreeSpace2=0
@@ -22,6 +22,12 @@ StorageId[$e]=tde-Home.desktop
 DesktopFile[$e]=/usr/share/applications/firefox-esr.desktop
 FreeSpace2=0
 StorageId[$e]=firefox-esr.desktop
+
+[ServiceButton_3]
+# The network button next to the clock (Wi-Fi chooser).
+DesktopFile[$e]=/usr/share/applications/syluxium-wifi.desktop
+FreeSpace2=1
+StorageId[$e]=syluxium-wifi.desktop
 
 [Applet_2]
 ConfigFile=taskbar_panelappletrc

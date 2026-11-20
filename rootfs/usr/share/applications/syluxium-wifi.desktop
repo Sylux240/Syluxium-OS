@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Wi-Fi Networks
+Comment=Connect to a Wi-Fi network
+Exec=syluxium-wifi-menu
+Icon=network
+Categories=Settings;Network;

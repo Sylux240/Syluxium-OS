@@ -1,7 +1,0 @@
-[Desktop Entry]
-Type=Application
-Name=Network
-Comment=Wi-Fi networks: click the icon by the clock to connect
-Exec=wpa_gui -t -q
-X-TDE-autostart-phase=2
-NoDisplay=true

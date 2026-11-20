@@ -1,0 +1,56 @@
+#!/bin/bash
+# Wi-Fi chooser (the network button by the clock): lists the networks the
+# Wi-Fi adapter sees, asks for the password, connects through
+# wpa_supplicant (wpa_cli; members of netdev may) and saves the network.
+T="Wi-Fi"
+# Interfaces wpa_supplicant runs on (control sockets, readable for netdev).
+iface=$(ls /run/wpa_supplicant 2>/dev/null | head -1)
+[ -n "$iface" ] || iface=$(iw dev 2>/dev/null | awk '$1 == "Interface" {print $2; exit}')
+if [ -z "$iface" ]; then
+    kdialog --title "$T" --sorry "No Wi-Fi adapter was found.\n\nWired network: $(ip -4 -o addr show 2>/dev/null | awk '$2 != "lo" {print $2 " " $4}' | head -3)"
+    exit 0
+fi
+W="wpa_cli -i $iface"
+for i in 1 2 3 4 5; do $W ping >/dev/null 2>&1 && break; sleep 1; done
+current=$($W status 2>/dev/null | sed -n 's/^ssid=//p')
+ip=$(ip -4 -o addr show "$iface" 2>/dev/null | awk '{print $4}')
+$W scan >/dev/null 2>&1
+kdialog --title "$T" --passivepopup "Looking for Wi-Fi networks..." 3 &
+sleep 4
+# bssid / frequency / signal level / flags / ssid
+items=()
+while IFS=$'\t' read -r bssid freq level flags ssid; do
+    [ -z "$ssid" ] && continue
+    case " ${seen[*]} " in *" $ssid "*) continue ;; esac
+    seen+=("$ssid")
+    pct=$(( (level + 100) * 2 )); [ $pct -gt 100 ] && pct=100; [ $pct -lt 0 ] && pct=0
+    lock=""; case "$flags" in *WPA*|*RSN*|*WEP*) lock=" (secured)" ;; esac
+    mark=""; [ "$ssid" = "$current" ] && mark="  - connected"
+    items+=("$ssid" "$ssid   $pct%$lock$mark")
+done < <($W scan_results 2>/dev/null | tail -n +2 | sort -t$'\t' -k3 -nr)
+[ ${#items[@]} -gt 0 ] || { kdialog --title "$T" --sorry "No Wi-Fi networks found."; exit 0; }
+status="Not connected"; [ -n "$current" ] && status="Connected to $current${ip:+ ($ip)}"
+ssid=$(kdialog --title "$T" --menu "$status\n\nChoose a network:" "${items[@]}") || exit 0
+flags=$($W scan_results | awk -F'\t' -v s="$ssid" '$5 == s {print $4; exit}')
+id=$($W add_network | tail -1)
+$W set_network "$id" ssid "\"$ssid\"" >/dev/null
+case "$flags" in
+    *WPA*|*RSN*)
+        pass=$(kdialog --title "$T" --password "Password for \"$ssid\":") || { $W remove_network "$id" >/dev/null; exit 0; }
+        $W set_network "$id" psk "\"$pass\"" >/dev/null ;;
+    *) $W set_network "$id" key_mgmt NONE >/dev/null ;;
+esac
+$W select_network "$id" >/dev/null
+$W save_config >/dev/null
+kdialog --title "$T" --passivepopup "Connecting to $ssid..." 5 &
+for i in $(seq 1 30); do
+    sleep 1
+    st=$($W status | sed -n 's/^wpa_state=//p')
+    ip=$(ip -4 -o addr show "$iface" 2>/dev/null | awk '{print $4}')
+    [ "$st" = COMPLETED ] && [ -n "$ip" ] && { kdialog --title "$T" --passivepopup "Connected to $ssid ($ip)" 6; exit 0; }
+done
+if [ "$st" = COMPLETED ]; then
+    kdialog --title "$T" --passivepopup "Connected to $ssid, but no IP address yet." 8
+else
+    kdialog --title "$T" --passivepopup "Could not connect to $ssid (wrong password?)" 8
+fi
