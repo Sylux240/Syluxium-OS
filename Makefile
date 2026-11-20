@@ -314,6 +314,7 @@ $(INITRAMFS): $(KERNEL) tools/mkfontdir.py tools/wine-setup.sh tools/wine-prefix
 	    src=$$(ls $(FIRMWARE_ROOT)/usr/lib/firmware/$$f $(FIRMWARE_ROOT)/lib/firmware/$$f 2>/dev/null | head -1); \
 	    [ -n "$$src" ] || { echo "  warning: firmware $$f not found"; continue; }; \
 	    mkdir -p $(ROOTFS)/usr/lib/firmware/$$(dirname $$f); cp -L "$$src" $(ROOTFS)/usr/lib/firmware/$$f; done
+	@ln -sf mediatek/mt7601u.bin $(ROOTFS)/usr/lib/firmware/mt7601u.bin # older drivers ask for it at the top level
 	@# Wine: 32-bit DLLs (WoW64), stripped DLLs, the template prefix.
 	@tools/wine-setup.sh $(ROOTFS) $(WINE_I386_ROOT)
 	@# What the installer puts on the new disk: kernel, Limine (UEFI + BIOS stages), its installer.
