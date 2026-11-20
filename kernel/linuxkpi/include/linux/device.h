@@ -14,6 +14,8 @@ struct device_driver {
     const char* name;
     void* owner;
     const struct dev_pm_ops* pm;
+    const struct of_device_id* of_match_table; /* always NULL here */
+    const void* acpi_match_table;
 };
 
 /* sysfs: attributes are accepted and ignored (no sysfs yet). */
@@ -66,6 +68,8 @@ struct class {
     int (*dev_uevent)(const struct device* dev, struct kobj_uevent_env* env);
     void (*dev_release)(struct device* dev);
     const struct dev_pm_ops* pm;
+    const struct of_device_id* of_match_table; /* always NULL here */
+    const void* acpi_match_table;
     const void* (*namespace_fn)(const struct device* dev);
     void (*get_ownership)(const struct device* dev, u32* uid, u32* gid);
     const void* ns_type;

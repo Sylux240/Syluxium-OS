@@ -41,6 +41,8 @@ LKPI_EXTERN_C_BEGIN
 
 struct pci_driver;
 
+struct pci_bus { unsigned char number; struct pci_bus *parent; };
+
 struct pci_dev {
     struct device dev;
     unsigned short vendor, device;

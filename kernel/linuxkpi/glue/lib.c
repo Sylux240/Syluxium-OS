@@ -1284,3 +1284,35 @@ void *memdup_array_user(const void __user *src, size_t n, size_t size)
 	}
 	return p;
 }
+
+/* ---- I2C ---- */
+#include <linux/i2c.h>
+int __i2c_transfer(struct i2c_adapter *adap, struct i2c_msg *msgs, int num)
+{
+	int r = -EOPNOTSUPP, tries;
+	int (*x)(struct i2c_adapter *, struct i2c_msg *, int) = adap->algo->master_xfer ? adap->algo->master_xfer : adap->algo->xfer;
+	if (!x)
+		return -EOPNOTSUPP;
+	for (tries = 0; tries <= adap->retries; tries++) {
+		r = x(adap, msgs, num);
+		if (r != -EAGAIN)
+			break;
+	}
+	return r;
+}
+int i2c_transfer(struct i2c_adapter *adap, struct i2c_msg *msgs, int num)
+{
+	int r;
+	mutex_lock(&adap->bus_lock);
+	r = __i2c_transfer(adap, msgs, num);
+	mutex_unlock(&adap->bus_lock);
+	return r;
+}
+int i2c_add_adapter(struct i2c_adapter *adap)
+{
+	mutex_init(&adap->bus_lock);
+	if (!adap->retries)
+		adap->retries = 1;
+	return 0;
+}
+void i2c_del_adapter(struct i2c_adapter *adap) { }

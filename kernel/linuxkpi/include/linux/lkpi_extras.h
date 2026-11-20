@@ -302,7 +302,14 @@ struct device_node;
 #define dev_is_platform(dev) false
 #define platform_get_resource(pdev, type, num) ((struct resource *)NULL)
 #define kobj_to_dev(k) container_of(k, struct device, kobj)
-struct bin_attribute { struct attribute attr; size_t size; void *private; };
+struct kobject; struct file;
+struct bin_attribute {
+	struct attribute attr;
+	size_t size;
+	void *private;
+	ssize_t (*read)(struct file *, struct kobject *, struct bin_attribute *, char *, loff_t, size_t);
+	ssize_t (*write)(struct file *, struct kobject *, struct bin_attribute *, char *, loff_t, size_t);
+};
 
 /* Memory regions of devices. */
 #define MEMREMAP_WB 1
@@ -319,3 +326,38 @@ void __iomem *devm_ioremap_wc(struct device *dev, resource_size_t offset, resour
 #define PCI_SLOT(devfn) (((devfn) >> 3) & 0x1f)
 #define PCI_FUNC(devfn) ((devfn) & 0x07)
 #define pci_domain_nr(bus) 0
+#define DECLARE_DYNDBG_CLASSMAP(...)
+
+/* ---- batch 4 ---- */
+typedef unsigned long pgoff_t;
+static inline bool mem_is_zero(const void *s, size_t n)
+{
+	const unsigned char *p = s;
+	while (n--)
+		if (*p++)
+			return false;
+	return true;
+}
+#define strtomem_pad(dest, src, pad) do { \
+	size_t _n = strnlen(src, sizeof(dest)); \
+	memcpy(dest, src, _n); \
+	memset((char *)(dest) + _n, pad, sizeof(dest) - _n); } while (0)
+#define list_for_each_entry_from_reverse(pos, head, member) \
+	for (; &pos->member != (head); pos = list_prev_entry(pos, member))
+struct fwnode_handle { struct fwnode_handle *secondary; const void *ops; };
+#define fwnode_handle_put(f) do { } while (0)
+#define fwnode_handle_get(f) (f)
+#define lock_acquire_shared_recursive(...) do { } while (0) /* args may name lockdep-only maps */
+#define lock_release(...) do { } while (0)
+#define _RET_IP_ ((unsigned long)__builtin_return_address(0))
+struct of_device_id { char name[32]; char type[32]; char compatible[128]; const void *data; };
+#ifndef KHZ2PICOS
+#define KHZ2PICOS(a) (1000000000UL / (a))
+#endif
+#define CEC_PHYS_ADDR_INVALID 0xffff
+#define NR_PAGE_ORDERS 11
+#define MAX_PAGE_ORDER 10
+struct of_endpoint { unsigned int port; unsigned int id; const struct device_node *local_node; };
+#define vga_switcheroo_lock_ddc(pdev) do { } while (0)
+#define vga_switcheroo_unlock_ddc(pdev) do { } while (0)
+#define vga_switcheroo_handler_flags() 0

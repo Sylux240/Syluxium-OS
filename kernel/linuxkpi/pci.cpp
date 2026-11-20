@@ -177,6 +177,12 @@ long lkpi_probe(const dev::Driver* drv, dev::Device* d) {
     pdev->revision = d->revision;
     pdev->pin = f->irq_pin;
     pdev->bus_number = f->bus;
+    {
+        // One pci_bus per bus number (DRM prints pdev->bus->number).
+        static struct pci_bus buses[256];
+        buses[f->bus & 0xff].number = static_cast<unsigned char>(f->bus);
+        pdev->bus = &buses[f->bus & 0xff];
+    }
     pdev->devfn = static_cast<unsigned>((f->device << 3) | f->function);
     pdev->driver = pdrv;
     pdev->lkpi_function = f;

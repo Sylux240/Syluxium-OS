@@ -10,6 +10,7 @@ struct seq_file { void* private; };
 static inline void seq_printf(struct seq_file* m, const char* fmt, ...) {}
 static inline void seq_puts(struct seq_file* m, const char* s) {}
 static inline void seq_putc(struct seq_file* m, char c) {}
+static inline int seq_write(struct seq_file* m, const void* data, size_t len) { return 0; }
 static inline int single_open(struct file* f, int (*show)(struct seq_file*, void*), void* data) { return -ENODEV; }
 #define single_release NULL
 #define seq_read NULL

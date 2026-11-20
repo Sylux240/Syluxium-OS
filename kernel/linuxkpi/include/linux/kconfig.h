@@ -1,3 +1,16 @@
+/* Linux 64-bit stdint types */
+/* In Linux, uint64_t is u64 (unsigned long long), so u64* and uint64_t*
+ * are interchangeable in driver code. Make <stdint.h> agree (C only). */
+#ifndef __cplusplus
+#undef __UINT64_TYPE__
+#define __UINT64_TYPE__ long long unsigned int
+#undef __INT64_TYPE__
+#define __INT64_TYPE__ long long int
+#undef __UINT64_C_SUFFIX__
+#define __UINT64_C_SUFFIX__ ULL
+#undef __INT64_C_SUFFIX__
+#define __INT64_C_SUFFIX__ LL
+#endif
 /* LinuxKPI: the kernel configuration that Linux sources compiled into
  * Syluxium see (included first, like Linux's autoconf.h + kconfig.h). */
 #ifndef _LKPI_LINUX_KCONFIG_H
@@ -62,3 +75,9 @@ struct poll_table_struct;
 
 /* Attributes (__must_check, __packed, ...) used by headers before anything else. */
 #include <linux/compiler.h>
+
+/* Exports are no-ops in a monolithic kernel; visible from every file. */
+#ifndef EXPORT_SYMBOL
+#define EXPORT_SYMBOL(x)
+#define EXPORT_SYMBOL_GPL(x)
+#endif
