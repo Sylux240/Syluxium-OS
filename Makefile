@@ -25,6 +25,7 @@ BUILD   := build
 OBJDIR  := $(BUILD)/obj
 KERNEL  := $(BUILD)/syluxium.elf
 IMAGE   := $(BUILD)/syluxium.img
+PICKER  := $(BUILD)/picker.efi
 INITRAMFS := $(BUILD)/initramfs.cpio
 ROOTFS  := $(BUILD)/rootfs
 
@@ -291,7 +292,7 @@ $(WINE_I386_STAMP): tools/debian-fetch.py Makefile
 	@python3 tools/debian-fetch.py --arch i386 --suite $(DEBIAN_SUITE) --out $(WINE_I386_ROOT) --cache deps/debian --no-deps libwine
 	@touch $@
 
-$(INITRAMFS): $(KERNEL) tools/mkfontdir.py tools/debrand-tde.py tools/syluxium_names.py tools/wine-setup.sh tools/wine-prefix-links.py $(DEBIAN_STAMP) $(DEBIAN_I386_STAMP) $(WINE_I386_STAMP) $(FIRMWARE_STAMP) $(USER_PROGS) $(USER32_PROGS) $(WIN_PROGS) $(shell find rootfs -type f 2>/dev/null) $(shell find rootfs -type d 2>/dev/null) Makefile
+$(INITRAMFS): $(KERNEL) $(PICKER) tools/mkfontdir.py tools/debrand-tde.py tools/syluxium_names.py tools/wine-setup.sh tools/wine-prefix-links.py $(DEBIAN_STAMP) $(DEBIAN_I386_STAMP) $(WINE_I386_STAMP) $(FIRMWARE_STAMP) $(USER_PROGS) $(USER32_PROGS) $(WIN_PROGS) $(shell find rootfs -type f 2>/dev/null) $(shell find rootfs -type d 2>/dev/null) Makefile
 	@echo "  ROOT  $(ROOTFS)"
 	@rm -rf $(ROOTFS)
 	@cp -a $(DEBIAN_ROOT) $(ROOTFS)
@@ -327,6 +328,7 @@ $(INITRAMFS): $(KERNEL) tools/mkfontdir.py tools/debrand-tde.py tools/syluxium_n
 	@mkdir -p $(ROOTFS)/usr/lib/syluxium/boot
 	@cp $(KERNEL) $(LIMINE_DIR)/BOOTX64.EFI $(LIMINE_DIR)/limine-bios.sys $(ROOTFS)/usr/lib/syluxium/boot/
 	@cp limine-splash.png $(ROOTFS)/usr/lib/syluxium/boot/splash.png
+	@cp $(PICKER) $(ROOTFS)/usr/lib/syluxium/boot/picker.efi
 	@$(USER_CC) -static -O2 -w -o $(ROOTFS)/usr/lib/syluxium/boot/limine $(LIMINE_DIR)/limine.c
 	@mkdir -p $(ROOTFS)/tmp $(ROOTFS)/var/tmp && chmod 1777 $(ROOTFS)/tmp $(ROOTFS)/var/tmp
 	@# The dynamic loader's cache (ldconfig): TDE's libraries live in /opt/trinity/lib.
@@ -342,7 +344,7 @@ $(INITRAMFS): $(KERNEL) tools/mkfontdir.py tools/debrand-tde.py tools/syluxium_n
 # Bootable MBR disk image: one FAT32 EFI system partition, BIOS + UEFI boot.
 # Built entirely without root using sfdisk + mtools.
 # ---------------------------------------------------------------------------
-$(IMAGE): $(KERNEL) $(INITRAMFS) limine.conf limine-splash.png $(LIMINE_DIR)/limine
+$(IMAGE): $(KERNEL) $(INITRAMFS) $(PICKER) limine.conf limine-splash.png $(LIMINE_DIR)/limine
 	@echo "  IMG   $@"
 	@# Sized to fit: kernel + initramfs + 32 MiB headroom, at least 128 MiB.
 	@# Built as $@.tmp and renamed only on success, so a failed build never
@@ -366,7 +368,8 @@ $(IMAGE): $(KERNEL) $(INITRAMFS) limine.conf limine-splash.png $(LIMINE_DIR)/lim
 	 mcopy -i $$tmp@@1M $(INITRAMFS) ::/boot/initramfs.cpio; \
 	 mcopy -i $$tmp@@1M limine.conf $(LIMINE_DIR)/limine-bios.sys limine-splash.png ::/boot/limine; \
 	 mren  -i $$tmp@@1M ::/boot/limine/limine-splash.png ::/boot/limine/splash.png; \
-	 mcopy -i $$tmp@@1M $(LIMINE_DIR)/BOOTX64.EFI ::/EFI/BOOT; \
+	 mcopy -i $$tmp@@1M $(PICKER) ::/EFI/BOOT/BOOTX64.EFI; \
+	 mcopy -i $$tmp@@1M $(LIMINE_DIR)/BOOTX64.EFI ::/EFI/BOOT/limine.efi; \
 	 $(LIMINE_DIR)/limine bios-install --quiet $$tmp; \
 	 mv $$tmp $@
 
@@ -400,3 +403,11 @@ distclean: clean
 	rm -rf deps
 
 -include $(DEPS)
+
+# The graphical boot picker (UEFI): \EFI\BOOT\BOOTX64.EFI, Limine next to it as limine.efi.
+$(PICKER): boot/picker/picker.c boot/picker/efi.h boot/picker/assets.h
+	@mkdir -p $(BUILD)
+	@echo "  EFI   $@"
+	@clang --target=x86_64-unknown-windows -ffreestanding -fshort-wchar -mno-red-zone -fno-stack-protector \
+	    -mno-stack-arg-probe -fno-builtin -O2 -Wall -Wno-unused-function -c -o $(BUILD)/picker.o $<
+	@lld-link -subsystem:efi_application -entry:efi_main -nodefaultlib -out:$@ $(BUILD)/picker.o

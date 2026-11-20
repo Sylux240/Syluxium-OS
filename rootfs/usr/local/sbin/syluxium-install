@@ -75,7 +75,13 @@ sed -i "s/^127\.0\.1\.1.*/127.0.1.1\t$HOSTNAME_NEW/" "$TARGET/etc/hosts"
 step 7 "Installing the boot loader"
 mount -t vfat "$ESP" "$TARGET/boot/efi"
 mkdir -p "$TARGET/boot/efi/EFI/BOOT" "$TARGET/boot/efi/boot/limine"
-cp "$BOOT/BOOTX64.EFI" "$TARGET/boot/efi/EFI/BOOT/"
+# Graphical boot picker first; Limine next to it (the picker starts it).
+if [ -f "$BOOT/picker.efi" ]; then
+    cp "$BOOT/picker.efi" "$TARGET/boot/efi/EFI/BOOT/BOOTX64.EFI"
+    cp "$BOOT/BOOTX64.EFI" "$TARGET/boot/efi/EFI/BOOT/limine.efi"
+else
+    cp "$BOOT/BOOTX64.EFI" "$TARGET/boot/efi/EFI/BOOT/"
+fi
 cp "$BOOT/syluxium.elf" "$TARGET/boot/efi/boot/"
 cp "$BOOT/limine-bios.sys" "$TARGET/boot/efi/boot/limine/"
 cp "$BOOT/splash.png" "$TARGET/boot/efi/boot/limine/" 2>/dev/null
