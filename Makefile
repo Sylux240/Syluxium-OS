@@ -310,6 +310,9 @@ $(INITRAMFS): $(KERNEL) tools/mkfontdir.py tools/wine-setup.sh tools/wine-prefix
 	@cp -a $(DEBIAN_I386_ROOT)/usr/lib/ld-linux.so.2 $(ROOTFS)/usr/lib/
 	@for prog in $(DEBIAN_I386_PROGS); do cp $(DEBIAN_I386_ROOT)/usr/bin/$$prog $(ROOTFS)/usr/bin/$$prog-i386; done
 	@cp -r rootfs/. $(ROOTFS)/
+	@# /var/run and /var/lock point into /run, as on Debian (programs look for
+	@# their sockets and pid files there: wpa_cli, dbus, ...).
+	@rm -rf $(ROOTFS)/var/run $(ROOTFS)/var/lock && ln -s /run $(ROOTFS)/var/run && ln -s /run/lock $(ROOTFS)/var/lock
 	@for f in $(FIRMWARE_FILES); do \
 	    src=$$(ls $(FIRMWARE_ROOT)/usr/lib/firmware/$$f $(FIRMWARE_ROOT)/lib/firmware/$$f 2>/dev/null | head -1); \
 	    [ -n "$$src" ] || { echo "  warning: firmware $$f not found"; continue; }; \
