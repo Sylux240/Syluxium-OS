@@ -374,7 +374,9 @@ void link_up(Interface* iface) {
 }
 
 void unregister_interface(Interface* iface) {
+    iface->detach_driver(); // waits for a transmit in progress, then no more calls
     LockGuard guard(g_lock);
+    iface->detached = true;
     iface->flags &= ~(IFF_UP | IFF_RUNNING);
     iface->link_up = false;
     iface->addr = 0;

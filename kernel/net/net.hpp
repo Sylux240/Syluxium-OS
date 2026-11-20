@@ -14,6 +14,8 @@ constexpr u32 IFF_UP = 0x1, IFF_BROADCAST = 0x2, IFF_LOOPBACK = 0x8, IFF_RUNNING
 class Interface {
 public:
     virtual ~Interface() = default;
+    // The hardware is gone: stop calling into its driver (unregister_interface).
+    virtual void detach_driver() {}
 
     // Send one Ethernet frame (without FCS). Must not sleep for long; may
     // drop the frame when the hardware queue is full.
@@ -32,6 +34,7 @@ public:
     u32 mtu = 1500;
     u32 index = 0;               // ifindex, from 1
     u32 flags = IFF_UP | IFF_BROADCAST | IFF_MULTICAST | IFF_RUNNING;
+    bool detached = false;       // hardware removed (USB unplug): kept for its index/name, revived on replug
     bool link_up = true;
     u32 addr = 0, netmask = 0;   // IPv4, host byte order (0 = unconfigured)
     dev::Device* hw = nullptr;
