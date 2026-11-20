@@ -1,3 +1,5 @@
+#include <linux/uaccess.h>
+#include <linux/io.h>
 // SPDX-License-Identifier: GPL-2.0
 /*
  * LinuxKPI: small library pieces the wireless stack needs - ctype, string
@@ -1193,5 +1195,92 @@ struct pid *lkpi_task_pid(struct task_struct *t)
 	struct pid *p = kzalloc(sizeof(*p), GFP_KERNEL);
 	if (p)
 		p->nr = t ? t->tgid : 0;
+	return p;
+}
+
+/* ---- batch 3 helpers ---- */
+struct cpuinfo_x86 boot_cpu_data = { .x86_clflush_size = 64, .x86_cache_alignment = 64 };
+struct resource iomem_resource = { .name = "PCI mem", .start = 0, .end = ~0ULL };
+
+static void lkpi_swap(void *a, void *b, size_t size)
+{
+	char t, *x = a, *y = b;
+	while (size--) {
+		t = *x;
+		*x++ = *y;
+		*y++ = t;
+	}
+}
+/* Heap sort (in place, O(n log n), like Linux's). */
+void sort(void *base, size_t num, size_t size, int (*cmp)(const void *, const void *), void (*swap_fn)(void *, void *, int))
+{
+	char *b = base;
+	size_t i, n, c, r;
+	if (num < 2)
+		return;
+	for (i = num / 2; i-- > 0;) {
+		for (r = i; (c = 2 * r + 1) < num; r = c) {
+			if (c + 1 < num && cmp(b + c * size, b + (c + 1) * size) < 0)
+				c++;
+			if (cmp(b + r * size, b + c * size) >= 0)
+				break;
+			swap_fn ? swap_fn(b + r * size, b + c * size, size) : lkpi_swap(b + r * size, b + c * size, size);
+		}
+	}
+	for (n = num - 1; n > 0; n--) {
+		swap_fn ? swap_fn(b, b + n * size, size) : lkpi_swap(b, b + n * size, size);
+		for (r = 0; (c = 2 * r + 1) < n; r = c) {
+			if (c + 1 < n && cmp(b + c * size, b + (c + 1) * size) < 0)
+				c++;
+			if (cmp(b + r * size, b + c * size) >= 0)
+				break;
+			swap_fn ? swap_fn(b + r * size, b + c * size, size) : lkpi_swap(b + r * size, b + c * size, size);
+		}
+	}
+}
+/* Stable insertion sort of a list (DRM sorts short mode lists). */
+void list_sort(void *priv, struct list_head *head, int (*cmp)(void *, const struct list_head *, const struct list_head *))
+{
+	struct list_head sorted, *e, *pos;
+	INIT_LIST_HEAD(&sorted);
+	while (!list_empty(head)) {
+		e = head->next;
+		list_del(e);
+		for (pos = sorted.prev; pos != &sorted && cmp(priv, pos, e) > 0; pos = pos->prev)
+			;
+		list_add(e, pos);
+	}
+	list_splice(&sorted, head);
+}
+unsigned long clear_user(void __user *to, unsigned long n)
+{
+	char zero[64] = { 0 };
+	while (n) {
+		unsigned long c = n < sizeof(zero) ? n : sizeof(zero);
+		if (copy_to_user(to, zero, c))
+			return n;
+		to = (char __user *)to + c;
+		n -= c;
+	}
+	return 0;
+}
+void *devm_memremap(struct device *dev, resource_size_t offset, size_t size, unsigned long flags)
+{
+	return (void *)ioremap(offset, size);
+}
+void __iomem *devm_ioremap_wc(struct device *dev, resource_size_t offset, resource_size_t size)
+{
+	return ioremap(offset, size);
+}
+
+void *memdup_array_user(const void __user *src, size_t n, size_t size)
+{
+	void *p = kmalloc(n * size, GFP_KERNEL);
+	if (!p)
+		return ERR_PTR(-ENOMEM);
+	if (copy_from_user(p, src, n * size)) {
+		kfree(p);
+		return ERR_PTR(-EFAULT);
+	}
 	return p;
 }

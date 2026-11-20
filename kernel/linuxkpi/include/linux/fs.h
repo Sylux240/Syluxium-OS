@@ -121,3 +121,9 @@ struct file *alloc_file_pseudo(struct inode *inode, struct vfsmount *mnt, const 
 char *dynamic_dname(char *buf, int buflen, const char *fmt, ...);
 char *strndup_user(const char __user *s, long n);
 #define simple_dname NULL
+
+/* Descriptor helpers. */
+struct fd { struct file *file; };
+static inline struct fd fdget(unsigned int fd) { struct fd f = { fget(fd) }; return f; }
+static inline void fdput(struct fd f) { if (f.file) fput(f.file); }
+#define fd_file(f) ((f).file)

@@ -170,3 +170,152 @@ struct scatterlist;
 struct sg_table { struct scatterlist *sgl; unsigned int nents; unsigned int orig_nents; };
 int sg_alloc_table(struct sg_table *t, unsigned int nents, gfp_t gfp);
 void sg_free_table(struct sg_table *t);
+
+/* ---- batch 3: DRM core long tail ---- */
+#define oops_in_progress 0
+#define overflowuid 65534
+#ifndef O_EXCL
+#define O_EXCL 00000200
+#endif
+#define ARCH_KMALLOC_MINALIGN 8
+#define ARCH_DMA_MINALIGN 64
+#define MINORBITS 20
+#define MINORMASK ((1U << MINORBITS) - 1)
+#define MKDEV(ma, mi) (((ma) << MINORBITS) | (mi))
+#define MAJOR(dev) ((unsigned int)((dev) >> MINORBITS))
+#define MINOR(dev) ((unsigned int)((dev) & MINORMASK))
+#define old_encode_dev(d) ((u16)((MAJOR(d) << 8) | MINOR(d)))
+#define new_encode_dev(d) ((u32)((MINOR(d) & 0xff) | (MAJOR(d) << 8) | ((MINOR(d) & ~0xff) << 12)))
+#ifndef SZ_1K
+#define SZ_1K 0x00000400
+#define SZ_4K 0x00001000
+#define SZ_64K 0x00010000
+#define SZ_1M 0x00100000
+#define SZ_2M 0x00200000
+#define SZ_16M 0x01000000
+#define SZ_256M 0x10000000
+#define SZ_1G 0x40000000
+#endif
+#define MAX_T(type, a, b) ((type)(a) > (type)(b) ? (type)(a) : (type)(b))
+#define MIN_T(type, a, b) ((type)(a) < (type)(b) ? (type)(a) : (type)(b))
+#define swab16(x) __builtin_bswap16(x)
+#define swab32(x) __builtin_bswap32(x)
+#define swab64(x) __builtin_bswap64(x)
+static inline u64 div64_u64_rem(u64 dividend, u64 divisor, u64 *remainder)
+{
+	*remainder = dividend % divisor;
+	return dividend / divisor;
+}
+#define nsecs_to_jiffies64(n) ((u64)(n) / (1000000000ULL / HZ))
+static inline char *strnchr(const char *s, size_t count, int c)
+{
+	for (; count-- && *s; s++)
+		if (*s == (char)c)
+			return (char *)s;
+	return NULL;
+}
+static inline size_t str_has_prefix(const char *str, const char *prefix)
+{
+	size_t len = strlen(prefix);
+	return strncmp(str, prefix, len) == 0 ? len : 0;
+}
+static inline bool sysfs_streq(const char *s1, const char *s2)
+{
+	while (*s1 && *s1 == *s2) {
+		s1++;
+		s2++;
+	}
+	if (*s1 == *s2)
+		return true;
+	if (!*s1 && *s2 == '\n' && !s2[1])
+		return true;
+	if (*s1 == '\n' && !s1[1] && !*s2)
+		return true;
+	return false;
+}
+void sort(void *base, size_t num, size_t size, int (*cmp)(const void *, const void *), void (*swap)(void *, void *, int));
+struct list_head;
+void list_sort(void *priv, struct list_head *head, int (*cmp)(void *, const struct list_head *, const struct list_head *));
+#define __list_del_entry(e) list_del(e)
+#define INIT_WORK_ONSTACK(w, f) INIT_WORK(w, f)
+#define destroy_work_on_stack(w) do { } while (0)
+#define lockdep_assert_once(c) do { } while (0)
+#define lockdep_assert_none_held_once() do { } while (0)
+#define compat_ptr(x) ((void __user *)(unsigned long)(x))
+#define task_pid_vnr(t) ((t)->pid)
+#define kmalloc_node_track_caller(size, gfp, node) kmalloc(size, gfp)
+void *memdup_array_user(const void __user *src, size_t n, size_t size);
+unsigned long clear_user(void __user *to, unsigned long n);
+static inline int atomic_dec_and_mutex_lock(atomic_t *cnt, struct mutex *lock)
+{
+	mutex_lock(lock);
+	if (atomic_dec_return(cnt) == 0)
+		return 1;
+	mutex_unlock(lock);
+	return 0;
+}
+#define kernel_fpu_begin() do { } while (0)
+#define kernel_fpu_end() do { } while (0)
+#define sched_set_fifo(t) do { } while (0)
+#define sched_set_fifo_low(t) do { } while (0)
+
+/* wait_event_lock_irq: the lock is dropped while waiting. */
+#define wait_event_lock_irq(wq, cond, lock) \
+	do { while (!(cond)) { spin_unlock_irq(&(lock)); wait_event(wq, (cond)); spin_lock_irq(&(lock)); } } while (0)
+
+/* eventfd (DRM syncobj event notifications): not supported yet. */
+struct eventfd_ctx;
+#define eventfd_signal(ctx) do { } while (0)
+#define eventfd_ctx_fdget(fd) ((struct eventfd_ctx *)ERR_PTR(-EINVAL))
+#define eventfd_ctx_put(ctx) do { } while (0)
+
+#define fops_get(fops) (fops)
+#define fops_put(fops) do { } while (0)
+#define replace_fops(f, fops) do { (f)->f_op = (fops); } while (0)
+#define file_clone_open(f) ((struct file *)ERR_PTR(-EOPNOTSUPP))
+#define simple_pin_fs(type, mount, count) 0
+#define simple_release_fs(mount, count) do { } while (0)
+
+/* Machine/platform queries. */
+struct cpuinfo_x86 { int x86_clflush_size; int x86_cache_alignment; };
+extern struct cpuinfo_x86 boot_cpu_data;
+#define xen_pv_domain() 0
+#define CC_ATTR_MEM_ENCRYPT 0
+#define cc_platform_has(attr) false
+#define vga_switcheroo_process_delayed_switch() do { } while (0)
+struct component_ops { int (*bind)(struct device *, struct device *, void *); void (*unbind)(struct device *, struct device *, void *); };
+#define component_add(dev, ops) 0
+#define component_del(dev, ops) do { } while (0)
+#define aperture_remove_conflicting_devices(base, size, name) 0
+#define aperture_remove_conflicting_pci_devices(pdev, name) 0
+#define devm_aperture_acquire_for_platform_device(pdev, base, size) 0
+
+/* Device tree (PCs have none). */
+struct device_node;
+#define of_parse_phandle(np, name, index) ((struct device_node *)NULL)
+#define of_property_read_u32(np, name, out) (-EINVAL)
+#define of_property_read_string(np, name, out) (-EINVAL)
+#define of_property_present(np, name) false
+#define of_node_put(np) do { } while (0)
+#define of_address_to_resource(np, index, r) (-EINVAL)
+#define dev_fwnode(dev) ((struct fwnode_handle *)NULL)
+#define dev_is_platform(dev) false
+#define platform_get_resource(pdev, type, num) ((struct resource *)NULL)
+#define kobj_to_dev(k) container_of(k, struct device, kobj)
+struct bin_attribute { struct attribute attr; size_t size; void *private; };
+
+/* Memory regions of devices. */
+#define MEMREMAP_WB 1
+#define MEMREMAP_WT 2
+#define MEMREMAP_WC 4
+extern struct resource iomem_resource;
+#define devm_request_mem_region(dev, start, n, name) ((struct resource *)NULL)
+void *devm_memremap(struct device *dev, resource_size_t offset, size_t size, unsigned long flags);
+void __iomem *devm_ioremap_wc(struct device *dev, resource_size_t offset, resource_size_t size);
+#define devm_add_action_or_reset(dev, action, data) ({ (void)(action); 0; })
+#define devm_add_action(dev, action, data) ({ (void)(action); 0; })
+
+/* PCI addresses. */
+#define PCI_SLOT(devfn) (((devfn) >> 3) & 0x1f)
+#define PCI_FUNC(devfn) ((devfn) & 0x07)
+#define pci_domain_nr(bus) 0

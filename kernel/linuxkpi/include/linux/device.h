@@ -70,6 +70,7 @@ struct class {
     void (*get_ownership)(const struct device* dev, u32* uid, u32* gid);
     const void* ns_type;
     const void* (*namespace)(const struct device* dev);
+    char* (*devnode)(const struct device* dev, umode_t* mode); /* appended */
 };
 #endif
 struct device_type {

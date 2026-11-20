@@ -58,6 +58,7 @@ struct pci_dev {
     unsigned long lkpi_res_flags[DEVICE_COUNT_RESOURCE];
     void __iomem* lkpi_iomap[DEVICE_COUNT_RESOURCE];
     void* lkpi_function; /* Syluxium pci::Function */
+    struct pci_bus* bus; /* appended: layout shared with C++ */
 };
 
 struct pci_driver {
