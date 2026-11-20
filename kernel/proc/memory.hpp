@@ -42,7 +42,16 @@ struct Vma {
     u64 file_offset = 0;          // file position of `start`
     u64 file_bytes = 0;           // bytes of file data from `start`; the rest is zero-filled
     ListNode node;
+    // VMA_DEVICE: on the global list of device mappings, so drivers can
+    // revoke pages (zap_device_range) when buffer memory moves.
+    ListNode dev_node;
+    class Memory* owner = nullptr;
 };
+
+// Drivers (LinuxKPI unmap_mapping_range): unmap every user page of device
+// mappings whose file offsets overlap [offset, offset + len). The next
+// access faults and asks the driver (Inode::mmap_phys) again.
+void zap_device_range(u64 offset, u64 len);
 
 class Memory {
 public:

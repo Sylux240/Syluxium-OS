@@ -9,6 +9,7 @@
 #include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/pci_ids.h>
+#include <linux/ioport.h>
 #include <uapi/linux/pci_regs.h>
 
 LKPI_EXTERN_C_BEGIN
@@ -20,10 +21,6 @@ LKPI_EXTERN_C_BEGIN
 #define PCI_DEVICE_CLASS(cls, mask) .class = (cls), .class_mask = (mask), .vendor = PCI_ANY_ID, .device = PCI_ANY_ID, .subvendor = PCI_ANY_ID, .subdevice = PCI_ANY_ID
 
 #define DEVICE_COUNT_RESOURCE 6
-#define IORESOURCE_IO 0x100
-#define IORESOURCE_MEM 0x200
-#define IORESOURCE_PREFETCH 0x2000
-#define IORESOURCE_MEM_64 0x100000
 
 struct pci_driver;
 
@@ -47,6 +44,7 @@ struct pci_dev {
     void __iomem* lkpi_iomap[DEVICE_COUNT_RESOURCE];
     void* lkpi_function; /* Syluxium pci::Function */
     struct pci_bus* bus; /* appended: layout shared with C++ */
+    struct resource resource[DEVICE_COUNT_RESOURCE + 1]; /* BARs + expansion ROM (PCI_ROM_RESOURCE) */
 };
 
 struct pci_driver {
@@ -79,6 +77,70 @@ int pci_request_regions(struct pci_dev* dev, const char* name);
 #define pci_request_selected_regions(d, mask, n) pci_request_regions(d, n)
 #define pcim_request_all_regions(d, n) pci_request_regions(d, n)
 void pci_release_regions(struct pci_dev* dev);
+#define pci_request_region(d, bar, name) 0
+#define pci_release_region(d, bar) do { } while (0)
+#define pcim_request_region(d, bar, name) 0
+struct pci_dev* pci_get_domain_bus_and_slot(int domain, unsigned int bus, unsigned int devfn);
+#define pci_get_slot(bus, devfn) pci_get_domain_bus_and_slot(0, (bus)->number, devfn)
+#define pci_get_bus_and_slot(bus, devfn) pci_get_domain_bus_and_slot(0, bus, devfn)
+struct pci_dev* pci_get_device(unsigned int vendor, unsigned int device, struct pci_dev* from);
+#define pci_get_subsys(v, d, sv, sd, from) pci_get_device(v, d, from)
+struct pci_dev* pci_get_class(unsigned int cls, struct pci_dev* from);
+#define pci_get_base_class(cls, from) pci_get_class(cls, from)
+int pci_dev_present(const struct pci_device_id* ids);
+int pci_bus_read_config_dword(struct pci_bus* bus, unsigned int devfn, int where, u32* val);
+int pci_bus_read_config_word(struct pci_bus* bus, unsigned int devfn, int where, u16* val);
+int pci_bus_read_config_byte(struct pci_bus* bus, unsigned int devfn, int where, u8* val);
+int pci_bus_write_config_dword(struct pci_bus* bus, unsigned int devfn, int where, u32 val);
+int pci_bus_write_config_word(struct pci_bus* bus, unsigned int devfn, int where, u16 val);
+int pci_bus_write_config_byte(struct pci_bus* bus, unsigned int devfn, int where, u8 val);
+struct pci_dev* pci_upstream_bridge(struct pci_dev* dev);
+void __iomem* pci_map_rom(struct pci_dev* pdev, size_t* size);
+void pci_unmap_rom(struct pci_dev* pdev, void __iomem* rom);
+#define pci_platform_rom(pdev, size) ((void __iomem *)NULL)
+#define pci_enable_rom(pdev) 0
+#define pci_disable_rom(pdev) do { } while (0)
+#define pci_domain_nr(bus) 0
+#define pci_is_root_bus(bus) ((bus)->number == 0)
+#define pci_dev_id(d) ((u16)(((d)->bus_number << 8) | (d)->devfn))
+#define PCI_DEVFN(slot, func) ((((slot) & 0x1f) << 3) | ((func) & 0x07))
+#define PCI_SLOT(devfn) (((devfn) >> 3) & 0x1f)
+#define PCI_FUNC(devfn) ((devfn) & 0x07)
+#define PCI_BUS_NUM(x) (((x) >> 8) & 0xff)
+#define PCI_ROM_RESOURCE 6
+#define PCI_NUM_RESOURCES 7
+#define pci_resource_n(d, n) (&(d)->resource[n])
+#define pci_is_thunderbolt_attached(d) false
+#define pci_is_bridge(d) (((d)->class >> 8) == 0x0604)
+#define pci_pcie_type(d) 0
+#define pcie_get_speed_cap(d) PCI_SPEED_UNKNOWN
+#define pcie_get_width_cap(d) PCIE_LNK_WIDTH_UNKNOWN
+#define pcie_bandwidth_available(d, lim_dev, speed, width) 0
+#define pci_rebar_get_possible_sizes(d, bar) 0
+#define pci_resize_resource(d, bar, size) (-ENOTSUPP)
+#define pci_rebar_bytes_to_size(b) 0
+#define pci_release_resource(d, bar) do { } while (0)
+#define pci_assign_unassigned_bus_resources(bus) do { } while (0)
+#define pci_find_host_bridge(bus) ((void *)NULL)
+#define pci_ignore_hotplug(d) do { } while (0)
+#define pci_d3cold_disable(d) do { } while (0)
+#define pci_d3cold_enable(d) do { } while (0)
+#define pci_reset_function(d) 0
+#define pci_reset_function_locked(d) 0
+#define pci_dev_is_disconnected(d) false
+#define pci_channel_offline(d) false
+#define pci_is_enabled(d) 1
+#define pci_dev_run_wake(d) false
+#define pci_acpi_set_companion(d) do { } while (0)
+#define pcie_aspm_support_enabled() false
+#define pci_enable_atomic_ops_to_root(d, mask) (-EINVAL)
+#define pcie_capability_read_dword(d, pos, v) (*(v) = 0, 0)
+#define pci_find_next_capability(d, pos, cap) 0
+#define pci_bus_max_busnr(bus) 0
+enum pci_bus_speed { PCIE_SPEED_2_5GT = 0x14, PCIE_SPEED_5_0GT = 0x15, PCIE_SPEED_8_0GT = 0x16, PCIE_SPEED_16_0GT = 0x17,
+                     PCIE_SPEED_32_0GT = 0x18, PCIE_SPEED_64_0GT = 0x19, PCI_SPEED_UNKNOWN = 0xff };
+enum pcie_link_width { PCIE_LNK_WIDTH_RESRV = 0, PCIE_LNK_X1 = 1, PCIE_LNK_X2 = 2, PCIE_LNK_X4 = 4, PCIE_LNK_X8 = 8,
+                       PCIE_LNK_X12 = 12, PCIE_LNK_X16 = 16, PCIE_LNK_X32 = 32, PCIE_LNK_WIDTH_UNKNOWN = 0xff };
 #define pci_release_mem_regions pci_release_regions
 #define pci_release_selected_regions(d, m) pci_release_regions(d)
 #define pci_resource_start(d, bar) ((d)->lkpi_res_start[bar])

@@ -88,12 +88,11 @@ static inline void kthread_flush_worker(struct kthread_worker *w) { flush_workqu
 void kthread_destroy_worker(struct kthread_worker *w);
 
 /* ---- batch 2: DRM core needs ---- */
-#define unmap_mapping_range(mapping, start, len, even_cows) do { } while (0)
-typedef u64 resource_size_t;
-struct resource { resource_size_t start, end; const char *name; unsigned long flags; struct resource *parent, *sibling, *child; };
-#define resource_size(r) ((r)->end - (r)->start + 1)
-#define DEFINE_RES_MEM(_start, _size) { .start = (_start), .end = (_start) + (_size) - 1, .flags = 0x200 }
-#define IORESOURCE_MEM 0x00000200
+struct address_space;
+void unmap_mapping_range(struct address_space *mapping, loff_t const holebegin, loff_t const holelen, int even_cows);
+#define unmap_mapping_pages(mapping, start, nr, even_cows) \
+	unmap_mapping_range(mapping, (loff_t)(start) << PAGE_SHIFT, (loff_t)(nr) << PAGE_SHIFT, even_cows)
+#include <linux/ioport.h>
 struct debugfs_reg32 { char *name; unsigned long offset; };
 struct debugfs_regset32 { const struct debugfs_reg32 *regs; int nregs; void __iomem *base; struct device *dev; };
 
@@ -283,7 +282,7 @@ struct eventfd_ctx;
 #define simple_release_fs(mount, count) do { } while (0)
 
 /* Machine/platform queries. */
-struct cpuinfo_x86 { int x86_clflush_size; int x86_cache_alignment; };
+struct cpuinfo_x86 { int x86_clflush_size; int x86_cache_alignment; u8 x86, x86_model, x86_stepping, x86_vendor; };
 extern struct cpuinfo_x86 boot_cpu_data;
 #define xen_pv_domain() 0
 #define CC_ATTR_MEM_ENCRYPT 0

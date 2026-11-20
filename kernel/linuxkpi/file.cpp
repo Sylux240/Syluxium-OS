@@ -11,6 +11,7 @@
 #include <lib/format.hpp>
 #include <lib/string.hpp>
 #include <mm/vmm.hpp>
+#include <proc/memory.hpp>
 #include <proc/process.hpp>
 
 extern "C" {
@@ -207,3 +208,6 @@ int lkpi_chrdev_node(const char* path, unsigned int major, unsigned int minor, u
 void lkpi_chrdev_node_remove(const char* path) { vfs::remove_node(path); }
 
 } // extern "C"
+
+// glue/file.c: drivers revoke user mappings (unmap_mapping_range).
+extern "C" void lkpi_zap_user_range(u64 offset, u64 len) { proc::zap_device_range(offset, len); }

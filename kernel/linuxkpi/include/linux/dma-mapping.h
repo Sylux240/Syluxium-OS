@@ -24,7 +24,21 @@ void dma_free_coherent(struct device* dev, size_t size, void* cpu, dma_addr_t ha
 dma_addr_t dma_map_single(struct device* dev, void* ptr, size_t size, enum dma_data_direction dir);
 #define dma_map_single_attrs(d, p, s, dir, a) dma_map_single(d, p, s, dir)
 static inline void dma_unmap_single(struct device* dev, dma_addr_t a, size_t s, enum dma_data_direction d) {}
-dma_addr_t dma_map_page(struct device* dev, void* page_virt, size_t offset, size_t size, enum dma_data_direction dir);
+struct page;
+dma_addr_t dma_map_page(struct device* dev, struct page* page, size_t offset, size_t size, enum dma_data_direction dir);
+#define dma_map_page_attrs(d, p, o, s, dir, a) dma_map_page(d, p, o, s, dir)
+#define dma_unmap_page_attrs(d, a, s, dir, at) dma_unmap_page(d, a, s, dir)
+#define dma_map_resource(d, phys, s, dir, a) ((dma_addr_t)(phys))
+#define dma_unmap_resource(d, a, s, dir, at) do { } while (0)
+#define dma_unmap_single_attrs(d, a, s, dir, at) dma_unmap_single(d, a, s, dir)
+#define dma_max_mapping_size(d) (~(size_t)0)
+#define dma_addressing_limited(d) false
+#define dma_get_required_mask(d) DMA_BIT_MASK(64)
+#define dma_set_max_seg_size(d, s) 0
+#define dma_get_max_seg_size(d) 0x7fffffffu
+#define dma_set_seg_boundary(d, m) 0
+#define dma_sync_single_range_for_cpu(d, a, o, s, dir) dma_sync_single_for_cpu(d, (a) + (o), s, dir)
+#define dma_sync_single_range_for_device(d, a, o, s, dir) dma_sync_single_for_device(d, (a) + (o), s, dir)
 static inline void dma_unmap_page(struct device* dev, dma_addr_t a, size_t s, enum dma_data_direction d) {}
 static inline int dma_mapping_error(struct device* dev, dma_addr_t a) { return a == 0; }
 static inline void dma_sync_single_for_cpu(struct device* d, dma_addr_t a, size_t s, enum dma_data_direction dir) { __atomic_thread_fence(__ATOMIC_SEQ_CST); }

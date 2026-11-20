@@ -2,14 +2,14 @@
  * drivers/video/aperture.c) and the boot-time display driver choice.
  *
  * The firmware framebuffer is shown by simpledrm on a "simple-framebuffer"
- * platform device. A real GPU driver (i915, amdgpu, nouveau, virtio-gpu, ...)
- * claims the PCI memory ranges of its device with
- * aperture_remove_conflicting_pci_devices() early in probe; if the boot
- * framebuffer lives in one of them, it is removed (and, as GPU drivers bind
- * from module_init before the boot framebuffer is registered, normally never
- * registered at all). If the GPU driver then fails, linuxkpi::init() puts the
- * boot framebuffer back (lkpi_boot_fb_wanted()), so the desktop still comes
- * up on simpledrm. */
+ * platform device (registered by linuxkpi::init, before PCI drivers probe).
+ * A real GPU driver (i915, amdgpu, radeon, nouveau, bochs) claims the PCI
+ * memory ranges of its device with aperture_remove_conflicting_pci_devices()
+ * early in probe; if the boot framebuffer lives in one of them, simpledrm is
+ * removed (the GPU driver then gets /dev/dri/card0) and the kernel stops
+ * drawing on the old framebuffer. If the GPU driver's probe then fails with
+ * no DRM device left, the firmware framebuffer goes back to simpledrm
+ * (lkpi_gpu_probe_failed), so the desktop still comes up. */
 #include <linux/lkpi_all.h>
 #include <linux/aperture.h>
 #include <linux/pci.h>
@@ -17,20 +17,28 @@
 
 static struct {
 	resource_size_t base, size;     /* the firmware framebuffer */
+	u32 width, height, pitch, red_shift;
 	bool known;
 	bool taken;                     /* a GPU driver claimed it */
 	const char *taken_by;
 	struct platform_device *pdev;   /* simple-framebuffer device, while registered */
 } boot_fb;
 static DEFINE_MUTEX(aperture_lock);
-static int drm_cards; /* /dev/dri/cardN nodes created */
+static int drm_cards; /* /dev/dri/cardN nodes */
 
-/* Called by core.cpp before the drivers' module_init()s run. */
-void lkpi_boot_fb_set_range(u64 base, u64 size)
+void lkpi_register_boot_framebuffer(u64 phys, u32 width, u32 height, u32 pitch, u32 red_shift);
+void lkpi_display_released(void); /* core.cpp: the kernel stops drawing on the firmware framebuffer */
+
+/* Called by core.cpp before any driver probes. */
+void lkpi_boot_fb_set(u64 base, u32 width, u32 height, u32 pitch, u32 red_shift)
 {
 	boot_fb.base = base;
-	boot_fb.size = size;
-	boot_fb.known = size != 0;
+	boot_fb.size = (u64)pitch * height;
+	boot_fb.width = width;
+	boot_fb.height = height;
+	boot_fb.pitch = pitch;
+	boot_fb.red_shift = red_shift;
+	boot_fb.known = boot_fb.size != 0;
 }
 
 void lkpi_boot_fb_registered(struct platform_device *pdev)
@@ -38,29 +46,28 @@ void lkpi_boot_fb_registered(struct platform_device *pdev)
 	boot_fb.pdev = pdev;
 }
 
-/* After module_init: register the boot framebuffer unless a GPU driver
- * took the display over and now drives a /dev/dri/card. */
-bool lkpi_boot_fb_wanted(void)
-{
-	if (!boot_fb.taken)
-		return true;
-	if (drm_cards > 0)
-		return false;
-	printk(KERN_WARNING "aperture: %s took over the display but registered no DRM device: "
-	       "using the firmware framebuffer again\n", boot_fb.taken_by ? boot_fb.taken_by : "a GPU driver");
-	boot_fb.taken = false;
-	return true;
-}
-
-bool lkpi_boot_fb_taken(void)
-{
-	return boot_fb.taken;
-}
-
 /* device_add()/device_del() of a /dev/dri/cardN node. */
 void lkpi_drm_card_added(int delta)
 {
 	__atomic_add_fetch(&drm_cards, delta, __ATOMIC_RELAXED);
+}
+
+/* pci.cpp: a display controller's driver failed to probe. If it had taken
+ * the display over and left no DRM device behind, give the firmware
+ * framebuffer back to simpledrm so the desktop still comes up. */
+void lkpi_gpu_probe_failed(const char *driver)
+{
+	bool restore;
+	mutex_lock(&aperture_lock);
+	restore = boot_fb.taken && !boot_fb.pdev && __atomic_load_n(&drm_cards, __ATOMIC_RELAXED) == 0;
+	if (restore)
+		boot_fb.taken = false;
+	mutex_unlock(&aperture_lock);
+	if (!restore)
+		return;
+	printk(KERN_WARNING "aperture: %s failed after taking over the display: back to the firmware framebuffer\n",
+	       driver ? driver : "the GPU driver");
+	lkpi_register_boot_framebuffer(boot_fb.base, boot_fb.width, boot_fb.height, boot_fb.pitch, boot_fb.red_shift);
 }
 
 int devm_aperture_acquire_for_platform_device(struct platform_device *pdev, resource_size_t base,
@@ -72,16 +79,20 @@ int devm_aperture_acquire_for_platform_device(struct platform_device *pdev, reso
 static void remove_boot_fb(const char *name)
 {
 	struct platform_device *pdev;
+	bool first;
 	mutex_lock(&aperture_lock);
 	pdev = boot_fb.pdev;
 	boot_fb.pdev = NULL;
-	if (!boot_fb.taken)
-		printk(KERN_INFO "aperture: %s takes over the display from the firmware framebuffer\n", name);
+	first = !boot_fb.taken;
 	boot_fb.taken = true;
 	boot_fb.taken_by = name;
 	mutex_unlock(&aperture_lock);
+	if (first) {
+		printk(KERN_INFO "aperture: %s takes over the display from the firmware framebuffer\n", name);
+		lkpi_display_released();
+	}
 	if (pdev)
-		platform_device_unregister(pdev); /* simpledrm's remove: /dev/dri/card0 goes away */
+		platform_device_unregister(pdev); /* simpledrm's remove: its /dev/dri/card goes away */
 }
 
 int aperture_remove_conflicting_devices(resource_size_t base, resource_size_t size, const char *name)
@@ -115,4 +126,46 @@ int aperture_remove_conflicting_pci_devices(struct pci_dev *pdev, const char *na
 	if (primary)
 		remove_boot_fb(name);
 	return 0;
+}
+
+/* ---- DMA (no IOMMU: bus address = physical address) ---- */
+dma_addr_t dma_map_page(struct device *dev, struct page *page, size_t offset, size_t size, enum dma_data_direction dir)
+{
+	return page_to_phys(page) + offset;
+}
+
+struct resource lkpi_dummy_resource = { .name = "reserved" };
+struct resource ioport_resource = { .name = "PCI IO", .start = 0, .end = 0xffff, .flags = IORESOURCE_IO };
+
+/* ---- memory queries & shrinkers ---- */
+u64 lkpi_kernel_virt_to_phys(const void *virt);
+unsigned long lkpi_freeram_pages(void);
+
+struct page *vmalloc_to_page(const void *addr)
+{
+	u64 phys = lkpi_kernel_virt_to_phys(addr);
+	return phys ? pfn_to_page(phys >> PAGE_SHIFT) : NULL;
+}
+
+unsigned long vmalloc_to_pfn(const void *addr)
+{
+	return lkpi_kernel_virt_to_phys(addr) >> PAGE_SHIFT;
+}
+
+void si_meminfo(struct sysinfo *val)
+{
+	memset(val, 0, sizeof(*val));
+	val->totalram = lkpi_totalram_pages();
+	val->freeram = lkpi_freeram_pages();
+	val->mem_unit = PAGE_SIZE;
+}
+
+struct shrinker *shrinker_alloc(unsigned int flags, const char *fmt, ...)
+{
+	return kzalloc(sizeof(struct shrinker), GFP_KERNEL);
+}
+
+void shrinker_free(struct shrinker *s)
+{
+	kfree(s);
 }

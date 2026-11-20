@@ -123,4 +123,104 @@
 #define EJUKEBOX 528
 #define EIOCBQUEUED 529
 
+/* The rest of Linux errno numbers. */
+#ifndef ENOTBLK
+#define ENOTBLK 15
+#endif
+#ifndef ETXTBSY
+#define ETXTBSY 26
+#endif
+#ifndef EMLINK
+#define EMLINK 31
+#endif
+#ifndef ENOLCK
+#define ENOLCK 37
+#endif
+#ifndef EIDRM
+#define EIDRM 43
+#endif
+#ifndef ECHRNG
+#define ECHRNG 44
+#endif
+#ifndef EL3HLT
+#define EL3HLT 46
+#endif
+#ifndef EL3RST
+#define EL3RST 47
+#endif
+#ifndef ELNRNG
+#define ELNRNG 48
+#endif
+#ifndef EUNATCH
+#define EUNATCH 49
+#endif
+#ifndef ENOCSI
+#define ENOCSI 50
+#endif
+#ifndef EL2HLT
+#define EL2HLT 51
+#endif
+#ifndef EDEADLOCK
+#define EDEADLOCK EDEADLK
+#endif
+#ifndef EBFONT
+#define EBFONT 59
+#endif
+#ifndef ENOPKG
+#define ENOPKG 65
+#endif
+#ifndef EREMOTE
+#define EREMOTE 66
+#endif
+#ifndef EADV
+#define EADV 68
+#endif
+#ifndef ESRMNT
+#define ESRMNT 69
+#endif
+#ifndef EMULTIHOP
+#define EMULTIHOP 72
+#endif
+#ifndef EDOTDOT
+#define EDOTDOT 73
+#endif
+#ifndef ELIBACC
+#define ELIBACC 79
+#endif
+#ifndef ELIBBAD
+#define ELIBBAD 80
+#endif
+#ifndef ELIBSCN
+#define ELIBSCN 81
+#endif
+#ifndef ELIBMAX
+#define ELIBMAX 82
+#endif
+#ifndef ELIBEXEC
+#define ELIBEXEC 83
+#endif
+#ifndef ERESTART
+#define ERESTART 85
+#endif
+#ifndef ESTRPIPE
+#define ESTRPIPE 86
+#endif
+#ifndef ENOTNAM
+#define ENOTNAM 118
+#endif
+#ifndef EISNAM
+#define EISNAM 120
+#endif
+#ifndef EOPENSTALE
+#define EOPENSTALE 518
+#endif
+#ifndef ENOPARAM
+#define ENOPARAM 519
+#endif
+#ifndef ERECALLCONFLICT
+#define ERECALLCONFLICT 530
+#endif
+#ifndef ENOGRACE
+#define ENOGRACE 531
+#endif
 #endif

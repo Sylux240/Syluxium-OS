@@ -453,3 +453,55 @@ vm_fault_t vmf_insert_pfn(struct vm_area_struct *vma, unsigned long addr, unsign
 {
 	return vmf_insert_pfn_prot(vma, addr, pfn, vma->vm_page_prot);
 }
+
+/* Revoke user mappings of [holebegin, holebegin + holelen) of a file (GEM /
+ * TTM buffers moving, i915 fences being stolen): forget the pages the driver
+ * supplied for those offsets and unmap them in every process; the next
+ * access faults into the driver again. holelen 0 = to the end. */
+void lkpi_zap_user_range(u64 offset, u64 len);
+void unmap_mapping_range(struct address_space *mapping, loff_t const holebegin, loff_t const holelen, int even_cows)
+{
+	unsigned long first = holebegin >> PAGE_SHIFT;
+	unsigned long last = holelen ? (unsigned long)((holebegin + holelen + PAGE_SIZE - 1) >> PAGE_SHIFT) : ~0UL;
+	for (int id = 0; id < LKPI_MAX_VMAS; id++) {
+		struct lkpi_vma *m;
+		unsigned long beg, end, zbeg, zend;
+		spin_lock(&lkpi_vmas_lock);
+		m = lkpi_vmas[id];
+		if (m)
+			m->refs++; /* keep it while we work on it */
+		spin_unlock(&lkpi_vmas_lock);
+		if (!m)
+			continue;
+		beg = m->vma.vm_pgoff;
+		end = m->vma.vm_pgoff + m->npages;
+		zbeg = max(beg, first);
+		zend = min(end, last);
+		if (m->vma.vm_file && m->vma.vm_file->f_mapping == mapping && zbeg < zend) {
+			mutex_lock(&m->lock);
+			if (m->remapped) { /* a whole-VMA remap_pfn_range: fall back to the per-page table */
+				for (unsigned long i = 0; i < m->npages; i++)
+					m->pages[i] = PFN_PHYS(m->base_pfn + i) | LKPI_PTE_VALID | prot_bits(m->vma.vm_page_prot);
+				m->remapped = false;
+			}
+			for (unsigned long pg = zbeg; pg < zend; pg++)
+				m->pages[pg - beg] = 0;
+			mutex_unlock(&m->lock);
+			lkpi_zap_user_range(m->vma.vm_start + ((zbeg - beg) << PAGE_SHIFT), (zend - zbeg) << PAGE_SHIFT);
+		}
+		lkpi_vma_ref(m->vma.vm_start, -1);
+	}
+}
+
+/* zap_vma_ptes(): the same for one VMA (i915 GGTT mmaps). */
+void zap_vma_ptes(struct vm_area_struct *vma, unsigned long address, unsigned long size)
+{
+	struct lkpi_vma *m = vma->lkpi;
+	unsigned long beg = (address - vma->vm_start) >> PAGE_SHIFT, n = size >> PAGE_SHIFT;
+	mutex_lock(&m->lock);
+	m->remapped = false;
+	for (unsigned long i = beg; i < beg + n && i < m->npages; i++)
+		m->pages[i] = 0;
+	mutex_unlock(&m->lock);
+	lkpi_zap_user_range(address, size);
+}

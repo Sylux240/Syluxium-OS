@@ -1366,7 +1366,7 @@ struct pid *lkpi_task_pid(struct task_struct *t)
 }
 
 /* ---- batch 3 helpers ---- */
-struct cpuinfo_x86 boot_cpu_data = { .x86_clflush_size = 64, .x86_cache_alignment = 64 };
+struct cpuinfo_x86 boot_cpu_data = { .x86_clflush_size = 64, .x86_cache_alignment = 64, .x86 = 6 };
 struct resource iomem_resource = { .name = "PCI mem", .start = 0, .end = ~0ULL };
 
 static void lkpi_swap(void *a, void *b, size_t size)

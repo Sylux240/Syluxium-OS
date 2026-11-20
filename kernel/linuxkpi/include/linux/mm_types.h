@@ -67,7 +67,8 @@ struct vm_area_struct {
 	const struct vm_operations_struct *vm_ops;
 	void *vm_private_data;
 	struct file *vm_file;
-	void *lkpi; /* file.cpp: the physical range a remap_pfn_range() mapped, the faulted pfn */
+	void *lkpi; /* glue/file.c: struct lkpi_vma */
+	struct mm_struct *vm_mm;
 };
 #define vma_pages(vma) (((vma)->vm_end - (vma)->vm_start) >> PAGE_SHIFT)
 #define vm_flags_set(vma, f) ((vma)->vm_flags |= (f))

@@ -173,21 +173,26 @@ bool lkpi_match(const dev::Driver* drv, const dev::Device* d) {
         said = true;
         return false;
     }
+    // Virtual-machine display drivers are opt-in ("bochsdrm"): the firmware
+    // framebuffer serves VMs well, and they are mainly a test bed for the
+    // GPU driver infrastructure (TTM, display handover) in QEMU.
+    const char* name = static_cast<const pci_driver*>(drv->ctx)->name;
+    if (name && !strcmp(name, "bochs-drm") && !strstr(boot::cmdline(), "bochsdrm"))
+        return false;
     return true;
 }
 
-long lkpi_probe(const dev::Driver* drv, dev::Device* d) {
-    auto* pdrv = static_cast<pci_driver*>(drv->ctx);
-    pci::Function* f = pci::function_of(d);
-    auto* pdev = static_cast<pci_dev*>(kzalloc(sizeof(pci_dev), GFP_KERNEL));
-    if (!pdev)
-        return -ENOMEM;
-    pdev->vendor = d->vendor;
-    pdev->device = d->device;
-    pdev->subsystem_vendor = d->subsystem_vendor;
-    pdev->subsystem_device = d->subsystem_device;
-    pdev->lkpi_class = d->class_code;
-    pdev->revision = d->revision;
+extern "C" void lkpi_gpu_probe_failed(const char* driver);
+
+// A pci_dev for function `f` (bound or not: drivers also look at bridges
+// and sibling functions).
+void fill_pdev(pci_dev* pdev, pci::Function* f, dev::Device* d) {
+    pdev->vendor = f->vendor_id;
+    pdev->device = f->device_id;
+    pdev->subsystem_vendor = d ? d->subsystem_vendor : 0;
+    pdev->subsystem_device = d ? d->subsystem_device : 0;
+    pdev->lkpi_class = (static_cast<u32>(f->class_code) << 16) | (static_cast<u32>(f->subclass) << 8) | f->prog_if;
+    pdev->revision = f->revision;
     pdev->pin = f->irq_pin;
     pdev->bus_number = f->bus;
     {
@@ -197,14 +202,16 @@ long lkpi_probe(const dev::Driver* drv, dev::Device* d) {
         pdev->bus = &buses[f->bus & 0xff];
     }
     pdev->devfn = static_cast<unsigned>((f->device << 3) | f->function);
-    pdev->driver = pdrv;
     pdev->lkpi_function = f;
     pdev->dev.lkpi_registry = d;
-    snprintf(pdev->dev.lkpi_name, sizeof(pdev->dev.lkpi_name), "%s", d->bus_id);
+    if (d)
+        snprintf(pdev->dev.lkpi_name, sizeof(pdev->dev.lkpi_name), "%s", d->bus_id);
+    else
+        snprintf(pdev->dev.lkpi_name, sizeof(pdev->dev.lkpi_name), "%04x:%02x:%02x.%u", f->segment, f->bus, f->device,
+                 f->function);
     pdev->dev.dma_mask_storage = DMA_BIT_MASK(32); // Linux's default until the driver sets one
     pdev->dev.dma_mask = &pdev->dev.dma_mask_storage;
     pdev->dev.coherent_dma_mask = DMA_BIT_MASK(32);
-    pdev->dev.driver = &pdrv->driver;
     for (int i = 0; i < DEVICE_COUNT_RESOURCE; i++) {
         const pci::Bar& b = f->bars[i];
         pdev->lkpi_res_start[i] = b.address;
@@ -212,11 +219,40 @@ long lkpi_probe(const dev::Driver* drv, dev::Device* d) {
         if (b.size)
             pdev->lkpi_res_flags[i] = (b.is_io ? IORESOURCE_IO : IORESOURCE_MEM) |
                                       (b.prefetchable ? IORESOURCE_PREFETCH : 0) | (b.is_64bit ? IORESOURCE_MEM_64 : 0);
+        pdev->resource[i].start = b.address;
+        pdev->resource[i].end = b.size ? b.address + b.size - 1 : 0;
+        pdev->resource[i].flags = pdev->lkpi_res_flags[i];
+        pdev->resource[i].name = pdev->dev.lkpi_name;
     }
+}
+
+// pci_devs handed out for functions no LinuxKPI driver is bound to, one per function.
+pci_dev* g_shadow[256];
+pci_dev* g_bound[256]; // LinuxKPI drivers' pci_devs, by function index
+
+void set_bound(pci::Function* f, pci_dev* pdev) {
+    for (u32 i = 0; i < pci::count() && i < 256; i++)
+        if (pci::function_at(i) == f)
+            g_bound[i] = pdev;
+}
+
+long lkpi_probe(const dev::Driver* drv, dev::Device* d) {
+    auto* pdrv = static_cast<pci_driver*>(drv->ctx);
+    pci::Function* f = pci::function_of(d);
+    auto* pdev = static_cast<pci_dev*>(kzalloc(sizeof(pci_dev), GFP_KERNEL));
+    if (!pdev)
+        return -ENOMEM;
+    fill_pdev(pdev, f, d);
+    pdev->driver = pdrv;
+    pdev->dev.driver = &pdrv->driver;
     d->driver_data = pdev;
+    set_bound(f, pdev);
     int r = pdrv->probe(pdev, find_id(pdrv, d));
     if (r) {
         d->driver_data = nullptr;
+        set_bound(f, nullptr);
+        if ((d->class_code >> 16) == 0x03)
+            lkpi_gpu_probe_failed(pdrv->name);
         kfree(pdev);
         return r;
     }
@@ -317,6 +353,168 @@ int pci_register_driver(struct pci_driver* drv) {
     drv->driver.name = drv->name;
     dev::register_driver(d);
     return 0;
+}
+
+// The pci_dev of a function: the bound driver's, else a shadow one.
+static pci_dev* pdev_of_index(u32 i) {
+    pci::Function* f = pci::function_at(i);
+    if (!f)
+        return nullptr;
+    dev::Device* d = f->entry;
+    if (i < 256 && g_bound[i])
+        return g_bound[i];
+    if (i >= 256)
+        return nullptr;
+    if (!g_shadow[i]) {
+        auto* pdev = static_cast<pci_dev*>(kzalloc(sizeof(pci_dev), GFP_KERNEL));
+        if (!pdev)
+            return nullptr;
+        fill_pdev(pdev, f, d);
+        g_shadow[i] = pdev;
+    }
+    return g_shadow[i];
+}
+
+struct pci_dev* pci_get_domain_bus_and_slot(int domain, unsigned int bus, unsigned int devfn) {
+    for (u32 i = 0; i < pci::count(); i++) {
+        pci::Function* f = pci::function_at(i);
+        if (f->segment == domain && f->bus == bus && ((f->device << 3) | f->function) == devfn)
+            return pdev_of_index(i);
+    }
+    return nullptr;
+}
+
+// Iteration in enumeration order, starting after `from`.
+static u32 index_after(struct pci_dev* from) {
+    if (!from)
+        return 0;
+    for (u32 i = 0; i < pci::count(); i++)
+        if (pci::function_at(i) == from->lkpi_function)
+            return i + 1;
+    return pci::count();
+}
+
+struct pci_dev* pci_get_device(unsigned int vendor, unsigned int device, struct pci_dev* from) {
+    for (u32 i = index_after(from); i < pci::count(); i++) {
+        pci::Function* f = pci::function_at(i);
+        if ((vendor == PCI_ANY_ID || f->vendor_id == vendor) && (device == PCI_ANY_ID || f->device_id == device))
+            return pdev_of_index(i);
+    }
+    return nullptr;
+}
+
+struct pci_dev* pci_get_class(unsigned int cls, struct pci_dev* from) {
+    for (u32 i = index_after(from); i < pci::count(); i++) {
+        pci::Function* f = pci::function_at(i);
+        u32 c = (static_cast<u32>(f->class_code) << 16) | (static_cast<u32>(f->subclass) << 8) | f->prog_if;
+        if (c == cls)
+            return pdev_of_index(i);
+    }
+    return nullptr;
+}
+
+int pci_dev_present(const struct pci_device_id* ids) {
+    for (const pci_device_id* id = ids; id && !is_terminator(id); id++)
+        for (u32 i = 0; i < pci::count(); i++) {
+            pci::Function* f = pci::function_at(i);
+            if (f->entry && id_matches(id, f->entry))
+                return 1;
+        }
+    return 0;
+}
+
+int pci_bus_read_config_dword(struct pci_bus* bus, unsigned int devfn, int where, u32* val) {
+    volatile u8* cfg = pci::config_space(0, bus->number, static_cast<u8>(devfn >> 3), static_cast<u8>(devfn & 7));
+    *val = cfg ? *reinterpret_cast<volatile u32*>(cfg + (where & ~3)) : 0xffffffff;
+    return cfg ? 0 : -ENODEV;
+}
+int pci_bus_read_config_word(struct pci_bus* bus, unsigned int devfn, int where, u16* val) {
+    volatile u8* cfg = pci::config_space(0, bus->number, static_cast<u8>(devfn >> 3), static_cast<u8>(devfn & 7));
+    *val = cfg ? *reinterpret_cast<volatile u16*>(cfg + (where & ~1)) : 0xffff;
+    return cfg ? 0 : -ENODEV;
+}
+int pci_bus_read_config_byte(struct pci_bus* bus, unsigned int devfn, int where, u8* val) {
+    volatile u8* cfg = pci::config_space(0, bus->number, static_cast<u8>(devfn >> 3), static_cast<u8>(devfn & 7));
+    *val = cfg ? cfg[where] : 0xff;
+    return cfg ? 0 : -ENODEV;
+}
+int pci_bus_write_config_dword(struct pci_bus* bus, unsigned int devfn, int where, u32 val) {
+    volatile u8* cfg = pci::config_space(0, bus->number, static_cast<u8>(devfn >> 3), static_cast<u8>(devfn & 7));
+    if (cfg)
+        *reinterpret_cast<volatile u32*>(cfg + (where & ~3)) = val;
+    return cfg ? 0 : -ENODEV;
+}
+int pci_bus_write_config_word(struct pci_bus* bus, unsigned int devfn, int where, u16 val) {
+    volatile u8* cfg = pci::config_space(0, bus->number, static_cast<u8>(devfn >> 3), static_cast<u8>(devfn & 7));
+    if (cfg)
+        *reinterpret_cast<volatile u16*>(cfg + (where & ~1)) = val;
+    return cfg ? 0 : -ENODEV;
+}
+int pci_bus_write_config_byte(struct pci_bus* bus, unsigned int devfn, int where, u8 val) {
+    volatile u8* cfg = pci::config_space(0, bus->number, static_cast<u8>(devfn >> 3), static_cast<u8>(devfn & 7));
+    if (cfg)
+        cfg[where] = val;
+    return cfg ? 0 : -ENODEV;
+}
+
+// The bridge above a device: the PCI(e) bridge whose secondary..subordinate
+// bus range holds the device's bus (none for devices on bus 0).
+struct pci_dev* pci_upstream_bridge(struct pci_dev* dev) {
+    if (!dev || dev->bus_number == 0)
+        return nullptr;
+    for (u32 i = 0; i < pci::count(); i++) {
+        pci::Function* f = pci::function_at(i);
+        if ((f->header_type & 0x7f) != 1)
+            continue;
+        u8 secondary = pci::read8(*f, 0x19);
+        if (secondary == dev->bus_number)
+            return pdev_of_index(i);
+    }
+    return nullptr;
+}
+
+// Expansion ROM (the video BIOS of discrete GPUs): enable the ROM BAR,
+// map it, and return the image size from its headers.
+void __iomem* pci_map_rom(struct pci_dev* pdev, size_t* size) {
+    pci::Function& f = fn(pdev);
+    u32 rom = pci::read32(f, 0x30);
+    if ((f.header_type & 0x7f) != 0)
+        return nullptr;
+    pci::write32(f, 0x30, 0xfffff800);
+    u32 mask = pci::read32(f, 0x30) & 0xfffff800;
+    pci::write32(f, 0x30, rom);
+    if (!mask || !(rom & 0xfffff800))
+        return nullptr;
+    u64 len = (~static_cast<u64>(mask) + 1) & 0xffffffff;
+    pci::write32(f, 0x30, rom | 1); // enable decoding
+    pci::write16(f, PCI_COMMAND, pci::read16(f, PCI_COMMAND) | PCI_COMMAND_MEMORY);
+    auto* v = static_cast<u8*>(ioremap(rom & 0xfffff800, len));
+    if (!v)
+        return nullptr;
+    // Walk the PCI data structures to find the end of the last image.
+    u64 off = 0, end = 0;
+    while (off + 0x1a < len && v[off] == 0x55 && v[off + 1] == 0xaa) {
+        u16 pds = static_cast<u16>(v[off + 0x18] | (v[off + 0x19] << 8));
+        if (off + pds + 0x18 > len || v[off + pds] != 'P' || v[off + pds + 1] != 'C' || v[off + pds + 2] != 'I' ||
+            v[off + pds + 3] != 'R')
+            break;
+        u64 image = static_cast<u64>(v[off + pds + 0x10] | (v[off + pds + 0x11] << 8)) * 512;
+        end = off + image;
+        if (v[off + pds + 0x15] & 0x80 || !image)
+            break;
+        off += image;
+    }
+    if (!end) {
+        iounmap(v);
+        pci::write32(f, 0x30, rom);
+        return nullptr;
+    }
+    *size = end;
+    return v;
+}
+void pci_unmap_rom(struct pci_dev* pdev, void __iomem* rom) {
+    iounmap(rom);
+    pci::write32(fn(pdev), 0x30, pci::read32(fn(pdev), 0x30) & ~1u);
 }
 
 void pci_unregister_driver(struct pci_driver*) {
@@ -449,9 +647,6 @@ dma_addr_t dma_map_single(struct device*, void* ptr, size_t, enum dma_data_direc
     return mm::direct_virt_to_phys(ptr);
 }
 
-dma_addr_t dma_map_page(struct device*, void* page_virt, size_t offset, size_t, enum dma_data_direction) {
-    return mm::direct_virt_to_phys(page_virt) + offset;
-}
 
 int dma_set_mask(struct device* dev, u64 mask) {
     dev->dma_mask_storage = mask;

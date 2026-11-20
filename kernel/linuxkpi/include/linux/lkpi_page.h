@@ -1,10 +1,13 @@
 /* LinuxKPI: the page model.
  *
- * A struct page describes a block of 2^order physical pages from the
- * kernel's buddy allocator, reached through the direct map (so it is
- * physically contiguous, page aligned and has a pfn user mappings and
- * devices can use). A folio is the same descriptor (Linux folios are a
- * head page; here every page is its own folio). */
+ * alloc_pages(order) takes a block of 2^order physical pages from the
+ * kernel's buddy allocator (reached through the direct map) and gives it
+ * an array of 2^order struct page descriptors, one per 4 KiB page, so page
+ * arithmetic (page + i, nth_page) works as in Linux. The first is the head:
+ * it holds the order and the reference count; every page points to its head.
+ * A pfn table maps pfns back to descriptors (pfn_to_page, virt_to_page);
+ * RAM pages that never came from alloc_pages() (kmalloc memory in an sg
+ * list) get a permanent descriptor on first lookup. A folio is a head page. */
 #ifndef _LKPI_LINUX_PAGE_H
 #define _LKPI_LINUX_PAGE_H
 
@@ -23,6 +26,9 @@ struct page {
 	unsigned long index;            /* page index within that file */
 	unsigned long private;
 	unsigned long flags;            /* PG_dirty, PG_referenced */
+	struct list_head lru;           /* free for the owner's lists (TTM pools, ...) */
+	struct page *head;              /* first page of the block (itself for a head page) */
+	unsigned long dma_addr;         /* page_pool / driver use */
 };
 struct folio { struct page page; };
 #define PG_dirty 0x1UL
@@ -38,6 +44,12 @@ void __free_pages(struct page *page, unsigned int order);
 void get_page(struct page *page);
 void put_page(struct page *page);
 void *lkpi_page_address(const struct page *page);
+struct page *lkpi_pfn_to_page(unsigned long pfn);
+#define pfn_to_page(pfn) lkpi_pfn_to_page(pfn)
+#define nth_page(p, n) ((p) + (n))
+#define compound_head(p) ((p)->head)
+#define pfn_valid(pfn) true
+void split_page(struct page *page, unsigned int order);
 #define page_address(p) lkpi_page_address(p)
 #define page_to_virt(p) lkpi_page_address(p)
 struct page *lkpi_virt_to_page(const void *addr);
@@ -59,9 +71,10 @@ void *lkpi_phys_to_direct(u64 phys);
 #define __va(p) lkpi_phys_to_direct(p)
 #define PHYS_PFN(x) ((unsigned long)((x) >> PAGE_SHIFT))
 #define PFN_PHYS(x) ((u64)(x) << PAGE_SHIFT)
-#define page_count(p) atomic_read(&(p)->refcount)
-#define compound_order(p) ((p)->order)
-#define page_size(p) (PAGE_SIZE << (p)->order)
+#define page_count(p) atomic_read(&(p)->head->refcount)
+#define page_ref_count(p) page_count(p)
+#define compound_order(p) ((p)->head == (p) ? (p)->order : 0)
+#define page_size(p) (PAGE_SIZE << compound_order(p))
 #define set_page_dirty(p) ((p)->flags |= PG_dirty, 1)
 #define set_page_dirty_lock(p) set_page_dirty(p)
 #define mark_page_accessed(p) ((p)->flags |= PG_referenced)
@@ -77,9 +90,9 @@ void *lkpi_phys_to_direct(u64 phys);
 #define kunmap_local(addr) do { (void)(addr); } while (0)
 
 /* Folios. */
-#define page_folio(p) ((struct folio *)(p))
-#define folio_page(f, n) (&(f)->page + 0 * (n))
-#define folio_file_page(f, index) (&(f)->page)
+#define page_folio(p) ((struct folio *)((p)->head))
+#define folio_page(f, n) (&(f)->page + (n))
+#define folio_file_page(f, index) (&(f)->page + ((index) & ((1UL << (f)->page.order) - 1)))
 #define folio_nr_pages(f) (1UL << (f)->page.order)
 #define folio_size(f) (PAGE_SIZE << (f)->page.order)
 #define folio_order(f) ((f)->page.order)

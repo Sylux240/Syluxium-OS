@@ -25,6 +25,9 @@ typedef int (*lkpi_initcall_t)(void);
 #define late_initcall(fn) __lkpi_define_initcall(fn, 7)
 #define late_initcall_sync(fn) __lkpi_define_initcall(fn, 7)
 #define module_exit(fn) static void (*__lkpi_exitcall_##fn)(void) __attribute__((unused)) = fn
+#define module_driver(__driver, __register, __unregister, ...) \
+    static int __init __driver##_lkpi_init(void) { return __register(&(__driver), ##__VA_ARGS__); } \
+    module_init(__driver##_lkpi_init)
 
 #define MODULE_LICENSE(x)
 #define MODULE_AUTHOR(x)

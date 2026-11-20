@@ -24,6 +24,27 @@ void Memory::put() {
         delete this;
 }
 
+namespace {
+IrqSpinlock g_dev_lock;
+IntrusiveList<Vma, &Vma::dev_node> g_dev_vmas; // every VMA_DEVICE mapping
+
+void dev_track(Vma* v, Memory* owner) {
+    if (v->kind != VMA_DEVICE || v->owner)
+        return;
+    v->owner = owner;
+    LockGuard guard(g_dev_lock);
+    g_dev_vmas.push_back(v);
+}
+
+void dev_untrack(Vma* v) {
+    if (!v->owner)
+        return;
+    LockGuard guard(g_dev_lock);
+    g_dev_vmas.remove(v);
+    v->owner = nullptr;
+}
+} // namespace
+
 Memory* Memory::fork() {
     auto* as = vmm::AddressSpace::create_user();
     if (!as)
@@ -49,6 +70,7 @@ Memory* Memory::fork() {
                 c->file->mmap_range_ref(c->file_offset, +1);
         }
         child->m_vmas.push_back(c); // same order as ours: already sorted
+        dev_track(c, child);
 
         u32 flags = prot_to_map_flags(v->prot);
         if (v->kind == VMA_DEVICE) { // device memory stays shared with the child
@@ -128,7 +150,32 @@ bool Memory::overlaps(uptr start, uptr end) {
     return false;
 }
 
+
+void zap_device_range(u64 offset, u64 len) {
+    // Collect under the lock, unmap outside it (shootdowns wait for other CPUs).
+    struct Hit { vmm::AddressSpace* as; uptr start, end; };
+    constexpr usize MAX_HITS = 64;
+    Hit hits[MAX_HITS];
+    usize n = 0;
+    {
+        LockGuard guard(g_dev_lock);
+        for (Vma* v = g_dev_vmas.front(); v && n < MAX_HITS; v = g_dev_vmas.next_of(v)) {
+            u64 vbeg = v->file_offset, vend = v->file_offset + (v->end - v->start);
+            u64 beg = max(vbeg, offset), end = min(vend, offset + len);
+            if (beg >= end || !v->owner->aspace())
+                continue;
+            hits[n++] = {v->owner->aspace(), v->start + (beg - vbeg), v->start + (end - vbeg)};
+        }
+    }
+    for (usize i = 0; i < n; i++) {
+        for (uptr page = hits[i].start; page < hits[i].end; page += PAGE_SIZE)
+            hits[i].as->unmap(page);
+        vmm::shootdown(hits[i].start, (hits[i].end - hits[i].start) / PAGE_SIZE, hits[i].as);
+    }
+}
+
 void Memory::insert(Vma* v) {
+    dev_track(v, this);
     Vma* pos = m_vmas.front();
     while (pos && pos->start < v->start)
         pos = m_vmas.next_of(pos);
@@ -186,6 +233,7 @@ void Memory::remove_range(uptr start, uptr end) {
         }
         unmap_pages(v->start, v->end, v->kind != VMA_DEVICE);
         m_vmas.remove(v);
+        dev_untrack(v);
         if (v->file && v->kind == VMA_DEVICE)
             v->file->mmap_range_ref(v->file_offset, -1);
         if (v->file)
@@ -522,6 +570,7 @@ long Memory::write_remote(uptr addr, const void* data, usize len) {
 void Memory::destroy() {
     LockGuard guard(m_lock);
     while (Vma* v = m_vmas.pop_front()) {
+        dev_untrack(v);
         if (v->kind == VMA_DEVICE && m_as)
             unmap_pages(v->start, v->end, false); // destroy_user() must not free shared/driver pages
         if (v->file && v->kind == VMA_DEVICE)
