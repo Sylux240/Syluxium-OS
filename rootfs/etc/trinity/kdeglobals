@@ -84,3 +84,5 @@ TimeFormat=%l:%M:%S %p
 # No "Switch User" (one session at a time on Syluxium).
 [KDE Action Restrictions]
 switch_user=false
+action/help_about_kde=false
+action/help_report_bug=false

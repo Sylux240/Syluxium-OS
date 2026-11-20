@@ -7,8 +7,13 @@ string not listed here stays TDE's English). Writes gettext .mo catalogs to
 TDE only uses a language for a program when that program's own catalog
 exists in it, so programs without an entry here are unaffected."""
 import os
+import re
 import struct
+import subprocess
 import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from syluxium_names import rename
 
 LANG = "en_XP"
 
@@ -89,10 +94,53 @@ def write_mo(path, messages):
         f.write(out)
 
 
-def main(root):
+# Where each catalog's strings live, for the automatic Trinity/TDE renames.
+SCAN = {
+    "tdelibs": ["opt/trinity/lib/libtdecore.so.14", "opt/trinity/lib/libtdeui.so.14", "opt/trinity/lib/libtdeio.so.14"],
+    "kcontrol": ["opt/trinity/lib/libtdeinit_kcontrol.so"],
+    "kicker": ["opt/trinity/lib/libtdeinit_kicker.so", "opt/trinity/lib/trinity/launcher_panelapplet.so"],
+    "kcmkicker": ["opt/trinity/lib/trinity/kcm_kicker.so"],
+    "kdesktop": ["opt/trinity/lib/libtdeinit_kdesktop.so"],
+    "ksmserver": ["opt/trinity/lib/libtdeinit_ksmserver.so"],
+    "konqueror": ["opt/trinity/lib/libtdeinit_konqueror.so"],
+    "libkonq": ["opt/trinity/lib/libkonq.so.4"],
+    "konsole": ["opt/trinity/lib/libtdeinit_konsole.so"],
+    "kmail": ["opt/trinity/lib/libkmailprivate.so"],
+    "kaffeine": ["opt/trinity/bin/kaffeine"],
+    "tdmgreet": ["opt/trinity/bin/tdm_greet"],
+    "tdm": ["opt/trinity/bin/tdm_config"],
+    "ksplash": ["opt/trinity/bin/ksplash"],
+}
+
+
+def scanned(tde_root, files):
+    """Renamed versions of the strings in TDE binaries that name Trinity/TDE."""
+    out = {}
+    for rel in files:
+        matches = [os.path.join(dp, f) for dp, _, fs in os.walk(os.path.dirname(os.path.join(tde_root, rel)))
+                   for f in fs if os.path.join(dp, f).startswith(os.path.join(tde_root, rel))][:1]
+        for path in matches:
+            text = subprocess.run(["strings", "-n", "6", path], capture_output=True, text=True).stdout
+            for s in text.split("\n"):
+                if not re.search(r"Trinity|\bTDE\b", s) or re.search(r"X-TDE|TDE_|_TDE|::|^/", s):
+                    continue
+                r = rename(s)
+                if r:
+                    out[s] = r
+    return out
+
+
+def main(root, tde_root=None):
     d = os.path.join(root, "opt/trinity/share/locale", LANG, "LC_MESSAGES")
-    for cat, msgs in CATALOGS.items():
+    cats = {c: dict(m) for c, m in CATALOGS.items()}
+    if tde_root:
+        for cat, files in SCAN.items():
+            auto = scanned(tde_root, files)
+            auto.update(cats.get(cat, {}))  # hand-written wording wins
+            cats[cat] = auto
+    for cat, msgs in cats.items():
         write_mo(os.path.join(d, cat + ".mo"), msgs)
+        print(f"  {cat}: {len(msgs)} strings")
     # TDE lists a language only if it has an entry.desktop
     with open(os.path.join(root, "opt/trinity/share/locale", LANG, "entry.desktop"), "w") as f:
         f.write("[KCM Locale]\nName=English (Syluxium)\n")
@@ -100,4 +148,5 @@ def main(root):
 
 
 if __name__ == "__main__":
-    main(sys.argv[1] if len(sys.argv) > 1 else "rootfs")
+    # make-xp-translations.py [rootfs] [extracted TDE root, e.g. build/rootfs-debian]
+    main(sys.argv[1] if len(sys.argv) > 1 else "rootfs", sys.argv[2] if len(sys.argv) > 2 else None)

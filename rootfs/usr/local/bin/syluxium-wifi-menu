@@ -5,8 +5,9 @@
 T="Wi-Fi"
 # Shown as a bubble in the lower right, above the clock (twinrulesrc: no frame,
 # no taskbar entry, on top).
+. /usr/local/lib/syluxium/balloon.sh
 kd() {
-    kdialog "$@" &
+    balloon "$@" &
     local pid=$!
     ( # move it to the lower right corner once it appears
         geom=$(xdotool getdisplaygeometry 2>/dev/null); sw=${geom% *}; sh=${geom#* }

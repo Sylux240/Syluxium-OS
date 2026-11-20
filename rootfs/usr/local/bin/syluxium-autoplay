@@ -1,4 +1,5 @@
 #!/bin/sh
+. /usr/local/lib/syluxium/balloon.sh
 # Syluxium AutoPlay (desktop session): when a USB drive appears in /media
 # (mounted by syluxium-automount), ask what to do with it - like Windows.
 known=" "
@@ -13,7 +14,7 @@ while :; do
         size=$(df -h "$dir" 2>/dev/null | awk 'NR==2 {print $2}')
         # Lower right corner, just above the clock; gone after 15 s if unanswered.
         out=/tmp/.autoplay-$$
-        kdialog --title "AutoPlay" --icon drive-removable-media --geometry 330x175-8-36 --radiolist \
+        balloon --title "AutoPlay" --icon drive-removable-media --geometry 330x175-8-36 --radiolist \
             "<b>$name</b> ($size) was connected.<br>What do you want to do?" \
             open "Open folder to view files" on \
             media "Play media files (Kaffeine)" off \
