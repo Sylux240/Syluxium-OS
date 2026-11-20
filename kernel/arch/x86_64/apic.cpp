@@ -164,6 +164,8 @@ void timer_oneshot_ns(u64 ns) {
 
 void send_ipi(u32 lapic_id, u8 vector) { write_icr(lapic_id, vector | ICR_ASSERT); }
 
+void send_nmi(u32 lapic_id) { write_icr(lapic_id, (0b100u << 8) | ICR_ASSERT); }
+
 void broadcast_ipi_others(u8 vector) { write_icr(0, vector | ICR_ASSERT | ICR_ALL_BUT_SELF); }
 
 } // namespace apic

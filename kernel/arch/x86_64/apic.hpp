@@ -21,6 +21,7 @@ u32 timer_ticks_per_ms();
 void timer_oneshot_ns(u64 ns); // one interrupt after `ns` (idle CPUs; start_timer resumes ticking)
 
 void send_ipi(u32 lapic_id, u8 vector);
+void send_nmi(u32 lapic_id); // non-maskable: reaches a CPU even with interrupts off
 void broadcast_ipi_others(u8 vector);
 
 // Start-up IPI sequence is done by Limine, so we don't need INIT/SIPI here.

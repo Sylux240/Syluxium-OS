@@ -56,8 +56,16 @@ void send_packet(Client* c, u8 type, u32 requested, u32 server) {
     put16(udp + 6, 0);
     memcpy(udp + 8, pkt, sizeof(pkt));
     put16(udp + 6, pseudo_checksum(0, 0xFFFFFFFF, PROTO_UDP, udp, sizeof(udp)));
-    LockGuard guard(g_lock);
+    // Diagnostics: report who holds the network lock if it takes long.
+    for (int waited = 0; !g_lock.try_lock(); waited++) {
+        if (waited == 200) {
+            sched::Thread* o = g_lock.owner();
+            klog::warn("dhcp %s: network lock held for 2 s by %s", c->iface->name, o ? o->name : "?");
+        }
+        sched::sleep_ms(10);
+    }
     ip_send(0, 0xFFFFFFFF, PROTO_UDP, udp, sizeof(udp), 64, c->iface);
+    g_lock.unlock();
 }
 
 struct Reply {

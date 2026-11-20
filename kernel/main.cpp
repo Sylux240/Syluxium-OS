@@ -1,3 +1,4 @@
+#include <core/watchdog.hpp>
 #include <core/bootlog.hpp>
 #include <power/cpupower.hpp>
 #include <acpi/acpi.hpp>
@@ -491,6 +492,7 @@ void kernel_main_thread(void*) {
     // Every CPU is now off the bootloader's stacks and page tables.
     sysfs::init(); // needs the final CPU count
     cpupower::publish(); // cpufreq files; idle CPUs go tickless from here
+    watchdog::start();   // stuck CPUs print where they are
     discover_hardware();
     acpi::start_interpreter(); // AML: power button, battery, lid (after PCI)
     ps2kbd::late_init(); // after the USB handoff (firmware PS/2 emulation off)

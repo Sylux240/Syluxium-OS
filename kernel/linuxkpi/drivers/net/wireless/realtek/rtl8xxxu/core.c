@@ -48,6 +48,9 @@ MODULE_PARM_DESC(debug, "Set debug mask");
 module_param_named(ht40_2g, rtl8xxxu_ht40_2g, bool, 0600);
 MODULE_PARM_DESC(ht40_2g, "Enable HT40 support on the 2.4GHz band");
 module_param_named(dma_aggregation, rtl8xxxu_dma_aggregation, bool, 0600);
+/* Syluxium addition (as in other Linux Wi-Fi drivers): software encryption. */
+static bool rtl8xxxu_nohwcrypt;
+module_param_named(nohwcrypt, rtl8xxxu_nohwcrypt, bool, 0600);
 MODULE_PARM_DESC(dma_aggregation, "Enable DMA packet aggregation");
 module_param_named(dma_agg_timeout, rtl8xxxu_dma_agg_timeout, int, 0600);
 MODULE_PARM_DESC(dma_agg_timeout, "Set DMA aggregation timeout (range 1-127)");
@@ -6999,6 +7002,8 @@ static int rtl8xxxu_set_key(struct ieee80211_hw *hw, enum set_key_cmd cmd,
 			    struct ieee80211_sta *sta,
 			    struct ieee80211_key_conf *key)
 {
+	if (rtl8xxxu_nohwcrypt)
+		return -EOPNOTSUPP; /* mac80211 encrypts in software */
 	struct rtl8xxxu_vif *rtlvif = (struct rtl8xxxu_vif *)vif->drv_priv;
 	struct rtl8xxxu_priv *priv = hw->priv;
 	struct device *dev = &priv->udev->dev;

@@ -51,6 +51,7 @@ public:
     bool try_lock();
     void unlock();
     bool held_by_current() const { return m_owner == current(); }
+    Thread* owner() const { return m_owner; } // diagnostics
 
 private:
     IrqSpinlock m_lock;
