@@ -3,6 +3,19 @@
 A from-scratch x86_64 operating system written in C++20: monolithic kernel,
 booted by [Limine](https://github.com/limine-bootloader/limine).
 
+## Screenshots
+
+From power-on to the desktop, in the order a computer shows them:
+
+| | |
+|---|---|
+| **1. Boot picker** (UEFI): pick a system with the mouse or keyboard | **2. Boot splash**: logo and load bar while Syluxium starts |
+| ![Boot picker](docs/screenshots/1-boot-picker.png) | ![Boot splash](docs/screenshots/2-boot-splash.png) |
+| **3. Verbose boot** (press Esc during the splash) | **4. Login screen** |
+| ![Verbose boot](docs/screenshots/3-verbose-boot.png) | ![Login screen](docs/screenshots/4-login.png) |
+| **5. Desktop** | |
+| ![Desktop](docs/screenshots/5-desktop.png) | |
+
 ## Requirements (Arch / CachyOS)
 
 ```sh
@@ -25,7 +38,8 @@ from official Debian packages (`DEBIAN_PKGS` in the Makefile).
 
 Headless test: `tools/smoke-test.sh [bios|uefi] [seconds] [label]` boots without
 a window and captures the serial log + a screenshot. With a label, both are
-archived to `smoke/` (one screenshot per major test; survives `make clean`).
+archived to `smoke/` (one screenshot per major test; survives `make clean`; kept
+locally, not in the repository).
 
 The first build clones Limine into `deps/`. `make` also writes
 `compile_commands.json`, so CLion / clangd get full code completion

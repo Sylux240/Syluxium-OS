@@ -3,3 +3,4 @@ deps/
 compile_commands.json
 .idea/
 __pycache__/
+smoke/

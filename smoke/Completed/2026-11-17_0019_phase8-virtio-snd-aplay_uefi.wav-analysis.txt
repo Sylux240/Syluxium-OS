@@ -1,6 +1,0 @@
-file: 623066 frames, 14.13 s, 44100 Hz, 2 ch, 16 bit
-segment  1: t=  0.00s dur= 2.00s  ch0   440.0 Hz rms   11581   ch1   440.0 Hz rms   11581
-segment  2: t=  2.00s dur= 4.00s  ch0  1000.0 Hz rms   11560   ch1  1000.0 Hz rms   11560
-segment  3: t=  6.10s dur= 1.90s  ch0   750.0 Hz rms   11584   ch1   750.0 Hz rms   11584
-segment  4: t=  8.10s dur= 2.90s  ch0   600.0 Hz rms   18541   ch1  silent  rms       0
-segment  5: t= 11.10s dur= 2.90s  ch0  silent  rms       0   ch1   600.0 Hz rms   18541
