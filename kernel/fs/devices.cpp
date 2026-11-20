@@ -100,6 +100,17 @@ void init() {
     vfs::add_node("/dev/tty", new DevTty);
     vfs::add_node("/dev/tty0", tty::console_inode());
     pty::init(); // /dev/ptmx, /dev/pts
+    // The usual symlinks (udev makes them on Linux): bash's <(...) process
+    // substitution and scripts reading /dev/stdin need them.
+    {
+        static const char* const links[][2] = {
+            {"fd", "/proc/self/fd"}, {"stdin", "/proc/self/fd/0"}, {"stdout", "/proc/self/fd/1"},
+            {"stderr", "/proc/self/fd/2"}};
+        vfs::Inode* dev;
+        if (vfs::resolve("/dev", nullptr, true, &dev) == 0)
+            for (const auto& l : links)
+                dev->create(l[0], strlen(l[0]), vfs::S_IFLNK | 0777, l[1], nullptr);
+    }
     // One real console: tty1..tty7 (what X servers open for "their" VT) are the same terminal.
     static const char* const vts[] = {"/dev/tty1", "/dev/tty2", "/dev/tty3", "/dev/tty4",
                                       "/dev/tty5", "/dev/tty6", "/dev/tty7"};

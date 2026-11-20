@@ -3,11 +3,26 @@
 # not in Alt+Tab, always on top, no window frame (it's placed in the lower
 # right corner above the clock by syluxium-autoplay).
 [General]
-count=1
+count=2
 
 [1]
 Description=Syluxium AutoPlay notification
 title=AutoPlay
+titlematch=2
+skiptaskbar=true
+skiptaskbarrule=2
+skippager=true
+skippagerrule=2
+skipswitcher=true
+skipswitcherrule=2
+above=true
+aboverule=2
+noborder=true
+noborderrule=2
+
+[2]
+Description=Syluxium Wi-Fi chooser bubble
+title=Wi-Fi
 titlematch=2
 skiptaskbar=true
 skiptaskbarrule=2
