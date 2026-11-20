@@ -47,3 +47,15 @@
 #define IS_ENABLED(option) __or(IS_BUILTIN(option), IS_MODULE(option))
 
 #endif
+
+/* Types headers mention in prototypes before their definitions. */
+struct seq_file;
+struct file;
+struct inode;
+struct vm_area_struct;
+struct poll_table_struct;
+
+/* Small helpers Linux code expects everywhere. */
+#define u64_to_user_ptr(x) ((void __user *)(unsigned long)(x))
+#define might_lock(lock) do { } while (0)
+#define might_lock_read(lock) do { } while (0)

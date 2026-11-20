@@ -81,6 +81,8 @@ public:
     // Regular files whose pages can be mapped MAP_SHARED (ramfs/tmpfs): the
     // mapping uses mmap_phys() and writes are seen by every process.
     virtual bool shared_mappable() const { return false; }
+    // LinuxKPI: the Linux struct file behind this open file (bridged files), else null.
+    virtual void* linux_file(File* f) { return nullptr; }
     // Read-only page cache for private mappings (programs, libraries on
     // disk): the page holding file offset `offset` (page aligned), shared by
     // every process that maps it; the caller takes its own reference. Writes

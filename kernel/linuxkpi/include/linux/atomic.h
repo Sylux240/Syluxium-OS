@@ -42,6 +42,15 @@ static inline bool atomic_add_unless(atomic_t* v, int a, int u) {
 #define atomic64_dec atomic_dec
 #define atomic64_inc_return atomic_inc_return
 #define atomic64_add_return atomic_add_return
+#define atomic64_fetch_add atomic_fetch_add
+#define ATOMIC64_INIT(i) { (i) }
+#define ATOMIC_LONG_INIT(i) { (i) }
+#define atomic_long_inc_return_relaxed atomic_inc_return
+#ifndef atomic_long_dec_return
+#define atomic_long_dec_return(v) atomic_sub_return(1, v)
+#endif
+#define smp_store_mb(var, value) do { WRITE_ONCE(var, value); __atomic_thread_fence(__ATOMIC_SEQ_CST); } while (0)
+#define kmalloc_size_roundup(size) (size)
 #define atomic_long_read atomic_read
 #define atomic_long_set atomic_set
 #define atomic_long_inc atomic_inc
@@ -61,6 +70,7 @@ typedef struct { atomic_t refs; } refcount_t;
 struct kref { refcount_t refcount; };
 #define kref_init(k) refcount_set(&(k)->refcount, 1)
 #define kref_get(k) refcount_inc(&(k)->refcount)
+#define kref_get_unless_zero(k) refcount_inc_not_zero(&(k)->refcount)
 #define kref_read(k) refcount_read(&(k)->refcount)
 static inline int kref_put(struct kref* k, void (*release)(struct kref*)) {
     if (refcount_dec_and_test(&k->refcount)) { release(k); return 1; }

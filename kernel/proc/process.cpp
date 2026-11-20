@@ -324,6 +324,20 @@ vfs::File* fd_get(Process* p, int fd) {
     return f;
 }
 
+long fd_replace(Process* p, int fd, vfs::File* f) {
+    if (fd < 0 || fd >= MAX_FDS)
+        return -err::BADF;
+    vfs::File* old;
+    {
+        LockGuard guard(p->fd_lock);
+        old = p->fds[fd];
+        p->fds[fd] = f;
+    }
+    if (old)
+        vfs::file_put(old);
+    return 0;
+}
+
 long fd_close(Process* p, int fd) {
     if (fd < 0 || fd >= MAX_FDS)
         return -err::BADF;

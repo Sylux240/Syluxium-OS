@@ -23,6 +23,7 @@ struct Thread {
 
     u64 tid = 0;
     char name[32] = {};
+    void* lkpi_task = nullptr; // LinuxKPI task_struct (allocated on first use)
     ThreadState state = ThreadState::Blocked;
     bool on_cpu = false;   // executing, or still being switched away from
     bool pinned = false;   // never migrated to another CPU

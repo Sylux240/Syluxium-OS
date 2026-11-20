@@ -16,6 +16,9 @@ typedef int (*lkpi_initcall_t)(void);
 #define postcore_initcall(fn) __lkpi_define_initcall(fn, 2)
 #define arch_initcall(fn) __lkpi_define_initcall(fn, 3)
 #define subsys_initcall(fn) __lkpi_define_initcall(fn, 4)
+#ifndef __exitcall
+#define __exitcall(fn)
+#endif
 #define fs_initcall(fn) __lkpi_define_initcall(fn, 5)
 #define device_initcall(fn) __lkpi_define_initcall(fn, 6)
 #define module_init(fn) __lkpi_define_initcall(fn, 6)

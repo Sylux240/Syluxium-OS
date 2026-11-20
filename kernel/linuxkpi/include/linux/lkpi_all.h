@@ -22,4 +22,5 @@
 #include <linux/idr.h>
 #include <linux/jump_label.h>
 #include <linux/notifier.h>
+#include <linux/ioctl.h>
 #endif

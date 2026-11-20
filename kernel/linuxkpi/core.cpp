@@ -6,6 +6,8 @@
 // Linux headers (whose macros, like min/max, must not leak into the C++
 // code above); then the C-linkage implementations.
 
+#include <fs/poll.hpp>
+#include <proc/process.hpp>
 #include <arch/x86_64/cpu.hpp>
 #include <core/log.hpp>
 #include <core/panic.hpp>
@@ -760,6 +762,7 @@ void init_waitqueue_head(wait_queue_head_t* w) { memset(w, 0, sizeof(*w)); }
 void wake_up(wait_queue_head_t* w) {
     __atomic_add_fetch(&w->seq, 1, __ATOMIC_SEQ_CST);
     wq_of(w)->wake_all();
+    ::poll::notify(); // Linux files bridged by file.cpp: pollers re-check
 }
 
 int lkpi_wait_sleep(wait_queue_head_t* w, unsigned int seen, unsigned long deadline, int interruptible) {
@@ -952,15 +955,45 @@ struct task_struct* lkpi_kthread_run(int (*fn)(void*), void* data, const char* n
     return &g_task_dummy;
 }
 
+namespace {
+struct LkpiTask {
+    struct task_struct t;
+    sched::WaitQueue wq;
+};
+LkpiTask* task_of(struct task_struct* t) { return reinterpret_cast<LkpiTask*>(t); }
+} // namespace
+
 struct task_struct* lkpi_current(void) {
-    // Per-call snapshot (only comm/pid are read, for log messages).
-    static struct task_struct t;
     sched::Thread* th = sched::current();
-    snprintf(t.comm, sizeof(t.comm), "%s", th ? th->name : "kernel");
-    t.pid = 0;
-    t.tgid = 0;
-    return &t;
+    if (!th) {
+        static LkpiTask boot;
+        return &boot.t;
+    }
+    if (!th->lkpi_task) {
+        auto* lt = new LkpiTask{};
+        snprintf(lt->t.comm, sizeof(lt->t.comm), "%s", th->name);
+        lt->t.lkpi_thread = th;
+        if (th->process)
+            lt->t.pid = lt->t.tgid = th->process->pid;
+        th->lkpi_task = lt;
+    }
+    return &static_cast<LkpiTask*>(th->lkpi_task)->t;
 }
+
+void lkpi_set_current_state(long state) {
+    __atomic_store_n(&lkpi_current()->__state, state, __ATOMIC_SEQ_CST);
+}
+
+int wake_up_state(struct task_struct* p, unsigned int state) {
+    if (!p || !(__atomic_load_n(&p->__state, __ATOMIC_SEQ_CST) & state))
+        return 0;
+    __atomic_store_n(&p->__state, TASK_RUNNING, __ATOMIC_SEQ_CST);
+    task_of(p)->wq.wake_all();
+    return 1;
+}
+int wake_up_process(struct task_struct* p) { return wake_up_state(p, TASK_NORMAL); }
+int lkpi_signal_pending(void) { return sched::current() && sched::current()->process && signal::interrupted(); }
+
 u64 lkpi_ktime_ns(void) { return clock::now_ns(); }
 
 void udelay(unsigned long us) { clock::busy_wait_ns(us * 1000); }
@@ -976,15 +1009,33 @@ void usleep_range(unsigned long min_us, unsigned long) {
     else
         sched::sleep_ns(min_us * 1000);
 }
-void schedule(void) { sched::yield(); }
+// Sleeps while the task is still in a sleeping state (set_current_state)
+// and nobody woke it; returns the jiffies (ms) left.
 long schedule_timeout(long timeout) {
-    if (timeout == MAX_SCHEDULE_TIMEOUT) {
+    struct task_struct* t = lkpi_current();
+    long state = __atomic_load_n(&t->__state, __ATOMIC_SEQ_CST);
+    if (state == TASK_RUNNING) {
         sched::yield();
         return timeout;
     }
-    sched::sleep_ms(timeout > 0 ? static_cast<u64>(timeout) : 0);
-    return 0;
+    bool interruptible = state & TASK_INTERRUPTIBLE;
+    auto still = [&] {
+        return __atomic_load_n(&t->__state, __ATOMIC_SEQ_CST) != TASK_RUNNING &&
+               !(interruptible && lkpi_signal_pending());
+    };
+    u64 start = clock::now_ns();
+    if (timeout == MAX_SCHEDULE_TIMEOUT) {
+        task_of(t)->wq.wait_until([&] { return !still(); });
+    } else if (timeout > 0) {
+        task_of(t)->wq.wait_until_timeout([&] { return !still(); }, static_cast<u64>(timeout) * 1'000'000);
+    }
+    __atomic_store_n(&t->__state, TASK_RUNNING, __ATOMIC_SEQ_CST);
+    if (timeout == MAX_SCHEDULE_TIMEOUT)
+        return timeout;
+    long used = static_cast<long>((clock::now_ns() - start) / 1'000'000);
+    return used >= timeout ? 0 : timeout - used;
 }
+void schedule(void) { schedule_timeout(MAX_SCHEDULE_TIMEOUT); }
 
 // ======================= bit searching =======================
 

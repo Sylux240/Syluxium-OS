@@ -3,7 +3,7 @@
 #ifndef _LKPI_LINUX_DEBUGFS_H
 #define _LKPI_LINUX_DEBUGFS_H
 #include <linux/lkpi_all.h>
-struct dentry { struct dentry* d_parent; };
+#include <linux/fs.h>
 struct file;
 struct inode;
 struct seq_file { void* private; };
@@ -16,15 +16,6 @@ static inline int single_open(struct file* f, int (*show)(struct seq_file*, void
 #define seq_lseek NULL
 struct poll_table_struct;
 typedef long long loff_t_lkpi;
-struct file_operations {
-    struct module* owner;
-    ssize_t (*read)(struct file*, char __user*, size_t, loff_t*);
-    ssize_t (*write)(struct file*, const char __user*, size_t, loff_t*);
-    int (*open)(struct inode*, struct file*);
-    int (*release)(struct inode*, struct file*);
-    loff_t (*llseek)(struct file*, loff_t, int);
-    unsigned int (*poll)(struct file*, struct poll_table_struct*);
-};
 struct debugfs_regset32;
 struct debugfs_blob_wrapper { void* data; unsigned long size; };
 #define DEFINE_DEBUGFS_ATTRIBUTE(__fops, __get, __set, __fmt) \

@@ -142,6 +142,8 @@ sched::Thread* find_thread(int tid);
 long fd_install(Process* p, vfs::File* f, int min_fd = 0, bool cloexec = false);
 vfs::File* fd_get(Process* p, int fd); // returns a new reference (file_put when done)
 long fd_close(Process* p, int fd);
+// Swap the file in a used slot (the old one is released). For LinuxKPI fd_install.
+long fd_replace(Process* p, int fd, vfs::File* f);
 long fd_dup2(Process* p, int old_fd, int new_fd, bool cloexec);
 
 void init();

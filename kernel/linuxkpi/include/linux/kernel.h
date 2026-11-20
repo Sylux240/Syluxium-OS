@@ -312,8 +312,28 @@ struct task_struct {
     char comm[16];
     int pid;
     int tgid;
+    volatile long __state; /* TASK_RUNNING / TASK_INTERRUPTIBLE / TASK_UNINTERRUPTIBLE */
+    void* lkpi_thread;     /* the Syluxium thread */
 };
 struct task_struct* lkpi_current(void);
+
+/* Linux's open-coded sleep: set_current_state(); check; schedule_timeout().
+ * A wake-up between the two isn't lost: it resets the state to running. */
+#define TASK_RUNNING 0x0000
+#define TASK_INTERRUPTIBLE 0x0001
+#define TASK_UNINTERRUPTIBLE 0x0002
+#define TASK_KILLABLE (TASK_UNINTERRUPTIBLE | 0x0100)
+#define TASK_IDLE (TASK_UNINTERRUPTIBLE | 0x0400)
+#define TASK_NORMAL (TASK_INTERRUPTIBLE | TASK_UNINTERRUPTIBLE)
+void lkpi_set_current_state(long state);
+#define set_current_state(s) lkpi_set_current_state(s)
+#define __set_current_state(s) lkpi_set_current_state(s)
+int wake_up_state(struct task_struct* p, unsigned int state);
+int wake_up_process(struct task_struct* p);
+int lkpi_signal_pending(void);
+#define signal_pending(t) ((t) == lkpi_current() ? lkpi_signal_pending() : 0)
+#define fatal_signal_pending(t) signal_pending(t)
+#define signal_pending_state(state, t) (((state) & TASK_INTERRUPTIBLE) && signal_pending(t))
 #ifndef __cplusplus
 #define current lkpi_current()
 #define in_interrupt() 0

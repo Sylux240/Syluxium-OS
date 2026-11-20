@@ -51,6 +51,9 @@ typedef u64 resource_size_t;
 typedef unsigned int gfp_t;
 typedef unsigned long kernel_ulong_t;
 typedef unsigned int fmode_t;
+typedef unsigned short umode_t;
+typedef unsigned int __poll_t;
+typedef unsigned int dev_t;
 
 typedef struct {
     volatile int counter;
