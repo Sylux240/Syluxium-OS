@@ -123,7 +123,7 @@ char *kvasprintf(gfp_t gfp, const char *fmt, va_list ap);
 #define boot_cpu_has(f) true
 static inline void clflushopt(volatile void *p) { __asm__ volatile("clflush %0" : "+m"(*(volatile char *)p)); }
 #define clflush clflushopt
-void wbinvd_on_all_cpus(void);
+int wbinvd_on_all_cpus(void);
 static inline void wbinvd(void) { __asm__ volatile("wbinvd" ::: "memory"); }
 #define boot_cpu_data_clflush_size 64
 
@@ -168,6 +168,12 @@ struct class_attribute_string { int unused; };
 /* Scatter/gather tables. */
 struct scatterlist;
 struct sg_table { struct scatterlist *sgl; unsigned int nents; unsigned int orig_nents; };
+enum dma_data_direction;
+struct device;
+int dma_map_sgtable(struct device *dev, struct sg_table *sgt, enum dma_data_direction dir, unsigned long attrs);
+void dma_unmap_sgtable(struct device *dev, struct sg_table *sgt, enum dma_data_direction dir, unsigned long attrs);
+#define DMA_ATTR_SKIP_CPU_SYNC (1UL << 5)
+#define dma_max_mapping_size(dev) SIZE_MAX
 int sg_alloc_table(struct sg_table *t, unsigned int nents, gfp_t gfp);
 void sg_free_table(struct sg_table *t);
 

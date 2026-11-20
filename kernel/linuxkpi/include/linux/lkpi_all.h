@@ -24,4 +24,5 @@
 #include <linux/notifier.h>
 #include <linux/ioctl.h>
 #include <linux/lkpi_extras.h>
+#include <linux/lkpi_page.h>
 #endif

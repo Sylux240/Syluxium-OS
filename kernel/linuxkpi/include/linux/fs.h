@@ -61,6 +61,7 @@ struct file {
 	atomic_long_t f_count;
 	void *lkpi_vfs; /* the Syluxium vfs::File */
 };
+struct file *lkpi_file_alloc(const struct file_operations *fops, void *priv, unsigned int flags, struct inode *inode);
 #define file_inode(f) ((f)->f_inode)
 #define file_count(f) atomic_long_read(&(f)->f_count)
 #define iput(inode) do { } while (0)

@@ -60,3 +60,4 @@
 #include <linux/compiler_ext.h>
 
 #endif
+#define __deprecated

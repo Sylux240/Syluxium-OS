@@ -9,7 +9,15 @@
 typedef struct { unsigned long pgprot; } pgprot_t;
 #define __pgprot(x) ((pgprot_t){ (x) })
 #define pgprot_val(x) ((x).pgprot)
-#define pgprot_writecombine(p) (p)
+#define LKPI_PROT_WC 0x10UL /* write-combining */
+#define LKPI_PROT_UC 0x20UL /* uncached */
+#define pgprot_writecombine(p) __pgprot((p).pgprot | LKPI_PROT_WC)
+#define pgprot_noncached(p) __pgprot((p).pgprot | LKPI_PROT_UC)
+#define pgprot_val(p) ((p).pgprot)
+#ifndef PAGE_KERNEL
+#define PAGE_KERNEL __pgprot(0)
+#define PAGE_KERNEL_IO __pgprot(LKPI_PROT_UC)
+#endif
 #define pgprot_noncached(p) (p)
 #define pgprot_decrypted(p) (p)
 
@@ -66,6 +74,8 @@ struct vm_area_struct {
 #define vm_flags_clear(vma, f) ((vma)->vm_flags &= ~(f))
 #define vm_flags_mod(vma, set, clr) ((vma)->vm_flags = ((vma)->vm_flags | (set)) & ~(clr))
 #define vm_get_page_prot(f) __pgprot(0)
+struct file *get_file(struct file *f);
+void fput(struct file *f);
 static inline void vma_set_file(struct vm_area_struct *vma, struct file *f)
 {
 	if (f)

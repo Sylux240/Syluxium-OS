@@ -9,6 +9,7 @@
 #ifndef _LKPI_LINUX_SKBUFF_H
 #define _LKPI_LINUX_SKBUFF_H
 
+#include <linux/lkpi_page.h>
 #include <linux/kernel.h>
 #include <linux/atomic.h>
 #include <linux/jiffies.h>
@@ -394,11 +395,6 @@ static inline bool skb_is_gso(const struct sk_buff* skb) { return skb_shinfo(skb
 static inline bool skb_is_gso_v6(const struct sk_buff* skb) { return false; }
 static inline unsigned int skb_frag_size(const skb_frag_t* f) { return f->len; }
 static inline struct page* skb_frag_page(const skb_frag_t* f) { return f->netmem; }
-void* lkpi_page_address(const struct page* page);
-struct page* lkpi_virt_to_page(const void* addr);
-#define virt_to_page(a) lkpi_virt_to_page(a)
-#define virt_to_head_page(a) lkpi_virt_to_page(a)
-#define page_to_virt(p) lkpi_page_address(p)
 static inline void* skb_frag_address(const skb_frag_t* f) { return (char*)lkpi_page_address(f->netmem) + f->offset; }
 static inline unsigned int skb_frag_off(const skb_frag_t* f) { return f->offset; }
 #define skb_frag_dma_map(dev, frag, off, size, dir) dma_map_single(dev, (char*)skb_frag_address(frag) + (off), size, dir)
@@ -520,20 +516,7 @@ static inline struct ethhdr* eth_hdr(const struct sk_buff* skb) { return (struct
 static inline struct ethhdr* skb_eth_hdr(const struct sk_buff* skb) { return (struct ethhdr*)skb->data; }
 
 /* ---- pages (for drivers that receive into pages) ---- */
-struct page* alloc_pages(gfp_t gfp, unsigned int order);
-#define alloc_page(gfp) alloc_pages(gfp, 0)
-#define dev_alloc_pages(order) alloc_pages(GFP_ATOMIC, order)
-#define dev_alloc_page() alloc_pages(GFP_ATOMIC, 0)
-void __free_pages(struct page* page, unsigned int order);
-#define __free_page(p) __free_pages(p, 0)
-void get_page(struct page* page);
-void put_page(struct page* page);
-#define page_address(p) lkpi_page_address(p)
-unsigned long __get_free_pages(gfp_t gfp, unsigned int order);
-#define __get_free_page(gfp) __get_free_pages(gfp, 0)
-#define get_zeroed_page(gfp) __get_free_pages((gfp) | __GFP_ZERO, 0)
-void free_pages(unsigned long addr, unsigned int order);
-#define free_page(addr) free_pages(addr, 0)
+
 
 LKPI_EXTERN_C_END
 

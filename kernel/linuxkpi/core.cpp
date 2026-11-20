@@ -1425,4 +1425,5 @@ void init() {
 
 // ---- DRM-core helpers ----
 extern "C" bool lkpi_capable(int) { return proc::capable(); }
-extern "C" void wbinvd_on_all_cpus(void) { asm volatile("wbinvd" ::: "memory"); }
+extern "C" int wbinvd_on_all_cpus(void) { asm volatile("wbinvd" ::: "memory"); return 0; }
+

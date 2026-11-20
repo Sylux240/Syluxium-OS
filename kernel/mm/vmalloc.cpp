@@ -216,6 +216,18 @@ void* map_physical(u64 phys, usize size, u32 flags) {
     return reinterpret_cast<void*>(area->data + offset);
 }
 
+void* map_pages(const u64* phys, usize count, u32 flags) {
+    Area* area = create_area(count, false);
+    if (!area)
+        return nullptr;
+    auto& ks = vmm::AddressSpace::kernel();
+    for (usize i = 0; i < count; i++) {
+        if (!ks.map(area->data + i * PAGE_SIZE, phys[i], flags | vmm::GLOBAL))
+            panic("vmalloc: failed to map page %#lx", phys[i]);
+    }
+    return reinterpret_cast<void*>(area->data);
+}
+
 void unmap_physical(void* virt) {
     destroy_area(reinterpret_cast<void*>(align_down(reinterpret_cast<uptr>(virt), PAGE_SIZE)), false);
 }
