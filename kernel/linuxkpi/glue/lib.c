@@ -926,6 +926,7 @@ int device_rename(struct device* dev, const char* new_name)
 	return 0;
 }
 
+void lkpi_drm_card_added(int delta);
 int device_add(struct device* dev)
 {
 	if (dev->init_name) {
@@ -945,6 +946,8 @@ int device_add(struct device* dev)
 		snprintf(path, sizeof(path), "/dev/%s", name ? name : dev_name(dev));
 		kfree(name);
 		lkpi_chrdev_node(path, MAJOR(dev->devt), MINOR(dev->devt), mode ? mode : 0666);
+		if (!strncmp(path, "/dev/dri/card", 13))
+			lkpi_drm_card_added(1);
 	}
 	return 0;
 }
@@ -958,6 +961,8 @@ void device_del(struct device* dev)
 		snprintf(path, sizeof(path), "/dev/%s", name ? name : dev_name(dev));
 		kfree(name);
 		lkpi_chrdev_node_remove(path);
+		if (!strncmp(path, "/dev/dri/card", 13))
+			lkpi_drm_card_added(-1);
 	}
 	dev->lkpi_added = false;
 }
@@ -1156,6 +1161,20 @@ void platform_device_unregister(struct platform_device* pdev)
 {
 	if (!pdev)
 		return;
+	mutex_lock(&lkpi_platform_lock);
+	for (int i = 0; i < LKPI_MAX_PLATFORM; i++)
+		if (lkpi_pdevs[i] == pdev)
+			lkpi_pdevs[i] = NULL;
+	mutex_unlock(&lkpi_platform_lock);
+	if (pdev->lkpi_driver) { /* unbind: the driver's remove() */
+		struct platform_driver *drv = pdev->lkpi_driver;
+		if (drv->remove_new)
+			drv->remove_new(pdev);
+		else if (drv->remove)
+			drv->remove(pdev);
+		pdev->lkpi_driver = NULL;
+		pdev->dev.driver = NULL;
+	}
 	device_del(&pdev->dev);
 	put_device(&pdev->dev);
 }
@@ -1188,13 +1207,17 @@ void platform_driver_unregister(struct platform_driver* drv)
  * "simple-framebuffer" device simpledrm drives until a GPU driver
  * takes over. */
 #include <linux/platform_data/simplefb.h>
+void lkpi_boot_fb_registered(struct platform_device *pdev);
 void lkpi_register_boot_framebuffer(u64 phys, u32 width, u32 height, u32 pitch, u32 red_shift)
 {
 	struct simplefb_platform_data pd = { .width = width, .height = height, .stride = pitch,
 					     .format = red_shift == 16 ? "x8r8g8b8" : "x8b8g8r8" };
 	struct resource res = { .name = "BOOTFB", .start = phys, .end = phys + (u64)pitch * height - 1,
 				.flags = IORESOURCE_MEM };
-	platform_device_register_resndata(NULL, "simple-framebuffer", 0, &res, 1, &pd, sizeof(pd));
+	struct platform_device *pdev =
+		platform_device_register_resndata(NULL, "simple-framebuffer", 0, &res, 1, &pd, sizeof(pd));
+	if (!IS_ERR_OR_NULL(pdev))
+		lkpi_boot_fb_registered(pdev);
 }
 
 /* ---- kthread workers ---- */
@@ -1343,7 +1366,7 @@ struct pid *lkpi_task_pid(struct task_struct *t)
 }
 
 /* ---- batch 3 helpers ---- */
-struct cpuinfo_x86 boot_cpu_data = { .x86_clflush_size = 64, .x86_cache_alignment = 64 };
+struct cpuinfo_x86 boot_cpu_data = { .x86_clflush_size = 64, .x86_cache_alignment = 64, .x86 = 6 };
 struct resource iomem_resource = { .name = "PCI mem", .start = 0, .end = ~0ULL };
 
 static void lkpi_swap(void *a, void *b, size_t size)

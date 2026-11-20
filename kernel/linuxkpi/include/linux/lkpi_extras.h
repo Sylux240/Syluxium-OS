@@ -52,6 +52,34 @@ static inline unsigned int read_seqretry(const seqlock_t *sl, unsigned int start
 #define write_seqlock_irqsave(sl, flags) do { (flags) = 0; write_seqlock(sl); } while (0)
 #define write_sequnlock_irqrestore(sl, flags) write_sequnlock(sl)
 #define seqcount_init(s) ((s)->seq = 0)
+typedef seqcount_t seqcount_mutex_t;
+typedef seqcount_t seqcount_spinlock_t;
+typedef seqcount_t seqcount_latch_t;
+#define seqcount_mutex_init(s, lock) seqcount_init(s)
+#define seqcount_spinlock_init(s, lock) seqcount_init(s)
+#define seqcount_latch_init(s) seqcount_init(s)
+#define write_seqcount_begin(s) do { __atomic_add_fetch(&(s)->seq, 1, __ATOMIC_RELEASE); __atomic_thread_fence(__ATOMIC_SEQ_CST); } while (0)
+#define write_seqcount_end(s) do { __atomic_thread_fence(__ATOMIC_SEQ_CST); __atomic_add_fetch(&(s)->seq, 1, __ATOMIC_RELEASE); } while (0)
+#define raw_write_seqcount_begin write_seqcount_begin
+#define raw_write_seqcount_end write_seqcount_end
+#define write_seqcount_invalidate(s) do { __atomic_add_fetch(&(s)->seq, 2, __ATOMIC_RELEASE); } while (0)
+static inline unsigned int lkpi_read_seqcount_begin(const seqcount_t *s)
+{
+	unsigned int v;
+	while ((v = __atomic_load_n(&s->seq, __ATOMIC_ACQUIRE)) & 1)
+		__builtin_ia32_pause();
+	return v;
+}
+#define read_seqcount_begin(s) lkpi_read_seqcount_begin(s)
+#define raw_read_seqcount_begin(s) lkpi_read_seqcount_begin(s)
+#define __read_seqcount_begin(s) lkpi_read_seqcount_begin(s)
+#define raw_read_seqcount(s) __atomic_load_n(&(s)->seq, __ATOMIC_ACQUIRE)
+#define read_seqcount_retry(s, start) (__atomic_thread_fence(__ATOMIC_ACQUIRE), __atomic_load_n(&(s)->seq, __ATOMIC_RELAXED) != (start))
+#define __read_seqcount_retry read_seqcount_retry
+#define raw_read_seqcount_latch(s) raw_read_seqcount(s)
+#define raw_read_seqcount_latch_retry(s, start) read_seqcount_retry(s, start)
+#define raw_write_seqcount_latch(s) write_seqcount_invalidate(s)
+#define seqprop_sequence(s) raw_read_seqcount(s)
 
 /* kmsg dumpers (panic log savers): never called. */
 enum kmsg_dump_reason { KMSG_DUMP_UNDEF, KMSG_DUMP_PANIC, KMSG_DUMP_OOPS, KMSG_DUMP_EMERG, KMSG_DUMP_SHUTDOWN, KMSG_DUMP_MAX };
@@ -88,12 +116,11 @@ static inline void kthread_flush_worker(struct kthread_worker *w) { flush_workqu
 void kthread_destroy_worker(struct kthread_worker *w);
 
 /* ---- batch 2: DRM core needs ---- */
-#define unmap_mapping_range(mapping, start, len, even_cows) do { } while (0)
-typedef u64 resource_size_t;
-struct resource { resource_size_t start, end; const char *name; unsigned long flags; struct resource *parent, *sibling, *child; };
-#define resource_size(r) ((r)->end - (r)->start + 1)
-#define DEFINE_RES_MEM(_start, _size) { .start = (_start), .end = (_start) + (_size) - 1, .flags = 0x200 }
-#define IORESOURCE_MEM 0x00000200
+struct address_space;
+void unmap_mapping_range(struct address_space *mapping, loff_t const holebegin, loff_t const holelen, int even_cows);
+#define unmap_mapping_pages(mapping, start, nr, even_cows) \
+	unmap_mapping_range(mapping, (loff_t)(start) << PAGE_SHIFT, (loff_t)(nr) << PAGE_SHIFT, even_cows)
+#include <linux/ioport.h>
 struct debugfs_reg32 { char *name; unsigned long offset; };
 struct debugfs_regset32 { const struct debugfs_reg32 *regs; int nregs; void __iomem *base; struct device *dev; };
 
@@ -283,7 +310,7 @@ struct eventfd_ctx;
 #define simple_release_fs(mount, count) do { } while (0)
 
 /* Machine/platform queries. */
-struct cpuinfo_x86 { int x86_clflush_size; int x86_cache_alignment; };
+struct cpuinfo_x86 { int x86_clflush_size; int x86_cache_alignment; u8 x86, x86_model, x86_stepping, x86_vendor; };
 extern struct cpuinfo_x86 boot_cpu_data;
 #define xen_pv_domain() 0
 #define CC_ATTR_MEM_ENCRYPT 0
@@ -292,9 +319,6 @@ extern struct cpuinfo_x86 boot_cpu_data;
 struct component_ops { int (*bind)(struct device *, struct device *, void *); void (*unbind)(struct device *, struct device *, void *); };
 #define component_add(dev, ops) 0
 #define component_del(dev, ops) do { } while (0)
-#define aperture_remove_conflicting_devices(base, size, name) 0
-#define aperture_remove_conflicting_pci_devices(pdev, name) 0
-#define devm_aperture_acquire_for_platform_device(pdev, base, size) 0
 
 /* Device tree (PCs have none). */
 struct device_node;

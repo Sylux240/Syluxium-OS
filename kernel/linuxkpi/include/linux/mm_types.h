@@ -6,7 +6,6 @@
 #include <linux/lkpi_all.h>
 #include <linux/fs.h>
 
-typedef struct { unsigned long pgprot; } pgprot_t;
 #define __pgprot(x) ((pgprot_t){ (x) })
 #define pgprot_val(x) ((x).pgprot)
 #define LKPI_PROT_WC 0x10UL /* write-combining */
@@ -18,7 +17,6 @@ typedef struct { unsigned long pgprot; } pgprot_t;
 #define PAGE_KERNEL __pgprot(0)
 #define PAGE_KERNEL_IO __pgprot(LKPI_PROT_UC)
 #endif
-#define pgprot_noncached(p) (p)
 #define pgprot_decrypted(p) (p)
 
 typedef unsigned int vm_fault_t;
@@ -68,7 +66,8 @@ struct vm_area_struct {
 	const struct vm_operations_struct *vm_ops;
 	void *vm_private_data;
 	struct file *vm_file;
-	void *lkpi; /* file.cpp: the physical range a remap_pfn_range() mapped, the faulted pfn */
+	void *lkpi; /* glue/file.c: struct lkpi_vma */
+	struct mm_struct *vm_mm;
 };
 #define vma_pages(vma) (((vma)->vm_end - (vma)->vm_start) >> PAGE_SHIFT)
 #define vm_flags_set(vma, f) ((vma)->vm_flags |= (f))

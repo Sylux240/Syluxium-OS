@@ -108,6 +108,8 @@ struct device {
     struct fwnode_handle* fwnode;
     bool lkpi_added;
     unsigned int devt; /* char device number (DRM minors); appended: C and C++ share this layout */
+    const struct bus_type* bus; /* appended */
+    struct { bool is_suspended; bool is_prepared; bool can_wakeup; } power;
 };
 
 static inline void* dev_get_drvdata(const struct device* d) { return d->driver_data; }

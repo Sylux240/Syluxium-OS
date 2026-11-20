@@ -14,6 +14,10 @@ static inline void writeb(u8 v, volatile void __iomem* a) { *(volatile u8*)a = v
 static inline void writew(u16 v, volatile void __iomem* a) { *(volatile u16*)a = v; }
 static inline void writel(u32 v, volatile void __iomem* a) { *(volatile u32*)a = v; }
 static inline void writeq(u64 v, volatile void __iomem* a) { *(volatile u64*)a = v; }
+#define readq readq
+#define writeq writeq
+#define readq_relaxed readq
+#define writeq_relaxed writeq
 #define readb_relaxed readb
 #define readw_relaxed readw
 #define readl_relaxed readl
@@ -49,7 +53,19 @@ static inline void outl(u32 v, u16 port) { __asm__ volatile("outl %0, %1" : : "a
 void __iomem* ioremap(phys_addr_t phys, size_t size);
 #define ioremap_nocache ioremap
 #define ioremap_uc ioremap
-#define ioremap_wc ioremap
+void __iomem* ioremap_wc(phys_addr_t phys, size_t size);
+void __iomem* ioremap_cache(phys_addr_t phys, size_t size);
+#define ioremap_np ioremap
+#define memremap(p, s, f) ((void *)ioremap_cache(p, s))
+#define memunmap(v) iounmap(v)
+#define MEMREMAP_WB 1
+#define MEMREMAP_WC 4
+#define arch_phys_wc_add(base, size) 0
+#define arch_phys_wc_del(h) do { } while (0)
+#define arch_io_reserve_memtype_wc(base, size) 0
+#define arch_io_free_memtype_wc(base, size) do { } while (0)
+#define devm_arch_phys_wc_add(dev, base, size) 0
+#define devm_arch_io_reserve_memtype_wc(dev, base, size) 0
 void iounmap(volatile void __iomem* addr);
 #define devm_ioremap(dev, p, s) ioremap(p, s)
 

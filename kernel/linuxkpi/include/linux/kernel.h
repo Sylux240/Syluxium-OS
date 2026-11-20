@@ -314,6 +314,7 @@ struct task_struct {
     int tgid;
     volatile long __state; /* TASK_RUNNING / TASK_INTERRUPTIBLE / TASK_UNINTERRUPTIBLE */
     void* lkpi_thread;     /* the Syluxium thread */
+    struct mm_struct* mm;  /* appended: always NULL (no Linux address spaces) */
 };
 struct task_struct* lkpi_current(void);
 

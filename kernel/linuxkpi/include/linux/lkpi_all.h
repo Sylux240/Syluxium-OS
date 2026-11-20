@@ -25,4 +25,5 @@
 #include <linux/ioctl.h>
 #include <linux/lkpi_extras.h>
 #include <linux/lkpi_page.h>
+#include <linux/lkpi_gpu.h>
 #endif

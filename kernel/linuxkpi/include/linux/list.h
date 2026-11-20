@@ -145,4 +145,13 @@ static inline void list_rotate_left(struct list_head* head) { if (!list_empty(he
 
 LKPI_EXTERN_C_END
 
+static inline void list_bulk_move_tail(struct list_head *head, struct list_head *first, struct list_head *last)
+{
+	first->prev->next = last->next;
+	last->next->prev = first->prev;
+	head->prev->next = first;
+	first->prev = head->prev;
+	last->next = head;
+	head->prev = last;
+}
 #endif

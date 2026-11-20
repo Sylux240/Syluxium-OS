@@ -1,4 +1,7 @@
-/* LinuxKPI: scatter/gather lists of kernel-virtual buffers (no chaining). */
+/* LinuxKPI: scatter/gather lists. An entry names a kernel-virtual buffer
+ * (lkpi_buf: sg_set_buf works for any kernel address) and, when set from a
+ * page, that page (lkpi_page). page_link carries Linux's end and chain
+ * marks: a chain entry's page_link points to the next array. */
 #ifndef _LKPI_LINUX_SCATTERLIST_H
 #define _LKPI_LINUX_SCATTERLIST_H
 
@@ -16,7 +19,16 @@ struct scatterlist {
     void* lkpi_buf;
     struct page* lkpi_page; /* appended: set by sg_set_page() */
 };
+#define SG_CHAIN 0x01UL
 #define SG_END 0x02UL
+#define SG_PAGE_LINK_MASK (SG_CHAIN | SG_END)
+#define sg_is_chain(sg) (((sg)->page_link & SG_CHAIN) != 0)
+#define sg_chain_ptr(sg) ((struct scatterlist *)((sg)->page_link & ~SG_PAGE_LINK_MASK))
+static inline void sg_chain(struct scatterlist* prv, unsigned int prv_nents, struct scatterlist* sgl) {
+    prv[prv_nents - 1].offset = 0;
+    prv[prv_nents - 1].length = 0;
+    prv[prv_nents - 1].page_link = ((unsigned long)sgl | SG_CHAIN) & ~SG_END;
+}
 
 static inline void sg_mark_end(struct scatterlist* sg) { sg->page_link |= SG_END; }
 static inline void sg_unmark_end(struct scatterlist* sg) { sg->page_link &= ~SG_END; }
@@ -35,7 +47,15 @@ static inline void sg_init_one(struct scatterlist* sg, const void* buf, unsigned
     sg_set_buf(sg, buf, buflen);
 }
 static inline void* sg_virt(struct scatterlist* sg) { return (char*)sg->lkpi_buf + sg->offset; }
-static inline struct scatterlist* sg_next(struct scatterlist* sg) { return sg_is_last(sg) ? NULL : sg + 1; }
+static inline struct scatterlist* sg_next(struct scatterlist* sg) {
+    if (sg_is_last(sg))
+        return NULL;
+    sg++;
+    if (sg_is_chain(sg))
+        sg = sg_chain_ptr(sg);
+    return sg;
+}
+static inline int sg_nents(struct scatterlist* sg) { int n = 0; for (; sg; sg = sg_next(sg)) n++; return n; }
 #define for_each_sg(sglist, sg, nr, __i) for (__i = 0, sg = (sglist); __i < (nr); __i++, sg = sg_next(sg))
 #define sg_dma_address(sg) ((sg)->dma_address)
 static inline void sg_set_page(struct scatterlist* sg, struct page* page, unsigned int len, unsigned int offset) {
@@ -45,6 +65,13 @@ static inline void sg_set_page(struct scatterlist* sg, struct page* page, unsign
     sg->length = len;
 }
 static inline struct page* sg_page(struct scatterlist* sg) { return sg->lkpi_page; }
+static inline void sg_assign_page(struct scatterlist* sg, struct page* page) {
+    sg->lkpi_page = page;
+    sg->lkpi_buf = page ? lkpi_page_address(page) : NULL;
+}
+#define sg_dma_mark_bus_address(sg) do { } while (0)
+#define sg_dma_is_bus_address(sg) false
+#define sg_dma_unmark_bus_address(sg) do { } while (0)
 #define sg_phys(sg) (lkpi_direct_to_phys(sg_virt(sg)))
 
 /* Tables (struct sg_table is declared with the other DRM needs). */
@@ -90,7 +117,7 @@ static inline void lkpi_sg_iter_start(struct sg_page_iter* it, struct scatterlis
 static inline u64 sg_page_iter_phys(struct sg_page_iter* it) {
     return lkpi_direct_to_phys(it->sg->lkpi_buf) + ((u64)it->sg_pgoffset << PAGE_SHIFT);
 }
-#define sg_page_iter_page(it) ((it)->sg->lkpi_page) /* only exact for single-page entries */
+#define sg_page_iter_page(it) (nth_page((it)->sg->lkpi_page, (it)->sg_pgoffset))
 #define sg_page_iter_dma_address(dit) ((dit)->base.sg->dma_address + ((dma_addr_t)(dit)->base.sg_pgoffset << PAGE_SHIFT))
 #define sg_dma_len(sg) ((sg)->dma_length)
 

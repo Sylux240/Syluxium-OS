@@ -245,7 +245,8 @@ bool AddressSpace::protect(uptr virt, u32 flags) {
     u64& e = table[table_index(virt, 1)];
     if (!(e & PTE_PRESENT))
         return false;
-    e = leaf_entry(e & PTE_ADDR_MASK, flags, PageSize::Size4K);
+    // Keep the cache type (device mappings: write-combining / uncached).
+    e = leaf_entry(e & PTE_ADDR_MASK, flags, PageSize::Size4K) | (e & (PTE_PWT | PTE_PCD | PTE_PAT_4K));
     arch::invlpg(virt);
     return true;
 }

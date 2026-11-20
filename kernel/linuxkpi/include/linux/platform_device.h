@@ -47,6 +47,7 @@ struct platform_device_info {
     unsigned int num_res;
     const void* data;
     size_t size_data;
+    u64 dma_mask;
 };
 struct platform_device* platform_device_register_full(const struct platform_device_info* info);
 struct platform_device* platform_device_register_resndata(struct device* parent, const char* name, int id,

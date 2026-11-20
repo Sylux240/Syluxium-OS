@@ -55,6 +55,7 @@ bool enable_msi(Function& f, u8 vector);
 
 Function* function_of(const dev::Device* d);
 u32 count();
+Function* function_at(u32 index); // 0 .. count()-1, in enumeration order
 
 // Class/subclass -> readable name, as the Device Manager shows it.
 const char* class_name(u8 class_code, u8 subclass, u8 prog_if);

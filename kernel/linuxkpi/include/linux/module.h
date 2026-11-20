@@ -25,6 +25,9 @@ typedef int (*lkpi_initcall_t)(void);
 #define late_initcall(fn) __lkpi_define_initcall(fn, 7)
 #define late_initcall_sync(fn) __lkpi_define_initcall(fn, 7)
 #define module_exit(fn) static void (*__lkpi_exitcall_##fn)(void) __attribute__((unused)) = fn
+#define module_driver(__driver, __register, __unregister, ...) \
+    static int __init __driver##_lkpi_init(void) { return __register(&(__driver), ##__VA_ARGS__); } \
+    module_init(__driver##_lkpi_init)
 
 #define MODULE_LICENSE(x)
 #define MODULE_AUTHOR(x)
@@ -97,6 +100,13 @@ struct lkpi_param {
     static const struct lkpi_param __lkpi_param_##name __attribute__((used, section(".lkpi_params"))) = { \
         KBUILD_MODNAME "." #name, (void*)&(var), __lkpi_param_type_##type}
 #define module_param(name, type, perm) module_param_named(name, name, type, perm)
+#define module_param_named_unsafe(name, var, type, perm) module_param_named(name, var, type, perm)
+struct kernel_param;
+#define module_param_cb_unsafe(name, ops, arg, perm) module_param_cb(name, ops, arg, perm)
+#define symbol_get(x) ((typeof(&x))NULL)
+#define symbol_put(x) do { } while (0)
+#define symbol_put_addr(p) do { } while (0)
+#define module_param_unsafe(name, type, perm) module_param_named(name, name, type, perm)
 #define module_param_array(name, type, nump, perm)
 #define MODULE_PARM_DESC(p, d)
 #define try_module_get(m) 1

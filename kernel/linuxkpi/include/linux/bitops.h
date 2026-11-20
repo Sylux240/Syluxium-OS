@@ -41,7 +41,7 @@ static inline unsigned long ffz(unsigned long w) { return __ffs(~w); }
 #define hweight64(w) __builtin_popcountll((u64)(w))
 #define hweight_long(w) __builtin_popcountl(w)
 static inline int ilog2_lkpi(u64 n) { return fls64(n) - 1; }
-#define ilog2(n) ilog2_lkpi(n)
+#define ilog2(n) (__builtin_constant_p(n) ? ((n) < 2 ? 0 : 63 - __builtin_clzll(n)) : ilog2_lkpi(n))
 #define is_power_of_2(n) ((n) != 0 && (((n) & ((n) - 1)) == 0))
 static inline u64 roundup_pow_of_two(u64 n) { return n <= 1 ? 1 : 1ULL << fls64(n - 1); }
 static inline u64 rounddown_pow_of_two(u64 n) { return 1ULL << (fls64(n) - 1); }

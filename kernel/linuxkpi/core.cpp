@@ -20,6 +20,7 @@
 #include <mm/pmm.hpp>
 #include <mm/vmalloc.hpp>
 #include <proc/signal.hpp>
+#include <proc/uaccess.hpp>
 #include <sched/sched.hpp>
 #include <sched/sync.hpp>
 #include <time/clock.hpp>
@@ -27,7 +28,9 @@
 #include <lib/random.hpp>
 #include <arch/x86_64/percpu.hpp>
 #include <boot/limine_requests.hpp>
+#include <video/console.hpp>
 #include <video/framebuffer.hpp>
+#include <video/splash.hpp>
 #include <arch/x86_64/cpu_local.hpp>
 
 // Linux's jiffies is a variable (struct fields share the name, so it can't
@@ -758,12 +761,23 @@ void up(struct semaphore* s) { sem_of(s)->signal(); }
 
 // ======================= wait queues / completions =======================
 
-void init_waitqueue_head(wait_queue_head_t* w) { memset(w, 0, sizeof(*w)); }
+void init_waitqueue_head(wait_queue_head_t* w) {
+    memset(w, 0, sizeof(*w));
+    w->head.next = w->head.prev = &w->head;
+}
 
-void wake_up(wait_queue_head_t* w) {
+// wait_event() sleepers: they watch the counter.
+void lkpi_wake_up_seq(wait_queue_head_t* w) {
     __atomic_add_fetch(&w->seq, 1, __ATOMIC_SEQ_CST);
     wq_of(w)->wake_all();
     ::poll::notify(); // Linux files bridged by file.cpp: pollers re-check
+}
+
+void lkpi_wake_entries(wait_queue_head_t* w, unsigned int mode, int nr, void* key); // glue/wait.c
+
+void wake_up(wait_queue_head_t* w) {
+    lkpi_wake_up_seq(w);
+    lkpi_wake_entries(w, TASK_NORMAL, 0, nullptr); // Linux entries (callbacks, prepare_to_wait sleepers)
 }
 
 int lkpi_wait_sleep(wait_queue_head_t* w, unsigned int seen, unsigned long deadline, int interruptible) {
@@ -1398,6 +1412,17 @@ void apply_module_params() {
 } // namespace
 
 extern "C" void lkpi_register_boot_framebuffer(u64 phys, u32 width, u32 height, u32 pitch, u32 red_shift);
+extern "C" void lkpi_boot_fb_set(u64 base, u32 width, u32 height, u32 pitch, u32 red_shift);
+
+// A GPU driver took the display over (glue/gpu.c): the kernel must stop
+// drawing into the firmware framebuffer, which may be GPU memory the driver
+// now uses for something else. Boot messages continue on serial and in the log.
+extern "C" void lkpi_display_released(void) {
+    klog::info("linuxkpi: a GPU driver drives the display now; kernel console continues on serial/log only");
+    splash::handover();
+    splash::finish();
+    console::set_graphics(true);
+}
 extern "C" lkpi_initcall_t __lkpi_initcalls_start[];
 extern "C" lkpi_initcall_t __lkpi_initcalls_end[];
 
@@ -1411,6 +1436,11 @@ void init() {
     system_highpri_wq = system_long_wq = system_unbound_wq = system_freezable_wq = system_power_efficient_wq = system_wq;
     init_pci();
     apply_module_params();
+    // GPU drivers (probed later) take the display over from the firmware
+    // framebuffer when it lies in their memory (glue/gpu.c).
+    video::Framebuffer& fb = video::primary_framebuffer();
+    if (fb.valid())
+        lkpi_boot_fb_set(mm::direct_virt_to_phys(fb.base()), fb.width(), fb.height(), fb.pitch(), fb.red_shift());
     int count = 0, failed = 0;
     for (lkpi_initcall_t* call = __lkpi_initcalls_start; call < __lkpi_initcalls_end; call++) {
         count++;
@@ -1422,7 +1452,6 @@ void init() {
     klog::ok("Linux driver layer (LinuxKPI): %d driver%s registered%s", count, count == 1 ? "" : "s",
              failed ? " (some failed)" : "");
     // The firmware framebuffer for simpledrm (/dev/dri/card0), unless "nodrm".
-    video::Framebuffer& fb = video::primary_framebuffer();
     if (fb.valid() && !strstr(boot::cmdline(), "nodrm"))
         lkpi_register_boot_framebuffer(mm::direct_virt_to_phys(fb.base()), fb.width(), fb.height(), fb.pitch(),
                                        fb.red_shift());
@@ -1434,3 +1463,10 @@ void init() {
 extern "C" bool lkpi_capable(int) { return proc::capable(); }
 extern "C" int wbinvd_on_all_cpus(void) { asm volatile("wbinvd" ::: "memory"); return 0; }
 
+
+// ---- GPU drivers ----
+extern "C" bool lkpi_access_ok(const void* addr, unsigned long size) {
+    return uaccess::check(addr, size, false) == 0;
+}
+extern "C" u64 lkpi_local_clock(void) { return clock::now_ns(); }
+extern "C" unsigned long lkpi_tsc_khz(void) { return clock::tsc_frequency_hz() / 1000; }

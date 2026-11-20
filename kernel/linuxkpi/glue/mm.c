@@ -15,45 +15,133 @@ void *lkpi_vmap_phys(const u64 *phys, unsigned long count, bool wc);
 void lkpi_vunmap(const void *virt);
 
 /* ---- pages ---- */
-struct page *alloc_pages(gfp_t gfp, unsigned int order)
+
+/* pfn -> descriptor: a directory of 1 GiB chunks (2 MiB tables of
+ * 2^18 pointers, allocated on first use), covering 4 TiB of physical
+ * addresses. */
+#define PFN_CHUNK_SHIFT 18
+#define PFN_DIR_SIZE 4096
+#define PFN_TABLE_ORDER (PFN_CHUNK_SHIFT + 3 - PAGE_SHIFT)
+static struct page **pfn_dir[PFN_DIR_SIZE];
+static DEFINE_SPINLOCK(pfn_dir_lock);
+
+static struct page **pfn_slot(unsigned long pfn, bool create)
 {
-	struct page *p = kzalloc(sizeof(struct folio), gfp);
+	unsigned long d = pfn >> PFN_CHUNK_SHIFT;
+	struct page **t;
+	if (d >= PFN_DIR_SIZE)
+		return NULL;
+	t = __atomic_load_n(&pfn_dir[d], __ATOMIC_ACQUIRE);
+	if (!t && create) {
+		struct page **n = lkpi_phys_alloc(PFN_TABLE_ORDER, true);
+		spin_lock(&pfn_dir_lock);
+		t = pfn_dir[d];
+		if (!t && n) {
+			__atomic_store_n(&pfn_dir[d], n, __ATOMIC_RELEASE);
+			t = n;
+			n = NULL;
+		}
+		spin_unlock(&pfn_dir_lock);
+		if (n)
+			lkpi_phys_free(n, PFN_TABLE_ORDER);
+	}
+	return t ? &t[pfn & ((1UL << PFN_CHUNK_SHIFT) - 1)] : NULL;
+}
+
+#define LKPI_PAGE_FOREIGN 0x464f524eu /* a permanent descriptor for memory we didn't allocate */
+
+struct page *lkpi_pfn_to_page(unsigned long pfn)
+{
+	struct page **slot = pfn_slot(pfn, true), *p, *expected = NULL;
+	if (!slot)
+		return NULL;
+	p = __atomic_load_n(slot, __ATOMIC_ACQUIRE);
+	if (p)
+		return p;
+	p = kzalloc(sizeof(*p), GFP_ATOMIC);
 	if (!p)
 		return NULL;
-	p->virt = lkpi_phys_alloc(order, (gfp & __GFP_ZERO) != 0);
-	if (!p->virt) {
+	p->virt = lkpi_phys_to_direct(PFN_PHYS(pfn));
+	p->head = p;
+	p->magic = LKPI_PAGE_FOREIGN;
+	atomic_set(&p->refcount, 1 << 30);
+	INIT_LIST_HEAD(&p->lru);
+	if (!__atomic_compare_exchange_n(slot, &expected, p, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
 		kfree(p);
+		return expected;
+	}
+	return p;
+}
+
+struct page *alloc_pages(gfp_t gfp, unsigned int order)
+{
+	unsigned long n = 1UL << order, pfn;
+	struct page *p = kvzalloc(n * sizeof(struct page), gfp & ~__GFP_ZERO);
+	void *virt;
+	if (!p)
+		return NULL;
+	virt = lkpi_phys_alloc(order, (gfp & __GFP_ZERO) != 0);
+	if (!virt) {
+		kvfree(p);
 		return NULL;
 	}
+	pfn = lkpi_direct_to_phys(virt) >> PAGE_SHIFT;
+	for (unsigned long i = 0; i < n; i++) {
+		struct page **slot = pfn_slot(pfn + i, true);
+		p[i].virt = (char *)virt + i * PAGE_SIZE;
+		p[i].head = p;
+		p[i].magic = LKPI_PAGE_MAGIC;
+		INIT_LIST_HEAD(&p[i].lru);
+		if (slot)
+			__atomic_store_n(slot, &p[i], __ATOMIC_RELEASE);
+	}
 	p->order = order;
-	p->magic = LKPI_PAGE_MAGIC;
 	atomic_set(&p->refcount, 1);
 	return p;
 }
 
 void __free_pages(struct page *page, unsigned int order) { put_page(page); }
-void get_page(struct page *page) { atomic_inc(&page->refcount); }
+void get_page(struct page *page) { atomic_inc(&page->head->refcount); }
 
 void put_page(struct page *page)
 {
-	if (!page || !atomic_dec_and_test(&page->refcount))
+	struct page *head;
+	unsigned long n, pfn;
+	if (!page)
 		return;
-	if (page->magic != LKPI_PAGE_MAGIC) {
+	head = page->head;
+	if (head->magic == LKPI_PAGE_FOREIGN)
+		return;
+	if (!atomic_dec_and_test(&head->refcount))
+		return;
+	if (head->magic != LKPI_PAGE_MAGIC) {
 		printk(KERN_ERR "linuxkpi: put_page of a bad page %p\n", page);
 		return;
 	}
-	page->magic = 0;
-	lkpi_phys_free(page->virt, page->order);
-	kfree(page);
+	n = 1UL << head->order;
+	pfn = lkpi_direct_to_phys(head->virt) >> PAGE_SHIFT;
+	for (unsigned long i = 0; i < n; i++) {
+		struct page **slot = pfn_slot(pfn + i, false);
+		if (slot)
+			__atomic_store_n(slot, NULL, __ATOMIC_RELEASE);
+		head[i].magic = 0;
+	}
+	lkpi_phys_free(head->virt, head->order);
+	kvfree(head);
+}
+
+/* Linux splits a non-compound block into independent pages; here the block
+ * keeps one descriptor array, so it is freed once every page was put. */
+void split_page(struct page *page, unsigned int order)
+{
+	atomic_add((1 << order) - 1, &page->head->refcount);
 }
 
 void *lkpi_page_address(const struct page *page) { return page->virt; }
 
 struct page *lkpi_virt_to_page(const void *addr)
 {
-	/* Descriptors live beside the memory, not in a page database. */
-	printk(KERN_ERR "linuxkpi: virt_to_page() is not supported\n");
-	return NULL;
+	return lkpi_pfn_to_page(lkpi_direct_to_phys(addr) >> PAGE_SHIFT);
 }
 
 unsigned long __get_free_pages(gfp_t gfp, unsigned int order)
@@ -82,20 +170,15 @@ static void *vmap_phys_list(u64 *phys, unsigned int count, pgprot_t prot)
 
 void *vmap(struct page **pages, unsigned int count, unsigned long flags, pgprot_t prot)
 {
-	unsigned int n = 0, i, j;
 	u64 *phys;
 	void *v;
-	for (i = 0; i < count; i++)
-		n += 1u << pages[i]->order;
-	phys = kmalloc_array(n, sizeof(u64), GFP_KERNEL);
+	phys = kvmalloc_array(count, sizeof(u64), GFP_KERNEL);
 	if (!phys)
 		return NULL;
-	n = 0;
-	for (i = 0; i < count; i++)
-		for (j = 0; j < (1u << pages[i]->order); j++)
-			phys[n++] = page_to_phys(pages[i]) + (u64)j * PAGE_SIZE;
-	v = vmap_phys_list(phys, n, prot);
-	kfree(phys);
+	for (unsigned int i = 0; i < count; i++)
+		phys[i] = page_to_phys(pages[i]);
+	v = vmap_phys_list(phys, count, prot);
+	kvfree(phys);
 	return v;
 }
 

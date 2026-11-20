@@ -208,11 +208,14 @@ LKPI_LINUX_CFLAGS := -I$(LKPI_INCLUDE) -include linux/kconfig.h -Werror=implicit
     -Wno-initializer-overrides -Wno-unused-const-variable -Wno-implicit-fallthrough -Wno-format-zero-length \
     -Wno-missing-field-initializers -Wno-sign-compare -Wno-address-of-packed-member -Wno-tautological-constant-out-of-range-compare \
     -Wno-default-const-init-field-unsafe -Wno-unknown-warning-option
-lkpi_modname = $(patsubst virtual,mac80211_hwsim,$(patsubst wireless,cfg80211,$(notdir $(patsubst %/,%,$(dir $<)))))
+lkpi_modname = $(if $(findstring /drm/i915/,$<),i915,$(patsubst virtual,mac80211_hwsim,$(patsubst wireless,cfg80211,$(notdir $(patsubst %/,%,$(dir $<))))))
+# GPU drivers: their own include directory and Kconfig (drm/lkpi_<driver>_config.h).
+LKPI_I915 := kernel/linuxkpi/drivers/gpu/drm/i915
+$(OBJDIR)/$(LKPI_I915)/%: LKPI_DRV_CFLAGS = -I$(LKPI_I915) -DI915 -include drm/lkpi_i915_config.h
 $(OBJDIR)/kernel/linuxkpi/%.c.o: kernel/linuxkpi/%.c
 	@mkdir -p $(dir $@)
 	@echo "  CC    $<"
-	@$(CC) $(filter-out -isystem $(LKPI_INCLUDE),$(CFLAGS)) $(LKPI_LINUX_CFLAGS) -DKBUILD_MODNAME='"$(lkpi_modname)"' -DKBUILD_BASENAME='"$(basename $(notdir $<))"' \
+	@$(CC) $(filter-out -isystem $(LKPI_INCLUDE),$(CFLAGS)) $(LKPI_LINUX_CFLAGS) $(LKPI_DRV_CFLAGS) -DKBUILD_MODNAME='"$(lkpi_modname)"' -DKBUILD_BASENAME='"$(basename $(notdir $<))"' \
 	    -MJ $@.json -c $< -o $@
 
 $(OBJDIR)/%.S.o: %.S

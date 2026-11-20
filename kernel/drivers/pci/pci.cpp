@@ -290,6 +290,7 @@ Function* function_of(const dev::Device* d) {
 }
 
 u32 count() { return g_count; }
+Function* function_at(u32 index) { return index < g_count ? &g_functions[index] : nullptr; }
 
 const char* class_name(u8 cls, u8 sub, u8 prog_if) {
     switch (cls) {

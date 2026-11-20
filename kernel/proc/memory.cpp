@@ -24,6 +24,27 @@ void Memory::put() {
         delete this;
 }
 
+namespace {
+IrqSpinlock g_dev_lock;
+IntrusiveList<Vma, &Vma::dev_node> g_dev_vmas; // every VMA_DEVICE mapping
+
+void dev_track(Vma* v, Memory* owner) {
+    if (v->kind != VMA_DEVICE || v->owner)
+        return;
+    v->owner = owner;
+    LockGuard guard(g_dev_lock);
+    g_dev_vmas.push_back(v);
+}
+
+void dev_untrack(Vma* v) {
+    if (!v->owner)
+        return;
+    LockGuard guard(g_dev_lock);
+    g_dev_vmas.remove(v);
+    v->owner = nullptr;
+}
+} // namespace
+
 Memory* Memory::fork() {
     auto* as = vmm::AddressSpace::create_user();
     if (!as)
@@ -43,16 +64,20 @@ Memory* Memory::fork() {
         c->file = v->file;
         c->file_offset = v->file_offset;
         c->file_bytes = v->file_bytes;
-        if (c->file)
+        if (c->file) {
             c->file->mmap_ref(+1);
+            if (c->kind == VMA_DEVICE)
+                c->file->mmap_range_ref(c->file_offset, +1);
+        }
         child->m_vmas.push_back(c); // same order as ours: already sorted
+        dev_track(c, child);
 
         u32 flags = prot_to_map_flags(v->prot);
         if (v->kind == VMA_DEVICE) { // device memory stays shared with the child
             for (uptr page = v->start; page < v->end; page += PAGE_SIZE) {
                 u64 phys;
                 if (m_as->translate(page, &phys))
-                    as->map(page, phys, flags);
+                    as->map(page, phys, flags | v->file->mmap_cache_flags(v->file_offset + (page - v->start)));
             }
             continue;
         }
@@ -125,7 +150,32 @@ bool Memory::overlaps(uptr start, uptr end) {
     return false;
 }
 
+
+void zap_device_range(u64 offset, u64 len) {
+    // Collect under the lock, unmap outside it (shootdowns wait for other CPUs).
+    struct Hit { vmm::AddressSpace* as; uptr start, end; };
+    constexpr usize MAX_HITS = 64;
+    Hit hits[MAX_HITS];
+    usize n = 0;
+    {
+        LockGuard guard(g_dev_lock);
+        for (Vma* v = g_dev_vmas.front(); v && n < MAX_HITS; v = g_dev_vmas.next_of(v)) {
+            u64 vbeg = v->file_offset, vend = v->file_offset + (v->end - v->start);
+            u64 beg = max(vbeg, offset), end = min(vend, offset + len);
+            if (beg >= end || !v->owner->aspace())
+                continue;
+            hits[n++] = {v->owner->aspace(), v->start + (beg - vbeg), v->start + (end - vbeg)};
+        }
+    }
+    for (usize i = 0; i < n; i++) {
+        for (uptr page = hits[i].start; page < hits[i].end; page += PAGE_SIZE)
+            hits[i].as->unmap(page);
+        vmm::shootdown(hits[i].start, (hits[i].end - hits[i].start) / PAGE_SIZE, hits[i].as);
+    }
+}
+
 void Memory::insert(Vma* v) {
+    dev_track(v, this);
     Vma* pos = m_vmas.front();
     while (pos && pos->start < v->start)
         pos = m_vmas.next_of(pos);
@@ -152,10 +202,13 @@ Vma* Memory::split(Vma* v, uptr at) {
     n->prot = v->prot;
     n->kind = v->kind;
     n->file = v->file;
-    if (n->file)
-        n->file->mmap_ref(+1);
     u64 delta = at - v->start;
     n->file_offset = v->file_offset + delta;
+    if (n->file) {
+        n->file->mmap_ref(+1);
+        if (n->kind == VMA_DEVICE)
+            n->file->mmap_range_ref(n->file_offset, +1);
+    }
     n->file_bytes = v->file_bytes > delta ? v->file_bytes - delta : 0;
     v->file_bytes = min(v->file_bytes, delta);
     v->end = at;
@@ -180,6 +233,9 @@ void Memory::remove_range(uptr start, uptr end) {
         }
         unmap_pages(v->start, v->end, v->kind != VMA_DEVICE);
         m_vmas.remove(v);
+        dev_untrack(v);
+        if (v->file && v->kind == VMA_DEVICE)
+            v->file->mmap_range_ref(v->file_offset, -1);
         if (v->file)
             v->file->mmap_ref(-1); // may free an unlinked file (its pages are already unmapped)
         delete v;
@@ -229,8 +285,11 @@ long Memory::map(uptr addr, usize len, u32 prot, u32 flags, vfs::Inode* file, u6
     // shared (ramfs/tmpfs, memfd, shm). Other MAP_SHARED files get a private copy.
     if (v->file && (!vfs::is_reg(v->file->mode) || ((flags & MAP_SHARED) && v->file->shared_mappable())))
         v->kind = VMA_DEVICE;
-    if (v->file)
+    if (v->file) {
         v->file->mmap_ref(+1);
+        if (v->kind == VMA_DEVICE)
+            v->file->mmap_range_ref(v->file_offset, +1);
+    }
     insert(v);
 
     if (flags & MAP_POPULATE)
@@ -345,7 +404,8 @@ bool Memory::populate(Vma* v, uptr page) {
         u64 dev_phys;
         if (v->file->mmap_phys(v->file_offset + (page - v->start), &dev_phys) < 0)
             return false;
-        return m_as->map(page, dev_phys, prot_to_map_flags(v->prot));
+        return m_as->map(page, dev_phys,
+                         prot_to_map_flags(v->prot) | v->file->mmap_cache_flags(v->file_offset + (page - v->start)));
     }
     // A whole page of a RAM-backed file (the live system's programs and
     // libraries): map the file's own page read-only and share it between
@@ -510,8 +570,11 @@ long Memory::write_remote(uptr addr, const void* data, usize len) {
 void Memory::destroy() {
     LockGuard guard(m_lock);
     while (Vma* v = m_vmas.pop_front()) {
+        dev_untrack(v);
         if (v->kind == VMA_DEVICE && m_as)
             unmap_pages(v->start, v->end, false); // destroy_user() must not free shared/driver pages
+        if (v->file && v->kind == VMA_DEVICE)
+            v->file->mmap_range_ref(v->file_offset, -1);
         if (v->file)
             v->file->mmap_ref(-1);
         delete v;

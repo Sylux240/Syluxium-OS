@@ -263,14 +263,35 @@ char *strndup_user(const char __user *s, long n)
 struct lkpi_vma {
 	struct vm_area_struct vma;
 	struct mutex lock;
+	int refs;               /* Syluxium mappings (VMAs, split parts, fork copies) + the mmap() call */
 	unsigned long base_pfn; /* remap_pfn_range: pfn at vm_start */
 	bool remapped;
-	unsigned long fault_pfn;
-	bool fault_set;
+	unsigned long npages;
+	u64 *pages;             /* per page: phys | LKPI_PTE_* (vmf_insert_pfn & co., prefaulted pages) */
 };
+#define LKPI_PTE_VALID 0x1ULL
+#define LKPI_PTE_WC 0x2ULL
+#define LKPI_PTE_UC 0x4ULL
 static struct lkpi_vma *lkpi_vmas[LKPI_MAX_VMAS];
 static DEFINE_SPINLOCK(lkpi_vmas_lock);
 
+static u64 prot_bits(pgprot_t prot)
+{
+	if (pgprot_val(prot) & LKPI_PROT_WC)
+		return LKPI_PTE_WC;
+	if (pgprot_val(prot) & LKPI_PROT_UC)
+		return LKPI_PTE_UC;
+	return 0;
+}
+
+static struct lkpi_vma *vma_of(unsigned long off)
+{
+	unsigned long id = (off >> LKPI_VMA_SHIFT) - 1;
+	return id < LKPI_MAX_VMAS ? lkpi_vmas[id] : NULL;
+}
+
+/* The mapping starts with one reference, which sys_mmap drops once the
+ * address-space mapping (which takes its own) exists. */
 long lkpi_file_mmap(struct file *f, unsigned long offset, unsigned long len, bool writable, unsigned long *handle)
 {
 	struct lkpi_vma *m;
@@ -280,6 +301,12 @@ long lkpi_file_mmap(struct file *f, unsigned long offset, unsigned long len, boo
 	m = kzalloc(sizeof(*m), GFP_KERNEL);
 	if (!m)
 		return -ENOMEM;
+	m->npages = PAGE_ALIGN(len) >> PAGE_SHIFT;
+	m->pages = kvzalloc(m->npages * sizeof(u64), GFP_KERNEL);
+	if (!m->pages) {
+		kfree(m);
+		return -ENOMEM;
+	}
 	spin_lock(&lkpi_vmas_lock);
 	for (id = 0; id < LKPI_MAX_VMAS && lkpi_vmas[id]; id++)
 		;
@@ -287,10 +314,12 @@ long lkpi_file_mmap(struct file *f, unsigned long offset, unsigned long len, boo
 		lkpi_vmas[id] = m;
 	spin_unlock(&lkpi_vmas_lock);
 	if (id == LKPI_MAX_VMAS) {
+		kvfree(m->pages);
 		kfree(m);
 		return -ENOMEM;
 	}
 	mutex_init(&m->lock);
+	m->refs = 1;
 	m->vma.vm_start = (unsigned long)(id + 1) << LKPI_VMA_SHIFT;
 	m->vma.vm_end = m->vma.vm_start + PAGE_ALIGN(len);
 	m->vma.vm_pgoff = offset >> PAGE_SHIFT;
@@ -304,6 +333,7 @@ long lkpi_file_mmap(struct file *f, unsigned long offset, unsigned long len, boo
 		spin_lock(&lkpi_vmas_lock);
 		lkpi_vmas[id] = NULL;
 		spin_unlock(&lkpi_vmas_lock);
+		kvfree(m->pages);
 		kfree(m);
 		return r;
 	}
@@ -311,32 +341,81 @@ long lkpi_file_mmap(struct file *f, unsigned long offset, unsigned long len, boo
 	return 0;
 }
 
+/* A Syluxium mapping of this VMA appeared (+1) or went away (-1). The last
+ * one closes it: vm_ops->close (GEM drops the object reference) and the
+ * file reference the mapping held. */
+void lkpi_vma_ref(unsigned long off, int delta)
+{
+	struct lkpi_vma *m;
+	unsigned long id = (off >> LKPI_VMA_SHIFT) - 1;
+	bool last = false;
+	spin_lock(&lkpi_vmas_lock);
+	m = id < LKPI_MAX_VMAS ? lkpi_vmas[id] : NULL;
+	if (m) {
+		m->refs += delta;
+		if (m->refs <= 0) {
+			lkpi_vmas[id] = NULL;
+			last = true;
+		}
+	}
+	spin_unlock(&lkpi_vmas_lock);
+	if (!last)
+		return;
+	if (m->vma.vm_ops && m->vma.vm_ops->close)
+		m->vma.vm_ops->close(&m->vma);
+	fput(m->vma.vm_file);
+	kvfree(m->pages);
+	kfree(m);
+}
+
+/* Cache attributes for the page at `off`: 0 (write-back), 1 (write-combining), 2 (uncached). */
+int lkpi_vma_cache(unsigned long off)
+{
+	struct lkpi_vma *m = vma_of(off);
+	unsigned long pg;
+	u64 bits;
+	if (!m)
+		return 0;
+	pg = ((off & ~(PAGE_SIZE - 1)) - m->vma.vm_start) >> PAGE_SHIFT;
+	bits = pg < m->npages && (m->pages[pg] & LKPI_PTE_VALID) ? m->pages[pg] : prot_bits(m->vma.vm_page_prot);
+	return (bits & LKPI_PTE_WC) ? 1 : (bits & LKPI_PTE_UC) ? 2 : 0;
+}
+
 long lkpi_vma_phys(unsigned long off, u64 *phys)
 {
-	unsigned long id = (off >> LKPI_VMA_SHIFT) - 1;
-	struct lkpi_vma *m = id < LKPI_MAX_VMAS ? lkpi_vmas[id] : NULL;
+	struct lkpi_vma *m = vma_of(off);
 	unsigned long addr = off & ~(PAGE_SIZE - 1);
 	struct vm_fault vmf = { 0 };
 	vm_fault_t ret;
+	unsigned long pg;
 	if (!m || addr >= m->vma.vm_end)
 		return -ENXIO;
+	pg = (addr - m->vma.vm_start) >> PAGE_SHIFT;
 	if (m->remapped) {
 		*phys = PFN_PHYS(m->base_pfn) + (addr - m->vma.vm_start);
 		return 0;
 	}
-	if (!m->vma.vm_ops || !m->vma.vm_ops->fault)
-		return -ENXIO;
 	mutex_lock(&m->lock);
-	m->fault_set = false;
+	if (m->pages[pg] & LKPI_PTE_VALID) {
+		*phys = m->pages[pg] & PAGE_MASK;
+		mutex_unlock(&m->lock);
+		return 0;
+	}
+	if (!m->vma.vm_ops || !m->vma.vm_ops->fault) {
+		mutex_unlock(&m->lock);
+		return -ENXIO;
+	}
 	vmf.vma = &m->vma;
 	vmf.address = addr;
-	vmf.pgoff = m->vma.vm_pgoff + ((addr - m->vma.vm_start) >> PAGE_SHIFT);
+	vmf.pgoff = m->vma.vm_pgoff + pg;
 	ret = m->vma.vm_ops->fault(&vmf);
-	if (m->fault_set)
-		*phys = PFN_PHYS(m->fault_pfn);
-	else if (vmf.page && !(ret & (VM_FAULT_SIGBUS | VM_FAULT_OOM)))
+	if (m->pages[pg] & LKPI_PTE_VALID)
+		*phys = m->pages[pg] & PAGE_MASK;
+	else if (vmf.page && !(ret & (VM_FAULT_SIGBUS | VM_FAULT_OOM))) {
 		*phys = page_to_phys(vmf.page);
-	else
+		m->pages[pg] = *phys | LKPI_PTE_VALID | prot_bits(m->vma.vm_page_prot);
+		/* The fault handler's page reference is kept (as a PTE would). */
+	} else
 		ret |= VM_FAULT_SIGBUS;
 	mutex_unlock(&m->lock);
 	return (ret & (VM_FAULT_SIGBUS | VM_FAULT_OOM)) ? -EFAULT : 0;
@@ -345,20 +424,113 @@ long lkpi_vma_phys(unsigned long off, u64 *phys)
 int remap_pfn_range(struct vm_area_struct *vma, unsigned long addr, unsigned long pfn, unsigned long size, pgprot_t prot)
 {
 	struct lkpi_vma *m = vma->lkpi;
-	m->base_pfn = pfn - ((addr - vma->vm_start) >> PAGE_SHIFT);
-	m->remapped = true;
+	/* Whole-VMA remaps (the common case) need no table. */
+	if (addr == vma->vm_start && size >= vma->vm_end - vma->vm_start && !m->remapped) {
+		m->base_pfn = pfn;
+		m->remapped = true;
+		vma->vm_page_prot = prot;
+		return 0;
+	}
+	for (unsigned long a = addr; a < addr + size && a < vma->vm_end; a += PAGE_SIZE, pfn++) {
+		unsigned long pg = (a - vma->vm_start) >> PAGE_SHIFT;
+		if (pg < m->npages)
+			m->pages[pg] = PFN_PHYS(pfn) | LKPI_PTE_VALID | prot_bits(prot);
+	}
 	return 0;
 }
 
 vm_fault_t vmf_insert_pfn_prot(struct vm_area_struct *vma, unsigned long addr, unsigned long pfn, pgprot_t prot)
 {
 	struct lkpi_vma *m = vma->lkpi;
-	m->fault_pfn = pfn;
-	m->fault_set = true;
+	unsigned long pg = (addr - vma->vm_start) >> PAGE_SHIFT;
+	if (addr < vma->vm_start || pg >= m->npages)
+		return VM_FAULT_SIGBUS;
+	m->pages[pg] = PFN_PHYS(pfn) | LKPI_PTE_VALID | prot_bits(prot);
 	return VM_FAULT_NOPAGE;
 }
 
 vm_fault_t vmf_insert_pfn(struct vm_area_struct *vma, unsigned long addr, unsigned long pfn)
 {
 	return vmf_insert_pfn_prot(vma, addr, pfn, vma->vm_page_prot);
+}
+
+/* Revoke user mappings of [holebegin, holebegin + holelen) of a file (GEM /
+ * TTM buffers moving, i915 fences being stolen): forget the pages the driver
+ * supplied for those offsets and unmap them in every process; the next
+ * access faults into the driver again. holelen 0 = to the end. */
+void lkpi_zap_user_range(u64 offset, u64 len);
+void unmap_mapping_range(struct address_space *mapping, loff_t const holebegin, loff_t const holelen, int even_cows)
+{
+	unsigned long first = holebegin >> PAGE_SHIFT;
+	unsigned long last = holelen ? (unsigned long)((holebegin + holelen + PAGE_SIZE - 1) >> PAGE_SHIFT) : ~0UL;
+	for (int id = 0; id < LKPI_MAX_VMAS; id++) {
+		struct lkpi_vma *m;
+		unsigned long beg, end, zbeg, zend;
+		spin_lock(&lkpi_vmas_lock);
+		m = lkpi_vmas[id];
+		if (m)
+			m->refs++; /* keep it while we work on it */
+		spin_unlock(&lkpi_vmas_lock);
+		if (!m)
+			continue;
+		beg = m->vma.vm_pgoff;
+		end = m->vma.vm_pgoff + m->npages;
+		zbeg = max(beg, first);
+		zend = min(end, last);
+		if (m->vma.vm_file && m->vma.vm_file->f_mapping == mapping && zbeg < zend) {
+			mutex_lock(&m->lock);
+			if (m->remapped) { /* a whole-VMA remap_pfn_range: fall back to the per-page table */
+				for (unsigned long i = 0; i < m->npages; i++)
+					m->pages[i] = PFN_PHYS(m->base_pfn + i) | LKPI_PTE_VALID | prot_bits(m->vma.vm_page_prot);
+				m->remapped = false;
+			}
+			for (unsigned long pg = zbeg; pg < zend; pg++)
+				m->pages[pg - beg] = 0;
+			mutex_unlock(&m->lock);
+			lkpi_zap_user_range(m->vma.vm_start + ((zbeg - beg) << PAGE_SHIFT), (zend - zbeg) << PAGE_SHIFT);
+		}
+		lkpi_vma_ref(m->vma.vm_start, -1);
+	}
+}
+
+/* zap_vma_ptes(): the same for one VMA (i915 GGTT mmaps). */
+void zap_vma_ptes(struct vm_area_struct *vma, unsigned long address, unsigned long size)
+{
+	struct lkpi_vma *m = vma->lkpi;
+	unsigned long beg = (address - vma->vm_start) >> PAGE_SHIFT, n = size >> PAGE_SHIFT;
+	mutex_lock(&m->lock);
+	m->remapped = false;
+	for (unsigned long i = beg; i < beg + n && i < m->npages; i++)
+		m->pages[i] = 0;
+	mutex_unlock(&m->lock);
+	lkpi_zap_user_range(address, size);
+}
+
+/* i915 (remap_io_mapping / remap_io_sg): pages [addr, addr + n pages) of a
+ * VMA map pfns pfn.. with the given cache type. */
+int lkpi_vma_insert_range(struct vm_area_struct *vma, unsigned long addr, unsigned long pfn,
+			  unsigned long npages, pgprot_t prot)
+{
+	struct lkpi_vma *m = vma->lkpi;
+	unsigned long pg = (addr - vma->vm_start) >> PAGE_SHIFT;
+	if (addr < vma->vm_start)
+		return -EINVAL;
+	for (unsigned long i = 0; i < npages && pg + i < m->npages; i++)
+		m->pages[pg + i] = PFN_PHYS(pfn + i) | LKPI_PTE_VALID | prot_bits(prot);
+	return 0;
+}
+
+/* get_file_active(): a reference to *f unless its last one is going away. */
+struct file *lkpi_get_file_active(struct file **f)
+{
+	struct file *file = READ_ONCE(*f);
+	long c;
+	if (!file)
+		return NULL;
+	c = atomic_long_read(&file->f_count);
+	do {
+		if (!c)
+			return NULL;
+	} while (!__atomic_compare_exchange_n(&file->f_count.counter, &c, c + 1, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST));
+	return file;
 }
