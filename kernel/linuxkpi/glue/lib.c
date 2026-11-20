@@ -1053,3 +1053,145 @@ void platform_device_unregister(struct platform_device* pdev)
 
 int platform_driver_register(struct platform_driver* drv) { return 0; }
 void platform_driver_unregister(struct platform_driver* drv) {}
+
+/* ---- kthread workers ---- */
+struct kthread_worker *kthread_create_worker(unsigned int flags, const char namefmt[], ...)
+{
+	struct kthread_worker *w = kzalloc(sizeof(*w), GFP_KERNEL);
+	if (!w)
+		return ERR_PTR(-ENOMEM);
+	w->wq = alloc_ordered_workqueue("%s", 0, namefmt);
+	if (!w->wq) {
+		kfree(w);
+		return ERR_PTR(-ENOMEM);
+	}
+	return w;
+}
+void kthread_destroy_worker(struct kthread_worker *w)
+{
+	if (!w)
+		return;
+	destroy_workqueue(w->wq);
+	kfree(w);
+}
+
+/* ---- xarray ---- */
+#include <linux/xarray.h>
+static int xa_grow(struct xarray *xa, unsigned long index)
+{
+	unsigned long n = xa->size ? xa->size : 16;
+	void **s;
+	while (n <= index)
+		n *= 2;
+	s = krealloc(xa->slots, n * sizeof(void *), GFP_ATOMIC);
+	if (!s)
+		return -ENOMEM;
+	memset(s + xa->size, 0, (n - xa->size) * sizeof(void *));
+	xa->slots = s;
+	xa->size = n;
+	return 0;
+}
+void *xa_load(struct xarray *xa, unsigned long index)
+{
+	void *e;
+	spin_lock(&xa->xa_lock);
+	e = index < xa->size ? xa->slots[index] : NULL;
+	spin_unlock(&xa->xa_lock);
+	return e;
+}
+void *xa_store(struct xarray *xa, unsigned long index, void *entry, gfp_t gfp)
+{
+	void *old = NULL;
+	spin_lock(&xa->xa_lock);
+	if (index < xa->size || (entry && xa_grow(xa, index) == 0)) {
+		if (index < xa->size) {
+			old = xa->slots[index];
+			xa->slots[index] = entry;
+		}
+	}
+	spin_unlock(&xa->xa_lock);
+	return old;
+}
+void *xa_erase(struct xarray *xa, unsigned long index) { return xa_store(xa, index, NULL, 0); }
+int xa_alloc(struct xarray *xa, u32 *id, void *entry, struct xa_limit limit, gfp_t gfp)
+{
+	unsigned long i;
+	int r = -EBUSY;
+	spin_lock(&xa->xa_lock);
+	for (i = limit.min; i <= limit.max; i++) {
+		if (i >= xa->size && xa_grow(xa, i)) {
+			r = -ENOMEM;
+			break;
+		}
+		if (!xa->slots[i]) {
+			xa->slots[i] = entry ? entry : (void *)1; /* reserved */
+			*id = (u32)i;
+			r = 0;
+			break;
+		}
+	}
+	spin_unlock(&xa->xa_lock);
+	return r;
+}
+bool xa_empty(const struct xarray *xa)
+{
+	for (unsigned long i = 0; i < xa->size; i++)
+		if (xa->slots[i])
+			return false;
+	return true;
+}
+void xa_destroy(struct xarray *xa)
+{
+	kfree(xa->slots);
+	xa->slots = NULL;
+	xa->size = 0;
+}
+
+/* ---- batch 2 helpers ---- */
+#include <linux/scatterlist.h>
+long simple_strtol(const char *cp, char **endp, unsigned int base)
+{
+	long sign = 1;
+	if (*cp == '-') {
+		sign = -1;
+		cp++;
+	}
+	return sign * (long)simple_strtoul(cp, endp, base);
+}
+char *kvasprintf(gfp_t gfp, const char *fmt, va_list ap)
+{
+	va_list aq;
+	int len;
+	char *p;
+	va_copy(aq, ap);
+	len = vsnprintf(NULL, 0, fmt, aq);
+	va_end(aq);
+	p = kmalloc(len + 1, gfp);
+	if (p)
+		vsnprintf(p, len + 1, fmt, ap);
+	return p;
+}
+int sg_alloc_table(struct sg_table *t, unsigned int nents, gfp_t gfp)
+{
+	t->sgl = kcalloc(nents ? nents : 1, sizeof(struct scatterlist), gfp);
+	if (!t->sgl)
+		return -ENOMEM;
+	sg_init_table(t->sgl, nents ? nents : 1);
+	t->nents = t->orig_nents = nents;
+	return 0;
+}
+void sg_free_table(struct sg_table *t)
+{
+	kfree(t->sgl);
+	t->sgl = NULL;
+	t->nents = t->orig_nents = 0;
+}
+
+/* One pid object per call (DRM keeps it per client); only ->nr is read. */
+struct pid *lkpi_task_pid(struct task_struct *t)
+{
+	struct pid *p = kzalloc(sizeof(*p), GFP_KERNEL);
+	if (p)
+		p->nr = t ? t->tgid : 0;
+	return p;
+}

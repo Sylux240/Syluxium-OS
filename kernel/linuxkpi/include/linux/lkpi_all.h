@@ -23,4 +23,5 @@
 #include <linux/jump_label.h>
 #include <linux/notifier.h>
 #include <linux/ioctl.h>
+#include <linux/lkpi_extras.h>
 #endif

@@ -81,6 +81,7 @@ struct device_type {
 /* The common part of every device (struct pci_dev embeds one). */
 struct device {
     struct device* parent;
+    dev_t devt;
     const char* init_name;
     char lkpi_name[32];
     void* driver_data;

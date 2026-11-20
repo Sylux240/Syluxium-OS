@@ -59,3 +59,6 @@ struct poll_table_struct;
 #define u64_to_user_ptr(x) ((void __user *)(unsigned long)(x))
 #define might_lock(lock) do { } while (0)
 #define might_lock_read(lock) do { } while (0)
+
+/* Attributes (__must_check, __packed, ...) used by headers before anything else. */
+#include <linux/compiler.h>
