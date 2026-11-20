@@ -1,3 +1,4 @@
+#include <video/splash.hpp>
 #include <core/log.hpp>
 #include <drivers/pty.hpp>
 #include <proc/process.hpp>
@@ -91,6 +92,7 @@ public:
 void init() {
     vfs::mkdir_p("/dev");
     vfs::add_node("/dev/null", new Null);
+    splash::create_device(); // /dev/splash: the login screen ends the boot splash
     vfs::add_node("/dev/zero", new Zero);
     vfs::add_node("/dev/full", new Full);
     vfs::add_node("/dev/random", new Random(8));

@@ -78,9 +78,16 @@ mkdir -p "$TARGET/boot/efi/EFI/BOOT" "$TARGET/boot/efi/boot/limine"
 cp "$BOOT/BOOTX64.EFI" "$TARGET/boot/efi/EFI/BOOT/"
 cp "$BOOT/syluxium.elf" "$TARGET/boot/efi/boot/"
 cp "$BOOT/limine-bios.sys" "$TARGET/boot/efi/boot/limine/"
+cp "$BOOT/splash.png" "$TARGET/boot/efi/boot/limine/" 2>/dev/null
 cat > "$TARGET/boot/efi/boot/limine/limine.conf" <<CONF
 timeout: 3
 default_entry: 1
+wallpaper: boot():/boot/limine/splash.png
+wallpaper_style: centered
+backdrop: 000000
+term_background: ff000000
+interface_branding: Syluxium
+interface_help_hidden: yes
 
 /Syluxium
     protocol: limine

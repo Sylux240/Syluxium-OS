@@ -1,3 +1,4 @@
+#include <video/splash.hpp>
 #include <arch/x86_64/apic.hpp>
 #include <arch/x86_64/cpu.hpp>
 #include <arch/x86_64/interrupts.hpp>
@@ -106,7 +107,10 @@ public:
         switch (request) {
         case KDSETMODE: // 0 = KD_TEXT, 1 = KD_GRAPHICS
             klog::info("console: %s mode (pid %d)", arg == 1 ? "graphics" : "text", proc::current()->pid);
-            console::set_graphics(arg == 1);
+            if (arg == 1)
+                splash::handover();
+            if (arg == 1 || !splash::active()) // text mode doesn't cut the splash short
+                console::set_graphics(arg == 1);
             return 0;
         case KDGETMODE: {
             i32 m = console::graphics() ? 1 : 0;

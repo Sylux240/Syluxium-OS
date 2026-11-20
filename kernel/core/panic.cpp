@@ -1,3 +1,4 @@
+#include <video/splash.hpp>
 #include <arch/x86_64/apic.hpp>
 #include <arch/x86_64/cpu.hpp>
 #include <arch/x86_64/interrupts.hpp>
@@ -16,6 +17,7 @@
         apic::broadcast_ipi_others(interrupts::VEC_PANIC_HALT);
 
     klog::break_lock();
+    splash::panic_off(); // the panic must be visible
     kprintf("\n\x1b[97;41m KERNEL PANIC \x1b[0m (CPU %u) \x1b[91m", this_cpu()->index);
     va_list args;
     va_start(args, fmt);

@@ -1,0 +1,6 @@
+#! /bin/sh
+# Xsetup - run as root before the login dialog appears.
+# The boot splash stayed on screen while X started; the login screen
+# takes over from here.
+echo done > /dev/splash 2>/dev/null
+exit 0

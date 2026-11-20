@@ -326,6 +326,7 @@ $(INITRAMFS): $(KERNEL) tools/mkfontdir.py tools/debrand-tde.py tools/syluxium_n
 	@# What the installer puts on the new disk: kernel, Limine (UEFI + BIOS stages), its installer.
 	@mkdir -p $(ROOTFS)/usr/lib/syluxium/boot
 	@cp $(KERNEL) $(LIMINE_DIR)/BOOTX64.EFI $(LIMINE_DIR)/limine-bios.sys $(ROOTFS)/usr/lib/syluxium/boot/
+	@cp limine-splash.png $(ROOTFS)/usr/lib/syluxium/boot/splash.png
 	@$(USER_CC) -static -O2 -w -o $(ROOTFS)/usr/lib/syluxium/boot/limine $(LIMINE_DIR)/limine.c
 	@mkdir -p $(ROOTFS)/tmp $(ROOTFS)/var/tmp && chmod 1777 $(ROOTFS)/tmp $(ROOTFS)/var/tmp
 	@# The dynamic loader's cache (ldconfig): TDE's libraries live in /opt/trinity/lib.
@@ -341,7 +342,7 @@ $(INITRAMFS): $(KERNEL) tools/mkfontdir.py tools/debrand-tde.py tools/syluxium_n
 # Bootable MBR disk image: one FAT32 EFI system partition, BIOS + UEFI boot.
 # Built entirely without root using sfdisk + mtools.
 # ---------------------------------------------------------------------------
-$(IMAGE): $(KERNEL) $(INITRAMFS) limine.conf $(LIMINE_DIR)/limine
+$(IMAGE): $(KERNEL) $(INITRAMFS) limine.conf limine-splash.png $(LIMINE_DIR)/limine
 	@echo "  IMG   $@"
 	@# Sized to fit: kernel + initramfs + 32 MiB headroom, at least 128 MiB.
 	@# Built as $@.tmp and renamed only on success, so a failed build never
@@ -363,7 +364,8 @@ $(IMAGE): $(KERNEL) $(INITRAMFS) limine.conf $(LIMINE_DIR)/limine
 	 mmd   -i $$tmp@@1M ::/EFI ::/EFI/BOOT ::/boot ::/boot/limine; \
 	 mcopy -i $$tmp@@1M $(KERNEL) ::/boot/syluxium.elf; \
 	 mcopy -i $$tmp@@1M $(INITRAMFS) ::/boot/initramfs.cpio; \
-	 mcopy -i $$tmp@@1M limine.conf $(LIMINE_DIR)/limine-bios.sys ::/boot/limine; \
+	 mcopy -i $$tmp@@1M limine.conf $(LIMINE_DIR)/limine-bios.sys limine-splash.png ::/boot/limine; \
+	 mren  -i $$tmp@@1M ::/boot/limine/limine-splash.png ::/boot/limine/splash.png; \
 	 mcopy -i $$tmp@@1M $(LIMINE_DIR)/BOOTX64.EFI ::/EFI/BOOT; \
 	 $(LIMINE_DIR)/limine bios-install --quiet $$tmp; \
 	 mv $$tmp $@

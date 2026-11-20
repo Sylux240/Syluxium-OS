@@ -5,6 +5,7 @@
 // The mode is whatever the firmware set up; FBIOPUT_VSCREENINFO accepts
 // only that mode. Real mode setting comes with DRM/KMS drivers.
 
+#include <video/splash.hpp>
 #include <dev/device.hpp>
 #include <drivers/pci/pci.hpp>
 #include <fs/genfs.hpp>
@@ -128,6 +129,7 @@ public:
         if ((f->flags & vfs::O_ACCMODE) == vfs::O_RDONLY)
             return;
         if (__atomic_add_fetch(&m_owners, 1, __ATOMIC_ACQ_REL) == 1) {
+            splash::handover();
             console::set_graphics(true);
             tty::set_keyboard_to_tty(false);
         }

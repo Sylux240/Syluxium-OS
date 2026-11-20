@@ -52,6 +52,7 @@
 #include <time/rtc.hpp>
 #include <video/console.hpp>
 #include <video/framebuffer.hpp>
+#include <video/splash.hpp>
 
 namespace {
 
@@ -64,6 +65,7 @@ void init_display() {
     if (primary.init(fb->address, fb->width, fb->height, fb->pitch, fb->bpp,
                      fb->red_mask_shift, fb->green_mask_shift, fb->blue_mask_shift))
         console::init(primary);
+    splash::show(primary); // logo + load bar until Esc, X, or the shell
     // The modes the firmware offers (Display Settings picks one for the next boot).
     if (fbs->revision >= 1)
         for (u64 i = 0; i < fb->mode_count; i++)
@@ -486,6 +488,7 @@ void console_shell_loop() {
 
 // Second half of boot, running as the first real kernel thread.
 void kernel_main_thread(void*) {
+    splash::start_animation(); // the first thread: the load bar moves from here on
     u32 cpus = smp::start_aps();
     klog::ok("SMP: %u CPU(s) online, scheduler running on all of them", cpus);
 
@@ -513,6 +516,8 @@ void kernel_main_thread(void*) {
                 c->index, c->lapic_id, c->ticks, c->context_switches);
     }
     klog::ok("Phase 4b complete. Starting an interactive shell on the console.");
+    // "splashhold" (tests): keep the splash like a desktop boot does, until Esc.
+    splash::boot_finished(strstr(boot::cmdline(), "desktop") != nullptr || strstr(boot::cmdline(), "splashhold") != nullptr);
     console_shell_loop();
 }
 

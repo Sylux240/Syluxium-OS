@@ -4,6 +4,7 @@
 // the driver's file_operations (DRM's /dev/dri/cardN). System calls forward
 // to f_op->read/write/unlocked_ioctl/poll/release (glue/file.c).
 
+#include <video/splash.hpp>
 #include <fs/poll.hpp>
 #include <fs/vfs.hpp>
 #include <lib/errno.hpp>
@@ -100,6 +101,8 @@ public:
     long mmap_phys(u64 offset, u64* phys) override { return lkpi_vma_phys(offset, phys); }
     void on_open(vfs::File* f) override {
         int err = 0;
+        if (m_major == 226) // DRM: a display server takes the screen
+            splash::handover();
         f->private_data = lkpi_chrdev_open(m_major, m_minor, f->flags, &err);
     }
     void on_release(vfs::File* f) override {

@@ -1,3 +1,4 @@
+#include <video/splash.hpp>
 #include <drivers/input/input.hpp>
 #include <fs/poll.hpp>
 #include <fs/vfs.hpp>
@@ -234,6 +235,8 @@ void mirror(Device* d, u16 type, u16 code, i32 value) {
 }
 
 void Device::report(u16 type, u16 code, i32 value) {
+    if (type == EV_KEY && code == 1 /* KEY_ESC */ && value == 1)
+        splash::request_verbose();
     mirror(this, type, code, value);
     if (type == EV_KEY && code <= KEY_MAX) {
         bool was_down = key_down[code / 64] & (1ull << (code % 64));
