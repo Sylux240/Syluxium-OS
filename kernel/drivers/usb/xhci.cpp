@@ -220,6 +220,8 @@ public:
     bool init();
     long command(u64 param, u32 status, u32 control, u32* slot_out, u64 timeout_ms = 2000);
     void process_events();
+    void process_events_locked();
+    bool processing = false;
     void scan_ports();
     bool reset_port(u32 port);
     void enumerate_port(u32 port, bool hotplug);
@@ -313,6 +315,15 @@ bool Controller::init() {
 }
 
 void Controller::process_events() {
+    // One thread at a time (the event thread, or a waiter checking for its
+    // own completion); the other simply skips this pass.
+    if (__atomic_exchange_n(&processing, true, __ATOMIC_ACQUIRE))
+        return;
+    process_events_locked();
+    __atomic_store_n(&processing, false, __ATOMIC_RELEASE);
+}
+
+void Controller::process_events_locked() {
     bool any = false;
     for (;;) {
         Trb& e = events[event_dequeue];
@@ -561,7 +572,17 @@ usb::Device* UsbDevice::add_child(u8 hub_port, u8 child_speed) {
 }
 
 long UsbDevice::wait(EndpointState& ep, u64 timeout_ms) {
-    m_hc->completions.wait_until_timeout([&] { return ep.done || gone; }, timeout_ms * 1'000'000);
+    // Most transfers finish within a fraction of a millisecond (a storage
+    // command is three of them): look for the completion directly for a
+    // short while instead of waiting for the event thread's next pass.
+    u64 spin_until = clock::now_ns() + 200'000;
+    while (!ep.done && !gone && clock::now_ns() < spin_until) {
+        m_hc->process_events();
+        if (!ep.done)
+            __builtin_ia32_pause();
+    }
+    if (!ep.done && !gone)
+        m_hc->completions.wait_until_timeout([&] { return ep.done || gone; }, timeout_ms * 1'000'000);
     if (gone)
         return -err::NODEV;
     if (!ep.done)

@@ -1,0 +1,9 @@
+# GitHub's language statistics: Linux 6.12 drivers and their headers are
+# vendored (run through LinuxKPI, not written for Syluxium); artwork and
+# fonts compiled in as arrays are generated.
+kernel/linuxkpi/drivers/** linguist-vendored
+kernel/linuxkpi/net/** linguist-vendored
+kernel/linuxkpi/include/** linguist-vendored
+boot/picker/assets.h linguist-generated
+kernel/video/generated/** linguist-generated
+kernel/video/font_*.cpp linguist-generated
