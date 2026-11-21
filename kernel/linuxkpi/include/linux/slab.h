@@ -86,6 +86,8 @@ void vfree(const void* p);
 struct kmem_cache {
     size_t size;
     const char* name;
+    unsigned long flags;   /* appended: SLAB_TYPESAFE_BY_RCU defers frees past an RCU grace period */
+    void (*ctor)(void*);   /* run on every allocation */
 };
 struct kmem_cache* kmem_cache_create(const char* name, size_t size, size_t align, unsigned long flags,
                                      void (*ctor)(void*));

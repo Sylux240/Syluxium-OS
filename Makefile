@@ -50,20 +50,22 @@ TRINITY_PKGS := dbus tdebase-trinity-bin twin-trinity kicker-trinity kdesktop-tr
                 tde-style-qtcurve-trinity twin-style-dekorator-trinity ksplash-trinity ksysguard-trinity \
                 kmag-trinity kvkbd-trinity ksystemlog-trinity kate-trinity tdeprint-trinity
 DEBIAN_PKGS  := bash busybox hello ncurses-base pciutils pci.ids netbase alsa-utils xserver-xorg-core xserver-xorg-video-fbdev xserver-xorg-input-evdev xinit x11-xserver-utils x11-xkb-utils xterm twm xfonts-base sudo libpam-runtime libpam-modules login fdisk e2fsprogs dosfstools xdotool firefox-esr \
-                wine wine64 iw wpasupplicant wireless-regdb hostapd fonts-wine xcape gparted python3 python3-gi gir1.2-gtk-3.0 librsvg2-common cups cups-bsd
+                wine wine64 iw wpasupplicant wireless-regdb hostapd fonts-wine xcape gparted python3 python3-gi gir1.2-gtk-3.0 librsvg2-common cups cups-bsd \
+                libgl1-mesa-dri libglx-mesa0 libegl-mesa0 mesa-utils
 DEBIAN_ROOT  := $(BUILD)/rootfs-debian
 DEBIAN_STAMP := $(DEBIAN_ROOT)/.fetched
 # A few i386 packages for testing 32-bit dynamic linking (Steam is 32-bit).
 DEBIAN_I386_PKGS  := hello busybox bash
 # Only the libraries these programs need (base-files would pull in gawk & co.).
-# Mesa's 3D stack (~190 MB) is only used by Xorg's GLAMOR acceleration, which the
-# fbdev driver doesn't use; it returns with real GPU drivers (phase 10).
+# Mesa's 3D stack (~190 MB, most of it LLVM for radeonsi/llvmpipe): OpenGL for
+# Xorg's GLAMOR acceleration and programs on the GPU drivers (i915: iris /
+# crocus, amdgpu: radeonsi, nouveau), software rendering elsewhere.
 # Wine (9-wine): libwine links the multimedia/hardware libraries below only
 # from optional Unix-side modules (winegstreamer, winepulse, gphoto2, wpcap,
 # capi, opencl); without them those modules don't load and the rest
 # of Wine works. FFmpeg + GStreamer alone would add ~150 MB.
 WINE_EXCLUDE := libavcodec61,libavformat61,libavutil59,libgstreamer-plugins-base1.0-0,libgstreamer1.0-0,libgphoto2-6t64,libgphoto2-port12t64,libpcap0.8t64,libpulse0,libcapi20-3t64,ocl-icd-libopencl1
-DEBIAN_EXCLUDE := mesa-libgallium,libllvm19,libz3-4,libgl1-mesa-dri,libglx-mesa0,libegl-mesa0,cpp,cpp-14,cpp-14-x86-64-linux-gnu,cpp-x86-64-linux-gnu,man-db,groff-base,systemd,udev,debconf,debconf-2.0,xbase-clients,systemd-sysv,libpam-systemd,dbus-user-session,$(WINE_EXCLUDE)
+DEBIAN_EXCLUDE := cpp,cpp-14,cpp-14-x86-64-linux-gnu,cpp-x86-64-linux-gnu,man-db,groff-base,systemd,udev,debconf,debconf-2.0,xbase-clients,systemd-sysv,libpam-systemd,dbus-user-session,$(WINE_EXCLUDE)
 DEBIAN_I386_EXCLUDE := base-files,debianutils,gawk,libmpfr6,libgmp10,libsigsegv2,readline-common,libreadline8t64
 DEBIAN_I386_PROGS := hello busybox bash
 DEBIAN_I386_ROOT  := $(BUILD)/rootfs-debian-i386
@@ -212,7 +214,7 @@ LKPI_LINUX_CFLAGS := -I$(LKPI_INCLUDE) -include linux/kconfig.h -Werror=implicit
 lkpi_modname = $(if $(findstring /drm/i915/,$<),i915,$(patsubst virtual,mac80211_hwsim,$(patsubst wireless,cfg80211,$(notdir $(patsubst %/,%,$(dir $<))))))
 # GPU drivers: their own include directory and Kconfig (drm/lkpi_<driver>_config.h).
 LKPI_I915 := kernel/linuxkpi/drivers/gpu/drm/i915
-$(OBJDIR)/$(LKPI_I915)/%: LKPI_DRV_CFLAGS = -I$(LKPI_I915) -DI915 -include drm/lkpi_i915_config.h
+$(OBJDIR)/$(LKPI_I915)/%: LKPI_DRV_CFLAGS = -I$(LKPI_I915) -DI915 -include drm/lkpi_i915_config.h -gline-tables-only
 $(OBJDIR)/kernel/linuxkpi/%.c.o: kernel/linuxkpi/%.c
 	@mkdir -p $(dir $@)
 	@echo "  CC    $<"
@@ -276,8 +278,15 @@ $(DEBIAN_STAMP): tools/debian-fetch.py Makefile
 # Device firmware from Debian's non-free-firmware section: the packages are
 # huge (GPU firmware), so only the files our drivers load are kept.
 FIRMWARE_REPO  := http://deb.debian.org/debian|$(DEBIAN_SUITE)|non-free-firmware
-FIRMWARE_PKGS  := firmware-mediatek firmware-realtek
-FIRMWARE_FILES := mediatek/mt7601u.bin rtlwifi/rtl8188eufw.bin rtlwifi/rtl8723bu_nic.bin rtl_bt/rtl8723b_fw.bin
+FIRMWARE_PKGS  := firmware-mediatek firmware-realtek firmware-intel-graphics
+FIRMWARE_FILES := mediatek/mt7601u.bin rtlwifi/rtl8188eufw.bin rtlwifi/rtl8723bu_nic.bin rtl_bt/rtl8723b_fw.bin \
+                  $(I915_FIRMWARE)
+# i915: display microcontroller (DMC) firmware for Skylake..Alder Lake, GuC/HuC
+# where i915 loads them by default (Alder Lake; Tiger/Rocket Lake run without).
+# Haswell/Broadwell need none. (~1.5 MB)
+I915_FIRMWARE  := i915/skl_dmc_ver1_27.bin i915/kbl_dmc_ver1_04.bin i915/bxt_dmc_ver1_07.bin i915/glk_dmc_ver1_04.bin \
+                  i915/icl_dmc_ver1_09.bin i915/tgl_dmc_ver2_12.bin i915/rkl_dmc_ver2_03.bin i915/adls_dmc_ver2_01.bin \
+                  i915/adlp_dmc.bin i915/adlp_guc_70.bin i915/tgl_guc_70.bin i915/tgl_huc.bin
 FIRMWARE_ROOT  := $(BUILD)/firmware-debian
 FIRMWARE_STAMP := $(FIRMWARE_ROOT)/.fetched
 

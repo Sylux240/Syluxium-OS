@@ -220,18 +220,58 @@ void lkpi_vfree(const void* p) {
         sylux_vfree(const_cast<void*>(p));
 }
 
-struct kmem_cache* kmem_cache_create(const char* name, size_t size, size_t, unsigned long, void (*)(void*)) {
+// Object caches: kmalloc underneath. SLAB_TYPESAFE_BY_RCU caches (i915
+// requests, dma-fences found by lockless lookups) keep freed memory out of
+// reuse until an RCU grace period has passed: an rcu_head trails each object.
+namespace {
+constexpr unsigned long LKPI_SLAB_TYPESAFE_BY_RCU = 0x00080000UL;
+struct SlabTrailer {
+    struct rcu_head head;
+    size_t offset; // of the trailer from the object start
+};
+size_t slab_object_size(const struct kmem_cache* c) { return (c->size + 15) & ~size_t(15); }
+void slab_rcu_free(struct rcu_head* h) {
+    auto* t = reinterpret_cast<SlabTrailer*>(h);
+    lkpi_kfree(reinterpret_cast<char*>(t) - t->offset);
+}
+} // namespace
+
+struct kmem_cache* kmem_cache_create(const char* name, size_t size, size_t, unsigned long flags, void (*ctor)(void*)) {
     auto* c = static_cast<struct kmem_cache*>(lkpi_kzalloc(sizeof(struct kmem_cache), GFP_KERNEL));
     if (c) {
         c->size = size;
         c->name = name;
+        c->flags = flags;
+        c->ctor = ctor;
     }
     return c;
 }
 void kmem_cache_destroy(struct kmem_cache* c) { lkpi_kfree(c); }
-void* kmem_cache_alloc(struct kmem_cache* c, gfp_t flags) { return lkpi_kmalloc(c->size, flags); }
-void* kmem_cache_zalloc(struct kmem_cache* c, gfp_t flags) { return lkpi_kzalloc(c->size, flags); }
-void kmem_cache_free(struct kmem_cache*, void* p) { lkpi_kfree(p); }
+void* kmem_cache_alloc(struct kmem_cache* c, gfp_t flags) {
+    size_t n = c->flags & LKPI_SLAB_TYPESAFE_BY_RCU ? slab_object_size(c) + sizeof(SlabTrailer) : c->size;
+    void* p = lkpi_kmalloc(n, flags);
+    if (p && c->ctor)
+        c->ctor(p);
+    return p;
+}
+void* kmem_cache_zalloc(struct kmem_cache* c, gfp_t flags) {
+    size_t n = c->flags & LKPI_SLAB_TYPESAFE_BY_RCU ? slab_object_size(c) + sizeof(SlabTrailer) : c->size;
+    void* p = lkpi_kzalloc(n, flags);
+    if (p && c->ctor)
+        c->ctor(p);
+    return p;
+}
+void kmem_cache_free(struct kmem_cache* c, void* p) {
+    if (!p)
+        return;
+    if (c && (c->flags & LKPI_SLAB_TYPESAFE_BY_RCU)) {
+        auto* t = reinterpret_cast<SlabTrailer*>(static_cast<char*>(p) + slab_object_size(c));
+        t->offset = slab_object_size(c);
+        call_rcu(&t->head, slab_rcu_free);
+        return;
+    }
+    lkpi_kfree(p);
+}
 
 // ======================= strings =======================
 

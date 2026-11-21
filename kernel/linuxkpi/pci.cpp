@@ -535,16 +535,26 @@ void pci_clear_master(struct pci_dev* p) { pci::write16(fn(p), PCI_COMMAND, pci:
 int pci_request_regions(struct pci_dev*, const char*) { return 0; }
 void pci_release_regions(struct pci_dev*) {}
 
-void __iomem* pci_iomap(struct pci_dev* p, int bar, unsigned long) {
+void __iomem* pci_iomap(struct pci_dev* p, int bar, unsigned long maxlen) {
     if (bar < 0 || bar >= DEVICE_COUNT_RESOURCE || !p->lkpi_res_len[bar])
         return nullptr;
     if (p->lkpi_res_flags[bar] & IORESOURCE_IO)
         return nullptr; // port I/O BARs: drivers must use inb/outb with pci_resource_start
+    // Part of a BAR (GPUs: i915 maps only the register half of BAR0, the
+    // other half (the GTT) is mapped write-combining elsewhere; mapping it
+    // uncached too would alias two memory types).
+    if (maxlen && maxlen < p->lkpi_res_len[bar])
+        return ioremap(p->lkpi_res_start[bar], maxlen);
     if (!p->lkpi_iomap[bar])
         p->lkpi_iomap[bar] = const_cast<void*>(reinterpret_cast<volatile void*>(pci::map_bar(fn(p), bar)));
     return p->lkpi_iomap[bar];
 }
-void pci_iounmap(struct pci_dev*, void __iomem*) {} // BAR mappings are permanent
+void pci_iounmap(struct pci_dev* p, void __iomem* addr) {
+    for (int i = 0; i < DEVICE_COUNT_RESOURCE; i++)
+        if (p->lkpi_iomap[i] == addr)
+            return; // whole-BAR mappings are permanent
+    iounmap(addr); // partial ones (pci_iomap with maxlen) are not
+}
 
 int pcim_iomap_regions(struct pci_dev* p, int mask, const char*) {
     for (int i = 0; i < DEVICE_COUNT_RESOURCE; i++)
