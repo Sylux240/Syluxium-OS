@@ -149,6 +149,12 @@ public:
     // Readiness for poll/select (POLLIN/POLLOUT/POLLHUP/POLLERR bits).
     // Plain files and most devices never block, so they're always ready.
     virtual u16 poll(File* f) { return 0x001 | 0x004; }
+    // Regular files epoll may watch anyway (procfs: Android's init watches
+    // /proc/self/mountinfo); other regular files and directories it refuses.
+    virtual bool epoll_regular() const { return false; }
+    // A "magic" symlink (/proc/<pid>/ns/*): readlink shows its text, but lookups
+    // and open() take the link inode itself instead of following it.
+    virtual bool magic_link() const { return false; }
 
     // An open file description referring to this inode was created / closed for good.
     virtual void on_open(File* f) {}
@@ -241,8 +247,10 @@ u64 next_fs_dev(); // a fresh st_dev for a newly mounted file system
 // system). source/type are what /proc/mounts shows.
 long mount_at(const char* path, Inode* fs_root, const char* source, const char* type);
 long unmount(const char* path);
+long unmount_at(const char* path, Inode* cwd, const char* canon); // umount2: relative to cwd
 void mount_source(const char* path, char* out, usize size); // what /proc/mounts shows as its device
 long move_mount(const char* from, const char* to); // MS_MOVE
+void bind_replicate(const char* src, const char* dst); // MS_BIND | MS_REC: copies of the mounts below src
 // chroot/pivot_root: the process layer says where the caller's "/" is.
 void set_process_root_hook(Inode* (*fn)());
 // Resolve from the system's "/" whatever the caller's root (proc, sys, dev

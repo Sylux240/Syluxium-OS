@@ -461,6 +461,18 @@ long sys_tgkill(SYSCALL_ARGS) {
     return 0;
 }
 
+// rt_sigqueueinfo / rt_tgsigqueueinfo: signals with a payload (Android's
+// libc and BoringSSL's self-tests). Delivered like kill / tgkill; the payload
+// (si_value) isn't carried yet.
+long sys_rt_sigqueueinfo(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    return sys_kill(a0, a1, 0, 0, 0, 0, frame);
+}
+long sys_rt_tgsigqueueinfo(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    return sys_tgkill(a0, a1, a2, 0, 0, 0, frame);
+}
+
 long sys_tkill(SYSCALL_ARGS) {
     SYSCALL_UNUSED;
     LockGuard guard(proc::table_lock());
@@ -670,6 +682,8 @@ long sys_prlimit64(SYSCALL_ARGS) {
         return uaccess::put(reinterpret_cast<RLimit*>(a3), default_limit(static_cast<u32>(a1)));
     return 0; // setting limits: accepted, not enforced yet
 }
+
+long sys_setrlimit(SYSCALL_ARGS) { SYSCALL_UNUSED; return 0; } // accepted, not enforced yet (as prlimit64)
 
 long sys_getrlimit(SYSCALL_ARGS) {
     SYSCALL_UNUSED;
@@ -1123,8 +1137,8 @@ long sys_setns(SYSCALL_ARGS) {
 
 long sys_personality(SYSCALL_ARGS) {
     SYSCALL_UNUSED;
-    // PER_LINUX only; 0xffffffff queries.
-    return (a0 == 0xffffffff || (a0 & 0xff) == 0) ? 0 : -err::INVAL;
+    // PER_LINUX (0) and PER_LINUX32 (8: Android's 32-bit libc sets it); 0xffffffff queries.
+    return (a0 == 0xffffffff || (a0 & 0xff) == 0 || (a0 & 0xff) == 8) ? 0 : -err::INVAL;
 }
 
 // Memory locking: every page stays resident anyway (no swap).
@@ -1224,6 +1238,9 @@ void register_process() {
     set(231, sys_exit_group, "exit_group");
     set(273, sys_set_robust_list, "set_robust_list");
     set(302, sys_prlimit64, "prlimit64");
+    set(160, sys_setrlimit, "setrlimit");
+    set(129, sys_rt_sigqueueinfo, "rt_sigqueueinfo");
+    set(297, sys_rt_tgsigqueueinfo, "rt_tgsigqueueinfo");
     set(318, sys_getrandom, "getrandom");
     set(309, sys_getcpu, "getcpu");
     set(157, sys_prctl, "prctl");

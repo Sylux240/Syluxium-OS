@@ -151,6 +151,37 @@ class TaskDir;
 // /proc/<pid>/oom_score_adj (-1000..1000) and the older oom_adj (-17..15):
 // readable and writable; TDE's start_tdeinit protects its core processes
 // through them (and waits until it has).
+// /proc/pressure/{cpu,memory,io}: pressure stall information. Nothing stalls
+// is measured yet: all zeros, and triggers (written by Android's lmkd) are
+// accepted but never fire.
+class PressureFile : public vfs::Inode {
+public:
+    explicit PressureFile(bool full) : m_full(full) {
+        ino = vfs::next_ino();
+        mode = vfs::S_IFREG | 0666;
+        atime = mtime = ctime = vfs::now();
+    }
+    isize read(u64 offset, void* buf, usize count) override {
+        static const char some[] = "some avg10=0.00 avg60=0.00 avg300=0.00 total=0\n";
+        static const char both[] = "some avg10=0.00 avg60=0.00 avg300=0.00 total=0\n"
+                                   "full avg10=0.00 avg60=0.00 avg300=0.00 total=0\n";
+        const char* text = m_full ? both : some;
+        usize n = strlen(text);
+        if (offset >= n)
+            return 0;
+        n = min<usize>(n - offset, count);
+        memcpy(buf, text + offset, n);
+        return static_cast<isize>(n);
+    }
+    isize write(u64, const void*, usize count) override { return static_cast<isize>(count); }
+    bool seekable() const override { return true; }
+    bool epoll_regular() const override { return true; }
+    u16 poll(vfs::File*) override { return 0x001 | 0x004; } // (no POLLPRI: no trigger fires)
+
+private:
+    bool m_full;
+};
+
 class OomFile : public vfs::Inode {
 public:
     OomFile(int p, bool legacy) : m_pid(p), m_legacy(legacy) {
@@ -545,11 +576,35 @@ class NsFile : public vfs::Inode {
 public:
     NsFile(int pid, const char* kind) : m_pid(pid) {
         ino = vfs::next_ino();
-        mode = vfs::S_IFREG | 0444;
+        mode = vfs::S_IFLNK | 0777;
         anon_kind = KIND_NSFS;
         snprintf(m_kind, sizeof(m_kind), "%s", kind);
     }
     isize read(u64, void*, usize) override { return -err::INVAL; }
+    bool magic_link() const override { return true; }
+    // "mnt:[4026531840]": the system's namespaces have Linux's initial ids,
+    // private ones an id derived from the namespace object.
+    isize readlink(char* buf, usize size) override {
+        const void* ns = nullptr;
+        {
+            LockGuard guard(proc::table_lock());
+            Process* p = proc::find(m_pid);
+            if (!p)
+                return -err::NOENT;
+            if (!strcmp(m_kind, "mnt"))
+                ns = p->mntns;
+            else if (!strcmp(m_kind, "uts"))
+                ns = p->uts;
+            else if (!strcmp(m_kind, "pid"))
+                ns = p->pidns;
+        }
+        u32 id = ns ? 4026532000u + static_cast<u32>((reinterpret_cast<uptr>(ns) >> 4) & 0xFFFFF) : 4026531840u;
+        char text[48];
+        int n = snprintf(text, sizeof(text), "%s:[%u]", m_kind, id);
+        usize len = static_cast<usize>(n) < size ? static_cast<usize>(n) : size;
+        memcpy(buf, text, len);
+        return static_cast<isize>(len);
+    }
     int m_pid;
     char m_kind[16];
 };
@@ -571,7 +626,7 @@ public:
     long readdir(u64 index, vfs::DirEntry* out) override {
         if (index >= COUNT)
             return 0;
-        fill_entry(out, m_files[index]->ino, vfs::DT_REG, kinds[index]);
+        fill_entry(out, m_files[index]->ino, vfs::DT_LNK, kinds[index]);
         return 1;
     }
 
@@ -866,6 +921,14 @@ void init() {
     add("stat", new GeneratedFile(gen_stat_global, nullptr));
     add("loadavg", new GeneratedFile(gen_loadavg, nullptr));
     add("cpuinfo", new GeneratedFile(gen_cpuinfo, nullptr));
+    {
+        auto* pressure = new ramfs::Dir;
+        pressure->mode = vfs::S_IFDIR | 0555;
+        pressure->attach("cpu", 3, new PressureFile(false));
+        pressure->attach("memory", 6, new PressureFile(true));
+        pressure->attach("io", 2, new PressureFile(true));
+        add("pressure", pressure);
+    }
     add("self", new GeneratedLink(link_self, nullptr));
     add("thread-self", new GeneratedLink(link_thread_self, nullptr));
 

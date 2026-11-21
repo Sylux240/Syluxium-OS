@@ -24,8 +24,6 @@ adapt_config() {
         echo "lxc.net.0.type = none"
         echo "lxc.apparmor.profile = unconfined"
         echo "lxc.cgroup.relative = 1" # (our cgroup, not init's: there's no init process)
-        # Android's init logs to the kernel log (and its failures show there).
-        echo "lxc.mount.entry = /dev/kmsg dev/kmsg none bind,create=file 0 0"
     } >> "$c"
     # Waydroid's own network setup (bridge, dnsmasq, NAT) isn't used.
     if [ -f /var/lib/waydroid/waydroid.cfg ]; then
@@ -35,9 +33,26 @@ adapt_config() {
 
 running() { [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; }
 
+# Android gets binder devices of its own (fresh contexts: its servicemanager
+# runs as uid 1000 and the system's /dev/binder may have another manager):
+# anbox-binder, anbox-vndbinder, anbox-hwbinder from a binderfs instance,
+# which Waydroid prefers over /dev/binder.
+setup_binder() {
+    mkdir -p /dev/binderfs
+    grep -q ' /dev/binderfs binder ' /proc/mounts || mount -t binder binder /dev/binderfs || return 1
+    for n in anbox-binder anbox-vndbinder anbox-hwbinder; do
+        [ -e "/dev/binderfs/$n" ] || python3 -c "
+import fcntl, struct
+with open('/dev/binderfs/binder-control', 'rb') as f:
+    fcntl.ioctl(f, 0xC1086201, struct.pack('256sII', b'$n', 0, 0))" || return 1
+        ln -sfn "/dev/binderfs/$n" "/dev/$n"
+    done
+}
+
 case "$1" in
 init)
     mkdir -p /var/lib/waydroid
+    setup_binder || echo "binderfs devices could not be made" >&2
     # Vanilla LineageOS images (no Google apps); waydroid prints its download progress.
     waydroid init -s VANILLA -f 2>&1
     rc=$?
@@ -47,6 +62,7 @@ init)
 start)
     set_up || { echo "not set up" >&2; exit 2; }
     running && exit 0
+    setup_binder || { echo "binderfs devices could not be made" >&2; exit 3; }
     adapt_config
     mkdir -p /run/dbus
     [ -S /run/dbus/system_bus_socket ] || dbus-daemon --system --fork

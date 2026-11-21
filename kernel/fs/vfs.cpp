@@ -141,6 +141,17 @@ long resolve_impl(const char* path, Inode* cwd, bool follow_last, Inode** out, i
         if (len == 1 && start[0] == '.')
             continue;
         if (len == 2 && start[0] == '.' && start[1] == '.') {
+            // ".." from a root that something has been mounted over (from
+            // underneath, by a working directory kept there) leads into what
+            // was mounted: Linux's behaviour, which LXC relies on to reach a
+            // container's root ("It is weird, but chdir("..") moves us in a new root").
+            if (node == g_root || node == top_dir()) {
+                Inode* over = cross_down(node);
+                if (over != node && node != top) {
+                    node = over;
+                    continue;
+                }
+            }
             if (node == g_root || node == top)
                 continue;
             for (Inode* c; node != g_root && node != top && (c = covered_by(node));)
@@ -157,7 +168,7 @@ long resolve_impl(const char* path, Inode* cwd, bool follow_last, Inode** out, i
         if (!next)
             return -err::NOENT;
         next = cross_down(next);
-        if (is_lnk(next->mode) && (!last || follow_last || trailing_slash)) {
+        if (is_lnk(next->mode) && !next->magic_link() && (!last || follow_last || trailing_slash)) {
             long r = follow(next, node, &next, depth);
             if (r < 0)
                 return r;
@@ -511,14 +522,54 @@ void mount_source(const char* path, char* out, usize size) {
         }
 }
 
-long unmount(const char* path) {
+long unmount(const char* path) { return unmount_at(path, nullptr, path); }
+
+// umount2(): `path` as the caller wrote it (relative to `cwd`), `canon` its
+// absolute form. The mount is the newest one sitting on the directory the
+// last component names (looked up without stepping into what's mounted
+// there), as Linux identifies it; the recorded path only breaks ties between
+// copies (MS_REC). A relative path resolves from cwd even when something has
+// been mounted over "/" since (LXC's chroot does exactly that).
+long unmount_at(const char* path, Inode* cwd, const char* canon) {
     Inode* node;
-    if (long r = resolve(path, nullptr, true, &node); r < 0)
+    if (long r = resolve(path, cwd, true, &node); r < 0)
         return r;
+    Inode* covered = nullptr;
+    {
+        Inode* parent;
+        const char* name;
+        usize len;
+        bool dots = (path[0] == '.' && (!path[1] || (path[1] == '.' && !path[2])));
+        if (!dots && resolve_parent(path, cwd, &parent, &name, &len) == 0 &&
+            !(len == 1 && name[0] == '.') && !(len == 2 && name[0] == '.' && name[1] == '.'))
+            covered = parent->lookup(name, len);
+    }
     Inode* top = process_top();
     LockGuard guard(g_mount_lock);
-    usize found;
-    if (long r = find_mount(path, node, top, &found); r != 0)
+    usize found = 0;
+    long r = 1;
+    if (covered) {
+        long best = -1;
+        for (usize i = g_mount_count; i-- > 0;) {
+            if (g_mounts[i].covered != covered)
+                continue;
+            if (strcmp(g_mounts[i].path, canon) == 0) {
+                best = static_cast<long>(i);
+                break;
+            }
+            if (best < 0)
+                best = static_cast<long>(i);
+        }
+        if (best >= 0) {
+            found = static_cast<usize>(best);
+            r = 0;
+        } else {
+            return -err::INVAL; // nothing mounted there
+        }
+    } else {
+        r = find_mount(canon, node, top, &found);
+    }
+    if (r != 0)
         return r < 0 ? r : 0;
     for (usize i = found + 1; i-- > found;) {
         // Something mounted inside it? (Bind mounts share their file
@@ -586,6 +637,36 @@ void mount_ns_get(void* ns) {
 void mount_ns_put(void* ns) {
     if (ns && __atomic_sub_fetch(&static_cast<MountTable*>(ns)->refs, 1, __ATOMIC_ACQ_REL) == 0)
         delete static_cast<MountTable*>(ns);
+}
+
+} // namespace vfs
+
+namespace vfs {
+
+// MS_BIND | MS_REC: every mount below `src` (by path, as the caller sees
+// them) gets a copy recorded below `dst`. It hangs on the same directory, so
+// lookups don't change - but unmounting the original (by its path) leaves the
+// copy, as Linux's replicated mounts do (LXC detaches the originals after
+// binding a container's root over "/").
+void bind_replicate(const char* src, const char* dst) {
+    LockGuard guard(g_mount_lock);
+    usize len = strlen(src);
+    if (len > 1 && src[len - 1] == '/')
+        len--;
+    usize n = g_mount_count;
+    for (usize i = 0; i < n && g_mount_count < MAX_MOUNTS; i++) {
+        const Mount m = g_mounts[i];
+        bool below = len == 1 ? m.path[0] == '/' && m.path[1] : strncmp(m.path, src, len) == 0 && m.path[len] == '/';
+        if (!below)
+            continue;
+        Mount& c = g_mounts[g_mount_count++];
+        c = m;
+        const char* rest = m.path + (len == 1 ? 0 : len); // "/sub/dir"
+        if (strcmp(dst, "/") == 0)
+            snprintf(c.path, sizeof(c.path), "%s", rest);
+        else
+            snprintf(c.path, sizeof(c.path), "%s%s", dst, rest);
+    }
 }
 
 } // namespace vfs

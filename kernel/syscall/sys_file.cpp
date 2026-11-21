@@ -216,7 +216,7 @@ long do_openat(long dirfd, u64 user_path, u32 flags, u32 mode) {
         return -err::NOTDIR;
     if (is_dir(inode->mode) && (flags & O_ACCMODE) != O_RDONLY)
         return -err::ISDIR;
-    if (is_lnk(inode->mode) && !(flags & O_PATH))
+    if (is_lnk(inode->mode) && !(flags & O_PATH) && !inode->magic_link())
         return -err::LOOP; // O_NOFOLLOW on a symlink
     if ((flags & O_TRUNC) && is_reg(inode->mode) && (flags & O_ACCMODE) != O_RDONLY && inode->size) {
         inode->truncate(0);
@@ -1656,6 +1656,7 @@ long sys_mount(SYSCALL_ARGS) {
     if (target.error()) return target.error();
     char abs[512];
     join_path(proc::current()->cwd_path, target.c_str(), abs, sizeof(abs));
+    { char c[512]; if (vfs::canonical_path(abs, "/", c, sizeof(c)) == 0) snprintf(abs, sizeof(abs), "%s", c); } // (/proc/self/fd/N paths: the real one)
 
     // Mount flags (containers): bind mounts, moves, remounts and propagation
     // changes. Read-only and propagation are accepted, not enforced: there is
@@ -1673,18 +1674,24 @@ long sys_mount(SYSCALL_ARGS) {
             return source.error();
         char src_abs[512];
         join_path(proc::current()->cwd_path, source.c_str(), src_abs, sizeof(src_abs));
+    { char c[512]; if (vfs::canonical_path(src_abs, "/", c, sizeof(c)) == 0) snprintf(src_abs, sizeof(src_abs), "%s", c); } // (/proc/self/fd/N paths: the real one)
         Inode* src;
         if (long r = vfs::resolve(src_abs, nullptr, true, &src); r < 0)
             return r;
-        // (MS_REC needs nothing more: mounts hang on directories, so the ones
-        // below src show through the bind as well.)
-        return vfs::mount_at(abs, src, src_abs, "bind");
+        // Mounts hang on directories, so the ones below src show through the
+        // bind anyway; MS_REC also records copies under abs (they survive
+        // unmounting the originals, as on Linux).
+        long r = vfs::mount_at(abs, src, src_abs, "bind");
+        if (r == 0 && (mflags & (1 << 14) /* MS_REC */))
+            vfs::bind_replicate(src_abs, abs);
+        return r;
     }
     if (mflags & MS_MOVE) {
         if (source.error())
             return source.error();
         char src_abs[512];
         join_path(proc::current()->cwd_path, source.c_str(), src_abs, sizeof(src_abs));
+    { char c[512]; if (vfs::canonical_path(src_abs, "/", c, sizeof(c)) == 0) snprintf(src_abs, sizeof(src_abs), "%s", c); } // (/proc/self/fd/N paths: the real one)
         return vfs::move_mount(src_abs, abs);
     }
     if (mflags & (MS_UNBINDABLE | MS_PRIVATE | MS_SLAVE | MS_SHARED)) {
@@ -1810,10 +1817,11 @@ long sys_umount2(SYSCALL_ARGS) {
         return target.error();
     char abs[512];
     join_path(proc::current()->cwd_path, target.c_str(), abs, sizeof(abs));
+    { char c[512]; if (vfs::canonical_path(abs, "/", c, sizeof(c)) == 0) snprintf(abs, sizeof(abs), "%s", c); }
     block::sync_all();
     char source[64];
     vfs::mount_source(abs, source, sizeof(source));
-    long r = vfs::unmount(abs);
+    long r = vfs::unmount_at(target.c_str(), proc::current()->cwd, abs);
     if (r == 0)
         loop::unmounted(source); // mount -o loop's device goes with it
     return r;
