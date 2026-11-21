@@ -98,6 +98,50 @@ bool new_slab(SizeClass& sc, unsigned class_index) {
     return true;
 }
 
+// Who freed an object: objects of 64 bytes and more keep the return
+// addresses of the kfree() call chain in their bytes 8..55 while free, so a
+// write after free can name the code that freed the object.
+constexpr u32 TRACE_AT = 8, TRACE_DEPTH = 6;
+
+bool in_free_trace(u32 size, u32 i) { return size >= 64 && i >= TRACE_AT && i < TRACE_AT + TRACE_DEPTH * 8; }
+
+void record_free_trace(u8* obj, u32 size) {
+    if (size < 64)
+        return;
+    u64 trace[TRACE_DEPTH] = {};
+    auto* fp = static_cast<u64*>(__builtin_frame_address(0));
+    // Walk only while the frame pointers look like a kernel stack: aligned,
+    // growing, close together (the outermost frames hold user values).
+    for (u32 i = 0; i < TRACE_DEPTH; i++) {
+        u64 f = reinterpret_cast<u64>(fp);
+        if (f < mm::KERNEL_HALF || f > ~0xFFFFull || (f & 7))
+            break;
+        trace[i] = fp[1];
+        auto* next = reinterpret_cast<u64*>(fp[0]);
+        if (next <= fp || reinterpret_cast<u64>(next) - f > 64 * 1024 || trace[i] < mm::KERNEL_HALF)
+            break;
+        fp = next;
+    }
+    memcpy(obj + TRACE_AT, trace, sizeof(trace));
+}
+
+[[noreturn]] void report_write_after_free(u8* obj, u32 size, u32 first) {
+    u32 last = first;
+    for (u32 i = first; i < size; i++)
+        if (!in_free_trace(size, i) && obj[i] != POISON)
+            last = i;
+    klog::warn("heap: write after free in %p (size %u): bytes %u..%u changed, first ones %02x %02x %02x %02x "
+               "%02x %02x %02x %02x", obj, size, first, last, obj[first], obj[first + 1], obj[first + 2],
+               obj[first + 3], obj[first + 4], obj[first + 5], obj[first + 6], obj[first + 7]);
+    if (size >= 64) {
+        u64 trace[TRACE_DEPTH];
+        memcpy(trace, obj + TRACE_AT, sizeof(trace));
+        klog::warn("heap: it was freed by %#lx %#lx %#lx %#lx %#lx %#lx", trace[0], trace[1], trace[2], trace[3],
+                   trace[4], trace[5]);
+    }
+    panic("heap: object %p (size %u) was written after being freed", obj, size);
+}
+
 void* slab_alloc(unsigned class_index) {
     SizeClass& sc = g_classes[class_index];
     LockGuard guard(sc.lock);
@@ -111,8 +155,10 @@ void* slab_alloc(unsigned class_index) {
 
     if (HEAP_DEBUG) {
         for (u32 i = 2; i < sc.object_size; i++) {
+            if (in_free_trace(sc.object_size, i))
+                continue;
             if (obj[i] != POISON)
-                panic("heap: object %p (size %u) was written after being freed", obj, sc.object_size);
+                report_write_after_free(obj, sc.object_size, i);
         }
     }
 
@@ -142,6 +188,7 @@ void slab_free(void* ptr, PageFrame& f) {
             memcpy(&i, slab_base(pfn) + i * sc.object_size, sizeof(u16));
         }
         memset(ptr, POISON, sc.object_size);
+        record_free_trace(static_cast<u8*>(ptr), sc.object_size);
     }
 
     bool was_full = f.slab_free == SLAB_FULL;
