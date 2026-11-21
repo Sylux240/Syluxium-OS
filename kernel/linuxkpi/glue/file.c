@@ -106,7 +106,18 @@ long lkpi_file_write(struct file *f, const char __user *buf, size_t n, long long
 }
 long lkpi_file_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 {
-	return f->f_op && f->f_op->unlocked_ioctl ? f->f_op->unlocked_ioctl(f, cmd, arg) : -ENOTTY;
+	static int logged;
+	long r = f->f_op && f->f_op->unlocked_ioctl ? f->f_op->unlocked_ioctl(f, cmd, arg) : -ENOTTY;
+	/* Failing GPU ioctls (type 'd'; not the mode-setting ones, whose probing
+	 * failures are routine), the first 60: Mesa aborts the X server
+	 * when command submission fails, often before its log reaches disk. */
+	if (r < 0 && _IOC_TYPE(cmd) == 'd' && (_IOC_NR(cmd) < 0xa0 || _IOC_NR(cmd) > 0xbe) && r != -EINTR && r != -EAGAIN && r != -ERESTARTSYS &&
+	    r != -ETIME && logged < 60) {
+		logged++;
+		pr_warn("drm: %s[%d]: ioctl 0x%02x (cmd %#x) failed: %ld%s\n", current->comm, current->pid,
+			_IOC_NR(cmd), cmd, r, logged == 60 ? " (no more of these)" : "");
+	}
+	return r;
 }
 unsigned int lkpi_file_poll(struct file *f)
 {

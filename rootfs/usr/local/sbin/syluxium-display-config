@@ -16,6 +16,13 @@ if [ -n "$card" ] && [ -x "$drminfo" ]; then
     info=$("$drminfo" "$card" 2>&1)
     driver=$("$drminfo" -n "$card" 2>/dev/null)
 fi
+# Without drminfo (or when it can't run on this CPU): the card's PCI device
+# names its driver in sysfs.
+if [ -z "$driver" ] && [ -n "$card" ]; then
+    minor=${card#/dev/dri/card}
+    driver=$(sed -n 's/^DRIVER=//p' "/sys/dev/char/226:$minor/device/uevent" 2>/dev/null | head -1)
+    [ -n "$driver" ] || driver=$(basename "$(readlink "/sys/dev/char/226:$minor/device/driver" 2>/dev/null)" 2>/dev/null)
+fi
 accel=none
 case "$driver" in
     i915|amdgpu|radeon|nouveau) accel=glamor ;;
