@@ -160,17 +160,18 @@ Legend: ✅ done · 🟡 partly done · ⬜ to do
 - 🟡 Personalize: themes, colors, wallpapers, icons (TDE Appearance & Themes); XP restyling of the dialogs to do
 - 🟡 Control Panel: TDE Control Center with XP category names; full restyle to do
 - 🟡 Task Manager with End Task (KSysGuard on Ctrl+Alt+Del / Ctrl+Shift+Esc); Windows-style front end to do
-- ⬜ System page: OS version, CPU, RAM, GPU, storage (TDE: KInfoCenter)
-- ⬜ Device Manager
-- ⬜ Disk Management, Computer Management
+- ✅ System page: Syluxium version, processor, memory, graphics, storage
+- ✅ Device Manager: every device by category, driver and status, problem devices flagged
+- ✅ Computer Management (Event Viewer, Services, Local Users, Device Manager, Disk Management)
+     and Disk Management with partitioning and formatting (GParted)
 - 🟡 Accessories: File Explorer (Konqueror), Media Player (Kaffeine), E-mail (KMail), Windows
      Notepad (Wine); WordPad, Paint, Calculator, Character Map, Snipping Tool to do
-- ⬜ Magnifier, On-Screen Keyboard (TDE: KMag; on-screen keyboard to find)
+- ✅ Magnifier, On-Screen Keyboard (KMag, KVkbd)
 - 🟡 Networking UI: Wi-Fi chooser by the clock; adapter settings, Network and Sharing Center,
      Firewall, Remote Desktop client to do
-- ⬜ Printing (CUPS-compatible print services, Devices and Printers) (TDE print manager + CUPS)
+- 🟡 Printing: CUPS print service + Printers and Faxes; automatic network printer discovery to do
 - ⬜ Programming tools: KDevelop-like IDE (editor, build, gdb debugger front end) (TDE: KDevelop)
-- ⬜ Image Writer: flash .iso/.img to USB/SD with verification
+- ✅ Image Writer: .iso/.img to USB sticks and SD cards with a read-back check
 - ✅ Firefox (Debian firefox-esr) preinstalled and the default browser
 - ✅ Windows programs: double-click an .exe (Wine), Start menu → Windows Programs
 - 🟡 Notifications: XP-style bubbles for AutoPlay and Wi-Fi; system-wide notifications (KNotify) to do
@@ -179,11 +180,12 @@ Legend: ✅ done · 🟡 partly done · ⬜ to do
 - 🟡 Installer: graphical wizard (disk, computer name, user) → GPT + ext4 + Limine (UEFI/BIOS);
      package and settings choices to do
 - 🟡 Package installer: build-time Debian fetcher done; App Store + double-click .deb on the device to do
-- ⬜ Running packages' maintainer (install) scripts
+- ✅ Packages' install scripts run (real dpkg database; apt works)
 - ✅ Accounts: graphical login, User Accounts (add/remove users, passwords), administrator prompts
 - 🟡 Security: NX, kernel W^X, guard pages, per-user permissions done; ASLR, SMEP/SMAP to do
 - 🟡 Power management: power off / restart, power button, battery and lid readings, idle CPU
      states; sleep, CPU frequency scaling, battery icon to do
-- ⬜ Updates and recovery
+- ✅ Updates (Syluxium Update: Debian and Trinity through apt) and a Recovery boot entry
+     (repair disks and packages, reset settings or passwords, root prompt)
 
-Tally: 32 done · 18 partly done · 9 to do.
+Tally: 39 done · 19 partly done · 1 to do.
