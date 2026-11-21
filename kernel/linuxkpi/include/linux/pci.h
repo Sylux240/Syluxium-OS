@@ -50,6 +50,8 @@ struct pci_dev {
     u8 msi_cap, msix_cap; /* appended: capability offsets */
     u32 saved_config_space[16];
     u8 pm_cap;
+    unsigned int multifunction:1; /* appended */
+    int cfg_size;                 /* appended: 256, or 4096 for PCI Express */
 };
 
 struct pci_driver {

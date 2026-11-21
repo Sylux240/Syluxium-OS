@@ -59,17 +59,7 @@ static inline u64 mul_u64_u64_div_u64(u64 a, u64 b, u64 c)
     return (u64)(((unsigned __int128)a * b) / c);
 }
 
-/* TCP header (checksum offload of TCP packets: never asked for here). */
-struct tcphdr {
-    __be16 source, dest;
-    __be32 seq, ack_seq;
-    u16 res1 : 4, doff : 4, fin : 1, syn : 1, rst : 1, psh : 1, ack : 1, urg : 1, ece : 1, cwr : 1;
-    __be16 window;
-    __sum16 check;
-    __be16 urg_ptr;
-};
-#define tcp_hdr(skb) ((struct tcphdr *)skb_transport_header(skb))
-#define tcp_hdrlen(skb) (tcp_hdr(skb)->doff * 4)
+#include <linux/tcp.h>
 
 /* The op mode (iwlmvm) is built in and registers itself at init. */
 #define request_module_nowait(fmt, ...) 0

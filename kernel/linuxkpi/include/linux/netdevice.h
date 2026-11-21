@@ -359,6 +359,11 @@ struct net_device {
     int lkpi_auto_open;     /* Ethernet drivers: open at registration (Syluxium interfaces start up) */
     void* lkpi_iface;       /* Syluxium net::Interface */
     size_t lkpi_priv_size;
+    /* phylib (added before the private area, which must stay last) */
+    struct phy_link_topology* link_topo;
+    struct phy_device* phydev;
+    struct sfp_bus* sfp_bus;
+    struct ethtool_netdev_state* ethtool;
     unsigned long lkpi_priv[] __aligned(64);
 };
 

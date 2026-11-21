@@ -181,9 +181,20 @@ bool cmdline_word(const char* w) {
     return false;
 }
 
+// Linux drivers with a native Syluxium driver behind them: if the Linux one
+// fails, the native one gets the device ("<name>=native" skips the Linux one).
+bool has_native_fallback(const char* name) { return name && !strcmp(name, "r8169"); }
+
 bool lkpi_match(const dev::Driver* drv, const dev::Device* d) {
     if (d->bus != dev::Bus::Pci || !find_id(static_cast<const pci_driver*>(drv->ctx), d))
         return false;
+    {
+        const char* name = static_cast<const pci_driver*>(drv->ctx)->name;
+        char opt[40];
+        snprintf(opt, sizeof(opt), "%s=native", name ? name : "?");
+        if (has_native_fallback(name) && cmdline_word(opt))
+            return false;
+    }
     // Real GPU drivers (i915, ...) are opt-in until they are proven on real
     // hardware: without "gpu" on the command line the firmware framebuffer
     // (simpledrm) drives the display. A black screen on a ThinkPad (UHD 620)
@@ -246,6 +257,8 @@ void fill_pdev(pci_dev* pdev, pci::Function* f, dev::Device* d) {
     pdev->lkpi_class = (static_cast<u32>(f->class_code) << 16) | (static_cast<u32>(f->subclass) << 8) | f->prog_if;
     pdev->revision = f->revision;
     pdev->pin = f->irq_pin;
+    pdev->multifunction = (f->header_type & 0x80) != 0;
+    pdev->cfg_size = f->pcie_cap ? 4096 : 256;
     pdev->bus_number = f->bus;
     {
         // One pci_bus per bus number (DRM prints pdev->bus->number).
@@ -390,6 +403,10 @@ long lkpi_probe(const dev::Driver* drv, dev::Device* d) {
         // It asked for its ACPI companion before AML ran (nouveau on Optimus
         // laptops: the video BIOS only comes from the _ROM method): once more
         // when the interpreter is up.
+        if (has_native_fallback(pdrv->name)) {
+            klog::warn("linuxkpi: %s: %s failed (%d); trying the native driver", d->bus_id, pdrv->name, r);
+            return -ENODEV;
+        }
         if (gpu && __atomic_load_n(&g_acpi_early_lookups, __ATOMIC_RELAXED) != early && g_acpi_retries < 8) {
             klog::info("linuxkpi: %s: %s will be probed again once ACPI methods are available", pdrv->name,
                        d->bus_id);

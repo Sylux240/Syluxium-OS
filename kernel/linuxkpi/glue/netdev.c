@@ -196,7 +196,10 @@ struct net_device* alloc_netdev_mqs(int sizeof_priv, const char* name, unsigned 
 	if (!dev)
 		return NULL;
 	dev->_tx = kcalloc(txqs, sizeof(*dev->_tx), GFP_KERNEL);
-	if (!dev->_tx) {
+	dev->ethtool = kzalloc(sizeof(*dev->ethtool), GFP_KERNEL);
+	if (!dev->_tx || !dev->ethtool) {
+		kfree(dev->_tx);
+		kfree(dev->ethtool);
 		kfree(dev);
 		return NULL;
 	}
@@ -241,6 +244,7 @@ void free_netdev(struct net_device* dev)
 	}
 	kfree(dev->tstats);
 	kfree(dev->_tx);
+	kfree(dev->ethtool);
 	kfree(dev);
 }
 
@@ -862,6 +866,19 @@ void eth_random_addr(u8* addr)
 u32 ethtool_op_get_link(struct net_device* dev)
 {
 	return netif_carrier_ok(dev) ? 1 : 0;
+}
+
+/* Software timestamps only (no PTP clocks here). */
+int ethtool_op_get_ts_info(struct net_device* dev, struct kernel_ethtool_ts_info* eti)
+{
+	eti->so_timestamping = SOF_TIMESTAMPING_TX_SOFTWARE | SOF_TIMESTAMPING_RX_SOFTWARE | SOF_TIMESTAMPING_SOFTWARE;
+	eti->phc_index = -1;
+	return 0;
+}
+
+/* phylib hands the ethtool netlink code its operations: no ethtool netlink here. */
+void ethtool_set_ethtool_phy_ops(const struct ethtool_phy_ops* ops)
+{
 }
 
 u32 crc32_le(u32 crc, const unsigned char* p, size_t len)
