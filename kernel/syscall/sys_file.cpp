@@ -415,6 +415,28 @@ long sys_readv(SYSCALL_ARGS) { SYSCALL_UNUSED; return vectored(a0, a1, a2, false
 long sys_writev(SYSCALL_ARGS) { SYSCALL_UNUSED; return vectored(a0, a1, a2, true); }
 
 long sys_open(SYSCALL_ARGS) { SYSCALL_UNUSED; return do_openat(AT_FDCWD, a0, static_cast<u32>(a1), static_cast<u32>(a2)); }
+// openat2(dirfd, path, how, size): openat with its flags in a struct. The
+// RESOLVE_* restrictions (no symlinks, stay beneath dirfd, ...) aren't
+// implemented: asking for any answers ENOSYS (callers fall back to openat)
+// rather than opening something the caller meant to forbid.
+long sys_openat2(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    struct OpenHow {
+        u64 flags, mode, resolve;
+    } how{};
+    if (a3 < sizeof(how) || a3 > 4096)
+        return -err::INVAL;
+    if (long r = uaccess::copy_from(&how, reinterpret_cast<const void*>(a2), sizeof(how)); r < 0)
+        return r;
+    if (how.flags >> 32 || how.mode & ~07777ull || (!(how.flags & (O_CREAT | 020000000 /* O_TMPFILE */)) && how.mode))
+        return -err::INVAL;
+    if (how.resolve & ~0x3Full)
+        return -err::INVAL;
+    if (how.resolve)
+        return -err::NOSYS;
+    return do_openat(static_cast<i32>(a0), a1, static_cast<u32>(how.flags), static_cast<u32>(how.mode));
+}
+
 long sys_openat(SYSCALL_ARGS) {
     SYSCALL_UNUSED;
     return do_openat(static_cast<long>(static_cast<i32>(a0)), a1, static_cast<u32>(a2), static_cast<u32>(a3));
@@ -2036,6 +2058,7 @@ void register_file() {
     set(23, sys_select, "select");
     set(40, sys_sendfile, "sendfile");
     set(326, sys_copy_file_range, "copy_file_range");
+    set(437, sys_openat2, "openat2");
     set(41, sys_socket, "socket");
     set(42, sys_not_socket, "connect");
     set(51, sys_not_socket, "getsockname");
