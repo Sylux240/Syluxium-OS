@@ -27,7 +27,7 @@ int main(int argc, char** argv) {
     int tty = open("/dev/tty0", O_RDWR);
     if (tty >= 0 && ioctl(tty, KDSETMODE, KD_GRAPHICS) == 0)
         printf("fbtest: console in KD_GRAPHICS mode\n");
-    // Background gradient (XP-ish blue sky to green hill) and test boxes.
+    // Background gradient (blue sky to green hill) and test boxes.
     for (unsigned y = 0; y < v.yres; y++) {
         uint32_t* row = (uint32_t*)(fb + y * f.line_length);
         for (unsigned x = 0; x < v.xres; x++) {
