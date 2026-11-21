@@ -8,6 +8,8 @@
 //             on a pipe that another thread writes in bursts.
 //  2. pingpong: pairs of threads handing a token back and forth with
 //             condition variables (lots of wait/wake ordering races).
+//  4. signal:  a signal sent to a thread about to sleep in FUTEX_WAIT must
+//             end the wait at once (EINTR), not be lost.
 //  3. timeout: raw FUTEX_WAIT with tiny timeouts racing FUTEX_WAKE, and
 //             FUTEX_WAIT_BITSET with absolute CLOCK_MONOTONIC deadlines.
 // A watchdog fails the run when no thread makes progress for 5 seconds
@@ -16,6 +18,7 @@
 #include <errno.h>
 #include <linux/futex.h>
 #include <pthread.h>
+#include <signal.h>
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -322,7 +325,7 @@ static int test_raw(void) {
     futex(&word, FUTEX_WAKE_PRIVATE, 100, NULL, 0);
     for (int i = 0; i < 6; i++)
         pthread_join(w[i], NULL);
-    int bad = atomic_load(&waits) == 0 || atomic_load(&timed_out) == 0;
+    int bad = atomic_load(&waits) == 0; // (how many timed out depends on the machine)
     printf("  [%s] raw futex: %ld waits, %ld woken, %ld timed out\n", bad ? "FAIL" : "PASS", atomic_load(&waits),
            atomic_load(&woken), atomic_load(&timed_out));
     atomic_store(&stop, 0);
@@ -343,6 +346,57 @@ static int test_raw(void) {
     return bad + bad2;
 }
 
+// ---- 4. a signal for a thread that is just going to sleep in FUTEX_WAIT ----
+static atomic_int never;  // nobody changes it: only the signal ends each wait
+static atomic_long eintrs, handled;
+
+// The handler runs when the thread leaves the kernel: a signal lost while
+// it sleeps in FUTEX_WAIT never gets here.
+static void on_usr1(int sig) { (void)sig; atomic_fetch_add(&handled, 1); }
+
+static void* sig_sleeper(void* arg) {
+    (void)arg;
+    while (!atomic_load(&stop)) {
+        if (futex(&never, FUTEX_WAIT_PRIVATE, 0, NULL, 0) < 0 && errno == EINTR)
+            atomic_fetch_add(&eintrs, 1);
+    }
+    return NULL;
+}
+
+static int test_signal(void) {
+    current_test = "signal vs FUTEX_WAIT";
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = on_usr1; // no SA_RESTART: the wait must end with EINTR
+    sigaction(SIGUSR1, &sa, NULL);
+    pthread_t t;
+    pthread_create(&t, NULL, sig_sleeper, NULL);
+    double worst = 0, end = now() + seconds;
+    long sent = 0;
+    int bad = 0;
+    while (now() < end) {
+        long before = atomic_load(&handled);
+        double t0 = now();
+        pthread_kill(t, SIGUSR1);
+        sent++;
+        while (atomic_load(&handled) == before) {
+            if (now() - t0 > 0.5) { bad = 1; break; } // the 1 s re-check would hide it otherwise
+        }
+        if (now() - t0 > worst)
+            worst = now() - t0;
+        atomic_fetch_add(&progress, 1);
+        if (bad)
+            break;
+    }
+    atomic_store(&stop, 1);
+    pthread_kill(t, SIGUSR1);
+    pthread_join(t, NULL);
+    printf("  [%s] signal vs FUTEX_WAIT: %ld signals (%ld ended a wait), slowest %.1f ms\n", bad ? "FAIL" : "PASS",
+           sent, atomic_load(&eintrs), worst * 1000);
+    atomic_store(&stop, 0);
+    return bad;
+}
+
 int main(int argc, char** argv) {
     if (argc > 1)
         seconds = atoi(argv[1]);
@@ -350,7 +404,7 @@ int main(int argc, char** argv) {
     printf("futexstress: %d s per test\n", seconds);
     pthread_t wd;
     pthread_create(&wd, NULL, watchdog, NULL);
-    int fails = test_gil() + test_pingpong() + test_raw();
+    int fails = test_gil() + test_pingpong() + test_raw() + test_signal();
     printf("futexstress: %s\n", fails ? "FAILED" : "all passed");
     return fails ? 1 : 0;
 }

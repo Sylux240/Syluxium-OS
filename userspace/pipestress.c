@@ -7,12 +7,17 @@
 //     the same instant (both ends' releases run concurrently).
 //  2. dup storm: dup/dup2/close of pipe ends from several threads while
 //     others read and write through them.
+//  4. signals: a thread reading an empty pipe is signalled again and again;
+//     every signal must get it out of read() at once (none lost).
 //  3. fork/exec: children inherit pipes, write and exit, while the parent
 //     keeps making and closing pipes.
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
+#include <signal.h>
+#include <string.h>
+#include <time.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -169,6 +174,56 @@ static void* timer(void* arg) {
     return NULL;
 }
 
+// ---- 4. signals for a thread blocked in read() ----
+static atomic_long handled;
+static void on_usr1(int sig) { (void)sig; atomic_fetch_add(&handled, 1); }
+
+static void* blocked_reader(void* arg) {
+    int fd = *(int*)arg;
+    char c;
+    while (!atomic_load(&stop))
+        (void)!read(fd, &c, 1);
+    return NULL;
+}
+
+static double now(void) {
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return t.tv_sec + t.tv_nsec / 1e9;
+}
+
+static int test_signals(void) {
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = on_usr1;
+    sigaction(SIGUSR1, &sa, NULL);
+    int p[2];
+    if (pipe(p) < 0)
+        return 1;
+    pthread_t t;
+    pthread_create(&t, NULL, blocked_reader, &p[0]);
+    double end = now() + seconds, worst = 0;
+    long sent = 0;
+    int bad = 0;
+    while (now() < end && !bad) {
+        long before = atomic_load(&handled);
+        double t0 = now();
+        pthread_kill(t, SIGUSR1);
+        sent++;
+        while (atomic_load(&handled) == before)
+            if (now() - t0 > 0.5) { bad = 1; break; }
+        if (now() - t0 > worst)
+            worst = now() - t0;
+    }
+    atomic_store(&stop, 1);
+    (void)!write(p[1], "x", 1);
+    pthread_join(t, NULL);
+    close(p[0]);
+    close(p[1]);
+    printf("  [%s] signals vs blocked read: %ld signals, slowest %.1f ms\n", bad ? "FAIL" : "PASS", sent, worst * 1000);
+    return bad;
+}
+
 int main(int argc, char** argv) {
     if (argc > 1)
         seconds = atoi(argv[1]);
@@ -185,6 +240,8 @@ int main(int argc, char** argv) {
     pthread_create(&tm, NULL, timer, NULL);
     fails += test_fork();
     pthread_join(tm, NULL);
+    atomic_store(&stop, 0);
+    fails += test_signals();
     printf("pipestress: %s\n", fails ? "FAILED" : "all passed");
     return fails;
 }

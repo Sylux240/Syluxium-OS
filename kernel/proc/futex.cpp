@@ -90,7 +90,8 @@ long wait(u64 uaddr, u32 expected, u64 deadline_ns, u32 bitset, bool is_private)
     for (;;) {
         u64 slice = clock::now_ns() + RECHECK_NS;
         bool final = deadline_ns && deadline_ns <= slice;
-        woken = sched::block_on(b.waiters, b.lock, final ? deadline_ns : slice);
+        woken = sched::block_on(b.waiters, b.lock, final ? deadline_ns : slice,
+                                [](void*) { return signal::interrupted(); }, nullptr);
         if (woken || final)
             break;
         if (signal::interrupted()) {

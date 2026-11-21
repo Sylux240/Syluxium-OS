@@ -407,9 +407,28 @@ void wake(Thread* t) {
 }
 
 bool block_on(WaitList& list, IrqSpinlock& lock, u64 deadline_ns) {
+    return block_on(list, lock, deadline_ns, nullptr, nullptr);
+}
+
+bool block_on(WaitList& list, IrqSpinlock& lock, u64 deadline_ns, bool (*abort)(void*), void* ctx) {
     Thread* me = current();
     me->state = ThreadState::Blocked;
     list.push_back(me);
+    if (abort) {
+        // Pairs with the waker's "set the condition, then look for Blocked
+        // threads": one of the two sides sees the other's store.
+        __atomic_thread_fence(__ATOMIC_SEQ_CST);
+        if (abort(ctx)) {
+            list.remove(me);
+            RunQueue& rq = this_cpu()->rq; // interrupts are off: we stay on this CPU
+            rq.lock.lock();
+            if (me->state == ThreadState::Ready)
+                rq.ready.remove(me); // a waker already queued us
+            me->state = ThreadState::Running;
+            rq.lock.unlock();
+            return true;
+        }
+    }
 
     if (deadline_ns) {
         RunQueue& rq = this_cpu()->rq; // interrupts are off: we can't migrate here
