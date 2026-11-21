@@ -159,7 +159,7 @@ def main(root):
             icon(name, size).save(os.path.join(d, name + ".png"))
     with open(os.path.join(base, "index.theme"), "w") as f:
         f.write("[Icon Theme]\nName=Syluxium Dusk\nComment=Syluxium's Dusk icons (tools/make-dusk-icons.py)\n")
-        f.write("Inherits=crystalsvg,hicolor\nDisplayDepth=32\n")
+        f.write("Inherits=crystalsvg,Adwaita,hicolor\nDisplayDepth=32\n")
         f.write("Directories=" + ",".join(dirs) + "\n\n")
         for size, d in zip(SIZES, dirs):
             f.write(f"[{d}]\nSize={size}\nContext=Applications\nType=Fixed\n\n")

@@ -1,7 +1,7 @@
 [Icon Theme]
 Name=Syluxium Dusk
 Comment=Syluxium's Dusk icons (tools/make-dusk-icons.py)
-Inherits=crystalsvg,hicolor
+Inherits=crystalsvg,Adwaita,hicolor
 DisplayDepth=32
 Directories=16x16/apps,22x22/apps,32x32/apps,48x48/apps,64x64/apps,128x128/apps
 
