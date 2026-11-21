@@ -1,6 +1,8 @@
 // Boot splash (see splash.hpp). Drawn straight into the firmware
-// framebuffer: black, the logo in the middle, an XP-style load bar (three
-// blue blocks gliding through a rounded track) and the Esc hint top left.
+// framebuffer: the Dusk picture centered on navy (exactly where Limine put
+// it), a thin cyan progress bar with a soft glow that moves towards the
+// current boot stage, the stage's name under it, and the Esc hint at the
+// bottom.
 
 #include <boot/limine_requests.hpp>
 #include <lib/string.hpp>
@@ -22,11 +24,22 @@ volatile bool g_active = false;
 volatile bool g_verbose = false;  // Esc: show the text console
 volatile u64 g_deadline_ms = 0;   // desktop boot: give up waiting for X then
 volatile bool g_x_started = false; // X has the display: never switch to text over it
-u32 g_logo_x, g_logo_y;
+u32 g_pic_x, g_pic_y;
 sched::Mutex g_draw;              // one frame at a time; handover waits for it
-u32 g_bar_x, g_bar_y;
-constexpr u32 BAR_W = 180, BAR_H = 18;
-constexpr const char* HINT = "Press Esc for verbose mode";
+constexpr const char* HINT = "Press Esc to see boot details";
+constexpr u32 CYAN = 0x6fe3f0, MUTED = 0xaab3d6, HINT_COLOR = 0x8a93bd;
+
+volatile u32 g_target = 8;        // percent the bar moves towards
+u32 g_shown = 0;                  // percent drawn, in 1/16 steps (smooth)
+const char* volatile g_text = "Loading kernel";
+const char* g_text_drawn = nullptr;
+
+u32 mix(u32 a, u32 b, u32 t256) { // a -> b by t/256
+    u32 r = ((a >> 16 & 255) * (256 - t256) + (b >> 16 & 255) * t256) >> 8;
+    u32 g = ((a >> 8 & 255) * (256 - t256) + (b >> 8 & 255) * t256) >> 8;
+    u32 bl = ((a & 255) * (256 - t256) + (b & 255) * t256) >> 8;
+    return r << 16 | g << 8 | bl;
+}
 
 void text(u32 x, u32 y, const char* s, u32 rgb) {
     const video::Font& f = video::default_font;
@@ -40,46 +53,67 @@ void text(u32 x, u32 y, const char* s, u32 rgb) {
     }
 }
 
-// The track: a rounded grey outline, black inside.
-void draw_track() {
-    u32 grey = g_fb->color(0x9a9a9a), black = g_fb->color(0);
-    g_fb->fill_rect(g_bar_x + 2, g_bar_y, BAR_W - 4, BAR_H, grey);
-    g_fb->fill_rect(g_bar_x, g_bar_y + 2, BAR_W, BAR_H - 4, grey);
-    g_fb->fill_rect(g_bar_x + 1, g_bar_y + 1, BAR_W - 2, BAR_H - 2, grey);
-    g_fb->fill_rect(g_bar_x + 2, g_bar_y + 2, BAR_W - 4, BAR_H - 4, black);
+void text_centered(u32 cy, const char* s, u32 rgb, u32 clear_w) {
+    const video::Font& f = video::default_font;
+    u32 w = g_fb->width();
+    u32 cx = clear_w < w ? (w - clear_w) / 2 : 0;
+    g_fb->fill_rect(cx, cy, clear_w < w ? clear_w : w, f.height, g_fb->color(PIC_BG));
+    u32 tw = static_cast<u32>(strlen(s)) * f.width;
+    text(tw < w ? (w - tw) / 2 : 0, cy, s, rgb);
 }
 
-// One animation frame: blocks at offset `pos` (pixels into the track).
-void draw_blocks(int pos) {
-    constexpr int BW = 9, GAP = 3, INSET = 4;
-    int inner_w = BAR_W - 2 * INSET;
-    g_fb->fill_rect(g_bar_x + INSET, g_bar_y + INSET, inner_w, BAR_H - 2 * INSET, g_fb->color(0));
-    for (int b = 0; b < 3; b++) {
-        int x0 = pos + b * (BW + GAP);
-        for (int x = x0; x < x0 + BW; x++) {
-            if (x < 0 || x >= inner_w)
-                continue;
-            // Glossy blue: light top, darker bottom.
-            for (u32 y = 0; y < BAR_H - 2 * INSET; y++) {
-                u32 rgb = y < 3 ? 0x6fa3ff : y < 6 ? 0x3c78f0 : 0x2552c8;
-                g_fb->put_pixel(g_bar_x + INSET + x, g_bar_y + INSET + y, g_fb->color(rgb));
-            }
+void draw_picture() {
+    u32 w = g_fb->width(), h = g_fb->height();
+    for (u32 y = 0; y < PIC_H && g_pic_y + y < h; y++)
+        for (u32 x = 0; x < PIC_W && g_pic_x + x < w; x++)
+            g_fb->put_pixel(g_pic_x + x, g_pic_y + y, g_fb->color(PIC[y * PIC_W + x]));
+}
+
+// The bar at `filled` pixels: track (cyan at 14%), the fill in cyan with a
+// glow a few pixels above and below.
+void draw_bar(u32 filled) {
+    u32 x0 = g_pic_x + (PIC_W - PIC_BAR_W) / 2, y0 = g_pic_y + PIC_BAR_Y;
+    constexpr u32 GLOW = 5;
+    u32 track = mix(PIC_BG, CYAN, 36);
+    for (u32 gy = 0; gy < GLOW; gy++) { // glow rows, fading outwards
+        u32 t = 70 - gy * 14;
+        u32 c = g_fb->color(mix(PIC_BG, CYAN, t));
+        u32 bg = g_fb->color(PIC_BG);
+        g_fb->fill_rect(x0, y0 - 1 - gy, filled, 1, c);
+        g_fb->fill_rect(x0, y0 + PIC_BAR_H + gy, filled, 1, c);
+        if (filled < PIC_BAR_W) {
+            g_fb->fill_rect(x0 + filled, y0 - 1 - gy, PIC_BAR_W - filled, 1, bg);
+            g_fb->fill_rect(x0 + filled, y0 + PIC_BAR_H + gy, PIC_BAR_W - filled, 1, bg);
         }
     }
+    g_fb->fill_rect(x0, y0, filled, PIC_BAR_H, g_fb->color(CYAN));
+    if (filled < PIC_BAR_W)
+        g_fb->fill_rect(x0 + filled, y0, PIC_BAR_W - filled, PIC_BAR_H, g_fb->color(track));
+    // rounded ends: the corner pixels in the background
+    u32 bg = g_fb->color(PIC_BG);
+    g_fb->put_pixel(x0, y0, bg);
+    g_fb->put_pixel(x0, y0 + PIC_BAR_H - 1, bg);
+    g_fb->put_pixel(x0 + PIC_BAR_W - 1, y0, bg);
+    g_fb->put_pixel(x0 + PIC_BAR_W - 1, y0 + PIC_BAR_H - 1, bg);
 }
 
-void draw_logo() {
-    u32 w = g_fb->width(), h = g_fb->height();
-    for (u32 y = 0; y < LOGO_H && g_logo_y + y < h; y++)
-        for (u32 x = 0; x < LOGO_W && g_logo_x + x < w; x++)
-            g_fb->put_pixel(g_logo_x + x, g_logo_y + y, g_fb->color(LOGO[y * LOGO_W + x]));
+void draw_status() {
+    const char* t = g_text;
+    text_centered(g_pic_y + PIC_TEXT_Y, t, MUTED, PIC_W);
+    g_text_drawn = t;
+}
+
+void draw_hint() {
+    u32 h = g_fb->height();
+    text_centered(h > 50 ? h - 50 : 0, HINT, HINT_COLOR, 400);
 }
 
 void draw_all() {
-    g_fb->fill_rect(0, 0, g_fb->width(), g_fb->height(), g_fb->color(0));
-    draw_logo();
-    draw_track();
-    text(16, 12, HINT, 0x8c8c8c);
+    g_fb->fill_rect(0, 0, g_fb->width(), g_fb->height(), g_fb->color(PIC_BG));
+    draw_picture();
+    draw_bar(g_shown * PIC_BAR_W / 1600);
+    draw_status();
+    draw_hint();
 }
 
 // Esc / timeout: the log as text - unless X owns the screen by now, then
@@ -94,7 +128,6 @@ void dismiss() {
 }
 
 void animate(void*) {
-    int pos = -40;
     u32 frame = 0;
     while (g_active) {
         if (g_verbose || (g_deadline_ms && clock::now_ms() >= g_deadline_ms)) {
@@ -106,18 +139,21 @@ void animate(void*) {
             if (!g_active)
                 return;
             // While X starts, its first frame may blank the screen: repaint.
-            if (g_x_started && frame % 3 == 0) {
-                draw_logo();
-                draw_track();
-                text(16, 12, HINT, 0x8c8c8c);
-            }
-            draw_blocks(pos);
+            if (g_x_started && frame % 10 == 0)
+                draw_all();
+            // Ease towards the target; creep slowly past it (but never to
+            // the end) so a long stage still shows movement.
+            u32 target = g_target * 16;
+            if (g_shown < target)
+                g_shown += (target - g_shown + 7) / 8;
+            else if (g_shown < 96 * 16 && frame % 6 == 0 && g_shown < target + 6 * 16)
+                g_shown++;
+            draw_bar(g_shown * PIC_BAR_W / 1600);
+            if (g_text_drawn != g_text)
+                draw_status();
         }
         frame++;
-        pos += 4;
-        if (pos > static_cast<int>(BAR_W))
-            pos = -40;
-        sched::sleep_ms(30);
+        sched::sleep_ms(40);
     }
 }
 
@@ -130,13 +166,11 @@ void show(video::Framebuffer& fb) {
     console::set_graphics(true); // keeps recording, stops drawing
     g_active = true;
     u32 w = fb.width(), h = fb.height();
-    // Where Limine's centered background (logo + LOGO_PAD below) put it.
-    g_logo_x = w > LOGO_W ? (w - LOGO_W) / 2 : 0;
-    g_logo_y = h > LOGO_H + LOGO_PAD ? (h - LOGO_H - LOGO_PAD) / 2 : 0;
-    g_bar_x = (w - BAR_W) / 2;
-    g_bar_y = g_logo_y + LOGO_H + 50;
+    // Where Limine's centered background put the picture.
+    g_pic_x = w > PIC_W ? (w - PIC_W) / 2 : 0;
+    g_pic_y = h > PIC_H ? (h - PIC_H) / 2 : 0;
+    g_shown = 4 * 16;
     draw_all();
-    draw_blocks(-40);
 }
 
 void start_animation() {
@@ -144,21 +178,31 @@ void start_animation() {
         sched::spawn("splash", animate, nullptr, -1, true);
 }
 
+void stage(u32 percent, const char* text) {
+    if (percent > g_target)
+        g_target = percent > 100 ? 100 : percent;
+    if (text)
+        g_text = text;
+}
+
 void request_verbose() { g_verbose = true; }
 
 void boot_finished(bool desktop) {
     if (!g_active)
         return;
-    if (desktop)
+    if (desktop) {
+        stage(82, "Starting desktop");
         g_deadline_ms = clock::now_ms() + 90'000; // X should have the screen long before
-    else
+    } else {
         g_verbose = true;
+    }
 }
 
 void handover() {
     // X keeps the splash on screen (started with -background none) until
     // the login screen is ready to draw: just remember not to go to text.
     g_x_started = true;
+    stage(94, nullptr);
     if (g_active && !g_deadline_ms)
         g_deadline_ms = clock::now_ms() + 90'000;
 }

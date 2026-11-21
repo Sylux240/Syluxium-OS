@@ -1,0 +1,13 @@
+# Syluxium: named as in the Dusk design.
+[Desktop Entry]
+Name=Network
+Encoding=UTF-8
+Icon=network
+
+
+Comment=Access to network places and remote hosts
+
+OnlyShowIn=TDE;
+Type=Link
+URL=remote:/
+X-Trinity-BuiltIn=true

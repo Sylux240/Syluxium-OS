@@ -1,0 +1,15 @@
+# Syluxium: named as in the Dusk design.
+[Desktop Entry]
+Name=Files
+Encoding=UTF-8
+Icon=folder_wordprocessing
+
+
+Comment=Contains personal documents
+
+URL=$XDG_DOCUMENTS_DIR
+Type=Link
+StartupNotify=true
+Terminal=false
+X-TDE-SubstituteUID=false
+OnlyShowIn=TDE;

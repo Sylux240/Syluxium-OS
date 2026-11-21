@@ -24,8 +24,10 @@ def background():
     for y in range(im.height):
         for x in range(im.width):
             r, g, b = px[x, y]
-            k = 0.42  # darker, so icons and text stand out
-            px[x, y] = (int(r * k), int(g * k), int(b * k))
+            # Dusk: much darker and tinted towards the boot splash's navy
+            # (#0B0F26), so icons and text stand out.
+            k = 0.26
+            px[x, y] = (int(r * k + 11 * 0.30), int(g * k + 15 * 0.30), int(b * k + 38 * 0.30))
     return im
 
 

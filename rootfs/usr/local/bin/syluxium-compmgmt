@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-"""Computer Management: one console for the system tools (like XP's compmgmt.msc)."""
+"""Computer Management: one console for the system tools."""
 import os
 import subprocess
 import sys

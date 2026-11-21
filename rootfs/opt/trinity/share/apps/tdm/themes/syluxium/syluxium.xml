@@ -1,109 +1,108 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE greeter SYSTEM "greeter.dtd">
-<!-- Syluxium's login screen, laid out like the XP-era welcome screen:
-     dark blue bands, the name on the left, the users with their pictures on
-     the right, "Turn off computer" at the bottom left. Artwork:
-     tools/make-xp-theme.py. -->
+<!-- Syluxium's login screen, Dusk theme: the dimmed dusk picture, the clock
+     at the top left, the logo, a glass card with the user picture, name and
+     password, the power button at the bottom right. Artwork:
+     tools/make-dusk-theme.py. -->
 <greeter>
 	<item type="pixmap">
-		<normal file="background.png"/>
+		<normal file="background.jpg"/>
 		<pos x="0" y="0" width="100%" height="100%"/>
 	</item>
 
-	<!-- left half -->
-	<item type="pixmap">
-		<normal file="logo.png"/>
-		<pos x="47%" y="42%" anchor="e"/>
-	</item>
-	<item type="label">
-		<pos x="47%" y="50%" anchor="e"/>
-		<normal color="#ffffff" font="Tahoma 12"/>
-		<text>To begin, click your user name</text>
+	<!-- clock and date, top left -->
+	<item type="label" id="clock">
+		<pos x="40" y="32" anchor="nw"/>
+		<normal color="#eef2ff" font="Inter Light 24"/>
+		<text>%c</text>
 	</item>
 
-	<!-- right half: user list, password and the arrow button -->
+	<!-- logo -->
+	<item type="pixmap">
+		<normal file="logo.png"/>
+		<pos x="50%" y="10%" anchor="n"/>
+	</item>
+
+	<!-- the card -->
 	<item type="rect">
-		<pos x="53%" y="24%" width="360" height="290" anchor="nw"/>
+		<normal color="#121736" alpha="0.72"/>
+		<pos x="50%" y="34%" width="400" height="330" anchor="n"/>
 		<fixed>
-			<item type="rect" id="userlist">
-				<pos x="0" y="0" width="100%" height="100%"/>
-				<bgmodifier value="0"/>
+			<item type="pixmap">
+				<normal file="avatar.png"/>
+				<pos x="50%" y="26" anchor="n"/>
+			</item>
+			<item type="label" id="greeting">
+				<pos x="50%" y="114" anchor="n"/>
+				<normal color="#eef2ff" font="Inter SemiBold 16"/>
+				<text>Welcome</text>
+			</item>
+			<item type="label">
+				<pos x="50%" y="144" anchor="n"/>
+				<normal color="#aab3d6" font="Inter 10"/>
+				<text>Sign in to Syluxium</text>
+			</item>
+			<item type="rect" id="talker">
+				<pos x="50%" y="178" width="box" height="box" anchor="n"/>
+				<box orientation="horizontal" spacing="10" xpadding="0" ypadding="0">
+					<item type="rect">
+						<pos width="box" height="box"/>
+						<box orientation="vertical" spacing="10" xpadding="0" ypadding="0">
+							<item type="entry" id="user-entry">
+								<pos width="260" height="36"/>
+							</item>
+							<item type="entry" id="pw-entry">
+								<pos width="260" height="36"/>
+							</item>
+						</box>
+					</item>
+					<item type="rect" id="login_button" button="true">
+						<normal alpha="0.0" color="#000000"/>
+						<pos width="box" height="box" y="100%" anchor="sw"/>
+						<box orientation="horizontal" xpadding="0" ypadding="0" spacing="0">
+							<item type="pixmap">
+								<normal file="login_normal.png"/>
+								<prelight file="login_prelight.png"/>
+								<active file="login_normal.png"/>
+							</item>
+						</box>
+					</item>
+				</box>
+			</item>
+			<item type="label" id="pam-error">
+				<pos x="50%" y="276" anchor="n"/>
+				<normal color="#f6c96b" font="Inter SemiBold 10"/>
+				<text/>
+			</item>
+			<item type="label" id="caps-lock-warning">
+				<pos x="50%" y="298" anchor="n"/>
+				<normal color="#f6c96b" font="Inter 10"/>
+				<stock type="caps-lock-warning"/>
 			</item>
 		</fixed>
 	</item>
-	<item type="rect" id="talker">
-		<pos x="53%" y="66%" width="box" height="box" anchor="nw"/>
-		<box orientation="horizontal" spacing="8" xpadding="0" ypadding="0">
-			<item type="rect">
-				<pos width="box" height="box" y="50%" anchor="w"/>
-				<box orientation="vertical" spacing="8" xpadding="0" ypadding="0">
-					<item type="label" id="username-label">
-						<pos x="100%" anchor="ne"/>
-						<normal color="#ffffff" font="Tahoma 9"/>
-						<stock type="username-label"/>
-					</item>
-					<item type="label" id="password-label">
-						<pos x="100%" anchor="ne"/>
-						<normal color="#ffffff" font="Tahoma 9"/>
-						<stock type="password-label"/>
-					</item>
-				</box>
-			</item>
-			<item type="rect">
-				<pos width="box" height="box" y="50%" anchor="w"/>
-				<box orientation="vertical" spacing="8" xpadding="0" ypadding="0">
-					<item type="entry" id="user-entry">
-						<pos width="160" height="22"/>
-					</item>
-					<item type="entry" id="pw-entry">
-						<pos width="160" height="22"/>
-					</item>
-				</box>
-			</item>
-			<item type="rect" id="login_button" button="true">
-				<normal alpha="0.0" color="#000000"/>
-				<pos width="box" height="box" y="100%" anchor="sw"/>
-				<box orientation="horizontal" xpadding="0" ypadding="0" spacing="0">
-					<item type="pixmap">
-						<normal file="login_normal.png"/>
-						<prelight file="login_prelight.png"/>
-						<active file="login_normal.png"/>
-					</item>
-				</box>
-			</item>
-		</box>
-	</item>
-	<item type="label" id="pam-error">
-		<pos x="53%" y="80%" anchor="nw"/>
-		<normal color="#ffe080" font="Tahoma Bold 9"/>
-		<text/>
-	</item>
-	<item type="label" id="caps-lock-warning">
-		<pos x="53%" y="83%" anchor="nw"/>
-		<normal color="#ffe080" font="Tahoma 9"/>
-		<stock type="caps-lock-warning"/>
-	</item>
 
-	<!-- bottom band -->
+	<!-- power, bottom right -->
 	<item type="rect" id="system_button" button="true">
 		<normal alpha="0.0" color="#000000"/>
-		<pos x="24" y="-40" width="box" height="box" anchor="w"/>
-		<box orientation="horizontal" spacing="8" xpadding="0" ypadding="0">
+		<pos x="-40" y="-28" width="box" height="box" anchor="se"/>
+		<box orientation="vertical" spacing="6" xpadding="0" ypadding="0">
 			<item type="pixmap">
+				<pos x="50%" anchor="n"/>
 				<normal file="system_normal.png"/>
 				<prelight file="system_prelight.png"/>
 				<active file="system_normal.png"/>
 			</item>
 			<item type="label">
-				<pos y="50%" anchor="w"/>
-				<normal color="#ffffff" font="Tahoma 11"/>
-				<text>Turn off computer</text>
+				<pos x="50%" anchor="n"/>
+				<normal color="#dfe4ff" font="Inter 10"/>
+				<text>Power</text>
 			</item>
 		</box>
 	</item>
 	<item type="label">
-		<pos x="-24" y="-40" anchor="e"/>
-		<normal color="#c8d8ff" font="Tahoma 9"/>
-		<text>After you log on, you can add or change accounts in Control Panel.</text>
+		<pos x="40" y="-36" anchor="sw"/>
+		<normal color="#aab3d6" font="Inter 9"/>
+		<text>%h</text>
 	</item>
 </greeter>

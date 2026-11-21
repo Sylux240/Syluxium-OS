@@ -1,5 +1,5 @@
 """Shared wording: how TDE's own names read on Syluxium (used by
-make-xp-translations.py and debrand-tde.py)."""
+make-wording.py and debrand-tde.py)."""
 import re
 
 # Specific names first; whole-phrase replacements.

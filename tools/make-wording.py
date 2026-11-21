@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Syluxium's XP-era wording for a few TDE programs, as a small English
-"translation" (language code en_XP, chosen in /etc/trinity/kdeglobals; any
+"""Syluxium's plain wording for a few TDE programs, as a small English
+"translation" (language code en_SX, chosen in /etc/trinity/kdeglobals; any
 string not listed here stays TDE's English). Writes gettext .mo catalogs to
-<rootfs>/opt/trinity/share/locale/en_XP/LC_MESSAGES/<catalog>.mo.
+<rootfs>/opt/trinity/share/locale/en_SX/LC_MESSAGES/<catalog>.mo.
 
 TDE only uses a language for a program when that program's own catalog
 exists in it, so programs without an entry here are unaffected."""
@@ -15,7 +15,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from syluxium_names import rename
 
-LANG = "en_XP"
+LANG = "en_SX"
 
 CATALOGS = {
     # TDE's common strings (used by the programs below): "3:46 PM"
@@ -63,7 +63,6 @@ CATALOGS = {
     "konqueror": {
         "L&ocation: ": "A&ddress ",
         "&Move to Trash": "&Delete",
-        "Trash": "Recycle Bin",
     },
 }
 
@@ -148,5 +147,5 @@ def main(root, tde_root=None):
 
 
 if __name__ == "__main__":
-    # make-xp-translations.py [rootfs] [extracted TDE root, e.g. build/rootfs-debian]
+    # make-wording.py [rootfs] [extracted TDE root, e.g. build/rootfs-debian]
     main(sys.argv[1] if len(sys.argv) > 1 else "rootfs", sys.argv[2] if len(sys.argv) > 2 else None)

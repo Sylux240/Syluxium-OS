@@ -1,4 +1,4 @@
-# Session start splash: Syluxium's "welcome" screen (TDE's Redmond splash
-# engine with original artwork from tools/make-xp-theme.py).
+# Session start splash: Syluxium's Dusk screen (TDE's Redmond splash engine
+# with artwork from tools/make-dusk-theme.py).
 [KSplash]
 Theme=Syluxium

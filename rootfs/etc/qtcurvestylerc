@@ -1,11 +1,9 @@
-# Syluxium's widget style: QtCurve set up for the XP-era look (round
-# white-to-beige buttons, light blue scroll bars with grip lines, green
-# check marks and progress bars, flat white menus with a blue highlight,
-# tabs with a coloured top line). System-wide default; users may override
-# it in ~/.config/qtcurve/stylerc.
-# (version: the option format of QtCurve 1.8; older files get converted.)
+# Syluxium's widget style (Dusk theme): QtCurve with flat, fully rounded
+# controls; the logo's cyan for sliders, check marks and progress bars;
+# dark menus. Colours come from /etc/trinity/kdeglobals. System-wide
+# default; users may override it in ~/.config/qtcurve/stylerc.
 version=1.8.18
-appearance=gradient
+appearance=flat
 round=full
 buttonEffect=none
 coloredMouseOver=thickcolored
@@ -18,13 +16,13 @@ focus=standard
 # square: text fields, scroll views, list selection, tool tips, pop-up menus
 square=1549
 
-# scroll bars: XP layout (one arrow at each end), 17 px, light blue
+# scroll bars: one arrow at each end, 17 px
 scrollbarType=windows
 sliderWidth=17
 sliderStyle=plain
 sliderThumbs=lines
-shadeSliders=#b8cdf8
-sliderAppearance=gradient
+shadeSliders=#6fe3f0
+sliderAppearance=flat
 sbarBgndAppearance=flat
 flatSbarButtons=false
 thinSbarGroove=false
@@ -33,7 +31,7 @@ fillSlider=true
 colorSliderMouseOver=true
 
 # check boxes and radio buttons: green mark
-shadeCheckRadio=#21a121
+shadeCheckRadio=#6fe3f0
 crHighlight=0
 crButton=true
 crSize=13
@@ -46,7 +44,7 @@ menubarMouseOver=true
 useHighlightForMenu=true
 menuitemAppearance=flat
 borderMenuitems=false
-lighterPopupMenuBgnd=30
+lighterPopupMenuBgnd=8
 menuBgndAppearance=flat
 shadePopupMenu=false
 popupBorder=true
@@ -57,17 +55,17 @@ thinnerMenuItems=false
 roundMbTopOnly=true
 
 # tabs
-tabAppearance=gradient
-activeTabAppearance=gradient
+tabAppearance=flat
+activeTabAppearance=flat
 highlightTab=true
 colorSelTab=false
 roundAllTabs=true
 borderTab=true
 tabMouseOver=top
 
-# progress bars: XP-era green
-progressAppearance=gradient
-progressColor=#2fb83c
+# progress bars: cyan
+progressAppearance=flat
+progressColor=#6fe3f0
 progressGrooveAppearance=flat
 progressGrooveColor=base
 stripedProgress=none

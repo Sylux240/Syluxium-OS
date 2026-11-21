@@ -10,8 +10,8 @@ AltTabStyle=KDE
 # Double-click on a title bar maximizes (TDE's default would roll it up).
 TitlebarDoubleClickCommand=Maximize
 
-# Window frames: Syluxium's XP-era deKorator theme (glossy blue title bar,
-# round top corners, red close button; tools/make-xp-theme.py), the
+# Window frames: Syluxium's Dusk deKorator theme (indigo title bar with a
+# cyan line, round top corners, pink close button; tools/make-dusk-theme.py), the
 # application icon on the left, minimize/maximize/close on the right.
 [Style]
 PluginLib=twin3_deKorator

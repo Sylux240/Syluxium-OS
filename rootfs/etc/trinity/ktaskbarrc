@@ -1,8 +1,7 @@
-# Task buttons on the blue taskbar (TDE's global taskbar settings: the
+# Task buttons on the Dusk taskbar (TDE's global taskbar settings: the
 # taskbar applet reads these, not taskbar_panelappletrc, while
-# UseGlobalSettings is on). XP-style: raised blue buttons with white text,
-# the active one pressed in and bold; buttons of one program are grouped
-# when the taskbar is full.
+# UseGlobalSettings is on): flat, light text, icon and title; buttons of one
+# program are grouped when the taskbar is full.
 [General]
 ShowAllWindows=true
 ShowOnlyIconified=false
@@ -11,16 +10,16 @@ GroupTasks=GroupWhenFull
 SortByDesktop=false
 SortByApp=true
 ShowWindowListBtn=false
-MaximumButtonWidth=170
+MaximumButtonWidth=200
 ShowCurrentScreenOnly=false
 
 [Appearance]
-DrawButtons=true
-ShowButtonOnHover=false
+DrawButtons=false
+ShowButtonOnHover=true
 HaloText=false
 ShowThumbnails=false
 UseCustomColors=true
 ActiveTaskTextColor=255,255,255
-InactiveTaskTextColor=255,255,255
-TaskBackgroundColor=60,128,240
+InactiveTaskTextColor=223,228,255
+TaskBackgroundColor=36,58,96
 IconSize=16

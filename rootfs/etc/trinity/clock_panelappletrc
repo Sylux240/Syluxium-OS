@@ -1,20 +1,20 @@
-# Clock on the blue taskbar, XP-style: just the time ("3:46 PM"), white,
-# no box; the date is in its tool tip.
+# Clock on the Dusk taskbar: the time in light text, no box; the date is in
+# its tool tip.
 [General]
 Type=Plain
 
 [Plain]
-Foreground_Color=255,255,255
+Foreground_Color=238,242,255
 Show_Date=false
 Show_DayOfWeek=false
 Show_Seconds=false
 Show_Frame=false
-Font=Tahoma,8,-1,5,50,0,0,0,0,0
+Font=Inter,9,-1,5,57,0,0,0,0,0
 
 [Digital]
-Foreground_Color=255,255,255
-Background_Color=36,92,214
+Foreground_Color=238,242,255
+Background_Color=18,23,54
 Show_Date=false
 
 [Date]
-Foreground_Color=255,255,255
+Foreground_Color=170,179,214

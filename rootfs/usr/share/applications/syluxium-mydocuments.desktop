@@ -1,6 +1,6 @@
 [Desktop Entry]
 Type=Application
-Name=My Documents
+Name=Files
 Comment=Your documents folder
 Exec=syluxium-open documents
 Icon=folder_wordprocessing

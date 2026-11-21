@@ -1,15 +1,20 @@
-# Syluxium defaults for the TDE panel (Kicker): an XP/7-style green
-# "Start" button instead of TDE's plain K-menu icon.
+# Syluxium defaults for the TDE panel (Kicker), Dusk theme: a see-through
+# navy taskbar (Panels > Appearance > Advanced options: "Enable transparency"
+# and "Tint amount" adjust it) and the hex-logo launcher button.
 # Panel contents: Start, Home and Web Browser buttons, task list, system
 # tray, clock. No desktop pager (Syluxium uses a single desktop).
 [General]
-# Blue XP-era taskbar (tools/make-taskbar.py).
+# Transparent, tinted with the Dusk glass colour (78%). With transparency
+# off, the plain Dusk taskbar picture (tools/make-dusk-theme.py) is used.
+Transparent=true
+TintColor=18,23,54
+TintValue=78
 UseBackgroundTheme=true
 BackgroundTheme=/opt/trinity/share/apps/kicker/wallpapers/syluxium_taskbar.png
 ColorizeBackground=false
 RotateBackground=false
-# Flat panel buttons (the Start button's own green tiles, no frame around
-# the tray); the task buttons get their XP-style frames from ktaskbarrc.
+# A taller taskbar (46 px) with flat buttons.
+Size=2
 ShowDeepButtons=false
 LegacyKMenu=true
 Applets2=KMenuButton_1,ServiceButton_1,ServiceButton_2,Applet_2,ServiceButton_3,Applet_3,Applet_4
@@ -48,22 +53,22 @@ ConfigFile=clock_panelappletrc
 DesktopFile=clockapplet.desktop
 FreeSpace2=1
 
-# The Start menu: a blue header with the user picture (tools/make-xp-theme.py),
-# no side banner, no search line; contents in
+# The launcher menu: a Dusk header with the user picture
+# (tools/make-dusk-theme.py), a search line; contents in
 # /opt/trinity/etc/xdg/menus/tde-applications.menu.
 [KMenu]
-ShowText=true
-Text=Start
+ShowText=false
+Text=
 CustomIcon=/opt/trinity/share/apps/kicker/pics/syluxium_start.png
 UseSidePixmap=false
 UseTopSide=true
 LeftSideTopName=syluxium_menu_top_left.png
 RightSideTopName=syluxium_menu_top_right.png
 SideTopTileName=syluxium_menu_top_tile.png
-UseSearchBar=false
+UseSearchBar=true
 UseTooltip=false
 
-# Menu entries show their name only ("My Computer", not "File Manager -
+# Menu entries show their name only ("Files", not "File Manager -
 # Konqueror"), no section titles, no Settings/System submenus (Control Panel
 # replaces them); the most used programs at the top.
 [menus]
@@ -77,9 +82,9 @@ RecentVsOften=false
 
 [button_tiles]
 EnableKMenuTiles=true
-KMenuTile=syluxium_green
+KMenuTile=syluxium_dusk
 
 [buttons]
 EnableTileBackground=true
-Font=Tahoma,11,-1,5,75,1,0,0,0,0
-TextColor=255,255,255
+Font=Inter,10,-1,5,63,0,0,0,0,0
+TextColor=238,242,255

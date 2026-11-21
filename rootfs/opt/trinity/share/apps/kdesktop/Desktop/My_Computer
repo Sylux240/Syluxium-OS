@@ -1,0 +1,13 @@
+# Syluxium: named as in the Dusk design.
+[Desktop Entry]
+Name=System
+Encoding=UTF-8
+Icon=computer
+
+
+Comment=Access to storage media
+
+OnlyShowIn=TDE;
+Type=Link
+URL=media:/
+X-Trinity-BuiltIn=true

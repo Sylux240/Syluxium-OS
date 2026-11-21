@@ -7,25 +7,25 @@ super-user-command=sudo
 # Firefox is the web browser; Konqueror stays the file manager.
 [General]
 BrowserApplication=firefox-esr
-# XP-era colours (beige windows and buttons, blue selection).
-background=236,233,216
-foreground=0,0,0
-windowBackground=255,255,255
-windowForeground=0,0,0
-buttonBackground=236,233,216
-buttonForeground=0,0,0
-selectBackground=49,106,197
-selectForeground=255,255,255
-linkColor=0,0,255
-visitedLinkColor=128,0,128
-alternateBackground=244,242,232
+# Dusk colours: navy windows, indigo buttons, cyan selection, light text.
+background=27,33,72
+foreground=238,242,255
+windowBackground=20,26,58
+windowForeground=238,242,255
+buttonBackground=37,45,92
+buttonForeground=238,242,255
+selectBackground=111,227,240
+selectForeground=20,26,58
+linkColor=111,227,240
+visitedLinkColor=185,163,227
+alternateBackground=24,31,66
 widgetStyle=QtCurve
-# The XP-era user-interface font: Tahoma (Wine's free replacement), 8 pt.
-font=Tahoma,8,-1,5,50,0,0,0,0,0
-menuFont=Tahoma,8,-1,5,50,0,0,0,0,0
-toolBarFont=Tahoma,8,-1,5,50,0,0,0,0,0
-taskbarFont=Tahoma,8,-1,5,50,0,0,0,0,0
-desktopFont=Tahoma,8,-1,5,50,0,0,0,0,0
+# The user-interface font: Inter (package fonts-inter), 9 pt.
+font=Inter,9,-1,5,50,0,0,0,0,0
+menuFont=Inter,9,-1,5,50,0,0,0,0,0
+toolBarFont=Inter,9,-1,5,50,0,0,0,0,0
+taskbarFont=Inter,9,-1,5,50,0,0,0,0,0
+desktopFont=Inter,9,-1,5,50,0,0,0,0,0
 fixed=DejaVu Sans Mono,9,-1,5,50,0,0,0,0,0
 
 [KDE]
@@ -48,20 +48,20 @@ Highlighting=true
 # Window title bars (the deKorator frames draw the bar itself; these give
 # the title text and the colours other programs use for title bars).
 [WM]
-activeBackground=0,84,227
-activeBlend=61,149,255
-activeForeground=255,255,255
-activeTitleBtnBg=0,84,227
-inactiveBackground=122,150,223
-inactiveBlend=157,185,235
-inactiveForeground=216,228,248
-inactiveTitleBtnBg=122,150,223
-activeFont=Tahoma,10,-1,5,75,0,0,0,0,0
+activeBackground=29,37,82
+activeBlend=29,37,82
+activeForeground=238,242,255
+activeTitleBtnBg=29,37,82
+inactiveBackground=24,30,64
+inactiveBlend=24,30,64
+inactiveForeground=150,160,200
+inactiveTitleBtnBg=24,30,64
+activeFont=Inter,10,-1,5,63,0,0,0,0,0
 
 # Windows-style keys: Win key or Ctrl+Esc = Start menu (the Win key alone
 # sends Alt+F1 through xcape: autostart/syluxium-winkey.desktop), Win+R = Run,
 # Win+D = show the desktop, Win+L = lock, Ctrl+Alt+Del and
-# Ctrl+Shift+Esc = Task Manager (Win+E = My Computer: apps/khotkeys/syluxium_winkeys.khotkeys).
+# Ctrl+Shift+Esc = Task Manager (Win+E = System: apps/khotkeys/syluxium_winkeys.khotkeys).
 [Global Shortcuts]
 Popup Launch Menu=Alt+F1;Ctrl+Escape
 Run Command=Alt+F2;Win+R
@@ -74,10 +74,10 @@ Walk Through Windows=Alt+Tab
 Walk Through Windows (Reverse)=Alt+Shift+Tab
 Window Close=Alt+F4
 
-# XP-era wording in the Start menu, Run box and Turn Off dialog: a small
-# English variant (tools/make-xp-translations.py); dates etc. stay US.
+# Plain wording in the launcher menu, Run box and Turn Off dialog: a small
+# English variant (tools/make-wording.py); dates etc. stay US.
 [Locale]
-Language=en_XP:en_US
+Language=en_SX:en_US
 Country=us
 TimeFormat=%l:%M:%S %p
 

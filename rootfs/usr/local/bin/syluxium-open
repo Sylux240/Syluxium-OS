@@ -1,6 +1,6 @@
 #!/bin/sh
 # Open one of the places of the Start menu / desktop in the file manager
-# (Konqueror), like the XP-era "My ..." folders:
+# (Konqueror), like the familiar "My ..." folders:
 #   syluxium-open documents|pictures|music|computer|network|home
 case "$1" in
     documents) dir="$HOME/Documents" ;;

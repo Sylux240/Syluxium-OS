@@ -1,23 +1,24 @@
 # Sourced by the notification-area bubbles (Wi-Fi, AutoPlay): run their
-# kdialog windows with XP balloon colours (pale yellow, black text).
+# kdialog windows in the Dusk bubble colours (glass navy, light text, cyan).
 # TDE takes colours from $TDEHOME/share/config/kdeglobals over the system
 # file, so the bubbles get a small settings folder of their own; fonts and
 # everything else still come from /etc/trinity/kdeglobals.
 balloon_home="${HOME:-/tmp}/.syluxium-balloon"
-if [ ! -f "$balloon_home/share/config/kdeglobals" ]; then
+if ! grep -q "Dusk" "$balloon_home/share/config/kdeglobals" 2>/dev/null; then
     mkdir -p "$balloon_home/share/config"
     cat > "$balloon_home/share/config/kdeglobals" <<'CFG'
+# Dusk bubble colours
 [General]
-background=255,255,225
-foreground=0,0,0
-windowBackground=255,255,225
-windowForeground=0,0,0
-buttonBackground=255,255,225
-buttonForeground=0,0,0
-selectBackground=49,106,197
-selectForeground=255,255,255
-alternateBackground=250,250,215
-linkColor=0,0,255
+background=18,23,54
+foreground=238,242,255
+windowBackground=20,26,58
+windowForeground=238,242,255
+buttonBackground=37,45,92
+buttonForeground=238,242,255
+selectBackground=111,227,240
+selectForeground=20,26,58
+alternateBackground=24,31,66
+linkColor=111,227,240
 CFG
 fi
 # Same icons, styles and caches as the session, only the colours differ.

@@ -1,8 +1,13 @@
-
-# Desktop wallpaper: the Syluxium wallpaper, scaled and cropped to fill the screen.
+# Desktop wallpaper: the Dusk picture, scaled and cropped to fill the screen
+# (night blue behind it while it loads); icon names in light text with a
+# shadow so they read on the picture.
 [Desktop0]
 BackgroundMode=Flat
-Color1=0,51,153
+Color1=20,26,58
 Wallpaper=/opt/trinity/share/wallpapers/syluxium-default.jpg
 WallpaperMode=ScaleAndCrop
 MultiWallpaperMode=NoMulti
+
+[FMSettings]
+NormalTextColor=243,245,255
+ShadowEnabled=true

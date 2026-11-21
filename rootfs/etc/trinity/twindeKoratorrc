@@ -1,18 +1,19 @@
-# Window frames: the deKorator decoration with Syluxium's own XP-era theme
-# (drawn by tools/make-xp-theme.py).
+# Window frames: the deKorator decoration with Syluxium's Dusk theme
+# (drawn by tools/make-dusk-theme.py): indigo title bar with a cyan line,
+# round top corners, soft square buttons, pink close button.
 [MISC]
 TitleAlignment=AlignLeft
 UseMenuImage=false
 IgnoreAppIconCol=true
 DblClkClose=true
 ShowBtmBorder=false
-UseShdtext=true
-ActiveShdtextX=1
-ActiveShdtextY=1
-ActiveShadowColor=0,32,120
+UseShdtext=false
+ActiveShdtextX=0
+ActiveShdtextY=0
+ActiveShadowColor=10,12,34
 InActiveShdtextX=0
 InActiveShdtextY=0
-InActiveShadowColor=150,172,230
+InActiveShadowColor=10,12,34
 BtnShiftX=0
 BtnShiftY=0
 

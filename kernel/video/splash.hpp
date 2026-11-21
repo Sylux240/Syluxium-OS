@@ -1,6 +1,7 @@
 #pragma once
-// Boot splash: the Syluxium logo, an animated load bar and "Press Esc for
-// verbose mode". The text console keeps recording underneath; Esc (or the
+// Boot splash (Dusk theme): the Syluxium logo on deep navy with faint
+// stars, a cyan progress bar, the current boot stage under it and "Press
+// Esc to see boot details". The text console keeps recording underneath; Esc (or the
 // boot option "verbose") shows it at once. A graphical program taking the
 // screen (X through /dev/fb0, /dev/dri or KDSETMODE) ends the splash quietly.
 #include <lib/types.hpp>
@@ -11,11 +12,14 @@ class Framebuffer;
 
 namespace splash {
 
-extern const u32 LOGO_W, LOGO_H, LOGO_PAD; // LOGO_PAD: black below it (Limine background)
-extern const u32 LOGO[]; // 0xRRGGBB, generated from the wallpaper
+// The splash picture (tools/make-boot-logo.py; Limine shows the same one,
+// centered): its size, background colour, and where the bar and text go.
+extern const u32 PIC_W, PIC_H, PIC_BG, PIC_BAR_W, PIC_BAR_H, PIC_BAR_Y, PIC_TEXT_Y;
+extern const u32 PIC[]; // 0xRRGGBB
 
 void show(video::Framebuffer& fb); // right after the console exists
 void start_animation();            // once kernel threads run
+void stage(u32 percent, const char* text); // boot progress: the bar moves towards percent
 void request_verbose();            // Esc pressed (any context)
 void boot_finished(bool desktop);  // the console shell starts
 void handover();                   // X is starting (it opened the display)

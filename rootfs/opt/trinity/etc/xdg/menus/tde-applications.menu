@@ -1,7 +1,7 @@
 <!DOCTYPE Menu PUBLIC "-//freedesktop//DTD Menu 1.0//EN"
   "http://www.freedesktop.org/standards/menu-spec/1.0/menu.dtd">
 
-<!-- Syluxium's Start menu, laid out like the XP-era one: the web browser
+<!-- Syluxium's Start menu, laid out simply: the web browser
      and e-mail at the top, "All Programs" (TDE's whole application menu,
      syluxium-programs.menu), then the places and tools. Kicker adds
      "Run...", "Lock Computer" and "Turn Off Computer..." at the bottom. -->

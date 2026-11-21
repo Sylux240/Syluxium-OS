@@ -1,6 +1,6 @@
 [Desktop Entry]
 Type=Application
-Name=My Network Places
+Name=Network
 Comment=Network places and remote computers
 Exec=syluxium-open network
 Icon=network

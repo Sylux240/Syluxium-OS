@@ -1,13 +1,17 @@
 [KSplash Theme: Syluxium]
-Name=Syluxium Welcome
-Description=Syluxium's welcome screen while the desktop starts.
+Name=Syluxium Dusk
+Description=Syluxium's Dusk screen while the desktop starts: the dimmed dusk picture with the logo.
 Author=Syluxium
 Engine=Redmond
-Welcome Text=welcome
-Welcome Font=Tahoma,36,-1,5,75,1,0,0,0,0
-Username Font=Tahoma,16,-1,5,75,0,0,0,0,0
-Action Font=Tahoma,10,-1,5,50,0,0,0,0,0
-Welcome Text Color=255,255,255
-Welcome Shadow Color=20,50,150
-Username Text Color=255,255,255
-Action Text Color=214,228,255
+Show Welcome Text=false
+Show Welcome Shadow=false
+Show Username=false
+Show Action=false
+Show Icon=false
+Welcome Text=
+Welcome Font=Inter,30,-1,5,25,0,0,0,0,0
+Username Font=Inter,14,-1,5,50,0,0,0,0,0
+Action Font=Inter,10,-1,5,50,0,0,0,0,0
+Welcome Text Color=238,242,255
+Username Text Color=238,242,255
+Action Text Color=170,179,214

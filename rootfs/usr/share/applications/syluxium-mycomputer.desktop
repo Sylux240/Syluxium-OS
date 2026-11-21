@@ -1,6 +1,6 @@
 [Desktop Entry]
 Type=Application
-Name=My Computer
+Name=System
 Comment=Disks and USB drives of this computer
 Exec=syluxium-open computer
 Icon=computer

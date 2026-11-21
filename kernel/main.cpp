@@ -287,6 +287,7 @@ void discover_hardware() {
     // The log onto the boot stick from here on, before the other drivers
     // (GPU drivers) bind: if one blanks the screen, its log still lands there.
     bootlog::start();
+    splash::stage(50, "Mounting file systems");
     mount_disk_root(); // root= on the command line: an installed system on disk
     dev::probe_all();
     sysfs::populate_devices();
@@ -506,13 +507,16 @@ void kernel_main_thread(void*) {
     sysfs::init(); // needs the final CPU count
     cpupower::publish(); // cpufreq files; idle CPUs go tickless from here
     watchdog::start();   // stuck CPUs print where they are
+    splash::stage(30, "Starting drivers");
     discover_hardware();
+    splash::stage(62, "Starting services");
     acpi::start_interpreter(); // AML: power button, battery, lid (after PCI)
     linuxkpi::acpi_ready();    // GPU probes that needed ACPI methods (_ROM)
     ps2kbd::late_init(); // after the USB handoff (firmware PS/2 emulation off)
     u64 reclaimed = pmm::reclaim_bootloader_memory();
     klog::ok("Reclaimed %lu KiB of bootloader memory", reclaimed / KiB);
 
+    splash::stage(72, "Checking the system");
     selftest::run_scheduler_tests();
     selftest::run_fpu_tests();
     run_userspace_tests();
