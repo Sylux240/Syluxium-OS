@@ -331,8 +331,12 @@ nvkm_udevice_new(const struct nvkm_oclass *oclass, void *data, u32 size,
 
 	/* find the device that matches what the client requested */
 	udev->device = nvkm_device_find(client->device);
-	if (!udev->device)
+	if (!udev->device) {
+		/* Syluxium: say why (the client names its device by PCI address) */
+		pr_err("nouveau: no nvkm device with handle %#llx for client %s\n",
+		       (unsigned long long)client->device, client->name);
 		return -ENODEV;
+	}
 
 	return 0;
 }
