@@ -101,6 +101,27 @@ void report(void* ctx, const u8* data, u32 length) {
     t->mouse.frame(fingers, n, button);
 }
 
+// An interrupt IN endpoint anywhere in the configuration, except on a HID
+// keyboard interface (the keyboard's own reports). Its interface in *ifnum.
+bool find_endpoint(Device* d, u8 address, Endpoint* out, u8* ifnum) {
+    const u8* c = d->config_desc;
+    bool keyboard = false;
+    u8 current = 0, alt = 0;
+    for (u16 off = 0; off + 2 <= d->config_len && c[off] >= 2; off = static_cast<u16>(off + c[off])) {
+        if (c[off + 1] == 4 && c[off] >= 9) { // interface
+            current = c[off + 2];
+            alt = c[off + 3];
+            keyboard = c[off + 5] == 3 && c[off + 7] == 1;
+        } else if (c[off + 1] == 5 && c[off] >= 7 && alt == 0 && !keyboard && c[off + 2] == address &&
+                   (c[off + 3] & 3) == 3) { // its interrupt endpoint
+            *out = Endpoint{c[off + 2], c[off + 3], static_cast<u16>(c[off + 4] | (c[off + 5] << 8)), c[off + 6]};
+            *ifnum = current;
+            return true;
+        }
+    }
+    return false;
+}
+
 // Switch the trackpad from HID-mouse mode to multi-touch reports.
 bool wellspring_mode(Device* d, const Format& f) {
     if (!f.um_size)
@@ -137,6 +158,16 @@ bool probe(Device* d, const Interface& intf) {
     for (int i = 0; i < intf.endpoint_count; i++)
         if (intf.endpoints[i].address == fmt.endpoint)
             ep = &intf.endpoints[i];
+    // Some models (MacBookPro9,x: 05ac:0252 with the trackpad as interface
+    // 2) send the multi-touch reports on another interface's endpoint, the
+    // vendor-defined one: Linux reads the endpoint wherever it is.
+    Endpoint other{};
+    u8 other_if = 0;
+    if (!ep && find_endpoint(d, fmt.endpoint, &other, &other_if)) {
+        klog::info("bcm5974: %s: trackpad endpoint %#x is on interface %u (trackpad interface %u)", model->name,
+                   fmt.endpoint, other_if, intf.number);
+        ep = &other;
+    }
     if (!ep) {
         klog::warn("bcm5974: %s: trackpad endpoint %#x not on interface %u", model->name, fmt.endpoint, intf.number);
         return false;
