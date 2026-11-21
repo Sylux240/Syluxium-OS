@@ -2,6 +2,9 @@
 # reboot: ask every program to quit (they may save their work), wait a
 # moment, then let the kernel flush the disks and reboot.
 [ "$(id -u)" = 0 ] || { echo "reboot: must be run as root (try: sudo reboot)" >&2; exit 1; }
+# Whoever started us (the login screen, a shell) goes away with everyone
+# else: don't let its hangup or TERM stop us before the disks are flushed.
+trap '' HUP INT TERM
 sync
 kill -TERM -1 2>/dev/null
 sleep 2

@@ -280,10 +280,11 @@ Thread* create_thread(const char* name, void (*entry)(void*), void* arg, bool de
     t->detached = detached;
 
     // Fake the stack context_switch() expects: six callee-saved registers,
-    // then a return address. The new thread "returns" into thread_start.
+    // RFLAGS, then a return address. The new thread "returns" into thread_start.
     auto* sp = reinterpret_cast<u64*>(static_cast<u8*>(t->stack) + KERNEL_STACK_SIZE);
     *--sp = 0;                                                 // alignment slot (SysV ABI)
     *--sp = reinterpret_cast<u64>(&thread_start_trampoline);   // `ret` target
+    *--sp = 0x2;                                               // RFLAGS (interrupts off, AC clear)
     for (int i = 0; i < 6; i++)
         *--sp = 0;                                             // rbp rbx r12 r13 r14 r15
     t->saved_rsp = reinterpret_cast<u64>(sp);
@@ -407,9 +408,28 @@ void wake(Thread* t) {
 }
 
 bool block_on(WaitList& list, IrqSpinlock& lock, u64 deadline_ns) {
+    return block_on(list, lock, deadline_ns, nullptr, nullptr);
+}
+
+bool block_on(WaitList& list, IrqSpinlock& lock, u64 deadline_ns, bool (*abort)(void*), void* ctx) {
     Thread* me = current();
     me->state = ThreadState::Blocked;
     list.push_back(me);
+    if (abort) {
+        // Pairs with the waker's "set the condition, then look for Blocked
+        // threads": one of the two sides sees the other's store.
+        __atomic_thread_fence(__ATOMIC_SEQ_CST);
+        if (abort(ctx)) {
+            list.remove(me);
+            RunQueue& rq = this_cpu()->rq; // interrupts are off: we stay on this CPU
+            rq.lock.lock();
+            if (me->state == ThreadState::Ready)
+                rq.ready.remove(me); // a waker already queued us
+            me->state = ThreadState::Running;
+            rq.lock.unlock();
+            return true;
+        }
+    }
 
     if (deadline_ns) {
         RunQueue& rq = this_cpu()->rq; // interrupts are off: we can't migrate here
@@ -622,11 +642,11 @@ void dump_threads() {
             len += snprintf(buf + len, CAP - len, " (timeout in %lu ms)",
                             t->wake_deadline > now ? (t->wake_deadline - now) / 1'000'000 : 0);
         if (t->state == ThreadState::Blocked || t->state == ThreadState::Ready) {
-            // context_switch() saved r15 r14 r13 r12 rbx rbp, then the return address.
+            // context_switch() saved r15 r14 r13 r12 rbx rbp, RFLAGS, then the return address.
             u64 lo = reinterpret_cast<u64>(t->stack), hi = t->kernel_stack_top();
             const u64* s = reinterpret_cast<const u64*>(t->saved_rsp);
-            if (t->saved_rsp >= lo && t->saved_rsp + 56 <= hi) {
-                len += snprintf(buf + len, CAP - len, " at %lx", s[6]);
+            if (t->saved_rsp >= lo && t->saved_rsp + 64 <= hi) {
+                len += snprintf(buf + len, CAP - len, " at %lx", s[7]);
                 u64 fp = s[5];
                 for (int i = 0; i < 12 && fp >= lo && fp + 16 <= hi && (fp & 7) == 0; i++) {
                     const u64* f = reinterpret_cast<const u64*>(fp);

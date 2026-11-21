@@ -68,7 +68,11 @@ public:
     }
 
     void on_release(vfs::File* f) override {
-        bool gone;
+        // Both ends can be closed at the same time on two CPUs: the one that
+        // took the last count away must not free the pipe while the other is
+        // still waking sleepers on it. m_releasing counts the closers inside
+        // here; the last one out frees it.
+        __atomic_add_fetch(&m_releasing, 1, __ATOMIC_ACQ_REL);
         {
             LockGuard guard(m_wq.lock());
             u32 acc = f->flags & vfs::O_ACCMODE;
@@ -76,10 +80,15 @@ public:
                 m_readers--;
             if (acc == vfs::O_WRONLY || acc == vfs::O_RDWR)
                 m_writers--;
-            gone = m_readers == 0 && m_writers == 0;
         }
         m_wq.wake_all(); // EOF for readers / EPIPE for writers
         poll::notify();
+        bool gone = false;
+        {
+            LockGuard guard(m_wq.lock());
+            if (__atomic_sub_fetch(&m_releasing, 1, __ATOMIC_ACQ_REL) == 0)
+                gone = m_readers == 0 && m_writers == 0;
+        }
         if (gone && !backing) // named FIFOs keep their pipe (and buffered data) for the next open
             delete this;
     }
@@ -203,6 +212,7 @@ private:
     u8* m_buf;
     usize m_head = 0, m_count = 0;
     u32 m_readers = 0, m_writers = 0;
+    u32 m_releasing = 0; // closers inside on_release (see there)
     sched::WaitQueue m_wq; // its lock protects all of the above
 };
 

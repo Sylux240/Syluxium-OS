@@ -1,3 +1,4 @@
+#include <arch/x86_64/protect.hpp>
 #include <video/splash.hpp>
 #include <arch/x86_64/apic.hpp>
 #include <arch/x86_64/cpu.hpp>
@@ -159,6 +160,7 @@ public:
     }
 
     isize write(u64, const void* buf, usize count) override {
+        protect::UserAccess window; // buf: the writer's (user) buffer
         kwrite(static_cast<const char*>(buf), count);
         return static_cast<isize>(count);
     }
@@ -184,6 +186,7 @@ public:
         }
         auto* out = static_cast<char*>(buf);
         usize n = 0;
+        protect::UserAccess window; // out: the reader's (user) buffer
         while (n < count && g_ready_count) {
             char c = g_ready[g_ready_head];
             g_ready_head = (g_ready_head + 1) % BUF_SIZE;

@@ -390,6 +390,11 @@ void deliver(interrupts::Frame* frame) {
     f.info.si_code = si_code;
     if (fault) {
         memcpy(f.info.fields, &si_addr, 8); // si_addr
+    } else if (si_code == SI_TIMER) { // a POSIX timer: si_timerid, si_overrun, si_value
+        i32 id = p->sig_timer[sig], overrun = 0;
+        memcpy(f.info.fields, &id, 4);
+        memcpy(f.info.fields + 4, &overrun, 4);
+        memcpy(f.info.fields + 8, &p->sig_value[sig], 8);
     } else {
         memcpy(f.info.fields, &si_pid, 4);     // si_pid
         memcpy(f.info.fields + 4, &si_uid, 4); // si_uid

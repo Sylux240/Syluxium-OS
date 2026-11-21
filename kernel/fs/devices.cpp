@@ -1,3 +1,4 @@
+#include <arch/x86_64/protect.hpp>
 #include <block/loop.hpp>
 #include <video/splash.hpp>
 #include <core/log.hpp>
@@ -35,6 +36,7 @@ class Zero : public CharDevice {
 public:
     Zero() : CharDevice(1, 5) {}
     isize read(u64, void* buf, usize n) override {
+        protect::UserAccess window; // buf is the caller's (user) buffer
         memset(buf, 0, n);
         return static_cast<isize>(n);
     }
@@ -45,6 +47,7 @@ class Full : public CharDevice {
 public:
     Full() : CharDevice(1, 7) {}
     isize read(u64, void* buf, usize n) override {
+        protect::UserAccess window; // buf is the caller's (user) buffer
         memset(buf, 0, n);
         return static_cast<isize>(n);
     }
@@ -55,6 +58,7 @@ class Random : public CharDevice {
 public:
     explicit Random(u32 minor) : CharDevice(1, minor) {}
     isize read(u64, void* buf, usize n) override {
+        protect::UserAccess window; // buf is the caller's (user) buffer
         random::fill(buf, n);
         return static_cast<isize>(n);
     }

@@ -584,6 +584,16 @@ public:
 
     Node* node(u32 ino, Node* parent);
     void forget(u32 ino);
+
+    // ---- orphans: files unlinked while still open ----
+    // They keep their blocks until the last close; meanwhile they sit on the
+    // superblock's orphan list (s_last_orphan, chained through each inode's
+    // dtime), so a crash in between leaves nothing for fsck to find: the
+    // next mount frees them.
+    static constexpr u32 SB_LAST_ORPHAN = 0xE8;
+    void orphan_add(Node* n);
+    void orphan_remove(Node* n);
+    void free_orphans(); // at mount
 };
 
 class Node : public vfs::Inode {
@@ -641,6 +651,21 @@ public:
         }
         *phys = m_cache[index];
         return 0;
+    }
+
+    u32 opens = 0;         // Files open on it
+    bool orphaned = false; // unlinked while open: freed by the last close
+
+    void on_open(vfs::File*) override { __atomic_add_fetch(&opens, 1, __ATOMIC_ACQ_REL); }
+    void on_release(vfs::File*) override {
+        if (__atomic_sub_fetch(&opens, 1, __ATOMIC_ACQ_REL) != 0)
+            return;
+        LockGuard guard(vol->lock);
+        if (orphaned && __atomic_load_n(&opens, __ATOMIC_ACQUIRE) == 0) {
+            vol->orphan_remove(this);
+            orphaned = false;
+            release_inode(this);
+        }
     }
 
     Node(Volume* v, u32 inode_number) : vol(v), number(inode_number) {
@@ -1569,11 +1594,24 @@ public:
             save();
             release_inode(victim);
         } else if (--victim->nlink == 0) {
-            release_inode(victim);
+            drop_last_link(victim);
         } else {
             victim->save();
         }
         return 0;
+    }
+
+    // A regular file lost its last name: free it now, or (still open) at
+    // its last close.
+    void drop_last_link(Node* victim) {
+        if (__atomic_load_n(&victim->opens, __ATOMIC_ACQUIRE) > 0 && !victim->orphaned) {
+            victim->orphaned = true;
+            victim->save(); // links = 0
+            vol->orphan_add(victim);
+            vol->forget(victim->number);
+            return;
+        }
+        release_inode(victim);
     }
 
     long link(const char* name, usize len, vfs::Inode* target_inode) override {
@@ -1622,7 +1660,7 @@ public:
                 new_dir->save();
                 release_inode(existing);
             } else if (--existing->nlink == 0) {
-                release_inode(existing);
+                drop_last_link(existing);
             } else {
                 existing->save();
             }
@@ -1679,6 +1717,53 @@ void Volume::forget(u32 ino) {
     }
 }
 
+
+void Volume::orphan_add(Node* n) {
+    n->raw.dtime = sb32(SB_LAST_ORPHAN); // next on the list
+    n->save();
+    u32 ino = n->number;
+    meta(1024 + SB_LAST_ORPHAN, &ino, 4);
+    sb_csum();
+}
+
+void Volume::orphan_remove(Node* n) {
+    u32 next = n->raw.dtime;
+    u32 cur = sb32(SB_LAST_ORPHAN);
+    if (cur == n->number) {
+        meta(1024 + SB_LAST_ORPHAN, &next, 4);
+        sb_csum();
+        return;
+    }
+    for (int guard = 0; cur && guard < 100000; guard++) {
+        RawInode r;
+        read_inode(cur, &r);
+        if (r.dtime == n->number) {
+            Node* prev = node(cur, nullptr);
+            prev->raw.dtime = next;
+            prev->save();
+            return;
+        }
+        cur = r.dtime;
+    }
+}
+
+void Volume::free_orphans() {
+    u32 ino = sb32(SB_LAST_ORPHAN);
+    int freed = 0;
+    while (ino && ino <= inodes_per_group * group_count && freed < 100000) {
+        Node* n = node(ino, nullptr);
+        u32 next = n->raw.dtime;
+        if (n->raw.links == 0 && n->raw.mode)
+            n->release_inode(n);
+        ino = next;
+        freed++;
+    }
+    u32 zero = 0;
+    meta(1024 + SB_LAST_ORPHAN, &zero, 4);
+    sb_csum();
+    if (freed)
+        klog::info("ext4: freed %d file(s) deleted while open before the last shutdown", freed);
+}
 
 // ---- journal ----
 
@@ -2044,6 +2129,11 @@ long mount(block::Device* dev, vfs::Inode** root, bool* read_only, const char** 
         v->read_only = true; // a journal we can't replay
     }
     *read_only = v->read_only;
+    if (!v->read_only && v->sb32(Volume::SB_LAST_ORPHAN)) {
+        LockGuard guard(v->lock);
+        v->free_orphans();
+        v->commit_locked();
+    }
 
     const char* kind = (v->incompat & (INCOMPAT_EXTENTS | INCOMPAT_64BIT | INCOMPAT_FLEX_BG)) ? "ext4"
                        : (v->compat & COMPAT_HAS_JOURNAL)                                    ? "ext3"

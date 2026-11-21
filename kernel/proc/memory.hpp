@@ -85,7 +85,9 @@ public:
     // 32-bit address space: every mapping stays below 4 GiB.
     void set_compat() { m_compat = true; }
     bool compat() const { return m_compat; }
-    uptr mmap_top() const { return m_compat ? COMPAT_MMAP_TOP : MMAP_TOP; }
+    uptr mmap_top() const { return (m_compat ? COMPAT_MMAP_TOP : MMAP_TOP) - m_mmap_shift; }
+    // ASLR: mmap() starts this much below the usual top (set at exec).
+    void set_mmap_shift(uptr shift) { m_mmap_shift = shift; }
     uptr task_end() const { return m_compat ? COMPAT_TASK_END : mm::USER_END; }
 
     // Resolve a page fault. False means the access is invalid (segfault).
@@ -134,6 +136,7 @@ private:
     u32 m_refs = 1;
     u64 m_rss = 0; // resident pages
     bool m_compat = false;
+    uptr m_mmap_shift = 0;
 };
 
 u32 prot_to_map_flags(u32 prot);

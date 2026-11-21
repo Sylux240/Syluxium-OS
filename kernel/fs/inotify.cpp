@@ -183,7 +183,12 @@ public:
         }
     }
 
+    // Only the last of the Files sharing this inode frees it (see events.cpp).
+    void on_open(vfs::File*) override { __atomic_add_fetch(&m_opens, 1, __ATOMIC_ACQ_REL); }
+
     void on_release(vfs::File*) override {
+        if (__atomic_sub_fetch(&m_opens, 1, __ATOMIC_ACQ_REL) != 0)
+            return;
         {
             LockGuard guard(g_lock);
             Watch** link = &g_watches;
@@ -208,6 +213,7 @@ public:
     bool m_changed = false;
 
 private:
+    u32 m_opens = 0;
     Queued* m_head = nullptr;
     Queued* m_tail = nullptr;
     usize m_count = 0, m_bytes = 0;
