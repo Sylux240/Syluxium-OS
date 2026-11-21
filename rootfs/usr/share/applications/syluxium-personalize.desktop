@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Personalize
+Comment=Taskbar transparency, glass blur, accent colour and wallpaper
+Exec=syluxium-personalize
+Icon=preferences-desktop-theme
+Categories=Settings;DesktopSettings;

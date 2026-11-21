@@ -11,18 +11,21 @@ mkdir -p "$RT" && chown "$U" "$RT" && chmod 700 "$RT"
 pgrep -x seatd > /dev/null || { seatd -g video > /var/log/seatd.log 2>&1 & sleep 1; }
 chmod 666 /run/seatd.sock 2>/dev/null
 LOG=/var/log/syluxium-shell.log
-# On the firmware framebuffer (simpledrm: no GPU driver) Wayfire draws in
-# software, and partial redraws leave parts of the screen stale there:
-# redraw everything each frame until that is fixed.
-CONF=/etc/syluxium-shell/wayfire.ini
+# Wayfire runs from the user's own copy of the configuration (Personalize
+# switches blur there; Wayfire reloads it by itself). Blur needs a GPU
+# driver: on the firmware framebuffer (software rendering) it misplaces the
+# panel, and partial redraws leave stale areas, so everything is redrawn.
+HOME_=$(getent passwd "$U" | cut -d: -f6)
+mkdir -p "$HOME_/.config/syluxium-shell"
+CONF=$HOME_/.config/syluxium-shell/wayfire.ini
+SET=$HOME_/.config/syluxium-shell/settings.ini
+cp /etc/syluxium-shell/wayfire.ini "$CONF"
 if grep -qs "simple-framebuffer" /sys/class/drm/card0/device/uevent; then
     SYLUXIUM_WAYFIRE_ARGS="--damage-rerender $SYLUXIUM_WAYFIRE_ARGS"
-else
-    # A GPU driver: the glass effects (blur behind the panel and menus).
-    sed 's/^plugins = autostart /plugins = autostart blur /' "$CONF" > "$RT/wayfire.ini"
-    chown "$U" "$RT/wayfire.ini"
-    CONF=$RT/wayfire.ini
+elif ! grep -qs "^blur *= *false" "$SET"; then
+    sed -i 's/^plugins = autostart /plugins = autostart blur /' "$CONF"
 fi
+chown -R "$U" "$HOME_/.config/syluxium-shell"
 exec su "$U" -s /bin/bash -c "export XDG_RUNTIME_DIR=$RT XDG_SESSION_TYPE=wayland LIBSEAT_BACKEND=seatd \
     WLR_RENDERER_ALLOW_SOFTWARE=1 GDK_BACKEND=wayland,x11 MOZ_ENABLE_WAYLAND=1 $SYLUXIUM_SHELL_ENV; \
     cd ~; exec dbus-run-session wayfire $SYLUXIUM_WAYFIRE_ARGS -c $CONF" > $LOG 2>&1
