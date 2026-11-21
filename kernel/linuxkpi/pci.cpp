@@ -161,11 +161,32 @@ const pci_device_id* find_id(const pci_driver* drv, const dev::Device* d) {
     return nullptr;
 }
 
+// A whole word on the kernel command line ("gpu" but not "nogpu").
+bool cmdline_word(const char* w) {
+    usize n = strlen(w);
+    for (const char* p = boot::cmdline(); (p = strstr(p, w)); p += n) {
+        bool start = p == boot::cmdline() || p[-1] == ' ';
+        bool end = p[n] == 0 || p[n] == ' ';
+        if (start && end)
+            return true;
+    }
+    return false;
+}
+
 bool lkpi_match(const dev::Driver* drv, const dev::Device* d) {
     if (d->bus != dev::Bus::Pci || !find_id(static_cast<const pci_driver*>(drv->ctx), d))
         return false;
-    // "nogpu": leave display controllers to the firmware framebuffer
-    // (simpledrm), for GPUs whose driver misbehaves.
+    // Real GPU drivers (i915, ...) are opt-in until they are proven on real
+    // hardware: without "gpu" on the command line the firmware framebuffer
+    // (simpledrm) drives the display. A black screen on a ThinkPad (UHD 620)
+    // with i915 bound by default is why. "nogpu" still forces them off.
+    if ((d->class_code >> 16) == 0x03 && !cmdline_word("gpu")) {
+        static bool told;
+        if (!told)
+            klog::info("linuxkpi: GPU drivers off (boot option \"gpu\" turns them on)");
+        told = true;
+        return false;
+    }
     if ((d->class_code >> 16) == 0x03 && strstr(boot::cmdline(), "nogpu")) {
         static bool said;
         if (!said)
