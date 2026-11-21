@@ -1,4 +1,6 @@
+#include <core/log.hpp>
 #include <core/panic.hpp>
+#include <lib/format.hpp>
 #include <lib/spinlock.hpp>
 #include <mm/heap.hpp>
 #include <mm/layout.hpp>
@@ -141,14 +143,54 @@ Area* create_area(usize pages, bool owns_pages) {
     return area;
 }
 
+// The call chain of a bad free, for the log (frame pointers are kept).
+void log_caller_chain() {
+    char line[160];
+    usize n = 0;
+    const u64* fp = static_cast<const u64*>(__builtin_frame_address(0));
+    for (int i = 0; i < 10 && reinterpret_cast<u64>(fp) >= 0xFFFF800000000000ull &&
+                    (reinterpret_cast<u64>(fp) & 7) == 0 && n + 18 < sizeof(line); i++) {
+        u64 ret = fp[1];
+        if (ret < 0xFFFF800000000000ull)
+            break;
+        n += snprintf(line + n, sizeof(line) - n, " %016lx", ret);
+        const u64* next = reinterpret_cast<const u64*>(fp[0]);
+        if (next <= fp)
+            break;
+        fp = next;
+    }
+    line[n] = 0;
+    klog::error("vmalloc:   called from:%s", line);
+}
+
 void destroy_area(void* ptr, bool expect_owned) {
     Area** link;
     Area* area;
     {
         LockGuard guard(g_lock);
         area = find_area(reinterpret_cast<uptr>(ptr), &link);
-        if (!area || area->owns_pages != expect_owned)
-            panic("vmalloc: free of unknown pointer %p", ptr);
+        // A bad free is a driver bug; Linux warns and carries on (the memory
+        // stays mapped), it doesn't take the whole machine down.
+        if (!area) {
+            uptr p = reinterpret_cast<uptr>(ptr);
+            const Area* in = nullptr;
+            for (const Area* a = g_areas; a; a = a->next)
+                if (p >= a->base && p < a->base + a->size)
+                    in = a;
+            if (in)
+                klog::error("vmalloc: free of %p, inside the %s area at %#lx (%lu pages): ignored", ptr,
+                            in->owns_pages ? "allocated" : "mapped", in->data, in->pages);
+            else
+                klog::error("vmalloc: free of unknown pointer %p (double free?): ignored", ptr);
+            log_caller_chain();
+            return;
+        }
+        if (area->owns_pages != expect_owned) {
+            // vfree() of a mapping or unmap of an allocation: free it the way it was made.
+            klog::warn("vmalloc: %p is %s, freed as %s", ptr, area->owns_pages ? "an allocation" : "a mapping",
+                       expect_owned ? "an allocation" : "a mapping");
+            log_caller_chain();
+        }
         *link = area->next;
         g_area_count--;
         g_mapped_pages -= area->pages;
@@ -162,6 +204,12 @@ void destroy_area(void* ptr, bool expect_owned) {
 }
 
 } // namespace
+
+bool is_mapping(const void* ptr) {
+    LockGuard guard(g_lock);
+    Area* area = find_area(reinterpret_cast<uptr>(ptr), nullptr);
+    return area && !area->owns_pages;
+}
 
 void* alloc(usize size) {
     if (size == 0)

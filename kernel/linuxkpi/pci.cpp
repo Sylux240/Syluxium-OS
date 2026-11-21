@@ -624,9 +624,12 @@ void __iomem* pci_iomap(struct pci_dev* p, int bar, unsigned long maxlen) {
     return p->lkpi_iomap[bar];
 }
 void pci_iounmap(struct pci_dev* p, void __iomem* addr) {
-    for (int i = 0; i < DEVICE_COUNT_RESOURCE; i++)
-        if (p->lkpi_iomap[i] == addr)
-            return; // whole-BAR mappings are permanent
+    for (int i = 0; i < DEVICE_COUNT_RESOURCE; i++) {
+        auto base = reinterpret_cast<uptr>(p->lkpi_iomap[i]);
+        auto a = reinterpret_cast<uptr>(addr);
+        if (base && a >= base && a < base + p->lkpi_res_len[i])
+            return; // whole-BAR mappings are permanent (pci_iomap_range points inside them)
+    }
     iounmap(addr); // partial ones (pci_iomap with maxlen) are not
 }
 
