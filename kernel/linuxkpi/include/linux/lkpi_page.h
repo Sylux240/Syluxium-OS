@@ -29,6 +29,7 @@ struct page {
 	struct list_head lru;           /* free for the owner's lists (TTM pools, ...) */
 	struct page *head;              /* first page of the block (itself for a head page) */
 	unsigned long dma_addr;         /* page_pool / driver use */
+	struct page_pool *pp;           /* appended: the page pool it came from */
 };
 struct folio { struct page page; };
 #define PG_dirty 0x1UL

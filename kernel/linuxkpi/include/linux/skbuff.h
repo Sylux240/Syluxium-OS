@@ -186,6 +186,8 @@ struct sk_buff* alloc_skb(unsigned int size, gfp_t gfp);
 struct sk_buff* netdev_alloc_skb(struct net_device* dev, unsigned int len);
 #define __netdev_alloc_skb(dev, len, gfp) netdev_alloc_skb(dev, len)
 struct sk_buff* napi_alloc_skb(struct napi_struct* napi, unsigned int len);
+struct sk_buff* build_skb(void* data, unsigned int frag_size);
+struct sk_buff* napi_build_skb(void* data, unsigned int frag_size);
 #define dev_alloc_skb(len) netdev_alloc_skb(NULL, len)
 #define __dev_alloc_skb(len, gfp) netdev_alloc_skb(NULL, len)
 static inline struct sk_buff* netdev_alloc_skb_ip_align(struct net_device* dev, unsigned int len) {

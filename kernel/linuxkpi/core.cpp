@@ -1018,34 +1018,115 @@ static void rcu_thread(void*) {
 // ======================= threads =======================
 
 namespace {
-struct KthreadStart {
+// A kthread_run() thread: what kthread_stop/park/unpark talk to it with.
+struct KthreadState {
     int (*fn)(void*);
     void* data;
+    volatile bool stop = false, park = false, parked = false, exited = false;
+    int result = 0;
+    sched::WaitQueue ctl;
 };
-void kthread_entry(void* arg) {
-    auto* s = static_cast<KthreadStart*>(arg);
-    auto fn = s->fn;
-    void* data = s->data;
-    delete s;
-    fn(data);
-    sched::exit(0);
-}
-struct task_struct g_task_dummy = {};
-} // namespace
-
-struct task_struct* lkpi_kthread_run(int (*fn)(void*), void* data, const char* name) {
-    auto* s = new KthreadStart{fn, data};
-    sched::spawn(name, kthread_entry, s, -1, true);
-    return &g_task_dummy;
-}
-
-namespace {
 struct LkpiTask {
     struct task_struct t;
     sched::WaitQueue wq;
+    KthreadState* kt = nullptr;
 };
 LkpiTask* task_of(struct task_struct* t) { return reinterpret_cast<LkpiTask*>(t); }
+
+void kthread_entry(void* arg) {
+    auto* lt = static_cast<LkpiTask*>(arg);
+    KthreadState* k = lt->kt;
+    k->result = k->fn(k->data);
+    {
+        LockGuard guard(k->ctl.lock());
+        k->exited = true;
+    }
+    k->ctl.wake_all();
+    sched::exit(0);
+}
+
+KthreadState* current_kthread() {
+    sched::Thread* th = sched::current();
+    return th && th->lkpi_task ? static_cast<LkpiTask*>(th->lkpi_task)->kt : nullptr;
+}
 } // namespace
+
+// The thread gets its task before it runs, so the caller can stop, park
+// and wake it through the task kthread_run() returns.
+struct task_struct* lkpi_kthread_run(int (*fn)(void*), void* data, const char* name) {
+    auto* lt = new LkpiTask{};
+    lt->kt = new KthreadState{fn, data};
+    snprintf(lt->t.comm, sizeof(lt->t.comm), "%s", name);
+    lt->t.lkpi_usage = 1;
+    lt->t.group_leader = &lt->t;
+    sched::Thread* th = sched::create(name, kthread_entry, lt, true);
+    if (!th) {
+        delete lt->kt;
+        delete lt;
+        return reinterpret_cast<struct task_struct*>(ERR_PTR(-ENOMEM));
+    }
+    lt->t.lkpi_thread = th;
+    th->lkpi_task = lt;
+    sched::start(th);
+    return &lt->t;
+}
+
+bool kthread_should_stop(void) {
+    KthreadState* k = current_kthread();
+    return k && k->stop;
+}
+bool kthread_should_park(void) {
+    KthreadState* k = current_kthread();
+    return k && k->park;
+}
+void kthread_parkme(void) {
+    KthreadState* k = current_kthread();
+    if (!k)
+        return;
+    {
+        LockGuard guard(k->ctl.lock());
+        k->parked = true;
+    }
+    k->ctl.wake_all();
+    k->ctl.wait_until([&] { return !k->park || k->stop; });
+    k->parked = false;
+}
+int kthread_park(struct task_struct* t) {
+    KthreadState* k = t ? task_of(t)->kt : nullptr;
+    if (!k)
+        return -ENOSYS;
+    {
+        LockGuard guard(k->ctl.lock());
+        k->park = true;
+    }
+    wake_up_process(t);
+    k->ctl.wait_until([&] { return k->parked || k->exited; });
+    return 0;
+}
+void kthread_unpark(struct task_struct* t) {
+    KthreadState* k = t ? task_of(t)->kt : nullptr;
+    if (!k)
+        return;
+    {
+        LockGuard guard(k->ctl.lock());
+        k->park = false;
+    }
+    k->ctl.wake_all();
+}
+int kthread_stop(struct task_struct* t) {
+    KthreadState* k = t ? task_of(t)->kt : nullptr;
+    if (!k)
+        return -EINTR;
+    {
+        LockGuard guard(k->ctl.lock());
+        k->stop = true;
+        k->park = false;
+    }
+    k->ctl.wake_all();
+    wake_up_process(t);
+    k->ctl.wait_until([&] { return k->exited; });
+    return k->result; // the task stays allocated (like other threads' tasks)
+}
 
 // The task of a whole process (group_leader of its threads' tasks): what
 // binder identifies a process by. Reference counted; the process holds one.

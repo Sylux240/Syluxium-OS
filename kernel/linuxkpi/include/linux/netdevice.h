@@ -386,6 +386,7 @@ struct net_device {
     const struct xdp_metadata_ops* xdp_metadata_ops;
     const struct xsk_tx_metadata_ops* xsk_tx_metadata_ops;
     u32 xdp_features;
+    u8 threaded;                      /* NAPI in its own thread (dev_set_threaded): polls are work items here */
     unsigned long lkpi_priv[] __aligned(64);
 };
 

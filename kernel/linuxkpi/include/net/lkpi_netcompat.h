@@ -143,13 +143,6 @@ static inline bool dev_page_is_reusable(const struct page *page) { return true; 
 /* How much of a received frame to copy into the head: all of it (up to the
  * caller's limit) - packets are linear here. */
 static inline u32 eth_get_headlen(const struct net_device *dev, const void *data, u32 len) { return len; }
-/* Building an skb around a receive page (no driver here enables it). */
-static inline struct sk_buff *napi_build_skb(void *data, unsigned int frag_size)
-{
-    WARN_ON_ONCE(1);
-    return NULL;
-}
-#define build_skb(data, size) napi_build_skb(data, size)
 static inline int __dev_uc_sync(struct net_device *dev, int (*sync)(struct net_device *, const unsigned char *),
                                 int (*unsync)(struct net_device *, const unsigned char *))
 {
@@ -217,4 +210,32 @@ static inline int platform_driver_probe(struct platform_driver *drv, int (*probe
 {
     drv->probe = probe;
     return platform_driver_register(drv);
+}
+
+#include <linux/kthread.h>
+#include <linux/of.h>
+
+/* NAPI polls run as work items here anyway: "threaded" is only remembered. */
+static inline int dev_set_threaded(struct net_device *dev, bool threaded)
+{
+    dev->threaded = threaded;
+    return 0;
+}
+#ifndef L1_CACHE_ALIGN
+#define L1_CACHE_ALIGN(x) ALIGN(x, 64)
+#endif
+/* 32-bit-word copies to/from device memory. */
+static inline void __iowrite32_copy(void __iomem *to, const void *from, size_t count)
+{
+    volatile u32 __iomem *dst = to;
+    const u32 *src = from;
+    while (count--)
+        *dst++ = *src++;
+}
+static inline void __ioread32_copy(void *to, const void __iomem *from, size_t count)
+{
+    u32 *dst = to;
+    const volatile u32 __iomem *src = from;
+    while (count--)
+        *dst++ = *src++;
 }

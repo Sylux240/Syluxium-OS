@@ -13,6 +13,71 @@
 #include <linux/netdevice.h>
 #include <net/sock.h>
 #include <net/dsfield.h>
+#include <net/page_pool/types.h>
+
+/* ---- build_skb: an skb around a buffer the driver filled ----
+ * The buffer's bytes are copied into an skb of our own (skbs here own one
+ * kmalloc'ed buffer) and the buffer is released: a page fragment
+ * (frag_size != 0: its page, e.g. from a page pool) or kmalloc'ed. */
+
+struct sk_buff* build_skb(void* data, unsigned int frag_size)
+{
+	unsigned int size = frag_size ? SKB_WITH_OVERHEAD(frag_size) : (unsigned int)ksize(data);
+	struct sk_buff* skb = alloc_skb(size, GFP_ATOMIC);
+	if (skb)
+		memcpy(skb->head, data, size);
+	if (frag_size) {
+		struct page* page = virt_to_head_page(data);
+		if (page->pp)
+			page_pool_put_full_page(page->pp, page, false);
+		else
+			put_page(page);
+	} else {
+		kfree(data);
+	}
+	return skb;
+}
+
+struct sk_buff* napi_build_skb(void* data, unsigned int frag_size)
+{
+	return build_skb(data, frag_size);
+}
+
+/* ---- page pools (net/page_pool/types.h): a page per buffer, no recycling ---- */
+
+struct page_pool* page_pool_create(const struct page_pool_params* params)
+{
+	struct page_pool* pool = kzalloc(sizeof(*pool), GFP_KERNEL);
+	if (!pool)
+		return ERR_PTR(-ENOMEM);
+	pool->p = *params;
+	return pool;
+}
+
+void page_pool_destroy(struct page_pool* pool)
+{
+	kfree(pool);
+}
+
+struct page* page_pool_alloc_frag(struct page_pool* pool, unsigned int* offset, unsigned int size, gfp_t gfp)
+{
+	struct page* page = alloc_pages(gfp, pool->p.order);
+	if (!page)
+		return NULL;
+	page->pp = pool;
+	if (pool->p.flags & PP_FLAG_DMA_MAP)
+		page->dma_addr = dma_map_page(pool->p.dev, page, 0, PAGE_SIZE << pool->p.order, pool->p.dma_dir);
+	*offset = 0;
+	return page;
+}
+
+void page_pool_put_full_page(struct page_pool* pool, struct page* page, bool allow_direct)
+{
+	if (pool && (pool->p.flags & PP_FLAG_DMA_MAP))
+		dma_unmap_page(pool->p.dev, page->dma_addr, PAGE_SIZE << pool->p.order, pool->p.dma_dir);
+	page->pp = NULL;
+	put_page(page);
+}
 
 struct sk_buff* alloc_skb(unsigned int size, gfp_t gfp)
 {
