@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Syluxium Notifications
+Comment=Shows notifications as bubbles in the lower right corner
+Exec=syluxium-notifyd
+X-TDE-autostart-phase=1
+NoDisplay=true

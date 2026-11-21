@@ -1,0 +1,241 @@
+#!/usr/bin/python3
+"""Network adapter settings (root): what Network Connections changes.
+
+    syluxium-netconfig apply [IFACE...]       settings of these (all) adapters, at startup
+    syluxium-netconfig dhcp IFACE             address from the network (DHCP)
+    syluxium-netconfig static IFACE ADDR/PREFIX [GATEWAY] [DNS...]
+    syluxium-netconfig enable|disable IFACE
+    syluxium-netconfig watch                  keep static addresses (runs in the background)
+
+Settings live in /etc/syluxium/network/IFACE.conf. The kernel runs a DHCP
+client on every Ethernet adapter by itself (kernel/net/dhcp.cpp); a static
+address is set over it with `ip`, and `watch` puts it back if the kernel's
+client replaces it after a link change. DNS: DHCP's servers are in the
+kernel's /run/resolv.conf, which /etc/resolv.conf links to; static DNS
+servers replace that link with a file of their own."""
+import fcntl
+import os
+import socket
+import struct
+import subprocess
+import sys
+import time
+
+CONF_DIR = "/etc/syluxium/network"
+RESOLV = "/etc/resolv.conf"
+KERNEL_RESOLV = "/run/resolv.conf"
+UDHCPC_SCRIPT = "/usr/local/lib/syluxium/udhcpc.script"
+
+
+def ip(*args):
+    return subprocess.run(["ip", *args], capture_output=True, text=True)
+
+
+def ifaddr(name):
+    """(address, prefix) of an adapter, or (None, 0)."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    req = struct.pack("16s16x", name.encode()[:15])
+    try:
+        addr = socket.inet_ntoa(fcntl.ioctl(s, 0x8915, req)[20:24])     # SIOCGIFADDR
+        mask = struct.unpack("!I", fcntl.ioctl(s, 0x891B, req)[20:24])[0]  # SIOCGIFNETMASK
+    except OSError:
+        return None, 0
+    finally:
+        s.close()
+    if addr == "0.0.0.0":
+        return None, 0
+    return addr, bin(mask).count("1")
+
+
+def carrier(name):
+    """Up with a link (netlink's flags: the ioctl's IFF_RUNNING is always set)."""
+    out = ip("-o", "link", "show", "dev", name).stdout
+    flags = out[out.find("<") + 1:out.find(">")].split(",") if "<" in out else []
+    return "UP" in flags and "NO-CARRIER" not in flags
+
+
+def load(name):
+    conf = {"METHOD": "dhcp", "ENABLED": "yes"}
+    try:
+        with open(os.path.join(CONF_DIR, name + ".conf")) as f:
+            for line in f:
+                line = line.strip()
+                if "=" in line and not line.startswith("#"):
+                    k, v = line.split("=", 1)
+                    conf[k.strip()] = v.strip().strip('"')
+    except OSError:
+        pass
+    return conf
+
+
+def save(name, conf):
+    os.makedirs(CONF_DIR, exist_ok=True)
+    path = os.path.join(CONF_DIR, name + ".conf")
+    with open(path + ".tmp", "w") as f:
+        f.write("# Network Connections (syluxium-netconfig)\n")
+        for k in ("METHOD", "ADDRESS", "PREFIX", "GATEWAY", "DNS", "ENABLED"):
+            if conf.get(k):
+                f.write(f'{k}="{conf[k]}"\n')
+    os.replace(path + ".tmp", path)
+
+
+def set_dns(servers):
+    """Static DNS servers, or back to the kernel's (DHCP) list when empty."""
+    if servers:
+        tmp = RESOLV + ".syluxium"
+        with open(tmp, "w") as f:
+            f.write("# Set in Network Connections\n")
+            f.writelines(f"nameserver {s}\n" for s in servers)
+        os.replace(tmp, RESOLV)
+    elif not (os.path.islink(RESOLV) and os.readlink(RESOLV) == KERNEL_RESOLV):
+        try:
+            os.remove(RESOLV)
+        except FileNotFoundError:
+            pass
+        os.symlink(KERNEL_RESOLV, RESOLV)
+
+
+def static_dns_anywhere(skip=None):
+    for f in sorted(os.listdir(CONF_DIR)) if os.path.isdir(CONF_DIR) else []:
+        name = f[:-5]
+        if f.endswith(".conf") and name != skip:
+            c = load(name)
+            if c["METHOD"] == "static" and c.get("DNS"):
+                return c["DNS"].split()
+    return []
+
+
+def apply_static(name, conf):
+    addr, prefix = conf.get("ADDRESS"), conf.get("PREFIX", "24")
+    if not addr:
+        return 1
+    cur = ifaddr(name)
+    if cur != (addr, int(prefix)):
+        if cur[0]:
+            ip("addr", "del", f"{cur[0]}/{cur[1]}", "dev", name)
+        r = ip("addr", "add", f"{addr}/{prefix}", "dev", name)
+        if r.returncode:
+            print(r.stderr.strip(), file=sys.stderr)
+            return 1
+    if conf.get("GATEWAY"):
+        ip("route", "del", "default")
+        ip("route", "add", "default", "via", conf["GATEWAY"], "dev", name)
+    if conf.get("DNS"):
+        set_dns(conf["DNS"].split())
+    return 0
+
+
+def apply(name, renew=False):
+    conf = load(name)
+    if conf.get("ENABLED") == "no":
+        ip("link", "set", "dev", name, "down")
+        return 0
+    was_up = carrier(name)
+    ip("link", "set", "dev", name, "up")
+    if not was_up:
+        # Drivers bring the link up again a few seconds after "up" (the cable's
+        # autonegotiation); the kernel's DHCP client starts over then by itself.
+        for _ in range(40):
+            if carrier(name):
+                break
+            time.sleep(0.25)
+        if conf["METHOD"] != "static":
+            for _ in range(40):
+                if ifaddr(name)[0]:
+                    break
+                time.sleep(0.25)
+    if conf["METHOD"] == "static":
+        return apply_static(name, conf)
+    set_dns(static_dns_anywhere(skip=name))
+    if renew and carrier(name):
+        # The kernel's DHCP client only starts over when the link comes back:
+        # ask the network for an address now (busybox udhcpc, raw socket).
+        static = ifaddr(name)
+        r = subprocess.run(["udhcpc", "-i", name, "-n", "-q", "-f", "-t", "4", "-T", "2", "-s", UDHCPC_SCRIPT],
+                           capture_output=True, text=True, timeout=40)
+        if r.returncode == 0:
+            return 0
+        with open("/var/log/syluxium-netconfig.log", "a") as log:
+            log.write(f"udhcpc on {name} failed ({r.returncode}):\n{r.stdout}{r.stderr}\n")
+        # Otherwise: take the link down and up again, which makes the
+        # kernel's DHCP client start over (drivers that report the link).
+        if static[0]:
+            ip("addr", "del", f"{static[0]}/{static[1]}", "dev", name)
+        ip("link", "set", "dev", name, "down")
+        time.sleep(1)
+        ip("link", "set", "dev", name, "up")
+        for _ in range(60):
+            if ifaddr(name)[0]:
+                return 0
+            time.sleep(0.25)
+        if r.returncode:
+            print(f"{name}: no answer from a DHCP server", file=sys.stderr)
+            return 2
+    return 0
+
+
+def adapters():
+    names = []
+    with open("/proc/net/dev") as f:
+        for line in f.readlines()[2:]:
+            n = line.split(":", 1)[0].strip()
+            if n and n != "lo":
+                names.append(n)
+    return names
+
+
+def main(argv):
+    if not argv:
+        print(__doc__)
+        return 1
+    cmd, args = argv[0], argv[1:]
+    if os.geteuid() != 0:
+        print("syluxium-netconfig: only an administrator can change network settings", file=sys.stderr)
+        return 1
+    if cmd == "apply":
+        rc = 0
+        for name in args or [n for n in adapters() if os.path.exists(os.path.join(CONF_DIR, n + ".conf"))]:
+            rc |= apply(name)
+        return rc
+    if cmd == "dhcp" and len(args) == 1:
+        conf = load(args[0])
+        was_static = conf["METHOD"] == "static"
+        conf = {"METHOD": "dhcp", "ENABLED": conf.get("ENABLED", "yes")}
+        save(args[0], conf)
+        return apply(args[0], renew=was_static)
+    if cmd == "static" and len(args) >= 2:
+        name, cidr = args[0], args[1]
+        addr, _, prefix = cidr.partition("/")
+        try:
+            socket.inet_aton(addr)
+            prefix = int(prefix or 24)
+            assert 1 <= prefix <= 32
+            for extra in args[2:]:
+                socket.inet_aton(extra)
+        except (OSError, ValueError, AssertionError):
+            print("syluxium-netconfig: not a valid address", file=sys.stderr)
+            return 1
+        conf = load(name)
+        conf.update({"METHOD": "static", "ADDRESS": addr, "PREFIX": str(prefix),
+                     "GATEWAY": args[2] if len(args) > 2 else "", "DNS": " ".join(args[3:])})
+        save(name, conf)
+        return apply(name)
+    if cmd in ("enable", "disable") and len(args) == 1:
+        conf = load(args[0])
+        conf["ENABLED"] = "yes" if cmd == "enable" else "no"
+        save(args[0], conf)
+        return apply(args[0], renew=cmd == "enable" and not ifaddr(args[0])[0])
+    if cmd == "watch":
+        while True:
+            time.sleep(10)
+            for name in adapters():
+                conf = load(name)
+                if conf["METHOD"] == "static" and conf.get("ENABLED") != "no" and \
+                        ifaddr(name) != (conf.get("ADDRESS"), int(conf.get("PREFIX", "24"))):
+                    apply_static(name, conf)
+    print(__doc__)
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

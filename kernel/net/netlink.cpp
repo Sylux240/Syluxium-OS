@@ -2,8 +2,10 @@
 // that `ip addr/link/route` (busybox, iproute2) and glibc's getifaddrs()
 // and getaddrinfo(AI_ADDRCONFIG) send: link, address and route dumps, and
 // adding/removing addresses, routes and link flags. NETLINK_KOBJECT_UEVENT
-// sockets can be created and bound but never receive anything (a quiet
-// system); other protocols are refused when the socket is created.
+// sockets receive device add/remove events (uevent_broadcast()): the
+// kernel's format on group 1 and, since there is no udevd, udevd's own
+// format on group 2, where libudev monitors (libinput, wlroots) listen.
+// Other protocols are refused when the socket is created.
 //
 // Requests are handled synchronously inside sendmsg(): the replies are
 // queued on the sender's socket as datagrams of at most one page (glibc
@@ -11,6 +13,9 @@
 
 #include <mm/heap.hpp>
 #include <net/internal.hpp>
+#include <lib/format.hpp>
+#include <net/uevent.hpp>
+#include <time/clock.hpp>
 #include <proc/process.hpp>
 
 extern "C" {
@@ -53,6 +58,8 @@ constexpr usize align4(usize n) { return (n + 3) & ~usize(3); }
 struct Datagram {
     Datagram* next;
     usize len;
+    u32 src_group; // multicast group it was sent to (the sender address's nl_groups)
+    bool cred;     // comes with SCM_CREDENTIALS (uid 0): libudev drops uevents without
     u8 data[];
 };
 
@@ -131,6 +138,8 @@ public:
         auto* d = static_cast<Datagram*>(kmalloc(sizeof(Datagram) + m_cur_len));
         if (d) {
             d->next = nullptr;
+            d->src_group = 0;
+            d->cred = false;
             d->len = m_cur_len;
             memcpy(d->data, m_cur, m_cur_len);
             *m_tail = d;
@@ -666,7 +675,7 @@ public:
         wake();
     }
 
-    isize recv_msg(u8* buf, usize len, int flags, SockAddr* from, Control*, bool nonblock,
+    isize recv_msg(u8* buf, usize len, int flags, SockAddr* from, Control* ctl, bool nonblock,
                    usize* full_len) override {
         for (;;) {
             if (long r = sock_wait(this, nonblock, rcv_timeout_ns, [&] { return head != nullptr; }); r < 0)
@@ -692,6 +701,11 @@ public:
                 *from = SockAddr{};
                 from->data[0] = AF_NETLINK;
                 from->len = 12;
+                memcpy(from->data + 8, &d->src_group, 4);
+            }
+            if (ctl && d->cred) {
+                ctl->has_cred = true;
+                ctl->cred = Ucred{};
             }
             if (!(flags & MSG_PEEK))
                 kfree(d);
@@ -776,6 +790,8 @@ Datagram* make_datagram(const void* data, usize len) {
     if (d) {
         d->next = nullptr;
         d->len = len;
+        d->src_group = 0;
+        d->cred = false;
         memcpy(d->data, data, len);
     }
     return d;
@@ -809,6 +825,142 @@ extern "C" void lkpi_sylux_netlink_multicast(int protocol, u32 group, u32 exclud
                 s->queue(d);
 }
 
+// ---- uevents ----
+
 namespace net {
 
+namespace {
+
+constexpr int NETLINK_KOBJECT_UEVENT = 15;
+constexpr u32 GROUP_KERNEL = 1, GROUP_UDEV = 2;
+u64 g_seqnum = 0;
+
+// systemd's string_hash32 (MurmurHash2, seed 0): libudev's socket filters
+// compare these.
+u32 murmur2(const char* s) {
+    const u32 m = 0x5bd1e995;
+    u32 len = static_cast<u32>(strlen(s)), h = len;
+    auto* p = reinterpret_cast<const u8*>(s);
+    for (; len >= 4; p += 4, len -= 4) {
+        u32 k = p[0] | (p[1] << 8) | (p[2] << 16) | (static_cast<u32>(p[3]) << 24);
+        k *= m;
+        k ^= k >> 24;
+        k *= m;
+        h = (h * m) ^ k;
+    }
+    switch (len) {
+    case 3: h ^= p[2] << 16; [[fallthrough]];
+    case 2: h ^= p[1] << 8; [[fallthrough]];
+    case 1: h ^= p[0]; h *= m;
+    }
+    h ^= h >> 13;
+    h *= m;
+    return h ^ (h >> 15);
+}
+
+struct Env {
+    char buf[2048];
+    usize len = 0;
+    void add(const char* s) {
+        usize n = strlen(s) + 1;
+        if (len + n <= sizeof(buf)) {
+            memcpy(buf + len, s, n);
+            len += n;
+        }
+    }
+    void addf(const char* key, const char* value) {
+        char tmp[256];
+        snprintf(tmp, sizeof(tmp), "%s=%s", key, value);
+        add(tmp);
+    }
+};
+
+void multicast(u32 group, const void* data, usize len) {
+    LockGuard guard(g_nl);
+    for (NetlinkSocket* s = g_sockets; s; s = s->next)
+        if (s->protocol == NETLINK_KOBJECT_UEVENT && s->member_of(group))
+            if (Datagram* d = make_datagram(data, len)) {
+                d->src_group = group;
+                d->cred = true;
+                s->queue(d);
+            }
+}
+
+} // namespace
+
+void uevent_broadcast(const char* action, const char* devpath, const char* subsystem, const char* const* kernel_env,
+                      const char* const* udev_env, const char* const* tags) {
+    char seq[24];
+    snprintf(seq, sizeof(seq), "%lu", __atomic_add_fetch(&g_seqnum, 1, __ATOMIC_RELAXED));
+    auto* k = new Env;
+    auto* u = new Env;
+    if (!k || !u) {
+        delete k;
+        delete u;
+        return;
+    }
+    // Kernel format: "<action>@<devpath>", then KEY=VALUE strings.
+    char head[192];
+    snprintf(head, sizeof(head), "%s@%s", action, devpath);
+    k->add(head);
+    k->addf("ACTION", action);
+    k->addf("DEVPATH", devpath);
+    k->addf("SUBSYSTEM", subsystem);
+    for (const char* const* e = kernel_env; e && *e; e++)
+        k->add(*e);
+    k->addf("SEQNUM", seq);
+    multicast(GROUP_KERNEL, k->buf, k->len);
+
+    // udevd's format: a "libudev" header, then the properties after
+    // processing (ID_INPUT..., DEVNAME=/dev/..., TAGS).
+    u->addf("ACTION", action);
+    u->addf("DEVPATH", devpath);
+    u->addf("SUBSYSTEM", subsystem);
+    u->addf("SEQNUM", seq);
+    char usec[24];
+    snprintf(usec, sizeof(usec), "%lu", clock::now_ns() / 1000);
+    u->addf("USEC_INITIALIZED", usec);
+    for (const char* const* e = udev_env; e && *e; e++)
+        u->add(*e);
+    u64 bloom = 0;
+    if (tags && *tags) {
+        char list[128] = ":";
+        for (const char* const* t = tags; *t; t++) {
+            usize l = strlen(list);
+            snprintf(list + l, sizeof(list) - l, "%s:", *t);
+            u32 h = murmur2(*t);
+            bloom |= (1ull << (h & 63)) | (1ull << ((h >> 6) & 63)) | (1ull << ((h >> 12) & 63)) |
+                     (1ull << ((h >> 18) & 63));
+        }
+        u->addf("TAGS", list);
+        u->addf("CURRENT_TAGS", list);
+    }
+    struct Header {
+        char prefix[8];
+        u32 magic, header_size, properties_off, properties_len, subsystem_hash, devtype_hash, tag_bloom_hi,
+            tag_bloom_lo;
+    };
+    static_assert(sizeof(Header) == 40);
+    auto* msg = static_cast<u8*>(kmalloc(sizeof(Header) + u->len));
+    if (msg) {
+        Header h;
+        memcpy(h.prefix, "libudev", 8);
+        h.magic = be32(0xFEEDCAFE);
+        h.header_size = sizeof(Header); // these three in host order, as libudev writes them
+        h.properties_off = sizeof(Header);
+        h.properties_len = static_cast<u32>(u->len);
+        h.subsystem_hash = be32(murmur2(subsystem));
+        h.devtype_hash = 0;
+        h.tag_bloom_hi = be32(static_cast<u32>(bloom >> 32));
+        h.tag_bloom_lo = be32(static_cast<u32>(bloom));
+        memcpy(msg, &h, sizeof(h));
+        memcpy(msg + sizeof(h), u->buf, u->len);
+        multicast(GROUP_UDEV, msg, sizeof(Header) + u->len);
+        kfree(msg);
+    }
+    delete k;
+    delete u;
+}
+
 } // namespace net
+

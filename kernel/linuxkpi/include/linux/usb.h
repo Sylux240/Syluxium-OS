@@ -104,6 +104,7 @@ struct usb_device {
     struct usb_interface lkpi_intfs[8];
     int lkpi_nintf;
     char lkpi_product[64];
+    struct usb_device* parent; /* appended: the hub it hangs off (a blank stand-in) */
 };
 #define to_usb_device(d) container_of(d, struct usb_device, dev)
 

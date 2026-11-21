@@ -1,0 +1,182 @@
+#!/bin/sh
+# Test aid: start the desktop, log in, then try the accessories, notifications
+# and Network Connections as the logged-in user. Results go to the console
+# ("ACCTEST ..."); screenshots to /root/shots/<phase>.png (taken inside the
+# system: tools can copy them off the disk image afterwards).
+say() { echo "ACCTEST $*" > /dev/console; }
+mkdir -p /root/shots
+LOG=/root/acctest.log; : > $LOG; chmod 666 $LOG
+shot() {
+    python3 - "$1" <<'EOF' 2>/dev/console
+import sys, gi
+gi.require_version("Gdk", "3.0")
+from gi.repository import Gdk
+w = Gdk.get_default_root_window()
+pb = Gdk.pixbuf_get_from_window(w, 0, 0, w.get_width(), w.get_height())
+pb.savev(f"/root/shots/{sys.argv[1]}.png", "png", [], [])
+EOF
+    sync
+    say "shot $1"
+}
+# A line every 15 s so test harnesses waiting for a quiet console keep waiting.
+( while :; do sleep 15; say "..."; done ) &
+beat=$!
+startdesktop > /dev/null 2>&1 &
+export DISPLAY=:0
+for i in $(seq 1 120); do
+    XAUTHORITY="$(ls /var/run/xauth/A:0-* 2>/dev/null | head -1)"
+    [ -n "$XAUTHORITY" ] && [ -S /tmp/.X11-unix/X0 ] && break
+    sleep 1
+done
+export XAUTHORITY
+sleep 10
+xdotool key Return    # log in (the login screen's user has no password)
+for i in $(seq 1 120); do pidof kicker > /dev/null && break; sleep 1; done
+sleep 15
+say "desktop up"
+# The session's environment (D-Bus session bus, X authority), to run things as the user.
+# (kdeinit's programs write their titles over their environment: take any
+# process of the user that still has the session bus address in it.)
+env=
+for want in SESSION_MANAGER DBUS_SESSION_BUS_ADDRESS; do for e in /proc/[0-9]*/environ; do
+    [ -z "$env" ] || break
+    [ "$(stat -c %u "$e" 2>/dev/null)" = 1000 ] || continue
+    tr '\0' '\n' < "$e" 2>/dev/null | grep -q "^$want=" || continue
+    tr '\0' '\n' < "$e" 2>/dev/null | grep -q '^DBUS_SESSION_BUS_ADDRESS=' || continue
+    # the whole session environment (DCOP/ICE authority, session manager, ...)
+    env=$(tr '\0' '\n' < "$e" | grep -E '^[A-Za-z_][A-Za-z0-9_]*=' | grep -v "'" | sed "s/^/export /; s/=/='/; s/\$/'/")
+done; done
+[ -n "$env" ] || { say "no session environment found"; env="export DISPLAY=:0"; }
+# (the arguments stay as they are: no shell in between)
+asuser() {
+    ( eval "$env"; exec python3 -c 'import os, sys
+os.initgroups("syluxium", 1000); os.setgid(1000); os.setuid(1000)
+os.execvp(sys.argv[1], sys.argv[1:])' "$@" ) < /dev/null >> $LOG 2>&1
+}
+place() { for i in $(seq 1 30); do w=$(xdotool search --onlyvisible --name "$1" 2>/dev/null | head -1); [ -n "$w" ] && xdotool windowmove "$w" "$2" "$3" && return 0; sleep 0.5; done; say "no window '$1'"; return 1; }
+
+phase=${ACCTEST_PHASES:-"notify apps snip netconn mdns menu store craft"}
+for p in $phase; do case $p in
+notify)
+    say "env: $(echo "$env" | tr '\n' ' ' | cut -c1-300)"
+    pkill -f syluxium-notifyd; sleep 1
+    asuser env SYLUXIUM_NOTIFYD_DEBUG=1 syluxium-notifyd &
+    sleep 3
+    asuser notify-send -a Firefox -i firefox "Download complete" "syluxium.iso (2.1 GB) was saved to Downloads." &
+    sleep 2
+    asuser notify-send -u critical -a "Battery" "Battery low" "'<b>8%</b> remaining.' Plug in the charger." &
+    sleep 1
+    asuser notify-send "Plain bubble" "Text with & and < characters" &
+    sleep 3
+    pgrep -f syluxium-notifyd > /dev/null && say "notifyd running" || say "notifyd NOT running"
+    shot notify
+    asuser dbus-send --session --print-reply --dest=org.freedesktop.Notifications /org/freedesktop/Notifications org.freedesktop.Notifications.GetServerInformation
+    say "notify log: $(grep -v -i 'dcop\|ICE\|^-*$\|authentication' $LOG | tail -12 | tr '\n' '|')"
+    sleep 8 ;;
+apps)
+    asuser kcalc & asuser kolourpaint & asuser kcharselect & asuser abiword &
+    place "KCalc" 20 30; place "KolourPaint" 360 30; place "KCharSelect" 20 400; place "AbiWord" 600 300
+    sleep 8
+    for prog in kcalc kolourpaint kcharselect abiword; do pidof $prog > /dev/null && say "$prog running" || say "$prog NOT running"; done
+    shot apps
+    pkill kcalc; pkill kolourpaint; pkill kcharselect; pkill abiword; sleep 2 ;;
+snip)
+    asuser ksnapshot &
+    sleep 10
+    pidof ksnapshot > /dev/null && say "ksnapshot running" || say "ksnapshot NOT running"
+    shot snip
+    pkill ksnapshot; sleep 1 ;;
+netconn)
+    ip -4 -o addr > /dev/console
+    asuser syluxium-netconn &
+    place "Network Connections" 100 60
+    sleep 5
+    shot netconn
+    say "static: $(syluxium-netconfig static eth0 10.0.2.50/24 10.0.2.2 10.0.2.3 2>&1; echo rc=$?)"
+    say "addr: $(ip -4 -o addr show dev eth0 | awk '{print $4}') route: $(ip route | grep default) dns: $(grep nameserver /etc/resolv.conf | tr '\n' ' ')"
+    ping -c 1 -W 3 10.0.2.2 > /dev/null 2>&1 && say "ping gateway ok (static)" || say "ping gateway FAILED (static)"
+    sleep 4
+    shot netconn-static
+    say "disable: $(syluxium-netconfig disable eth0 2>&1; echo rc=$?) flags: $(ip link show eth0 | head -1)"
+    sleep 4
+    say "enable: $(syluxium-netconfig enable eth0 2>&1; echo rc=$?) flags: $(ip link show eth0 | head -1)"
+    say "dhcp: $(syluxium-netconfig dhcp eth0 2>&1; echo rc=$?)"
+    say "addr: $(ip -4 -o addr show dev eth0 | awk '{print $4}') route: $(ip route | grep default) dns: $(grep nameserver /etc/resolv.conf | tr '\n' ' ') resolv: $(ls -l /etc/resolv.conf | awk '{print $NF}')"
+    ping -c 1 -W 3 10.0.2.2 > /dev/null 2>&1 && say "ping gateway ok (dhcp)" || say "ping gateway FAILED (dhcp)"
+    sleep 4
+    pkill -f syluxium-netconn ;;
+store)
+    say "apt-get update: $(apt-get update 2>&1 | tail -1)"
+    asuser syluxium-appstore --search craft &
+    place "Syluxium App Store" 40 30
+    sleep 25
+    shot store
+    pkill -f syluxium-appstore ;;
+craft)
+    say "release: $(python3 -c "
+import importlib.machinery as m
+s = m.SourceFileLoader('store', '/usr/local/bin/syluxium-appstore').load_module()
+r = s.optional_release('anicraft')
+print(r[0], r[1], r[2], s.download(r[1], '/tmp/anicraft.deb', r[2], r[3], lambda f: None))" 2>&1 | tail -1)"
+    say "install: $(DEBIAN_FRONTEND=noninteractive apt-get install -y /tmp/anicraft.deb mesa-vulkan-drivers libvulkan1 2>&1 | tail -2 | tr '\n' ' ')"
+    asuser anicraft &
+    sleep 30
+    pgrep -x anicraft > /dev/null && say "anicraft running" || say "anicraft NOT running: $(tail -5 $LOG | tr '\n' '|')"
+    shot craft
+    pkill -x anicraft ;;
+mdns)
+    # Multicast DNS (printer discovery): a group member should get its own
+    # datagrams back (IP_MULTICAST_LOOP), as on Linux.
+    for fam in 4 6; do
+        say "multicast loop IPv$fam: $(python3 - $fam <<'EOF' 2>&1 | tail -1
+import socket, struct, sys
+v6 = sys.argv[1] == "6"
+fam = socket.AF_INET6 if v6 else socket.AF_INET
+grp = "ff02::fb" if v6 else "224.0.0.251"
+r = socket.socket(fam, socket.SOCK_DGRAM)
+r.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+r.bind(("", 5354))
+idx = socket.if_nametoindex("eth0")
+if v6:
+    r.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_JOIN_GROUP, socket.inet_pton(fam, grp) + struct.pack("@I", idx))
+else:
+    r.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, socket.inet_aton(grp) + socket.inet_aton("0.0.0.0"))
+r.settimeout(3)
+s = socket.socket(fam, socket.SOCK_DGRAM)
+try:
+    if v6:
+        s.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_MULTICAST_IF, idx)
+        s.sendto(b"hello", (grp, 5354, 0, idx))
+    else:
+        s.sendto(b"hello", (grp, 5354))
+    print("received", r.recvfrom(100))
+except Exception as e:
+    print("FAILED:", e)
+EOF
+)"
+    done
+    mkdir -p /run/avahi-daemon && chown avahi:avahi /run/avahi-daemon 2>/dev/null
+    avahi-daemon --no-chroot --debug > /tmp/avahi.log 2>&1 &
+    sleep 6
+    say "avahi: $(grep -E 'Joining|joining|Server startup|failed|error|Fatal|cannot|Failed' /tmp/avahi.log | head -8 | tr '\n' '|')"
+    say "avahi-browse: $(timeout 8 avahi-browse -a -t -p 2>&1 | head -5 | tr '\n' '|')"
+    say "avahi-resolve: $(timeout 5 avahi-resolve -n syluxium.local 2>&1 | tr '\n' '|')"
+    cups-browsed > /tmp/cups-browsed.log 2>&1 &
+    sleep 4
+    pgrep -x cups-browsed > /dev/null && say "cups-browsed running" || say "cups-browsed NOT running: $(tail -3 /tmp/cups-browsed.log | tr '\n' '|')"
+    say "lpinfo dnssd: $(timeout 20 lpinfo --include-schemes dnssd -v 2>&1 | head -3 | tr '\n' '|')"
+    say "avahi interfaces: $(grep -i "interface\|group\|socket\|netlink" /tmp/avahi.log | grep -v dbus-protocol | head -12 | tr "\n" "|")"
+    cp /tmp/avahi.log /tmp/cups-browsed.log /root/ 2>/dev/null ;;
+menu)
+    xdotool key alt+F1
+    sleep 2
+    xdotool key Down Down Down Down Right
+    sleep 1
+    xdotool key Right
+    sleep 2
+    shot menu
+    xdotool key Escape Escape Escape ;;
+esac; done
+say "log: $(tr '\n' '|' < $LOG | tail -c 1500)"
+kill $beat
+say "done"

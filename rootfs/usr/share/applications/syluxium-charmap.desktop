@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Character Map
+GenericName=Character Map
+Comment=Find special characters and copy them into documents
+Exec=kcharselect
+Icon=syluxium-charmap
+Terminal=false
+Categories=X-Syluxium-Accessories;
+Keywords=symbol;unicode;character;

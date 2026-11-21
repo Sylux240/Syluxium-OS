@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Snipping Tool
+GenericName=Screenshot
+Comment=Take a picture of a region, a window or the whole screen; save or copy it
+Exec=ksnapshot
+Icon=syluxium-snip
+Terminal=false
+Categories=X-Syluxium-Accessories;
+Keywords=screenshot;capture;snip;

@@ -1,0 +1,28 @@
+#!/bin/bash
+# The Syluxium shell (Wayland, preview): seatd hands the display and input
+# devices to Wayfire, which runs as the desktop user with the Dusk panel and
+# wallpaper (/etc/syluxium-shell/wayfire.ini). X11 programs run through
+# Xwayland. Started by the "Syluxium (new shell, preview)" boot entry.
+U=${1:-$(awk -F= '/^DefaultUser=/ {print $2}' /etc/trinity/tdm/tdmrc 2>/dev/null)}
+[ -n "$U" ] || U=syluxium
+UID_=$(id -u "$U") || exit 1
+RT=/run/user/$UID_
+mkdir -p "$RT" && chown "$U" "$RT" && chmod 700 "$RT"
+pgrep -x seatd > /dev/null || { seatd -g video > /var/log/seatd.log 2>&1 & sleep 1; }
+chmod 666 /run/seatd.sock 2>/dev/null
+LOG=/var/log/syluxium-shell.log
+# On the firmware framebuffer (simpledrm: no GPU driver) Wayfire draws in
+# software, and partial redraws leave parts of the screen stale there:
+# redraw everything each frame until that is fixed.
+CONF=/etc/syluxium-shell/wayfire.ini
+if grep -qs "simple-framebuffer" /sys/class/drm/card0/device/uevent; then
+    SYLUXIUM_WAYFIRE_ARGS="--damage-rerender $SYLUXIUM_WAYFIRE_ARGS"
+else
+    # A GPU driver: the glass effects (blur behind the panel and menus).
+    sed 's/^plugins = autostart /plugins = autostart blur /' "$CONF" > "$RT/wayfire.ini"
+    chown "$U" "$RT/wayfire.ini"
+    CONF=$RT/wayfire.ini
+fi
+exec su "$U" -s /bin/bash -c "export XDG_RUNTIME_DIR=$RT XDG_SESSION_TYPE=wayland LIBSEAT_BACKEND=seatd \
+    WLR_RENDERER_ALLOW_SOFTWARE=1 GDK_BACKEND=wayland,x11 MOZ_ENABLE_WAYLAND=1 $SYLUXIUM_SHELL_ENV; \
+    cd ~; exec dbus-run-session wayfire $SYLUXIUM_WAYFIRE_ARGS -c $CONF" > $LOG 2>&1

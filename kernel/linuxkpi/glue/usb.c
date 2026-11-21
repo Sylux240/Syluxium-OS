@@ -645,6 +645,12 @@ static struct usb_device* udev_for(void* sylux, const u8* config, unsigned int c
 	if (!udev)
 		return NULL;
 	udev->lkpi_sylux = sylux;
+	/* Drivers look at the parent hub's IDs (r8152: Lenovo docks); a
+	 * blank one answers "not a known hub". */
+	{
+		static struct usb_device blank_hub;
+		udev->parent = &blank_hub;
+	}
 	r = lkpi_sylux_usb_control(sylux, USB_DIR_IN, USB_REQ_GET_DESCRIPTOR, USB_DT_DEVICE << 8, 0, &udev->descriptor,
 				   sizeof(udev->descriptor));
 	if (r < (long)sizeof(udev->descriptor)) {

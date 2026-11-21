@@ -1,0 +1,16 @@
+<!DOCTYPE Menu PUBLIC "-//freedesktop//DTD Menu 1.0//EN"
+  "http://www.freedesktop.org/standards/menu-spec/1.0/menu.dtd">
+
+<!-- Start menu: "Accessories" with the small everyday programs
+     (Syluxium's syluxium-*.desktop entries for them; the programs' own
+     menu entries are hidden by tools/debrand-tde.py). -->
+<Menu>
+	<Name>Applications</Name>
+	<Menu>
+		<Name>Accessories</Name>
+		<Directory>syluxium-accessories.directory</Directory>
+		<Include>
+			<Category>X-Syluxium-Accessories</Category>
+		</Include>
+	</Menu>
+</Menu>

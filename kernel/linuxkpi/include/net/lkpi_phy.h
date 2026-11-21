@@ -6,6 +6,7 @@
 #include <linux/lkpi_all.h>
 #include <linux/device/bus.h>
 #include <linux/devres.h>
+#include <linux/of.h>
 #include <linux/ethtool.h>
 #include <linux/linkmode.h>
 #include <linux/netdevice.h>
@@ -34,7 +35,6 @@ struct device_node {
 };
 #define FWNODE_FLAG_NEEDS_CHILD_BOUND_ON_ADD (1 << 2)
 #define of_fwnode_handle(np) ((np) ? &(np)->fwnode : NULL)
-static inline struct device_node *of_get_child_by_name(const struct device_node *np, const char *name) { return NULL; }
 #define for_each_available_child_of_node_scoped(parent, child) \
     for (struct device_node *child = NULL; child != NULL;)
 static inline struct device *bus_find_device_by_fwnode(const struct bus_type *bus, const struct fwnode_handle *f)
@@ -74,7 +74,6 @@ struct led_init_data {
 #define SIOCSHWTSTAMP 0x89b0
 #define SIOCGHWTSTAMP 0x89b1
 #endif
-static inline bool of_property_read_bool(const struct device_node *np, const char *name) { return false; }
 static inline struct device_node *of_get_parent(const struct device_node *np) { return NULL; }
 static inline bool of_node_name_eq(const struct device_node *np, const char *name) { return false; }
 
