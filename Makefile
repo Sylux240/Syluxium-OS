@@ -66,6 +66,8 @@ DEBIAN_PKGS  := bash busybox hello ncurses-base pciutils pci.ids netbase alsa-ut
 DEBIAN_PKGS  += 7zip
 # libinput (Wayland shell input) and its "libinput list-devices / debug-events" tools (~4 MB)
 DEBIAN_PKGS  += libinput-tools
+# Bluetooth: BlueZ (bluetoothd, bluetoothctl, btmgmt)
+DEBIAN_PKGS  += bluez
 # Broadcom b43 Wi-Fi (iMacs, older MacBooks): its firmware may not be shipped;
 # syluxium-b43-firmware fetches Broadcom's driver and cuts it out with this.
 DEBIAN_CONTRIB_REPO := http://deb.debian.org/debian|$(DEBIAN_SUITE)|contrib

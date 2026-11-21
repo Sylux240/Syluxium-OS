@@ -16,6 +16,8 @@ import sys
 import time
 
 ADDR = bytes([0x01, 0x02, 0x03, 0x04, 0xAA, 0x00])  # 00:AA:04:03:02:01 (little endian)
+PEER = bytes([0x66, 0x55, 0x44, 0x33, 0xBB, 0x00])  # a device found by inquiry: 00:BB:33:44:55:66
+PEER_NAME = b"Syluxium Test Mouse"
 
 
 def reply(opcode, params):
@@ -34,7 +36,7 @@ def reply(opcode, params):
         return b"\x00" + b"Syluxium virtual controller".ljust(248, b"\x00")
     # Exact lengths where the kernel checks them: Reset, Read Class of
     # Device, Read Voice Setting, Read Number of Supported IAC.
-    exact = {0x0C03: 1, 0x0C23: 4, 0x0C25: 3, 0x0C38: 2}
+    exact = {0x0C03: 1, 0x0C23: 4, 0x0C25: 3, 0x0C38: 2, 0x0C13: 1, 0x0C1C: 1, 0x0C1A: 1, 0x0C24: 1, 0x0C56: 1, 0x0C45: 1}
     if opcode in exact:
         return bytes(exact[opcode])
     return b"\x00" + bytes(64)
@@ -56,10 +58,21 @@ def serve(seconds):
             continue
         opcode = struct.unpack("<H", pkt[1:3])[0]
         params = pkt[4:4 + pkt[3]]
+        commands += 1
+        if opcode in (0x0401, 0x0419):  # Inquiry, Remote Name Request: Command Status first
+            os.write(fd, bytes([0x04, 0x0F, 4, 0, 1]) + struct.pack("<H", opcode))
+            if opcode == 0x0401:
+                # One device nearby: a mouse (class 0x002580), then the inquiry ends.
+                res = bytes([1]) + PEER + bytes([1, 0]) + bytes([0x80, 0x25, 0x00]) + struct.pack("<Hb", 0, -50)
+                os.write(fd, bytes([0x04, 0x22, len(res)]) + res)
+                os.write(fd, bytes([0x04, 0x01, 1, 0]))
+            else:
+                ev = b"\x00" + params[:6] + PEER_NAME.ljust(248, b"\x00")
+                os.write(fd, bytes([0x04, 0x07, len(ev)]) + ev)
+            continue
         rp = reply(opcode, params)
         body = struct.pack("<BH", 1, opcode) + rp
         os.write(fd, bytes([0x04, 0x0E, len(body)]) + body)
-        commands += 1
     print("vhci: answered", commands, "commands", flush=True)
 
 
