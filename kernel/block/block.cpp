@@ -438,8 +438,30 @@ void next_sd_name(char* out, usize size) {
     snprintf(out, size, "sdz");
 }
 
+// /dev node paths are removed after the block cache lock is released:
+// resolving "/dev/..." reads the root file system, which may live on a disk
+// (root=), i.e. go through the block cache and its lock again.
+struct NodePaths {
+    char path[16][32];
+    usize n = 0;
+    Device* parts[16];
+    usize nparts = 0;
+    void add(const char* name) {
+        if (n < 16)
+            snprintf(path[n++], sizeof(path[0]), "/dev/%s", name);
+    }
+    void remove_all() {
+        for (usize i = 0; i < n; i++)
+            vfs::remove_node(path[i]);
+        for (usize i = 0; i < nparts; i++)
+            unpublish_partition(parts[i]);
+    }
+};
+
 void unregister_disk(Device* disk) {
     unpublish_sysfs(disk);
+    NodePaths gone;
+    {
     LockGuard guard(g_cache_lock);
     for (CacheBlock* b = g_lru.front(); b;) {
         CacheBlock* next = g_lru.next_of(b);
@@ -451,15 +473,15 @@ void unregister_disk(Device* disk) {
     for (usize i = 0; i < g_device_count; i++) {
         Device* d = g_devices[i];
         if (d == disk || d->parent == disk) {
-            char path[32];
-            snprintf(path, sizeof(path), "/dev/%s", d->name);
-            vfs::remove_node(path);
+            gone.add(d->name);
             klog::info("Disk %s removed", d->name);
             continue;
         }
         g_devices[kept++] = d;
     }
     g_device_count = kept;
+    }
+    gone.remove_all();
     // The letter may be handed out again (the next stick becomes sdb again).
     if (disk->name[0] == 's' && disk->name[1] == 'd' && disk->name[2] >= 'a' && disk->name[2] <= 'z' && !disk->name[3])
         __atomic_and_fetch(&g_sd_taken, ~(1u << (disk->name[2] - 'a')), __ATOMIC_RELAXED);
@@ -467,6 +489,7 @@ void unregister_disk(Device* disk) {
 
 long rescan_partitions(Device* disk) {
     sync_device(disk);
+    NodePaths gone;
     {
         LockGuard guard(g_cache_lock);
         // Forget the old partitions: their cached blocks and /dev nodes. (The
@@ -483,10 +506,9 @@ long rescan_partitions(Device* disk) {
         for (usize i = 0; i < g_device_count; i++) {
             Device* d = g_devices[i];
             if (d->parent == disk) {
-                char path[32];
-                snprintf(path, sizeof(path), "/dev/%s", d->name);
-                vfs::remove_node(path);
-                unpublish_partition(d);
+                gone.add(d->name);
+                if (gone.nparts < 16)
+                    gone.parts[gone.nparts++] = d;
                 continue;
             }
             g_devices[kept++] = d;
@@ -500,6 +522,7 @@ long rescan_partitions(Device* disk) {
             b = next;
         }
     }
+    gone.remove_all();
     scan_partitions(disk);
     return 0;
 }
