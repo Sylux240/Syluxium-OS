@@ -60,7 +60,7 @@ TRINITY_PKGS := dbus tdebase-trinity-bin twin-trinity kicker-trinity kdesktop-tr
                 tde-style-qtcurve-trinity twin-style-dekorator-trinity ksplash-trinity ksysguard-trinity \
                 kmag-trinity kvkbd-trinity ksystemlog-trinity kate-trinity tdeprint-trinity
 DEBIAN_PKGS  := bash busybox hello ncurses-base pciutils pci.ids netbase alsa-utils xserver-xorg-core xserver-xorg-video-fbdev xserver-xorg-input-evdev xinit x11-xserver-utils x11-xkb-utils xterm twm xfonts-base sudo libpam-runtime libpam-modules login fdisk e2fsprogs dosfstools xdotool firefox-esr \
-                wine wine64 iw wpasupplicant wireless-regdb hostapd fonts-wine xcape gparted python3 python3-gi python3-gi-cairo fonts-inter gir1.2-gtk-3.0 librsvg2-common cups cups-bsd dpkg apt debconf libc-bin coreutils trinity-keyring ca-certificates \
+                wine wine64 iw wpasupplicant wireless-regdb hostapd fonts-wine xcape gparted python3 python3-gi python3-gi-cairo fonts-inter wayfire wayfire-plugin-winshadows xwayland seatd gir1.2-gtklayershell-0.1 swaybg gir1.2-gtk-3.0 librsvg2-common cups cups-bsd dpkg apt debconf libc-bin coreutils trinity-keyring ca-certificates \
                 libgl1-mesa-dri libglx-mesa0 libegl-mesa0 mesa-utils
 # Right-click "Extract Here" for .7z (zip and tar are handled without it).
 DEBIAN_PKGS  += 7zip
@@ -463,6 +463,8 @@ $(INITRAMFS): $(KERNEL) $(PICKER) $(DEBIAN_CONFIGURED) tools/merge-accounts.py t
 	@# /var/run and /var/lock point into /run, as on Debian (programs look for
 	@# their sockets and pid files there: wpa_cli, dbus, ...).
 	@rm -rf $(ROOTFS)/var/run $(ROOTFS)/var/lock && ln -s /run $(ROOTFS)/var/run && ln -s /run/lock $(ROOTFS)/var/lock
+	@# DNS servers: the kernel's /run/resolv.conf (filled in by DHCP).
+	@rm -f $(ROOTFS)/etc/resolv.conf && ln -s /run/resolv.conf $(ROOTFS)/etc/resolv.conf
 	@for f in $(FIRMWARE_FILES); do \
 	    src=$$(ls $(FIRMWARE_ROOT)/usr/lib/firmware/$$f $(FIRMWARE_ROOT)/lib/firmware/$$f 2>/dev/null | head -1); \
 	    [ -n "$$src" ] || { echo "  warning: firmware $$f not found"; continue; }; \
