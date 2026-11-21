@@ -455,9 +455,29 @@ long sys_lseek(SYSCALL_ARGS) {
 
 long sys_ioctl(SYSCALL_ARGS) {
     SYSCALL_UNUSED;
-    FileRef f(proc::current(), static_cast<long>(a0));
+    Process* p = proc::current();
+    FileRef f(p, static_cast<long>(a0));
     if (!f)
         return -err::BADF;
+    // The generic ones (Python sets non-blocking mode with FIONBIO, not
+    // fcntl). Sockets keep their own FIONBIO for now: making it take effect
+    // there stalled the desktop session's start.
+    bool socket = (f->inode->mode & vfs::S_IFMT) == vfs::S_IFSOCK;
+    switch (static_cast<u32>(a1)) {
+    case 0x5421: { // FIONBIO
+        if (socket)
+            break;
+        i32 on;
+        if (long r = uaccess::get(&on, reinterpret_cast<const i32*>(a2)); r < 0)
+            return r;
+        f->flags = on ? (f->flags | O_NONBLOCK) : (f->flags & ~static_cast<u32>(O_NONBLOCK));
+        return 0;
+    }
+    case 0x5451: // FIOCLEX
+    case 0x5450: // FIONCLEX
+        p->cloexec[static_cast<int>(a0)] = static_cast<u32>(a1) == 0x5451;
+        return 0;
+    }
     return f->inode->ioctl_file(f.get(), a1, a2); // checks the argument buffer (see vfs::Inode)
 }
 
