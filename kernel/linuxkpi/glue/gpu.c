@@ -109,14 +109,23 @@ int __aperture_remove_legacy_vga_devices(struct pci_dev *pdev)
 	return 0; /* no vgacon / vga16fb */
 }
 
-/* No other VGA / display controller in the machine (an Intel IGD next to a
- * discrete card must not take the discrete card's framebuffer). */
-static bool only_display_controller(struct pci_dev *pdev)
+/* The firmware framebuffer isn't in a BAR of any other display controller
+ * (an Intel IGD next to a discrete card must not take the discrete card's
+ * framebuffer; on Optimus laptops the IGD drives the panel and the NVIDIA
+ * chip has no outputs, so the IGD keeps the right to take it). */
+static bool fb_not_on_other_gpu(struct pci_dev *pdev)
 {
 	struct pci_dev *other = NULL;
-	while ((other = pci_get_device(PCI_ANY_ID, PCI_ANY_ID, other)))
-		if (other != pdev && (other->class >> 16) == PCI_BASE_CLASS_DISPLAY)
-			return false;
+	while ((other = pci_get_device(PCI_ANY_ID, PCI_ANY_ID, other))) {
+		if (other == pdev || (other->class >> 16) != PCI_BASE_CLASS_DISPLAY)
+			continue;
+		for (int bar = 0; bar < PCI_STD_NUM_BARS; bar++) {
+			resource_size_t start = pci_resource_start(other, bar), len = pci_resource_len(other, bar);
+			if ((pci_resource_flags(other, bar) & IORESOURCE_MEM) && len && start < boot_fb.base + boot_fb.size &&
+			    boot_fb.base < start + len)
+				return false;
+		}
+	}
 	return true;
 }
 
@@ -138,7 +147,7 @@ int aperture_remove_conflicting_pci_devices(struct pci_dev *pdev, const char *na
 	 * device; with one display controller that is this one. On Intel the
 	 * GOP framebuffer can sit in stolen memory outside every BAR. */
 	if (!primary && boot_fb.known && (pdev->class >> 8) == PCI_CLASS_DISPLAY_VGA &&
-	    pdev->vendor == PCI_VENDOR_ID_INTEL && only_display_controller(pdev))
+	    pdev->vendor == PCI_VENDOR_ID_INTEL && fb_not_on_other_gpu(pdev))
 		primary = true;
 	if (primary)
 		remove_boot_fb(name);
