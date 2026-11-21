@@ -153,6 +153,8 @@ def draw(name, p):
         p.rect(12.5, 13, 21.5, 20, 1.5)
         p.line((7, 11), (7, 16.5), (12.5, 16.5))
         p.line((17, 13), (17, 7.5), (11.5, 7.5))
+    elif name in ("syluxium-bluetooth", "bluetooth", "preferences-system-bluetooth"):
+        p.line((6.5, 7.5), (17, 16.5), (12, 21), (12, 3), (17, 7.5), (6.5, 16.5))
     elif name in ("syluxium-notification", "preferences-desktop-notification"):
         p.line((6, 17), (6, 11))
         p.arc(12, 11, 6, 6, 180, 360)
@@ -176,6 +178,7 @@ ICONS = {
     "syluxium-wordpad": GOLD, "abiword": GOLD,
     "syluxium-network-connections": CYAN, "network-wired": CYAN,
     "syluxium-notification": GOLD, "preferences-desktop-notification": GOLD,
+    "syluxium-bluetooth": CYAN, "bluetooth": CYAN, "preferences-system-bluetooth": CYAN,
 }
 COLOR_OVERRIDE = {"folder_wordprocessing": CYAN}  # documents folder: cyan like the mockup's folders
 

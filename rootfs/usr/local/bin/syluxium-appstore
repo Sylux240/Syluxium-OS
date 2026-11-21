@@ -817,10 +817,13 @@ class Store:
         ev = Gtk.EventBox()
         css = Gtk.CssProvider()
         css.load_from_data(b"""
-            .store-banner { background-image: linear-gradient(to right, #0a246a, #3a6ea5); }
-            .store-banner label { color: white; }
-            .store-tile { background-color: #ffffff; border: 1px solid #c8c4b8; border-radius: 4px; }
-            .store-group { color: #1c3f94; }
+            .store-banner { background-image: linear-gradient(to right, #141a3a, #1d2552 60%, #2a2f6a);
+                            border-bottom: 1px solid rgba(111, 227, 240, 0.45); }
+            .store-banner label { color: #eef2ff; }
+            .store-tile { background-color: rgba(29, 37, 82, 0.85); background-image: none;
+                          border: 1px solid #2e3870; border-radius: 12px; color: #eef2ff; }
+            .store-tile:hover { border-color: rgba(111, 227, 240, 0.7); background-color: #252d5c; }
+            .store-group { color: #6fe3f0; }
         """)
         Gtk.StyleContext.add_provider_for_screen(self.win.get_screen(), css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
         ev.get_style_context().add_class("store-banner")

@@ -321,6 +321,7 @@ struct task_struct {
     struct task_struct* group_leader; /* the process's task (binder: one per process) */
     int lkpi_usage;        /* get/put_task_struct; a process's task is freed at 0 */
     void* lkpi_process;    /* a process's task: its proc::Process (NULL once it's gone) */
+    int lkpi_kernel_uaccess; /* appended: >0 while "user" pointers are kernel buffers (socket bridge) */
 };
 struct task_struct* lkpi_current(void);
 

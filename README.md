@@ -166,11 +166,13 @@ Legend: ✅ done · 🟡 partly done · ⬜ to do
 - ✅ USB drives mounted automatically, AutoPlay bubble (open folder / play media)
 
 **Networking**
-- ✅ TCP/IP stack: Ethernet, ARP, IPv4 + IPv6, ICMP, UDP, TCP (window scaling), DHCP, SLAAC,
-     fragments. Drivers: e1000/e1000e, virtio-net, RTL8139 (Linux 8139cp), r8169 (untested)
-- ✅ Sockets API: AF_INET/AF_INET6, AF_UNIX (fd passing), AF_NETLINK, AF_PACKET; epoll, eventfd,
-     timerfd, signalfd, inotify
-- ✅ Netlink: rtnetlink (ip, getifaddrs), generic netlink with nl80211 (Wi-Fi)
+- ✅ TCP/IP stack: Ethernet, ARP, IPv4 + IPv6, ICMP, UDP, TCP (window scaling), DHCP (switchable per
+     adapter), SLAAC, fragments, IPv4/IPv6 multicast (group membership, IGMP, loopback).
+     Drivers: e1000/e1000e, virtio-net, RTL8139 (Linux 8139cp), r8169 (untested)
+- ✅ Sockets API: AF_INET/AF_INET6 (with IP_PKTINFO/TTL ancillary data), raw IPv4, AF_UNIX (fd
+     passing), AF_NETLINK, AF_PACKET; epoll, eventfd, timerfd, signalfd, inotify
+- ✅ Netlink: rtnetlink (ip, getifaddrs, link/address events with credentials), generic netlink
+     with nl80211 (Wi-Fi); /sys/class/net and ethtool (link speed)
 
 **Linux compatibility**
 - ✅ ELF loader, dynamic linking, Debian userland running unmodified
@@ -198,11 +200,10 @@ Legend: ✅ done · 🟡 partly done · ⬜ to do
      (KCharSelect), Snipping Tool (KSnapshot: region, window or full screen; save or copy), Dusk icons
 - ✅ Magnifier, On-Screen Keyboard (KMag, KVkbd)
 - 🟡 Networking UI: Wi-Fi chooser by the clock; Network Connections (every adapter's status, IPv4/IPv6
-     addresses, gateway, DNS, MAC, Wi-Fi speed; DHCP or static address; enable/disable); firewall
+     addresses, gateway, DNS, MAC, link speed; DHCP or static address; enable/disable); firewall
      (needs a packet filter in the kernel) and remote desktop to do
-- 🟡 Printing: CUPS print service + Printers (network printers by address); automatic discovery
-     (avahi-daemon + cups-browsed, installed) waits for IPv4/IPv6 multicast and netlink credentials
-     in the kernel
+- ✅ Printing: CUPS print service + Printers; network printers found automatically (mDNS / DNS-SD:
+     avahi-daemon, cups-browsed adds IPP Everywhere printers to CUPS)
 - ⬜ Programming tools: IDE (editor, build, debugger front end)
 - ✅ Image Writer: .iso/.img to USB sticks and SD cards with a read-back check
 - ✅ Firefox (Debian firefox-esr) preinstalled and the default browser
@@ -226,4 +227,4 @@ Legend: ✅ done · 🟡 partly done · ⬜ to do
 - ✅ Updates (Syluxium Update: Debian and Trinity through apt) and a Recovery boot entry
      (repair disks and packages, reset settings or passwords, root prompt)
 
-Tally: 47 done · 13 partly done · 2 to do.
+Tally: 48 done · 12 partly done · 2 to do.

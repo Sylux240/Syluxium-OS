@@ -19,6 +19,9 @@ static inline void poll_wait(struct file *f, wait_queue_head_t *wq, poll_table *
 #define EPOLLRDNORM 0x00000040
 #define EPOLLRDBAND 0x00000080
 #define EPOLLWRNORM 0x00000100
+#ifndef EPOLLWRBAND
+#define EPOLLWRBAND 0x00000200
+#endif
 #define EPOLLRDHUP 0x00002000
 #define POLLIN EPOLLIN
 #define POLLOUT EPOLLOUT

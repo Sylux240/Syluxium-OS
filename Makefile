@@ -31,20 +31,22 @@ ROOTFS  := $(BUILD)/rootfs
 
 # Syluxium's own test programs: ordinary Linux binaries built with the host toolchain.
 USER_CC     := gcc
-# Linked against Debian's static glibc (baseline x86-64, AVX2 chosen at run
-# time), not the build host's: a distribution built for x86-64-v3 (CachyOS)
+# Linked against Debian's static glibc and libgcc (baseline x86-64, AVX2
+# chosen at run time), not the build host's: a distribution built for x86-64-v3 (CachyOS)
 # ships a libc.a whose startup code uses AVX2, so the programs died with
 # SIGILL on pre-Haswell CPUs (iMac13,1).
 LIBC_SYSROOT   := $(CURDIR)/deps/libc-sysroot
 LIBC_SYSROOT32 := $(CURDIR)/deps/libc-sysroot32
 USER_CFLAGS := --sysroot=$(LIBC_SYSROOT) -isystem $(LIBC_SYSROOT)/usr/include/x86_64-linux-gnu \
                -B$(LIBC_SYSROOT)/usr/lib/x86_64-linux-gnu/ -L$(LIBC_SYSROOT)/usr/lib/x86_64-linux-gnu \
+               -B$(LIBC_SYSROOT)/usr/lib/gcc/x86_64-linux-gnu/14/ -L$(LIBC_SYSROOT)/usr/lib/gcc/x86_64-linux-gnu/14 \
                -static -O2 -Wall
 TESTS_DIR   := $(BUILD)/tests
 USER_PROGS  := $(patsubst userspace/%.c,$(TESTS_DIR)/%,$(wildcard userspace/*.c))
 # 32-bit (i386) test programs for the compat layer (host gcc multilib, static).
 USER32_CFLAGS := --sysroot=$(LIBC_SYSROOT32) -isystem $(LIBC_SYSROOT32)/usr/include/i386-linux-gnu \
                  -B$(LIBC_SYSROOT32)/usr/lib/i386-linux-gnu/ -L$(LIBC_SYSROOT32)/usr/lib/i386-linux-gnu \
+                 -B$(LIBC_SYSROOT32)/usr/lib/gcc/i686-linux-gnu/14/ -L$(LIBC_SYSROOT32)/usr/lib/gcc/i686-linux-gnu/14 \
                  -m32 -static -O2 -Wall -pthread
 USER32_PROGS  := $(patsubst userspace/ia32/%.c,$(TESTS_DIR)/%,$(wildcard userspace/ia32/*.c))
 # Windows test programs for Wine (x86-64 and i386 PE), built with clang +
@@ -70,8 +72,11 @@ WAYDROID_REPO := https://repo.waydro.id|trixie|main
 DEBIAN_PKGS  += waydroid python3-gbinder lxc weston
 # libinput (Wayland shell input) and its "libinput list-devices / debug-events" tools (~4 MB)
 DEBIAN_PKGS  += libinput-tools
-# Broadcom b43 Wi-Fi (iMacs, older MacBooks): its firmware may not be shipped;
-# syluxium-b43-firmware fetches Broadcom's driver and cuts it out with this.
+# Bluetooth: BlueZ (bluetoothd, bluetoothctl, btmgmt)
+DEBIAN_PKGS  += bluez
+# Broadcom b43 Wi-Fi (iMacs, older MacBooks): tools/b43-firmware.sh cuts its
+# firmware out of Broadcom's driver at build time (syluxium-b43-firmware can
+# still do it on the machine).
 DEBIAN_CONTRIB_REPO := http://deb.debian.org/debian|$(DEBIAN_SUITE)|contrib
 DEBIAN_PKGS  += b43-fwcutter
 # Accessories: WordPad (AbiWord, reads and writes .rtf/.doc/.odt), notify-send;
@@ -250,6 +255,9 @@ $(OBJDIR)/kernel/linuxkpi/drivers/bcma/%: LKPI_DRV_CFLAGS = -include net/lkpi_bc
 $(OBJDIR)/kernel/linuxkpi/drivers/net/wireless/broadcom/%: LKPI_DRV_CFLAGS = -include net/lkpi_bcma.h
 $(OBJDIR)/kernel/linuxkpi/drivers/net/wireless/realtek/rtw88/%: LKPI_DRV_CFLAGS = -include net/lkpi_netcompat.h
 $(OBJDIR)/kernel/linuxkpi/drivers/net/wireless/ath/%: LKPI_DRV_CFLAGS = -include net/lkpi_netcompat.h -Ikernel/linuxkpi/drivers/net/wireless/ath
+# Bluetooth core
+$(OBJDIR)/kernel/linuxkpi/net/bluetooth/%: LKPI_DRV_CFLAGS = -include net/lkpi_bt.h
+$(OBJDIR)/kernel/linuxkpi/drivers/bluetooth/%: LKPI_DRV_CFLAGS = -include net/lkpi_bt.h -fshort-wchar
 LKPI_MT76 := kernel/linuxkpi/drivers/net/wireless/mediatek/mt76
 $(OBJDIR)/$(LKPI_MT76)/%: LKPI_DRV_CFLAGS = -include net/lkpi_netcompat.h -I$(LKPI_MT76) -DCONFIG_PM=1
 LKPI_BRCM := kernel/linuxkpi/drivers/net/wireless/broadcom/brcm80211
@@ -338,12 +346,12 @@ $(KERNEL): $(OBJS) kernel/linker.ld
 # ---------------------------------------------------------------------------
 $(LIBC_SYSROOT)/.done:
 	@echo "  FETCH Debian libc6-dev (amd64) for the test programs"
-	@python3 tools/debian-fetch.py --out $(LIBC_SYSROOT) --cache deps/debian --no-deps libc6-dev libc6 linux-libc-dev >/dev/null
+	@python3 tools/debian-fetch.py --out $(LIBC_SYSROOT) --cache deps/debian --no-deps libc6-dev libc6 linux-libc-dev libgcc-14-dev >/dev/null
 	@touch $@
 
 $(LIBC_SYSROOT32)/.done:
 	@echo "  FETCH Debian libc6-dev (i386) for the 32-bit test programs"
-	@python3 tools/debian-fetch.py --out $(LIBC_SYSROOT32) --cache deps/debian --arch i386 --no-deps libc6-dev libc6 linux-libc-dev >/dev/null
+	@python3 tools/debian-fetch.py --out $(LIBC_SYSROOT32) --cache deps/debian --arch i386 --no-deps libc6-dev libc6 linux-libc-dev libgcc-14-dev >/dev/null
 	@touch $@
 
 $(TESTS_DIR)/%: userspace/%.c | $(LIBC_SYSROOT)/.done
@@ -427,7 +435,8 @@ GPU_FIRMWARE   += amdgpu/vega10_* amdgpu/vega12_* amdgpu/vega20_* amdgpu/raven* 
 # Realtek rtw88 (RTL8822BE/CE, 8821CE, 8723DE): ~0.6 MB.
 # MediaTek MT7921/MT7922 (mt7921e): ~2 MB.
 # Qualcomm ath10k: the laptop and PCIe-card chips QCA6174, QCA9377, QCA988x, QCA9887 (~6.5 MB).
-NET_FIRMWARE   := ath10k/QCA6174/*/* ath10k/QCA9377/*/* ath10k/QCA988X/*/* ath10k/QCA9887/*/* mediatek/WIFI_RAM_CODE_MT7961_1.bin mediatek/WIFI_MT7961_patch_mcu_1_2_hdr.bin mediatek/WIFI_RAM_CODE_MT7922_1.bin mediatek/WIFI_MT7922_patch_mcu_1_1_hdr.bin rtw88/rtw8822b_fw.bin rtw88/rtw8822c_fw.bin rtw88/rtw8821c_fw.bin rtw88/rtw8723d_fw.bin brcm/brcmfmac*-pcie.* brcm/brcmfmac43143.bin brcm/brcmfmac43236b.bin brcm/brcmfmac43242a.bin \
+# Bluetooth (btusb): Intel (ibt-*, ~17 MB), Realtek (rtl_bt, ~1.5 MB), MediaTek MT7921/MT7922 (~1 MB).
+NET_FIRMWARE   := intel/ibt-* rtl_bt/* mediatek/BT_RAM_CODE_MT7961_1_2_hdr.bin mediatek/BT_RAM_CODE_MT7922_1_1_hdr.bin ath10k/QCA6174/*/* ath10k/QCA9377/*/* ath10k/QCA988X/*/* ath10k/QCA9887/*/* mediatek/WIFI_RAM_CODE_MT7961_1.bin mediatek/WIFI_MT7961_patch_mcu_1_2_hdr.bin mediatek/WIFI_RAM_CODE_MT7922_1.bin mediatek/WIFI_MT7922_patch_mcu_1_1_hdr.bin rtw88/rtw8822b_fw.bin rtw88/rtw8822c_fw.bin rtw88/rtw8821c_fw.bin rtw88/rtw8723d_fw.bin brcm/brcmfmac*-pcie.* brcm/brcmfmac43143.bin brcm/brcmfmac43236b.bin brcm/brcmfmac43242a.bin \
                   brcm/brcmfmac43569.bin brcm/brcmfmac4373.bin \
                   iwlwifi-7260-17.ucode iwlwifi-3160-17.ucode iwlwifi-7265-17.ucode iwlwifi-7265D-29.ucode \
                   iwlwifi-3168-29.ucode iwlwifi-8000C-36.ucode iwlwifi-8265-36.ucode iwlwifi-9000-pu-b0-jf-b0-46.ucode \
@@ -495,6 +504,8 @@ $(INITRAMFS): $(KERNEL) $(PICKER) $(DEBIAN_CONFIGURED) tools/merge-accounts.py t
 	    mkdir -p $(CURDIR)/$(ROOTFS)/usr/lib/firmware/$$(dirname $$f); \
 	    cp -L "$$f" $(CURDIR)/$(ROOTFS)/usr/lib/firmware/$$f; done
 	@ln -sf mediatek/mt7601u.bin $(ROOTFS)/usr/lib/firmware/mt7601u.bin # older drivers ask for it at the top level
+	@# Broadcom b43 (older MacBooks, iMacs): cut from Broadcom's driver at build time.
+	@tools/b43-firmware.sh $(ROOTFS)
 	@# Wine: 32-bit DLLs (WoW64), stripped DLLs, the template prefix.
 	@tools/wine-setup.sh $(ROOTFS) $(WINE_I386_ROOT)
 	@# What the installer puts on the new disk: kernel, Limine (UEFI + BIOS stages), its installer.

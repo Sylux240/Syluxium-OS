@@ -81,19 +81,33 @@ def ipv6_addresses():
 
 
 def carriers():
-    """Adapters with a link (from netlink: the ioctl flags always say RUNNING)."""
-    try:
-        out = subprocess.run(["ip", "-o", "link"], capture_output=True, text=True, timeout=5).stdout
-    except (OSError, subprocess.SubprocessError):
-        return set()
+    """Adapters with a link (/sys/class/net/<if>/carrier)."""
     up = set()
-    for line in out.splitlines():
-        f = line.split(":", 2)
-        if len(f) == 3 and "<" in f[2]:
-            flags = f[2][f[2].find("<") + 1:f[2].find(">")].split(",")
-            if "UP" in flags and "NO-CARRIER" not in flags:
-                up.add(f[1].strip().split("@")[0])
+    try:
+        names = os.listdir("/sys/class/net")
+    except OSError:
+        return up
+    for n in names:
+        if read(f"/sys/class/net/{n}/carrier") == "1":
+            up.add(n)
     return up
+
+
+def name_has_link(a):
+    return a["status"].startswith("Connected")
+
+
+def wired_speed(name):
+    """The link speed the driver reports, e.g. "1 Gbit/s"; "" if unknown."""
+    try:
+        mbps = int(read(f"/sys/class/net/{name}/speed", "-1"))
+    except ValueError:
+        return ""
+    if mbps <= 0:
+        return ""
+    duplex = read(f"/sys/class/net/{name}/duplex")
+    text = f"{mbps // 1000} Gbit/s" if mbps >= 1000 and mbps % 1000 == 0 else f"{mbps} Mbit/s"
+    return text + (", full duplex" if duplex == "full" else ", half duplex" if duplex == "half" else "")
 
 
 def config(name):
@@ -134,7 +148,7 @@ def adapters():
         a["conf"] = config(name)
         ssid, rate = wifi.get(name, ("", ""))
         a["ssid"] = ssid
-        a["speed"] = rate or ("" if a["wifi"] else "")
+        a["speed"] = rate or ("" if a["wifi"] else wired_speed(name))
         if not a["up"]:
             a["status"] = "Disabled"
         elif a["wifi"] and not ssid:
@@ -322,7 +336,7 @@ class NetworkConnections:
             return
         conf = a["conf"]
         method = ("Static address" if conf["METHOD"] == "static" else "Automatic (DHCP)")
-        speed = a["speed"] or ("Not reported by the driver" if not a["wifi"] else "-")
+        speed = a["speed"] or ("Not reported by the driver" if not a["wifi"] and name_has_link(a) else "-")
         rows = [
             ("Status", a["status"]),
             ("Type", "Wi-Fi" if a["wifi"] else "Ethernet"),

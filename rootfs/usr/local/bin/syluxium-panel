@@ -16,36 +16,70 @@ from gi.repository import Gdk, GdkPixbuf, Gio, GLib, Gtk, GtkLayerShell  # noqa:
 
 LOGO = "/usr/share/syluxium/dusk/logo-hex.png"
 HEIGHT = 54
-PINNED = ["firefox-esr.desktop", "syluxium-mydocuments.desktop", "syluxium-mycomputer.desktop",
+PINNED = ["firefox-esr.desktop", "syluxium-mydocuments.desktop", "syluxium-mycomputer.desktop", "syluxium-personalize.desktop",
           "syluxium-appstore.desktop", "syluxium-taskmgr.desktop", "syluxium-installer.desktop"]
 
-CSS = b"""
+CSS_TEMPLATE = """
 * { font-family: Inter, sans-serif; color: #eef2ff; }
-.bar { background: rgba(18, 23, 54, 0.78); border-top: 1px solid rgba(111, 227, 240, 0.40); }
-.launcher { background: rgba(111, 227, 240, 0.16); border: 1px solid rgba(111, 227, 240, 0.55);
-            border-radius: 12px; box-shadow: 0 0 16px rgba(111, 227, 240, 0.35); padding: 2px 6px; }
-.launcher:hover { background: rgba(111, 227, 240, 0.28); }
+.bar { background: rgba(18, 23, 54, @BAR@); border-top: 1px solid rgba(@ACCENT@, 0.40); }
+.launcher { background: rgba(@ACCENT@, 0.16); border: 1px solid rgba(@ACCENT@, 0.55);
+            border-radius: 12px; box-shadow: 0 0 16px rgba(@ACCENT@, 0.35); padding: 2px 6px; }
+.launcher:hover { background: rgba(@ACCENT@, 0.28); }
 .pin { background: transparent; border: none; border-radius: 10px; padding: 4px 8px; }
-.pin:hover { background: rgba(111, 227, 240, 0.12); }
+.pin:hover { background: rgba(@ACCENT@, 0.12); }
 .sep { background: rgba(255, 255, 255, 0.14); min-width: 1px; margin: 12px 6px; }
 .clock-time { font-weight: 500; font-size: 10pt; color: #ffffff; }
 .clock-date { font-size: 9pt; color: #aab3d6; }
-.menu { background: rgba(18, 23, 54, 0.86); border: 1px solid rgba(111, 227, 240, 0.28);
+.menu { background: rgba(18, 23, 54, @MENU@); border: 1px solid rgba(@ACCENT@, 0.28);
         border-radius: 16px; padding: 18px; }
 .menu-name { font-weight: 500; font-size: 12pt; }
 .menu-sub { color: #aab3d6; font-size: 9pt; }
 .section { color: #aab3d6; font-size: 8pt; letter-spacing: 1px; }
 .search { background: rgba(255, 255, 255, 0.07); border: 1px solid rgba(255, 255, 255, 0.12);
-          border-radius: 10px; padding: 8px 10px; color: #eef2ff; caret-color: #6fe3f0; }
+          border-radius: 10px; padding: 8px 10px; color: #eef2ff; caret-color: rgb(@ACCENT@); }
 .app { background: transparent; border: none; border-radius: 12px; padding: 10px 4px; }
-.app:hover { background: rgba(111, 227, 240, 0.10); }
+.app:hover { background: rgba(@ACCENT@, 0.10); }
 .app label { font-size: 9pt; color: #e6eaff; }
 .power { background: rgba(242, 154, 182, 0.12); border: 1px solid rgba(242, 154, 182, 0.40);
          border-radius: 10px; }
-.allapps { background: transparent; border: none; color: #6fe3f0; }
+.allapps { background: transparent; border: none; color: rgb(@ACCENT@); }
 list, list row { background: transparent; }
-list row:hover { background: rgba(111, 227, 240, 0.10); border-radius: 8px; }
+list row:hover { background: rgba(@ACCENT@, 0.10); border-radius: 8px; }
 """
+
+
+SETTINGS = os.path.expanduser("~/.config/syluxium-shell/settings.ini")
+DEFAULTS = {"opacity": "0.78", "accent": "#6fe3f0", "blur": "true",
+            "wallpaper": "/opt/trinity/share/wallpapers/syluxium-default.jpg"}
+
+
+def read_settings():
+    """Personalize's choices (syluxium-personalize writes the file)."""
+    values = dict(DEFAULTS)
+    try:
+        with open(SETTINGS) as f:
+            for line in f:
+                if "=" in line and not line.lstrip().startswith(("#", "[")):
+                    k, v = line.split("=", 1)
+                    values[k.strip()] = v.strip()
+    except OSError:
+        pass
+    return values
+
+
+def build_css(values):
+    try:
+        opacity = min(1.0, max(0.2, float(values["opacity"])))
+    except ValueError:
+        opacity = 0.78
+    a = values["accent"].lstrip("#")
+    try:
+        accent = f"{int(a[0:2], 16)}, {int(a[2:4], 16)}, {int(a[4:6], 16)}"
+    except (ValueError, IndexError):
+        accent = "111, 227, 240"
+    return (CSS_TEMPLATE.replace("@BAR@", f"{opacity:.2f}")
+            .replace("@MENU@", f"{min(1.0, opacity + 0.08):.2f}")
+            .replace("@ACCENT@", accent)).encode()
 
 
 def app_info(desktop_id):
@@ -301,8 +335,23 @@ class Panel(Gtk.Window):
 
 def main():
     prov = Gtk.CssProvider()
-    prov.load_from_data(CSS)
+    values = read_settings()
+    prov.load_from_data(build_css(values))
     Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), prov, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+    state = {"wallpaper": values["wallpaper"]}
+
+    # Personalize writes the settings file: colours change at once, a new
+    # wallpaper restarts swaybg.
+    def on_changed(*_):
+        v = read_settings()
+        prov.load_from_data(build_css(v))
+        if v["wallpaper"] != state["wallpaper"] and os.path.exists(v["wallpaper"]):
+            state["wallpaper"] = v["wallpaper"]
+            subprocess.call(["pkill", "-x", "swaybg"])
+            subprocess.Popen(["swaybg", "-i", v["wallpaper"], "-m", "fill"], start_new_session=True)
+    os.makedirs(os.path.dirname(SETTINGS), exist_ok=True)
+    monitor = Gio.File.new_for_path(SETTINGS).monitor_file(Gio.FileMonitorFlags.NONE, None)
+    monitor.connect("changed", on_changed)
     panel = Panel()
     if os.environ.get("SYLUXIUM_PANEL_DEBUG"):
         dbg = open(os.path.expanduser("~/.cache/syluxium-panel-debug.log"), "a", buffering=1)

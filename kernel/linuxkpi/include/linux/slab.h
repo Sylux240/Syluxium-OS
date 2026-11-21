@@ -46,6 +46,7 @@ void kfree(const void* p);
 void kfree_sensitive(const void* p);
 size_t ksize(const void* p);
 #define kvmalloc kmalloc
+#define kvmemdup(src, len, gfp) kmemdup(src, len, gfp)
 #define kvzalloc kzalloc
 #define kvcalloc kcalloc
 #define kvmalloc_array kmalloc_array

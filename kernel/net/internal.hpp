@@ -183,6 +183,46 @@ void udp_input(Interface* in, const u8* ip, usize ip_len, const Endpoint& src, c
 void tcp_input(Interface* in, const Endpoint& src, const Endpoint& dst, const u8* data, usize len);
 void tcp_timer(u64 now_ms); // retransmissions, TIME_WAIT (lock held)
 
+// ---- multicast (mcast.cpp) ----
+// Group memberships per interface, counted over the sockets that joined
+// (IP_ADD_MEMBERSHIP, IPV6_JOIN_GROUP). Lock held for all of these.
+inline bool is_mcast4(u32 a) { return (a >> 28) == 0xE; }
+constexpr u32 ALL_HOSTS4 = 0xE0000001;
+inline bool is_mcast(const Endpoint& e) { return e.v6 ? ip6::is_multicast(e.addr6) : is_mcast4(e.addr); }
+// The interface multicast to/for a group uses: `ifindex`, else the one with
+// IPv4 address `addr4`, else the first Ethernet interface that is up.
+Interface* mc_interface(bool v6, u32 ifindex, u32 addr4 = 0);
+// Join/leave on an interface (ifindex 0: the default one). Returns the
+// interface index used, or -errno. The first join of a group announces it
+// (IGMPv2 membership report).
+long mc_join(u32 ifindex, const Endpoint& group);
+void mc_leave(u32 ifindex, const Endpoint& group);
+// Does this host receive `group` on that interface (joined, or all-hosts)?
+bool mc_joined(u32 ifindex, const Endpoint& group);
+void igmp_input(Interface* in, const u8* data, usize len); // queries: report our groups again
+
+// Raw IP sockets (raw.cpp): a copy of every received IPv4 packet for the
+// sockets of its protocol; IPPROTO_RAW sockets send whole packets.
+Socket* create_raw(int protocol);
+void raw_deliver(Interface* in, const u8* ip, usize len);
+long ip_send_raw(const u8* packet, usize len); // a complete IPv4 packet (header included)
+
+// rtnetlink events (netlink.cpp) for RTMGRP_LINK / RTMGRP_IPV4_IFADDR /
+// RTMGRP_IPV6_IFADDR listeners (avahi, NetworkManager-like tools). Safe with
+// the stack lock held.
+void rtnl_link_event(Interface* f);
+void rtnl_addr4_event(Interface* f, bool added, u32 addr, u32 netmask);
+void rtnl_addr6_event(const Addr6& a, bool added);
+
+// Per-interface switch for the kernel's DHCP client (dhcp.cpp):
+// /proc/sys/net/ipv4/conf/<if>/syluxium_dhcp.
+bool dhcp_enabled(Interface* iface);
+void dhcp_set_enabled(Interface* iface, bool on); // turning it on (again) starts over now
+void dhcp_restart(Interface* iface);
+
+// /sys/class/net and /proc/sys/net/ipv4/conf (sysnet.cpp).
+void sysnet_init();
+
 // DHCP client hook: UDP datagrams to port 68 go here.
 void dhcp_input(Interface* in, const u8* data, usize len);
 void dhcp_start(Interface* iface);
@@ -234,16 +274,27 @@ struct Ucred {
     u32 uid = 0, gid = 0;
 };
 
-// Ancillary data of sendmsg/recvmsg (control messages); only AF_UNIX
-// sockets carry it. `files` is a heap array of file references owned by
-// whoever holds the Control; release_control() drops them.
+// Ancillary data of sendmsg/recvmsg (control messages). `files` is a heap
+// array of file references owned by whoever holds the Control;
+// release_control() drops them.
 struct Control {
-    vfs::File** files = nullptr; // SCM_RIGHTS
+    vfs::File** files = nullptr; // SCM_RIGHTS (AF_UNIX)
     int nfiles = 0;
-    bool has_cred = false;       // SCM_CREDENTIALS
+    bool has_cred = false;       // SCM_CREDENTIALS (AF_UNIX, netlink)
     Ucred cred;
+    // IP-level messages for recvmsg (IP_PKTINFO, IP_TTL, IPV6_PKTINFO,
+    // IPV6_HOPLIMIT), packed as {i32 level, i32 type, u32 len, data} records
+    // by control_add_ip(); written out by the system call.
+    u8 ip[128];
+    u32 ip_len = 0;
+    // IP_PKTINFO / IPV6_PKTINFO given to sendmsg: the outgoing interface
+    // (0: any) and source address.
+    bool has_pktinfo = false;
+    u32 pkt_ifindex = 0;
+    Endpoint pkt_src;
 };
 void release_control(Control& c);
+void control_add_ip(Control& c, int level, int type, const void* data, u32 len);
 Ucred current_cred();
 
 // Socket option hooks return this when they don't handle an option, so the
@@ -344,7 +395,8 @@ void endpoint_to_sockaddr(const Endpoint& ep, SockAddr* out, u16 domain = AF_INE
 // (wildcards, IPv4 vs IPv6, IPV6_V6ONLY)
 bool local_accepts(const Socket* s, const Endpoint& dst);
 // Do two local bindings overlap (for EADDRINUSE)?
-bool bindings_overlap(const Endpoint& a, const Endpoint& b);
+// (an IPv6 binding with IPV6_V6ONLY doesn't overlap IPv4 ones)
+bool bindings_overlap(const Endpoint& a, const Endpoint& b, bool a_v6only = false, bool b_v6only = false);
 
 Socket* create_unix(int type);
 long unix_socketpair(int type, Socket** a, Socket** b);
@@ -358,7 +410,7 @@ Socket* create_icmp(int type);
 
 // Port allocation for UDP/TCP (lock held). Returns 0 when exhausted.
 u16 ephemeral_port(u8 proto);
-bool port_in_use(u8 proto, const Endpoint& addr, u16 port);
+bool port_in_use(u8 proto, const Endpoint& addr, u16 port, bool v6only = false);
 
 // /proc/net/* contents.
 void format_ip6(const u8* a, char* out, usize size);

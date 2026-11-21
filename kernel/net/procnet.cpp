@@ -183,6 +183,7 @@ void proc_net_init() {
     vfs::add_node("/proc/net/udp6", new genfs::GeneratedFile(gen_udp6, nullptr));
     vfs::add_node("/proc/net/if_inet6", new genfs::GeneratedFile(gen_if_inet6, nullptr));
     unix_proc_init();
+    sysnet_init(); // /sys/class/net, /proc/sys/net/ipv4/conf
     // /run/resolv.conf (the system's /etc/resolv.conf links to it, as on
     // Debian with resolvconf): /run stays in RAM when "/" moves to a disk
     // (root=), /etc doesn't. Also at /etc/resolv.conf for the RAM root.

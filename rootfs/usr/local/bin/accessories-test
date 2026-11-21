@@ -125,48 +125,103 @@ print(r[0], r[1], r[2], s.download(r[1], '/tmp/anicraft.deb', r[2], r[3], lambda
     shot craft
     pkill -x anicraft ;;
 mdns)
-    # Multicast DNS (printer discovery): a group member should get its own
-    # datagrams back (IP_MULTICAST_LOOP), as on Linux.
+    # Multicast (mDNS), packet info, netlink credentials and events,
+    # /sys/class/net, ethtool, then printer discovery end to end: a
+    # simulated IPP Everywhere printer (ippeveprinter) announces itself,
+    # avahi finds it, cups-browsed adds it to CUPS.
     for fam in 4 6; do
         say "multicast loop IPv$fam: $(python3 - $fam <<'EOF' 2>&1 | tail -1
 import socket, struct, sys
 v6 = sys.argv[1] == "6"
 fam = socket.AF_INET6 if v6 else socket.AF_INET
 grp = "ff02::fb" if v6 else "224.0.0.251"
+idx = socket.if_nametoindex("eth0")
 r = socket.socket(fam, socket.SOCK_DGRAM)
 r.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 r.bind(("", 5354))
-idx = socket.if_nametoindex("eth0")
 if v6:
     r.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_JOIN_GROUP, socket.inet_pton(fam, grp) + struct.pack("@I", idx))
+    r.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_RECVPKTINFO, 1)
+    r.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_RECVHOPLIMIT, 1)
 else:
     r.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, socket.inet_aton(grp) + socket.inet_aton("0.0.0.0"))
+    r.setsockopt(socket.IPPROTO_IP, socket.IP_PKTINFO, 1)
+    r.setsockopt(socket.IPPROTO_IP, 12, 1)  # IP_RECVTTL
 r.settimeout(3)
 s = socket.socket(fam, socket.SOCK_DGRAM)
 try:
     if v6:
         s.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_MULTICAST_IF, idx)
+        s.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_MULTICAST_HOPS, 255)
         s.sendto(b"hello", (grp, 5354, 0, idx))
     else:
+        s.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 255)
         s.sendto(b"hello", (grp, 5354))
-    print("received", r.recvfrom(100))
+    data, anc, flags, addr = r.recvmsg(100, 256)
+    info = []
+    for lvl, typ, d in anc:
+        if lvl == socket.IPPROTO_IP and typ == socket.IP_PKTINFO:
+            info.append("pktinfo if=%d dst=%s" % (struct.unpack("@I", d[:4])[0], socket.inet_ntoa(d[8:12])))
+        elif lvl == socket.IPPROTO_IPV6 and typ == socket.IPV6_PKTINFO:
+            info.append("pktinfo6 if=%d dst=%s" % (struct.unpack("@I", d[16:20])[0], socket.inet_ntop(fam, d[:16])))
+        else:
+            info.append("cmsg %d/%d=%d" % (lvl, typ, struct.unpack("@i", d[:4])[0]))
+    print("received", data, "from", addr[0], "; ".join(info))
 except Exception as e:
     print("FAILED:", e)
 EOF
 )"
     done
-    mkdir -p /run/avahi-daemon && chown avahi:avahi /run/avahi-daemon 2>/dev/null
-    avahi-daemon --no-chroot --debug > /tmp/avahi.log 2>&1 &
-    sleep 6
-    say "avahi: $(grep -E 'Joining|joining|Server startup|failed|error|Fatal|cannot|Failed' /tmp/avahi.log | head -8 | tr '\n' '|')"
-    say "avahi-browse: $(timeout 8 avahi-browse -a -t -p 2>&1 | head -5 | tr '\n' '|')"
+    say "netlink creds+events: $(python3 - <<'EOF' 2>&1 | tail -1
+import socket, struct, subprocess
+s = socket.socket(socket.AF_NETLINK, socket.SOCK_RAW, 0)
+s.setsockopt(socket.SOL_SOCKET, socket.SO_PASSCRED, 1)
+s.bind((0, 0x1 | 0x10 | 0x100))  # RTMGRP_LINK | IPV4_IFADDR | IPV6_IFADDR
+s.settimeout(3)
+subprocess.run(["ip", "addr", "add", "10.0.2.77/24", "dev", "eth0"])  # replaces the address (one per interface)
+try:
+    data, anc, flags, addr = s.recvmsg(8192, 64)
+    t = struct.unpack("@IHHII", data[:16])[1]
+    cred = [struct.unpack("@iII", d[:12]) for l, ty, d in anc if l == socket.SOL_SOCKET and ty == 2]
+    print("event type", t, "creds", cred)
+except Exception as e:
+    print("FAILED:", e)
+finally:
+    subprocess.run(["sh", "-c", "echo restart > /proc/sys/net/ipv4/conf/eth0/syluxium_dhcp"])
+EOF
+)"
+    sleep 5
+    say "after dhcp restart: $(ip -4 -o addr show dev eth0 | awk '{print $4}')"
+    say "sysfs: $(cd /sys/class/net && ls | tr '\n' ' ') eth0: op=$(cat /sys/class/net/eth0/operstate) carrier=$(cat /sys/class/net/eth0/carrier) speed=$(cat /sys/class/net/eth0/speed) duplex=$(cat /sys/class/net/eth0/duplex) mac=$(cat /sys/class/net/eth0/address) mtu=$(cat /sys/class/net/eth0/mtu) flags=$(cat /sys/class/net/eth0/flags) rx=$(cat /sys/class/net/eth0/statistics/rx_bytes) dhcp=$(cat /proc/sys/net/ipv4/conf/eth0/syluxium_dhcp)"
+    say "ethtool: $(python3 - <<'EOF' 2>&1 | tail -1
+import array, fcntl, socket, struct
+s = socket.socket()
+cmd = bytearray(struct.pack("I", 1) + bytes(40))
+buf = array.array("B", cmd)
+ifr = struct.pack("16sP", b"eth0", buf.buffer_info()[0])
+fcntl.ioctl(s, 0x8946, ifr)
+speed = buf[12] | (buf[13] << 8) | (buf[28] << 16) | (buf[29] << 24)
+drv = array.array("B", struct.pack("I", 3) + bytes(192))
+fcntl.ioctl(s, 0x8946, struct.pack("16sP", b"eth0", drv.buffer_info()[0]))
+name = bytes(drv[4:36]).split(b"\0")[0].decode()
+flags = struct.unpack("H", fcntl.ioctl(s, 0x8913, struct.pack("16s16x", b"eth0"))[16:18])[0]
+print("speed", speed, "duplex", buf[14], "driver", name, "IFF_RUNNING", bool(flags & 0x40))
+EOF
+)"
+    say "avahi running: $(pidof avahi-daemon) cups-browsed: $(pidof cups-browsed)"
+    pkill -x cups-browsed; sleep 1
+    cups-browsed --debug > /tmp/cups-browsed-debug.log 2>&1 &
+    ippeveprinter -k -p 8631 -M Syluxium -m "Test Printer" "Syluxium Test Printer" > /tmp/ippeve.log 2>&1 &
+    sleep 8
+    say "avahi-browse: $(timeout 10 avahi-browse -rtp _ipp._tcp 2>&1 | grep -c '^=') resolved, $(timeout 10 avahi-browse -rtp _ipp._tcp 2>&1 | grep '^=' | head -2 | cut -d';' -f2-9 | tr '\n' '|')"
     say "avahi-resolve: $(timeout 5 avahi-resolve -n syluxium.local 2>&1 | tr '\n' '|')"
-    cups-browsed > /tmp/cups-browsed.log 2>&1 &
-    sleep 4
-    pgrep -x cups-browsed > /dev/null && say "cups-browsed running" || say "cups-browsed NOT running: $(tail -3 /tmp/cups-browsed.log | tr '\n' '|')"
-    say "lpinfo dnssd: $(timeout 20 lpinfo --include-schemes dnssd -v 2>&1 | head -3 | tr '\n' '|')"
-    say "avahi interfaces: $(grep -i "interface\|group\|socket\|netlink" /tmp/avahi.log | grep -v dbus-protocol | head -12 | tr "\n" "|")"
-    cp /tmp/avahi.log /tmp/cups-browsed.log /root/ 2>/dev/null ;;
+    for i in $(seq 1 45); do lpstat -v 2>/dev/null | grep -q . && break; sleep 2; done
+    say "lpstat -v: $(lpstat -v 2>&1 | tr '\n' '|') (after $((i * 2)) s)"
+    say "lpstat -l -p: $(lpstat -l -p 2>&1 | head -4 | tr '\n' '|')"
+    say "dnssd backend: $(timeout 20 /usr/lib/cups/backend/dnssd 2>&1 | head -3 | tr '\n' '|')"
+    say "cups-browsed: $(grep -i 'ipp\|queue\|printer\|error' /tmp/cups-browsed-debug.log | tail -6 | tr '\n' '|' | cut -c1-600)"
+    cp /tmp/ippeve.log /tmp/cups-browsed-debug.log /root/ 2>/dev/null
+    pkill ippeveprinter ;;
 menu)
     xdotool key alt+F1
     sleep 2

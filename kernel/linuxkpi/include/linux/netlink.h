@@ -6,7 +6,7 @@
 #include <linux/lkpi_all.h>
 #include <linux/skbuff.h>
 #include <linux/export.h>
-struct scm_creds { u32 pid; u32 uid; u32 gid; };
+#include <net/scm.h> /* struct scm_creds */
 struct sock; struct file; struct user_namespace; struct notifier_block;
 #include <uapi/linux/netlink.h>
 

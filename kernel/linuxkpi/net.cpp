@@ -16,6 +16,8 @@
 extern "C" {
 long lkpi_netdev_xmit(void* dev, const u8* frame, usize len);
 long lkpi_netdev_set_up(void* dev, int up);
+int lkpi_kernel_uaccess_active(void);
+int lkpi_netdev_link_settings(void* dev, u32* speed, int* full_duplex);
 }
 
 namespace {
@@ -36,6 +38,15 @@ public:
     long set_up(bool up) override {
         LockGuard guard(m_lock);
         return m_dev ? lkpi_netdev_set_up(m_dev, up ? 1 : 0) : -err::NODEV;
+    }
+
+    bool link_settings(u32* mbps, bool* full_duplex) override {
+        LockGuard guard(m_lock);
+        int full = 0;
+        if (!m_dev || lkpi_netdev_link_settings(m_dev, mbps, &full) != 0)
+            return false;
+        *full_duplex = full != 0;
+        return true;
     }
 
     void detach_driver() override {
@@ -126,8 +137,20 @@ int lkpi_sylux_name_taken(const char* name) {
     return i && !i->detached; // a removed device's name is free for its replug
 }
 
-unsigned long copy_to_user(void* to, const void* from, unsigned long n) { return uaccess::copy_to(to, from, n) < 0 ? n : 0; }
+// The socket bridge (socket.cpp) calls Linux's getsockopt with kernel
+// buffers: "user" copies are plain copies while it does.
+unsigned long copy_to_user(void* to, const void* from, unsigned long n) {
+    if (lkpi_kernel_uaccess_active()) {
+        memcpy(to, from, n);
+        return 0;
+    }
+    return uaccess::copy_to(to, from, n) < 0 ? n : 0;
+}
 unsigned long copy_from_user(void* to, const void* from, unsigned long n) {
+    if (lkpi_kernel_uaccess_active()) {
+        memcpy(to, from, n);
+        return 0;
+    }
     return uaccess::copy_from(to, from, n) < 0 ? n : 0;
 }
 
