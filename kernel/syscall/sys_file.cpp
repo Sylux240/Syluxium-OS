@@ -1282,6 +1282,76 @@ long sys_sendfile(SYSCALL_ARGS) {
     return total ? static_cast<long>(total) : result;
 }
 
+// copy_file_range(fd_in, off_in*, fd_out, off_out*, len, flags): copy between
+// two regular files in the kernel (cp and install use it). A NULL offset
+// pointer means the file's own position, which then advances.
+long sys_copy_file_range(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    if (a5 != 0)
+        return -err::INVAL;
+    Process* p = proc::current();
+    FileRef in(p, static_cast<long>(a0));
+    FileRef out(p, static_cast<long>(a2));
+    if (!in || !out)
+        return -err::BADF;
+    if (!can_read(in.get()) || !can_write(out.get()) || (out->flags & O_APPEND))
+        return -err::BADF;
+    if (!vfs::is_reg(in->inode->mode) || !vfs::is_reg(out->inode->mode))
+        return vfs::is_dir(in->inode->mode) || vfs::is_dir(out->inode->mode) ? -err::ISDIR : -err::INVAL;
+    i64 off_in = -1, off_out = -1;
+    if (a1 && uaccess::get(&off_in, reinterpret_cast<const i64*>(a1)) < 0)
+        return -err::FAULT;
+    if (a3 && uaccess::get(&off_out, reinterpret_cast<const i64*>(a3)) < 0)
+        return -err::FAULT;
+    if ((a1 && off_in < 0) || (a3 && off_out < 0))
+        return -err::INVAL;
+    u64 rpos = a1 ? static_cast<u64>(off_in) : in->offset;
+    u64 wpos = a3 ? static_cast<u64>(off_out) : out->offset;
+    u64 len = a4;
+    // The same file: the ranges may not overlap.
+    if (in->inode == out->inode && rpos < wpos + len && wpos < rpos + len)
+        return -err::INVAL;
+
+    constexpr usize CHUNK = 64 * KiB;
+    auto* buf = static_cast<u8*>(kmalloc(CHUNK));
+    if (!buf)
+        return -err::NOMEM;
+    u64 total = 0;
+    long result = 0;
+    while (total < len) {
+        usize want = min<u64>(CHUNK, len - total);
+        isize n = in->inode->read_file(in.get(), rpos, buf, want);
+        if (n <= 0) {
+            result = n;
+            break;
+        }
+        isize w = out->inode->write_file(out.get(), wpos, buf, static_cast<usize>(n));
+        if (w <= 0) {
+            result = w;
+            break;
+        }
+        rpos += static_cast<u64>(w);
+        wpos += static_cast<u64>(w);
+        total += static_cast<u64>(w);
+        if (w < n)
+            break;
+    }
+    kfree(buf);
+    if (a1)
+        uaccess::put(reinterpret_cast<i64*>(a1), static_cast<i64>(rpos));
+    else {
+        LockGuard guard(in->lock);
+        in->offset = rpos;
+    }
+    if (a3)
+        uaccess::put(reinterpret_cast<i64*>(a3), static_cast<i64>(wpos));
+    else {
+        LockGuard guard(out->lock);
+        out->offset = wpos;
+    }
+    return total ? static_cast<long>(total) : result;
+}
+
 // ---- permissions ----
 
 long chmod_inode(Inode* n, u64 mode) {
@@ -1959,6 +2029,7 @@ void register_file() {
     set(7, sys_poll, "poll");
     set(23, sys_select, "select");
     set(40, sys_sendfile, "sendfile");
+    set(326, sys_copy_file_range, "copy_file_range");
     set(41, sys_socket, "socket");
     set(42, sys_not_socket, "connect");
     set(51, sys_not_socket, "getsockname");

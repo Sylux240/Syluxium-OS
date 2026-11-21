@@ -500,6 +500,68 @@ long sys_rt_sigsuspend(SYSCALL_ARGS) {
     return -err::INTR;
 }
 
+// rt_sigtimedwait(set, info, timeout, sigsetsize): take one of the signals in
+// `set` (normally blocked by the caller) off the pending set, waiting for one
+// if needed (sigwait, sigwaitinfo, sigtimedwait; dbus and xcape use it).
+// Other, unblocked signals interrupt the wait (EINTR); a timeout gives EAGAIN.
+long sys_rt_sigtimedwait(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    if (a3 != sizeof(u64))
+        return -err::INVAL;
+    u64 set;
+    if (long r = uaccess::get(&set, reinterpret_cast<const u64*>(a0)); r < 0)
+        return r;
+    set &= ~((1ull << 8) | (1ull << 18)); // SIGKILL / SIGSTOP can't be waited for
+    u64 deadline = 0;
+    if (a2) {
+        struct { i64 sec, nsec; } ts;
+        if (long r = uaccess::copy_from(&ts, reinterpret_cast<void*>(a2), sizeof(ts)); r < 0)
+            return r;
+        if (ts.sec < 0 || ts.nsec < 0 || ts.nsec >= 1'000'000'000)
+            return -err::INVAL;
+        deadline = clock::now_ns() + static_cast<u64>(ts.sec) * 1'000'000'000 + static_cast<u64>(ts.nsec);
+    }
+    int sig = signal::dequeue(set);
+    if (!sig) {
+        sched::WaitQueue wq; // woken by the sender (it wakes every sleeping thread)
+        auto ready = [&] { return (signal::pending_set() & set) != 0 || signal::interrupted(); };
+        for (;;) {
+            if (a2) {
+                u64 now = clock::now_ns();
+                if (now >= deadline || !wq.wait_until_timeout(ready, deadline - now))
+                    break;
+            } else {
+                wq.wait_until(ready);
+            }
+            if ((sig = signal::dequeue(set)) != 0)
+                break;
+            if (signal::interrupted())
+                return -err::INTR;
+        }
+        if (!sig)
+            sig = signal::dequeue(set);
+    }
+    if (!sig)
+        return -err::AGAIN;
+    if (a1) {
+        // siginfo_t (128 bytes): signo, errno, code, then pid and uid for a kill.
+        struct SigInfo {
+            i32 signo, err, code, pad;
+            i32 pid;
+            u32 uid;
+            u8 rest[104];
+        } info{};
+        Process* p = proc::current();
+        info.signo = sig;
+        info.code = p->sig_code[sig];
+        info.pid = p->sig_pid[sig];
+        info.uid = p->sig_uid[sig];
+        if (long r = uaccess::put(reinterpret_cast<SigInfo*>(a1), info); r < 0)
+            return r;
+    }
+    return sig;
+}
+
 long sys_sched_yield(SYSCALL_ARGS) {
     SYSCALL_UNUSED;
     sched::yield();
@@ -1201,6 +1263,7 @@ void register_process() {
     set(61, sys_wait4, "wait4");
     set(62, sys_kill, "kill");
     set(130, sys_rt_sigsuspend, "rt_sigsuspend");
+    set(128, sys_rt_sigtimedwait, "rt_sigtimedwait");
     set(200, sys_tkill, "tkill");
     set(234, sys_tgkill, "tgkill");
     set(435, sys_quiet_nosys, "clone3");

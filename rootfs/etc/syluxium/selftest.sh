@@ -65,6 +65,7 @@ check "/sys/devices/system/cpu/online"      sh -c 'grep -q "^0" /sys/devices/sys
 # closed at once, dup storms, fork/exec with inherited pipes ---
 check "futex stress (GIL handoff, condvars, timeouts)" /opt/syluxium/tests/futexstress 1
 check "pipe / fd stress (close races, dup, fork)"     /opt/syluxium/tests/pipestress 1
+check "copy_file_range, pidfd, sigtimedwait, mlock"   /opt/syluxium/tests/newsyscalls
 
 echo "selftest: $pass passed, $fail failed"
 exit $fail

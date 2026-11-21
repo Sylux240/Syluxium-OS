@@ -1,0 +1,116 @@
+// Checks for copy_file_range, pidfd_open / pidfd_send_signal,
+// rt_sigtimedwait and mlock/munlock. Prints PASS/FAIL per check; exit
+// status = number of failures.
+#define _GNU_SOURCE
+#include <errno.h>
+#include <fcntl.h>
+#include <poll.h>
+#include <signal.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/mman.h>
+#include <sys/syscall.h>
+#include <sys/wait.h>
+#include <time.h>
+#include <unistd.h>
+
+static int fails;
+static void check(int ok, const char* what) {
+    printf("  [%s] %s\n", ok ? "PASS" : "FAIL", what);
+    if (!ok)
+        fails++;
+}
+
+static void test_copy_file_range(void) {
+    const char* a = "/tmp/cfr-in", *b = "/tmp/cfr-out";
+    int in = open(a, O_RDWR | O_CREAT | O_TRUNC, 0644);
+    char data[200000];
+    for (size_t i = 0; i < sizeof(data); i++)
+        data[i] = (char)(i * 7 + i / 300);
+    check(in >= 0 && write(in, data, sizeof(data)) == (ssize_t)sizeof(data), "copy_file_range: source written");
+    int out = open(b, O_RDWR | O_CREAT | O_TRUNC, 0644);
+    loff_t off_in = 0;
+    ssize_t n = syscall(SYS_copy_file_range, in, &off_in, out, NULL, sizeof(data), 0);
+    check(n == (ssize_t)sizeof(data) && off_in == (loff_t)sizeof(data), "copy_file_range: whole file copied");
+    char back[sizeof(data)];
+    check(pread(out, back, sizeof(back), 0) == (ssize_t)sizeof(back) && memcmp(back, data, sizeof(data)) == 0,
+          "copy_file_range: same bytes");
+    check(lseek(out, 0, SEEK_CUR) == (off_t)sizeof(data), "copy_file_range: output position advanced");
+    loff_t o1 = 100, o2 = 150;
+    check(syscall(SYS_copy_file_range, in, &o1, in, &o2, 100, 0) < 0 && errno == EINVAL,
+          "copy_file_range: overlapping ranges refused");
+    close(in);
+    close(out);
+    unlink(a);
+    unlink(b);
+}
+
+static void test_pidfd(void) {
+    pid_t child = fork();
+    if (child == 0) {
+        usleep(200 * 1000);
+        _exit(3);
+    }
+    int pfd = syscall(SYS_pidfd_open, child, 0);
+    check(pfd >= 0, "pidfd_open on a child");
+    struct pollfd p = {pfd, POLLIN, 0};
+    check(poll(&p, 1, 0) == 0, "pidfd: not readable while the child runs");
+    check(poll(&p, 1, 3000) == 1 && (p.revents & POLLIN), "pidfd: readable when the child exits");
+    int st;
+    check(waitpid(child, &st, 0) == child && WIFEXITED(st) && WEXITSTATUS(st) == 3, "pidfd: child reaped");
+    close(pfd);
+
+    child = fork();
+    if (child == 0) {
+        for (;;)
+            pause();
+    }
+    pfd = syscall(SYS_pidfd_open, child, 0);
+    check(syscall(SYS_pidfd_send_signal, pfd, SIGTERM, NULL, 0) == 0, "pidfd_send_signal SIGTERM");
+    check(waitpid(child, &st, 0) == child && WIFSIGNALED(st) && WTERMSIG(st) == SIGTERM,
+          "pidfd_send_signal: the child died of it");
+    check(syscall(SYS_pidfd_send_signal, pfd, SIGTERM, NULL, 0) < 0 && errno == ESRCH,
+          "pidfd_send_signal to a reaped process: ESRCH");
+    close(pfd);
+    check(syscall(SYS_pidfd_open, 999999, 0) < 0 && errno == ESRCH, "pidfd_open of no process: ESRCH");
+}
+
+static void test_sigtimedwait(void) {
+    sigset_t set;
+    sigemptyset(&set);
+    sigaddset(&set, SIGUSR1);
+    sigprocmask(SIG_BLOCK, &set, NULL);
+    kill(getpid(), SIGUSR1);
+    siginfo_t info;
+    struct timespec ts = {1, 0};
+    int sig = sigtimedwait(&set, &info, &ts);
+    check(sig == SIGUSR1 && info.si_signo == SIGUSR1 && info.si_pid == getpid(), "sigtimedwait: pending signal taken");
+    struct timespec short_ts = {0, 50 * 1000 * 1000};
+    check(sigtimedwait(&set, &info, &short_ts) < 0 && errno == EAGAIN, "sigtimedwait: times out (EAGAIN)");
+    pid_t child = fork();
+    if (child == 0) {
+        usleep(100 * 1000);
+        kill(getppid(), SIGUSR1);
+        _exit(0);
+    }
+    check(sigwaitinfo(&set, &info) == SIGUSR1 && info.si_pid == child, "sigwaitinfo: waits for a signal from a child");
+    waitpid(child, NULL, 0);
+    sigprocmask(SIG_UNBLOCK, &set, NULL);
+}
+
+static void test_mlock(void) {
+    char* p = mmap(NULL, 65536, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    check(mlock(p, 65536) == 0 && munlock(p, 65536) == 0, "mlock / munlock");
+    munmap(p, 65536);
+}
+
+int main(void) {
+    setvbuf(stdout, NULL, _IONBF, 0);
+    test_copy_file_range();
+    test_pidfd();
+    test_sigtimedwait();
+    test_mlock();
+    printf("newsyscalls: %d failed\n", fails);
+    return fails;
+}

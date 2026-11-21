@@ -5,6 +5,7 @@
 #include <arch/x86_64/interrupts.hpp>
 #include <arch/x86_64/percpu.hpp>
 #include <core/log.hpp>
+#include <fs/poll.hpp>
 #include <core/panic.hpp>
 #include <drivers/tty.hpp>
 #include <lib/format.hpp>
@@ -882,6 +883,7 @@ namespace {
         }
         p->exit_status = wait_status;
         p->state = State::Zombie;
+        poll::notify(); // pidfds of this process become readable
 
         if (Process* parent = p->parent) {
             {
