@@ -15,3 +15,6 @@ struct dmi_system_id { int (*callback)(const struct dmi_system_id *); const char
 #define dmi_get_system_info(field) ((const char *)NULL)
 #define dmi_match(field, str) false
 #define dmi_name_in_vendors(s) false
+
+struct dmi_header { u8 type; u8 length; u16 handle; } __attribute__((packed));
+static inline int dmi_walk(void (*decode)(const struct dmi_header *, void *), void *private_data) { return -ENXIO; }

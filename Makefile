@@ -241,6 +241,7 @@ $(OBJDIR)/$(LKPI_IWL)/%: LKPI_DRV_CFLAGS = -I$(LKPI_IWL) -DCONFIG_IWLWIFI=1 -DCO
 $(OBJDIR)/kernel/linuxkpi/drivers/bcma/%: LKPI_DRV_CFLAGS = -include net/lkpi_bcma.h
 $(OBJDIR)/kernel/linuxkpi/drivers/net/wireless/broadcom/%: LKPI_DRV_CFLAGS = -include net/lkpi_bcma.h
 $(OBJDIR)/kernel/linuxkpi/drivers/net/wireless/realtek/rtw88/%: LKPI_DRV_CFLAGS = -include net/lkpi_netcompat.h
+$(OBJDIR)/kernel/linuxkpi/drivers/net/wireless/ath/%: LKPI_DRV_CFLAGS = -include net/lkpi_netcompat.h -Ikernel/linuxkpi/drivers/net/wireless/ath
 LKPI_MT76 := kernel/linuxkpi/drivers/net/wireless/mediatek/mt76
 $(OBJDIR)/$(LKPI_MT76)/%: LKPI_DRV_CFLAGS = -include net/lkpi_netcompat.h -I$(LKPI_MT76) -DCONFIG_PM=1
 LKPI_BRCM := kernel/linuxkpi/drivers/net/wireless/broadcom/brcm80211
@@ -386,7 +387,7 @@ $(DEBIAN_CONFIGURED): $(DEBIAN_STAMP) tools/configure-packages.sh
 # Device firmware from Debian's non-free-firmware section: the packages are
 # huge (GPU firmware), so only the files our drivers load are kept.
 FIRMWARE_REPO  := http://deb.debian.org/debian|$(DEBIAN_SUITE)|non-free-firmware
-FIRMWARE_PKGS  := firmware-mediatek firmware-realtek firmware-intel-graphics firmware-amd-graphics firmware-nvidia-graphics firmware-iwlwifi firmware-brcm80211
+FIRMWARE_PKGS  := firmware-mediatek firmware-realtek firmware-intel-graphics firmware-amd-graphics firmware-nvidia-graphics firmware-iwlwifi firmware-brcm80211 firmware-atheros
 FIRMWARE_FILES = mediatek/mt7601u.bin rtlwifi/rtl8188eufw.bin rtlwifi/rtl8723bu_nic.bin rtl_bt/rtl8723b_fw.bin \
                   $(I915_FIRMWARE)
 # i915: display microcontroller (DMC) firmware for Skylake..Alder Lake, GuC/HuC
@@ -417,7 +418,8 @@ GPU_FIRMWARE   += amdgpu/vega10_* amdgpu/vega12_* amdgpu/vega20_* amdgpu/raven* 
 # ...) and the USB ones (~6.5 MB); Apple's 4355/4364 (T2 Macs) aren't in it.
 # Realtek rtw88 (RTL8822BE/CE, 8821CE, 8723DE): ~0.6 MB.
 # MediaTek MT7921/MT7922 (mt7921e): ~2 MB.
-NET_FIRMWARE   := mediatek/WIFI_RAM_CODE_MT7961_1.bin mediatek/WIFI_MT7961_patch_mcu_1_2_hdr.bin mediatek/WIFI_RAM_CODE_MT7922_1.bin mediatek/WIFI_MT7922_patch_mcu_1_1_hdr.bin rtw88/rtw8822b_fw.bin rtw88/rtw8822c_fw.bin rtw88/rtw8821c_fw.bin rtw88/rtw8723d_fw.bin brcm/brcmfmac*-pcie.* brcm/brcmfmac43143.bin brcm/brcmfmac43236b.bin brcm/brcmfmac43242a.bin \
+# Qualcomm ath10k: the laptop and PCIe-card chips QCA6174, QCA9377, QCA988x, QCA9887 (~6.5 MB).
+NET_FIRMWARE   := ath10k/QCA6174/*/* ath10k/QCA9377/*/* ath10k/QCA988X/*/* ath10k/QCA9887/*/* mediatek/WIFI_RAM_CODE_MT7961_1.bin mediatek/WIFI_MT7961_patch_mcu_1_2_hdr.bin mediatek/WIFI_RAM_CODE_MT7922_1.bin mediatek/WIFI_MT7922_patch_mcu_1_1_hdr.bin rtw88/rtw8822b_fw.bin rtw88/rtw8822c_fw.bin rtw88/rtw8821c_fw.bin rtw88/rtw8723d_fw.bin brcm/brcmfmac*-pcie.* brcm/brcmfmac43143.bin brcm/brcmfmac43236b.bin brcm/brcmfmac43242a.bin \
                   brcm/brcmfmac43569.bin brcm/brcmfmac4373.bin \
                   iwlwifi-7260-17.ucode iwlwifi-3160-17.ucode iwlwifi-7265-17.ucode iwlwifi-7265D-29.ucode \
                   iwlwifi-3168-29.ucode iwlwifi-8000C-36.ucode iwlwifi-8265-36.ucode iwlwifi-9000-pu-b0-jf-b0-46.ucode \

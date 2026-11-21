@@ -23,3 +23,7 @@ static inline const void *of_get_property(const struct device_node *np, const ch
 #define of_property_for_each_string(np, propname, prop, s) \
     for (prop = of_find_property(np, propname, NULL), s = of_prop_next_string(prop, NULL); s; \
          s = of_prop_next_string(prop, s))
+static inline int of_property_read_u8(const struct device_node *np, const char *name, u8 *out) { return -EINVAL; }
+static inline int of_property_read_string_index(const struct device_node *np, const char *name, int index, const char **out) { return -EINVAL; }
+static inline int of_property_read_u8_array(const struct device_node *np, const char *name, u8 *out, size_t n) { return -EINVAL; }
+static inline int of_property_read_u32_array(const struct device_node *np, const char *name, u32 *out, size_t n) { return -EINVAL; }

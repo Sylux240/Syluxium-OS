@@ -80,4 +80,8 @@ struct hlist_node {
     struct hlist_node *next, **pprev;
 };
 
+typedef u8 u_int8_t;
+typedef u16 u_int16_t;
+typedef u32 u_int32_t;
+typedef u64 u_int64_t;
 #endif

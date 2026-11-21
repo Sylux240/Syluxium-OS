@@ -57,6 +57,11 @@
 #define CONFIG_MT792x_LIB 1
 #define CONFIG_MT7921_COMMON 1
 #define CONFIG_MT7921E 1
+/* Qualcomm Atheros ath10k (PCIe: QCA988x, QCA6174, QCA9377, QCA99x0) */
+#define CONFIG_ATH_COMMON 1
+#define CONFIG_ATH10K 1
+#define CONFIG_ATH10K_PCI 1
+#define CONFIG_ATH10K_CE 1
 /* Broadcom: bcma (PCI host) and b43 (N/HT/G/LP PHYs: BCM4321 .. BCM4331) */
 #define CONFIG_BCMA 1
 #define CONFIG_BCMA_HOST_PCI 1
