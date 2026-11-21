@@ -239,13 +239,18 @@ static void self_file(CHAR16 *out, const char *name)
 static const EFI_GUID GLOBAL_GUID = {0x8be4df61, 0x93ca, 0x11d2, {0xaa, 0x0d, 0x00, 0xe0, 0x98, 0x03, 0x2b, 0x8c}};
 static void register_boot_entry(void)
 {
-    CHAR16 marker[128], name[9] = {'B', 'o', 'o', 't', 0, 0, 0, 0, 0};
+    /* Always \EFI\Syluxium (the firmware may have started the fallback copy
+     * in \EFI\BOOT): the entry points at our own folder's picker. */
+    static const CHAR16 marker[] = {'\\', 'E', 'F', 'I', '\\', 'S', 'y', 'l', 'u', 'x', 'i', 'u', 'm', '\\', 'r', 'e', 'g', 'i',
+                                    's', 't', 'e', 'r', '-', 'b', 'o', 'o', 't', '-', 'e', 'n', 't', 'r', 'y', 0};
+    static const CHAR16 target[] = {'\\', 'E', 'F', 'I', '\\', 'S', 'y', 'l', 'u', 'x', 'i', 'u', 'm', '\\', 'B', 'O', 'O', 'T',
+                                    'X', '6', '4', '.', 'E', 'F', 'I', 0};
+    CHAR16 name[9] = {'B', 'o', 'o', 't', 0, 0, 0, 0, 0};
     static const char hex[] = "0123456789ABCDEF";
     u16 order[128], num = 0xFFFF;
     UINTN osize = sizeof(order), i, k;
-    self_file(marker, "register-boot-entry");
-    if (!SELF_PATH[0] || !file_exists(SELF->DeviceHandle, marker)) return;
-    EFI_DEVICE_PATH *dp = file_path(SELF->DeviceHandle, SELF_PATH), *n;
+    if (!file_exists(SELF->DeviceHandle, marker) || !file_exists(SELF->DeviceHandle, target)) return;
+    EFI_DEVICE_PATH *dp = file_path(SELF->DeviceHandle, target), *n;
     if (!dp) return;
     UINTN dplen = 0;
     for (n = dp;; n = (EFI_DEVICE_PATH *)((u8 *)n + (n->Length[0] | n->Length[1] << 8))) {

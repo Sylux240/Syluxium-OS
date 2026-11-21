@@ -1,76 +1,372 @@
-#!/bin/bash
-# The graphical installer (runs as root: started through the "Install
-# Syluxium" icon, which asks for an administrator password). A wizard of
-# kdialog windows; syluxium-install does the work.
-export PATH=/opt/trinity/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-TITLE="Install Syluxium"
-die() { kdialog --title "$TITLE" --error "$1"; exit 1; }
-[ "$(id -u)" = 0 ] || exec tdesudo -c "$0" -- "$@"
+#!/usr/bin/python3
+"""Install Syluxium: a step-by-step wizard (disk, account, settings, software)
+in front of /usr/local/sbin/syluxium-install, which does the work."""
+import os
+import re
+import subprocess
+import sys
+import threading
 
-kdialog --title "$TITLE" --yesno "Welcome to Syluxium!
+if os.geteuid() != 0:  # the desktop icon asks for the administrator password
+    try:
+        os.execvp("tdesudo", ["tdesudo", "-c", os.path.abspath(sys.argv[0])])
+    except OSError:
+        pass
 
-This will install Syluxium on your computer's disk, so it starts without
-the USB stick and keeps your files.
+sys.path.insert(0, "/usr/local/lib/syluxium/python")
+import syluxium_sys as S  # noqa: E402
+from syluxium_sys import Gtk, GLib  # noqa: E402
 
-Continue?" || exit 0
+TITLE = "Install Syluxium"
+LOG = "/var/log/syluxium-install.log"
+STEPS = ["Welcome", "Disk", "Your account", "Settings", "Software", "Ready to install", "Installing", "Finished"]
 
-# Disks: whole disks, not the one the live system was started from.
-live_disk=$(awk '$2 == "/boot/efi" {print $1}' /proc/mounts | sed 's/[0-9]*$//; s/p$//')
-items=()
-for d in /dev/sd? /dev/nvme?n? /dev/vd?; do
-    [ -b "$d" ] || continue
-    [ "$d" = "$live_disk" ] && continue
-    kib=$(sfdisk --show-size "$d" 2>/dev/null) || continue
-    [ "$kib" -ge 8000000 ] 2>/dev/null || [ "$kib" -ge 3000000 ] || continue
-    model=$(cat "/sys/class/block/${d#/dev/}/device/model" 2>/dev/null | tr -s ' ')
-    items+=("$d  -  $((kib / 1048576)) GB  ${model:-disk}")
-done
-[ ${#items[@]} -gt 0 ] || die "No disk to install on was found (at least 3 GB is needed)."
-choice=$(kdialog --title "$TITLE" --combobox "Where should Syluxium be installed?" "${items[@]}") || exit 0
-disk=${choice%% *}
-[ -b "$disk" ] || die "Please choose a disk."
+# Optional parts of the system: unticked ones are removed from the new system
+# (with whatever depends on them; the desktop itself is protected).
+SOFTWARE = [
+    ("Firefox web browser", "firefox-esr", True),
+    ("Windows programs (Wine)", "wine wine64 libwine fonts-wine", True),
+    ("E-mail and notes (KMail, KNotes)", "kmail-trinity knotes-trinity", True),
+    ("Media player (Kaffeine)", "kaffeine-trinity", True),
+    ("Text editor for programmers (Kate)", "kate-trinity", True),
+    ("Partition editor (GParted)", "gparted", True),
+    ("Magnifier and on-screen keyboard", "kmag-trinity kvkbd-trinity", True),
+]
 
-kdialog --title "$TITLE" --warningcontinuecancel "Everything on $disk will be erased.
+KEYBOARDS = [
+    ("us", "English (US)"), ("gb", "English (UK)"), ("us(intl)", "English (US, international)"),
+    ("ca", "French (Canada)"), ("de", "German"), ("ch", "German (Switzerland)"), ("fr", "French"),
+    ("be", "Belgian"), ("nl", "Dutch"), ("es", "Spanish"), ("latam", "Spanish (Latin America)"),
+    ("pt", "Portuguese"), ("br", "Portuguese (Brazil)"), ("it", "Italian"), ("se", "Swedish"),
+    ("no", "Norwegian"), ("dk", "Danish"), ("fi", "Finnish"), ("pl", "Polish"), ("cz", "Czech"),
+    ("hu", "Hungarian"), ("ru", "Russian"), ("ua", "Ukrainian"), ("tr", "Turkish"), ("gr", "Greek"),
+    ("jp", "Japanese"), ("kr", "Korean"),
+]
 
-All files, programs and other operating systems on this disk will be
-permanently deleted." --continue-label "Erase and install" || exit 0
 
-fullname=$(kdialog --title "$TITLE" --inputbox "Your name:" "") || exit 0
-suggest=$(echo "$fullname" | awk '{print tolower($1)}' | tr -cd 'a-z0-9_-')
-[ -n "$suggest" ] || suggest=user
-while :; do
-    user=$(kdialog --title "$TITLE" --inputbox "User name (for signing in; small letters and numbers):" "$suggest") || exit 0
-    echo "$user" | grep -Eq '^[a-z_][a-z0-9_-]{0,31}$' && [ "$user" != root ] && break
-    kdialog --title "$TITLE" --sorry "\"$user\" can't be used: use small letters, numbers, - and _ (starting with a letter)."
-done
-while :; do
-    pass1=$(kdialog --title "$TITLE" --password "Choose a password for $user:") || exit 0
-    pass2=$(kdialog --title "$TITLE" --password "Type the password again:") || exit 0
-    [ -z "$pass1" ] && { kdialog --title "$TITLE" --sorry "The password can't be empty."; continue; }
-    [ "$pass1" = "$pass2" ] && break
-    kdialog --title "$TITLE" --sorry "The passwords don't match. Please try again."
-done
-host=$(kdialog --title "$TITLE" --inputbox "Computer name (how it appears on the network):" "${user}-pc") || exit 0
-host=$(echo "$host" | tr -cd 'A-Za-z0-9-'); [ -n "$host" ] || host=syluxium
+def time_zones():
+    zones = []
+    for tab in ("/usr/share/zoneinfo/zone1970.tab", "/usr/share/zoneinfo/zone.tab"):
+        for line in S.read(tab).splitlines():
+            if line and not line.startswith("#"):
+                f = line.split("\t")
+                if len(f) >= 3:
+                    zones.append(f[2])
+        if zones:
+            break
+    return sorted(set(zones)) or ["Etc/UTC"]
 
-ref=$(kdialog --title "$TITLE" --progressbar "Installing Syluxium on $disk..." 9)
-progress() { dcop $ref setProgress "$1" > /dev/null 2>&1; dcop $ref setLabel "$2" > /dev/null 2>&1; }
-export -f progress; export ref
-if syluxium-install --disk "$disk" --user "$user" --password "$pass1" --fullname "$fullname" \
-       --hostname "$host" --progress progress > /var/log/syluxium-install.log 2>&1; then
-    dcop $ref close > /dev/null 2>&1
-    if kdialog --title "$TITLE" --yesno "Syluxium is installed!
 
-Remove the USB stick, then restart the computer.
-Sign in as \"$user\" with the password you chose.
+def current_zone():
+    z = S.read("/etc/timezone")
+    if z:
+        return z
+    try:
+        return os.readlink("/etc/localtime").split("zoneinfo/", 1)[1]
+    except (OSError, IndexError):
+        return "Etc/UTC"
 
-Restart now?"; then
-        reboot 2>/dev/null || kdialog --title "$TITLE" --msgbox "Please restart the computer now."
-    fi
-else
-    dcop $ref close > /dev/null 2>&1
-    kdialog --title "$TITLE" --error "The installation failed.
 
-$(tail -5 /var/log/syluxium-install.log)"
-    exit 1
-fi
+class Wizard:
+    def __init__(self):
+        self.win = S.window(TITLE, 760, 520, "system-software-install")
+        self.win.connect("delete-event", self.on_close)
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        self.win.add(outer)
+        body = Gtk.Box()
+        outer.pack_start(body, True, True, 0)
+
+        # Left: the steps, the current one in bold (as in the XP setup).
+        side = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10, margin=18)
+        side.get_style_context().add_class("sidebar")
+        side.set_size_request(190, -1)
+        side.pack_start(S.label("Syluxium Setup", bold=True, size="large"), False, False, 6)
+        self.step_labels = []
+        for name in STEPS:
+            lab = S.label(name)
+            side.pack_start(lab, False, False, 0)
+            self.step_labels.append(lab)
+        body.pack_start(side, False, False, 0)
+        body.pack_start(Gtk.Separator(orientation=Gtk.Orientation.VERTICAL), False, False, 0)
+
+        self.stack = Gtk.Stack(transition_type=Gtk.StackTransitionType.SLIDE_LEFT_RIGHT)
+        body.pack_start(self.stack, True, True, 0)
+        self.pages = [self.page_welcome(), self.page_disk(), self.page_account(), self.page_settings(),
+                      self.page_software(), self.page_summary(), self.page_progress(), self.page_done()]
+        for i, p in enumerate(self.pages):
+            self.stack.add_named(p, str(i))
+
+        outer.pack_start(Gtk.Separator(), False, False, 0)
+        buttons = Gtk.Box(spacing=8, margin=10)
+        self.back = Gtk.Button(label="< Back")
+        self.next = Gtk.Button(label="Next >")
+        self.cancel = Gtk.Button(label="Cancel")
+        self.back.connect("clicked", lambda *_: self.go(self.current - 1))
+        self.next.connect("clicked", self.on_next)
+        self.cancel.connect("clicked", lambda *_: self.on_close())
+        buttons.pack_end(self.cancel, False, False, 0)
+        buttons.pack_end(self.next, False, False, 0)
+        buttons.pack_end(self.back, False, False, 0)
+        outer.pack_start(buttons, False, False, 0)
+        self.installing = False
+        self.current = 0
+        self.go(0)
+        self.win.show_all()
+
+    # ---- pages ----
+    def page(self, title, text=""):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10, margin=22)
+        box.pack_start(S.label(title, bold=True, size="x-large"), False, False, 0)
+        if text:
+            box.pack_start(S.label(text, wrap=True), False, False, 0)
+        return box
+
+    def page_welcome(self):
+        return self.page("Welcome to Syluxium Setup",
+                         "This wizard installs Syluxium on this computer's disk, so it starts without the "
+                         "USB stick and keeps your files and settings.\n\nYou'll choose a disk, create your "
+                         "account and pick the software you want. Nothing is changed until you click "
+                         "Install on the last page.\n\nClick Next to continue.")
+
+    def page_disk(self):
+        box = self.page("Where should Syluxium be installed?",
+                        "Choose a disk. Everything on it will be erased: all files, programs and other "
+                        "operating systems on that disk.")
+        self.disk_store = Gtk.ListStore(str, str, str, str)  # device, size, model, note
+        view = Gtk.TreeView(model=self.disk_store)
+        for i, t in enumerate(("Disk", "Size", "Model", "")):
+            view.append_column(Gtk.TreeViewColumn(t, Gtk.CellRendererText(), text=i))
+        self.disk_view = view
+        sw = Gtk.ScrolledWindow(min_content_height=160)
+        sw.add(view)
+        box.pack_start(sw, True, True, 0)
+        refresh = Gtk.Button(label="Refresh")
+        refresh.connect("clicked", lambda *_: self.fill_disks())
+        row = Gtk.Box()
+        row.pack_start(refresh, False, False, 0)
+        box.pack_start(row, False, False, 0)
+        self.erase_ok = Gtk.CheckButton(label="I understand that everything on this disk will be erased")
+        box.pack_start(self.erase_ok, False, False, 0)
+        self.fill_disks()
+        return box
+
+    def fill_disks(self):
+        self.disk_store.clear()
+        for d in S.disks():
+            if d["system"] or d["size"] < 8 * 1000**3:
+                continue  # the stick Syluxium runs from, or too small
+            note = "removable" if d["removable"] else ""
+            self.disk_store.append([f"/dev/{d['name']}", S.human(d["size"]), d["model"], note])
+        if len(self.disk_store):
+            self.disk_view.get_selection().select_path(Gtk.TreePath(0))
+
+    def page_account(self):
+        box = self.page("Your account", "This is the account you'll sign in with. It can install "
+                                        "software and change settings (as an administrator).")
+        grid = Gtk.Grid(column_spacing=12, row_spacing=10)
+        self.fullname, self.user, self.pass1, self.pass2, self.host = (Gtk.Entry() for _ in range(5))
+        self.pass1.set_visibility(False)
+        self.pass2.set_visibility(False)
+        self.fullname.connect("changed", self.suggest_names)
+        self.user.connect("changed", lambda *_: setattr(self, "user_edited", self.user.has_focus()) or None)
+        self.user_edited = False
+        for i, (text, entry) in enumerate((("Your name:", self.fullname), ("User name:", self.user),
+                                           ("Password:", self.pass1), ("Type it again:", self.pass2),
+                                           ("Computer name:", self.host))):
+            grid.attach(S.label(text), 0, i, 1, 1)
+            entry.set_hexpand(True)
+            grid.attach(entry, 1, i, 1, 1)
+        box.pack_start(grid, False, False, 0)
+        self.account_error = S.label("")
+        box.pack_start(self.account_error, False, False, 0)
+        return box
+
+    def suggest_names(self, *_):
+        if self.user_edited:
+            return
+        first = (self.fullname.get_text().split() or ["user"])[0].lower()
+        name = re.sub(r"[^a-z0-9_-]", "", first) or "user"
+        if not name[0].isalpha():
+            name = "u" + name
+        self.user.set_text(name)
+        self.host.set_text(f"{name}-pc")
+
+    def page_settings(self):
+        box = self.page("Settings")
+        grid = Gtk.Grid(column_spacing=12, row_spacing=10)
+        self.zone = Gtk.ComboBoxText()
+        zones = time_zones()
+        cur = current_zone()
+        for z in zones:
+            self.zone.append(z, z.replace("_", " "))
+        self.zone.set_active_id(cur if cur in zones else ("America/New_York" if "America/New_York" in zones else zones[0]))
+        self.keyboard = Gtk.ComboBoxText()
+        for code, name in KEYBOARDS:
+            self.keyboard.append(code, name)
+        self.keyboard.set_active_id("us")
+        self.autologin = Gtk.CheckButton(label="Sign in automatically (no password at start-up)")
+        grid.attach(S.label("Time zone:"), 0, 0, 1, 1)
+        grid.attach(self.zone, 1, 0, 1, 1)
+        grid.attach(S.label("Keyboard layout:"), 0, 1, 1, 1)
+        grid.attach(self.keyboard, 1, 1, 1, 1)
+        grid.attach(self.autologin, 0, 2, 2, 1)
+        box.pack_start(grid, False, False, 0)
+        return box
+
+    def page_software(self):
+        box = self.page("Software", "Untick what you don't need: it's left out of the installed system "
+                                    "(you can add it again later from the App Store).")
+        self.soft_checks = []
+        for name, pkgs, default in SOFTWARE:
+            c = Gtk.CheckButton(label=name)
+            c.set_active(default)
+            box.pack_start(c, False, False, 0)
+            self.soft_checks.append((c, pkgs))
+        return box
+
+    def page_summary(self):
+        box = self.page("Ready to install", "Check your choices. Click Install to begin; this takes a few "
+                                            "minutes.")
+        self.summary = S.label("", wrap=True)
+        box.pack_start(self.summary, False, False, 0)
+        return box
+
+    def page_progress(self):
+        box = self.page("Installing Syluxium", "Please wait. Don't turn off the computer or remove the "
+                                               "USB stick.")
+        self.bar = Gtk.ProgressBar(show_text=True)
+        box.pack_start(self.bar, False, False, 8)
+        self.status = S.label("")
+        box.pack_start(self.status, False, False, 0)
+        return box
+
+    def page_done(self):
+        box = self.page("Finished")
+        self.done_text = S.label("", wrap=True)
+        box.pack_start(self.done_text, False, False, 0)
+        return box
+
+    # ---- navigation ----
+    def chosen_disk(self):
+        model, it = self.disk_view.get_selection().get_selected()
+        return model[it][0] if it else None
+
+    def removed(self):
+        return " ".join(p for c, p in self.soft_checks if not c.get_active())
+
+    def check(self, page):
+        if page == 1:
+            if not self.chosen_disk():
+                return "Choose a disk (at least 8 GB). The USB stick Syluxium runs from isn't listed."
+            if not self.erase_ok.get_active():
+                return "Tick the box to confirm that the disk may be erased."
+        if page == 2:
+            u, p1, p2 = self.user.get_text(), self.pass1.get_text(), self.pass2.get_text()
+            if not re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}", u) or u == "root":
+                return "User name: small letters, numbers, - and _, starting with a letter."
+            if not p1:
+                return "Choose a password."
+            if p1 != p2:
+                return "The passwords don't match."
+            if not re.fullmatch(r"[A-Za-z0-9-]{1,63}", self.host.get_text()):
+                return "Computer name: letters, numbers and -."
+        return None
+
+    def on_next(self, *_):
+        if self.current == 5:
+            self.start_install()
+            return
+        if self.current == 7:
+            self.finish()
+            return
+        problem = self.check(self.current)
+        if problem:
+            S.message(self.win, problem, kind=Gtk.MessageType.WARNING)
+            return
+        self.go(self.current + 1)
+
+    def go(self, i):
+        self.current = i
+        self.stack.set_visible_child_name(str(i))
+        for k, lab in enumerate(self.step_labels):
+            lab.set_markup(f"<b>{GLib.markup_escape_text(STEPS[k])}</b>" if k == i
+                           else GLib.markup_escape_text(STEPS[k]))
+        if i == 5:
+            gone = [n for (n, _, _), (c, _) in zip(SOFTWARE, self.soft_checks) if not c.get_active()]
+            self.summary.set_text(
+                f"Disk: {self.chosen_disk()} (will be erased)\n"
+                f"Account: {self.fullname.get_text() or self.user.get_text()} ({self.user.get_text()})\n"
+                f"Computer name: {self.host.get_text()}\n"
+                f"Time zone: {self.zone.get_active_id()}\n"
+                f"Keyboard: {dict(KEYBOARDS).get(self.keyboard.get_active_id(), 'English (US)')}\n"
+                f"Automatic sign-in: {'yes' if self.autologin.get_active() else 'no'}\n"
+                f"Left out: {', '.join(gone) if gone else 'nothing'}")
+        self.back.set_sensitive(0 < i < 6)
+        self.next.set_sensitive(i != 6)
+        self.next.set_label({5: "Install", 7: "Restart now"}.get(i, "Next >"))
+        self.cancel.set_label("Close" if i == 7 else "Cancel")
+        self.cancel.set_sensitive(i != 6)
+
+    # ---- installing ----
+    def start_install(self):
+        self.installing = True
+        self.go(6)
+        cmd = ["syluxium-install", "--disk", self.chosen_disk(), "--user", self.user.get_text(),
+               "--password", self.pass1.get_text(), "--fullname", self.fullname.get_text() or self.user.get_text(),
+               "--hostname", self.host.get_text(), "--timezone", self.zone.get_active_id() or "Etc/UTC",
+               "--keyboard", self.keyboard.get_active_id() or "us"]
+        if self.autologin.get_active():
+            cmd.append("--autologin")
+        if self.removed():
+            cmd += ["--remove", self.removed()]
+        threading.Thread(target=self.run, args=(cmd,), daemon=True).start()
+
+    def run(self, cmd):
+        ok = False
+        try:
+            with open(LOG, "w") as log:
+                p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                for line in p.stdout:
+                    log.write(line)
+                    log.flush()
+                    m = re.match(r"\[install\] (\d+)/(\d+) (.*)", line)
+                    if m:
+                        GLib.idle_add(self.progress, int(m[1]), int(m[2]), m[3])
+                ok = p.wait() == 0
+        except OSError as e:
+            with open(LOG, "a") as log:
+                log.write(f"cannot run the installer: {e}\n")
+        GLib.idle_add(self.done, ok)
+
+    def progress(self, n, total, text):
+        self.bar.set_fraction(min(1.0, n / total))
+        self.bar.set_text(f"{n * 100 // total}%")
+        self.status.set_text(text)
+
+    def done(self, ok):
+        self.installing = False
+        if ok:
+            self.done_text.set_text(f"Syluxium is installed.\n\nRemove the USB stick, then restart the computer. "
+                                    f"Sign in as \"{self.user.get_text()}\" with the password you chose.")
+        else:
+            tail = "".join(open(LOG).readlines()[-6:]) if os.path.exists(LOG) else ""
+            self.done_text.set_text(f"The installation failed. Nothing on the USB stick was changed.\n\n"
+                                    f"Details ({LOG}):\n{tail}")
+            self.next.set_label("Restart now")
+        self.go(7)
+        if not ok:
+            self.next.set_sensitive(False)
+
+    def finish(self):
+        subprocess.call(["reboot"])
+
+    def on_close(self, *_):
+        if self.installing:
+            return True  # not while the disk is being written
+        Gtk.main_quit()
+        return False
+
+
+if __name__ == "__main__":
+    Wizard()
+    Gtk.main()
