@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Task Manager
+GenericName=Task Manager
+Comment=See the programs and processes running on this computer and end them
+Exec=syluxium-taskmgr
+Icon=utilities-system-monitor
+Categories=System;Monitor;
