@@ -81,6 +81,11 @@ inline void wrmsr(u32 msr, u64 value) {
     asm volatile("wrmsr" : : "c"(msr), "a"(static_cast<u32>(value)), "d"(static_cast<u32>(value >> 32)));
 }
 
+// Like rdmsr/wrmsr, but an MSR the CPU (or hypervisor) doesn't have gives
+// false instead of a fatal #GP (interrupts.cpp skips the instruction).
+bool rdmsr_safe(u32 msr, u64* value);
+bool wrmsr_safe(u32 msr, u64 value);
+
 // ---- CPUID -----------------------------------------------------------------
 
 struct CpuidResult {

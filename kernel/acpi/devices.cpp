@@ -8,6 +8,7 @@
 #include <acpi/devices.hpp>
 #include <acpi/ec.hpp>
 #include <acpi/power.hpp>
+#include <power/cpupower.hpp>
 #include <block/block.hpp>
 #include <core/log.hpp>
 #include <fs/ext2.hpp>
@@ -24,6 +25,7 @@
 #include <arch/x86_64/cpu.hpp>
 #include <uacpi/event.h>
 #include <uacpi/sleep.h>
+#include <uacpi/namespace.h>
 #include <uacpi/notify.h>
 #include <uacpi/uacpi.h>
 #include <uacpi/utilities.h>
@@ -325,6 +327,69 @@ uacpi_status battery_notify(uacpi_handle, uacpi_namespace_node*, uacpi_u64) {
     return UACPI_STATUS_OK;
 }
 
+// ---- processor idle states (_CST) ----
+
+// The first processor object with a _CST: its deepest I/O-port C2 state
+// goes to cpupower (AMD's CC6; Intel CPUs idle through MWAIT instead).
+uacpi_iteration_decision find_cst(void* user, uacpi_namespace_node* node, uacpi_u32) {
+    auto* out = static_cast<uacpi_namespace_node**>(user);
+    uacpi_object* cst = nullptr;
+    if (uacpi_eval_simple(node, "_CST", &cst) != UACPI_STATUS_OK || !cst)
+        return UACPI_ITERATION_DECISION_CONTINUE;
+    uacpi_object_unref(cst);
+    *out = node;
+    return UACPI_ITERATION_DECISION_BREAK;
+}
+
+void detect_cstates() {
+    uacpi_namespace_node* cpu = nullptr;
+    uacpi_namespace_for_each_child(uacpi_namespace_root(), find_cst, nullptr,
+                                   static_cast<uacpi_object_type_bits>(UACPI_OBJECT_PROCESSOR_BIT | UACPI_OBJECT_DEVICE_BIT),
+                                   UACPI_MAX_DEPTH_ANY, &cpu);
+    if (!cpu)
+        return;
+    uacpi_object* cst = nullptr;
+    if (uacpi_eval_simple(cpu, "_CST", &cst) != UACPI_STATUS_OK || !cst)
+        return;
+    uacpi_object_array list;
+    u16 best_port = 0;
+    u32 best_latency = 0;
+    int best_type = 0, count = 0;
+    if (uacpi_object_get_package(cst, &list) == UACPI_STATUS_OK) {
+        for (usize i = 1; i < list.count; i++) { // [0] is the count
+            uacpi_object_array e;
+            if (uacpi_object_get_package(list.objects[i], &e) != UACPI_STATUS_OK || e.count < 4)
+                continue;
+            count++;
+            uacpi_data_view reg;
+            if (uacpi_object_get_buffer(e.objects[0], &reg) != UACPI_STATUS_OK || reg.length < 15)
+                continue;
+            const u8* b = reg.const_bytes;
+            // Generic Register descriptor: 0x82, length, space, width, offset, access size, address.
+            if (b[0] != 0x82 || b[3] != 1 /* SystemIO */)
+                continue;
+            u64 addr = 0;
+            for (int k = 0; k < 8; k++)
+                addr |= static_cast<u64>(b[7 + k]) << (8 * k);
+            int type = static_cast<int>(package_int(e, 1));
+            u32 latency = static_cast<u32>(package_int(e, 2));
+            if (type == 2 && addr && addr < 0x10000 && (!best_port || latency >= best_latency)) {
+                best_port = static_cast<u16>(addr);
+                best_latency = latency;
+                best_type = type;
+            }
+        }
+    }
+    uacpi_object_unref(cst);
+    const char* path = uacpi_namespace_node_generate_absolute_path(cpu);
+    klog::info("ACPI: %s lists %d idle state(s)%s", path ? path : "processor", count,
+               best_port ? ", one entered through an I/O port" : "");
+    if (path)
+        uacpi_free_absolute_path(path);
+    if (best_port)
+        cpupower::set_io_cstate(best_port, best_latency, best_type);
+}
+
 void publish_power_supplies() {
     for (int i = 0; i < g_battery_count; i++) {
         uacpi_install_notify_handler(g_batteries[i], battery_notify, nullptr);
@@ -408,6 +473,7 @@ void start_interpreter() {
     uacpi_find_devices("ACPI0003", found_ac, nullptr);
     uacpi_find_devices("PNP0C0D", found_lid, nullptr);
     publish_power_supplies();
+    detect_cstates();
     // What power managers (TDE's tdepowersave) look for to know ACPI is
     // there; no sleep states are offered until resume works.
     vfs::mkdir_p("/proc/acpi");
