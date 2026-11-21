@@ -174,6 +174,21 @@ void add_char_device(u32 major, u32 minor, const char* devname, const char* pci_
         snprintf(out, size, "../../../class/drm");
         return true;
     }, cd));
+    // <pci device>/drm/<card0|renderD128>: libdrm finds a device's other
+    // nodes there (the X server hands clients the render node for DRI3).
+    const char* base = devname;
+    for (const char* p = devname; *p; p++)
+        if (*p == '/')
+            base = p + 1;
+    char node[128];
+    snprintf(node, sizeof(node), "/sys/bus/pci/devices/%s/drm/%s", pci_bus_id, base);
+    vfs::mkdir_p(node, 0755);
+    add(node, "uevent", new GeneratedFile(gen_chardev_uevent, cd));
+    char devnum[32];
+    snprintf(devnum, sizeof(devnum), "%u:%u\n", major, minor);
+    char devpath[160];
+    snprintf(devpath, sizeof(devpath), "%s/dev", node);
+    genfs::static_file(devpath, devnum);
 }
 
 } // namespace sysfs
