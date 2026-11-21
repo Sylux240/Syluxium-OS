@@ -1,0 +1,16 @@
+[Desktop Entry]
+X-TDE-ServiceTypes=all/all
+Actions=zip;targz;
+X-TDE-Submenu=Send To
+X-TDE-Priority=TopLevel
+Type=Service
+
+[Desktop Action zip]
+Name=Compressed (zipped) Folder
+Icon=application-x-tar
+Exec=syluxium-archive zip %F
+
+[Desktop Action targz]
+Name=Compressed tar.gz Archive
+Icon=application-x-tar
+Exec=syluxium-archive targz %F

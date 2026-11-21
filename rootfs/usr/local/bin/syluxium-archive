@@ -1,0 +1,253 @@
+#!/usr/bin/env python3
+# Archives from the file manager's and desktop's right-click menus, the way
+# XP-era Windows offers them:
+#   syluxium-archive extract-here FILE...   "Extract Here"
+#   syluxium-archive extract-to FILE...     "Extract All..." (asks where)
+#   syluxium-archive zip FILE...            "Send To > Compressed (zipped) Folder"
+#   syluxium-archive targz FILE...          "Compress to .tar.gz"
+# zip and tar (gz/bz2/xz) are handled here; 7z and rar through 7z/unrar when
+# installed. Long jobs show a progress window; errors a message box.
+import os
+import shutil
+import subprocess
+import sys
+import tarfile
+import threading
+import zipfile
+
+sys.path.insert(0, "/usr/local/lib/syluxium/python")
+import gi  # noqa: E402
+
+gi.require_version("Gtk", "3.0")
+from gi.repository import GLib, Gtk  # noqa: E402
+
+TAR_SUFFIXES = (".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tbz", ".tbz2", ".tar.xz", ".txz", ".tar.lzma", ".tar.Z")
+SINGLE_SUFFIXES = {".gz": "gzip", ".bz2": "bzip2", ".xz": "xz", ".lzma": "xz", ".Z": "gzip"}
+
+
+def strip_suffix(name):
+    low = name.lower()
+    for s in sorted(TAR_SUFFIXES + (".zip", ".7z", ".rar") + tuple(SINGLE_SUFFIXES), key=len, reverse=True):
+        if low.endswith(s.lower()):
+            return name[: -len(s)]
+    return os.path.splitext(name)[0]
+
+
+def unique(path):
+    """path, or 'path (2)', 'path (3)'... whichever doesn't exist yet."""
+    if not os.path.lexists(path):
+        return path
+    base, ext = path, ""
+    for s in (".tar.gz", ".zip"):
+        if path.endswith(s):
+            base, ext = path[: -len(s)], s
+    n = 2
+    while os.path.lexists(f"{base} ({n}){ext}"):
+        n += 1
+    return f"{base} ({n}){ext}"
+
+
+def safe_member(dest, name):
+    """The member's target inside dest, or None if it would escape it."""
+    target = os.path.realpath(os.path.join(dest, name))
+    root = os.path.realpath(dest)
+    return target if target == root or target.startswith(root + os.sep) else None
+
+
+def members(path):
+    """Top-level names in the archive (to decide whether it needs its own folder)."""
+    low = path.lower()
+    if zipfile.is_zipfile(path):
+        with zipfile.ZipFile(path) as z:
+            names = z.namelist()
+    elif low.endswith(TAR_SUFFIXES) or tarfile.is_tarfile(path):
+        with tarfile.open(path) as t:
+            names = t.getnames()
+    elif shutil.which("7z"):
+        out = subprocess.run(["7z", "l", "-slt", "-ba", path], capture_output=True, text=True).stdout
+        names = [line[7:] for line in out.splitlines() if line.startswith("Path = ")]
+    else:
+        return None
+    return {n.strip("/").split("/")[0] for n in names if n.strip("/") and n.strip("/") != "."}
+
+
+def extract(path, dest):
+    os.makedirs(dest, exist_ok=True)
+    low = path.lower()
+    if zipfile.is_zipfile(path):
+        with zipfile.ZipFile(path) as z:
+            for info in z.infolist():
+                if safe_member(dest, info.filename) is None:
+                    raise RuntimeError(f"unsafe path in the archive: {info.filename}")
+            z.extractall(dest)
+            # Restore the Unix permissions zip files from Linux carry (executables).
+            for info in z.infolist():
+                mode = info.external_attr >> 16
+                if mode and not info.is_dir():
+                    target = os.path.join(dest, info.filename)
+                    if os.path.isfile(target):
+                        os.chmod(target, mode & 0o777)
+        return
+    if low.endswith(TAR_SUFFIXES) or tarfile.is_tarfile(path):
+        with tarfile.open(path) as t:
+            t.extractall(dest, filter="data")  # no absolute paths, '..', devices or setuid bits
+        return
+    for suffix, tool in SINGLE_SUFFIXES.items():  # a single compressed file: file.txt.gz -> file.txt
+        if low.endswith(suffix.lower()) and shutil.which(tool):
+            out = unique(os.path.join(dest, os.path.basename(path)[: -len(suffix)]))
+            with open(out, "wb") as f:
+                subprocess.run([tool, "-dc", path], stdout=f, check=True)
+            return
+    if shutil.which("7z"):
+        r = subprocess.run(["7z", "x", "-y", f"-o{dest}", path], capture_output=True, text=True)
+        if r.returncode != 0:
+            raise RuntimeError(r.stderr.strip() or r.stdout.strip().splitlines()[-1])
+        return
+    raise RuntimeError("this kind of archive can't be opened (7-Zip is not installed)")
+
+
+def extract_here(path):
+    folder = os.path.dirname(os.path.abspath(path))
+    top = members(path)
+    # One folder (or file) inside: put it here. Several: into a folder named
+    # after the archive, so they don't spill over everything else here.
+    if top is not None and len(top) == 1 and not os.path.lexists(os.path.join(folder, next(iter(top)))):
+        extract(path, folder)
+    else:
+        extract(path, unique(os.path.join(folder, strip_suffix(os.path.basename(path)))))
+
+
+def compress(files, kind):
+    files = [os.path.abspath(f) for f in files]
+    folder = os.path.dirname(files[0])
+    first = os.path.basename(files[0].rstrip("/"))
+    stem = strip_suffix(first) if len(files) == 1 and os.path.isfile(files[0]) else first
+    if len(files) > 1:
+        stem = os.path.basename(folder) or "Archive"
+    if kind == "zip":
+        out = unique(os.path.join(folder, stem + ".zip"))
+        with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
+            for f in files:
+                if os.path.isdir(f):
+                    for root, dirs, names in os.walk(f):
+                        rel = os.path.relpath(root, folder)
+                        if not names and not dirs:
+                            z.write(root, rel)  # keep empty folders
+                        for n in names:
+                            p = os.path.join(root, n)
+                            if os.path.isfile(p):
+                                z.write(p, os.path.join(rel, n))
+                else:
+                    z.write(f, os.path.basename(f))
+    else:
+        out = unique(os.path.join(folder, stem + ".tar.gz"))
+        with tarfile.open(out, "w:gz") as t:
+            for f in files:
+                t.add(f, os.path.basename(f.rstrip("/")))
+    return out
+
+
+class Progress(Gtk.Window):
+    def __init__(self, title, text):
+        super().__init__(title=title)
+        self.set_default_size(380, -1)
+        self.set_border_width(14)
+        self.set_icon_name("package")
+        self.set_position(Gtk.WindowPosition.CENTER)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        label = Gtk.Label(label=text, xalign=0.0)
+        label.set_line_wrap(True)
+        box.pack_start(label, False, False, 0)
+        self.bar = Gtk.ProgressBar()
+        box.pack_start(self.bar, False, False, 0)
+        self.add(box)
+        GLib.timeout_add(100, self.pulse)
+
+    def pulse(self):
+        self.bar.pulse()
+        return True
+
+
+def error(text, secondary=""):
+    d = Gtk.MessageDialog(message_type=Gtk.MessageType.ERROR, buttons=Gtk.ButtonsType.OK, text=text)
+    d.set_title("Compressed Folders")
+    if secondary:
+        d.format_secondary_text(secondary)
+    d.run()
+    d.destroy()
+
+
+def run_job(title, text, job):
+    """Run job() in a thread; a progress window appears if it takes longer than half a second."""
+    result = {}
+
+    def worker():
+        try:
+            job()
+        except Exception as e:  # shown to the user, not a crash
+            result["error"] = str(e) or e.__class__.__name__
+        GLib.idle_add(Gtk.main_quit)
+
+    win = Progress(title, text)
+    GLib.timeout_add(500, lambda: (win.show_all(), False)[1])
+    threading.Thread(target=worker, daemon=True).start()
+    Gtk.main()
+    win.destroy()
+    if "error" in result:
+        error(f"{title} failed", result["error"])
+        return False
+    return True
+
+
+def choose_folder(default):
+    d = Gtk.FileChooserDialog(title="Extract All - Select a Destination", action=Gtk.FileChooserAction.SELECT_FOLDER)
+    d.add_buttons("_Cancel", Gtk.ResponseType.CANCEL, "E_xtract", Gtk.ResponseType.OK)
+    parent = os.path.dirname(default)
+    d.set_current_folder(parent)
+    # Offer "<folder>/<archive name>" like Windows' extraction wizard.
+    entry = Gtk.Entry(text=os.path.basename(default))
+    box = Gtk.Box(spacing=6)
+    box.pack_start(Gtk.Label(label="Extract into a new folder named:"), False, False, 0)
+    box.pack_start(entry, True, True, 0)
+    box.show_all()
+    d.set_extra_widget(box)
+    r = d.run()
+    folder = d.get_filename()
+    name = entry.get_text().strip()
+    d.destroy()
+    if r != Gtk.ResponseType.OK or not folder:
+        return None
+    return os.path.join(folder, name) if name else folder
+
+
+def main():
+    if len(sys.argv) < 3:
+        print(__doc__ or "usage: syluxium-archive extract-here|extract-to|zip|targz FILE...", file=sys.stderr)
+        return 2
+    mode, files = sys.argv[1], [f for f in sys.argv[2:] if f]
+    files = [f[7:] if f.startswith("file://") else f for f in files]
+    if mode == "extract-here":
+        for f in files:
+            if not run_job("Extract", f"Extracting {os.path.basename(f)}...", lambda f=f: extract_here(f)):
+                return 1
+    elif mode == "extract-to":
+        for f in files:
+            dest = choose_folder(unique(os.path.join(os.path.dirname(os.path.abspath(f)),
+                                                     strip_suffix(os.path.basename(f)))))
+            if dest is None:
+                return 0
+            if not run_job("Extract", f"Extracting {os.path.basename(f)}...", lambda f=f, d=dest: extract(f, d)):
+                return 1
+            subprocess.Popen(["kfmclient", "openProfile", "filemanagement", dest], stderr=subprocess.DEVNULL)
+    elif mode in ("zip", "targz"):
+        names = ", ".join(os.path.basename(f.rstrip("/")) for f in files[:3]) + ("..." if len(files) > 3 else "")
+        if not run_job("Compress", f"Compressing {names}...", lambda: compress(files, mode)):
+            return 1
+    else:
+        print(f"unknown mode {mode}", file=sys.stderr)
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

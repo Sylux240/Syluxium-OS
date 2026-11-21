@@ -1,0 +1,10 @@
+[Desktop Entry]
+X-TDE-ServiceTypes=application/x-desktop,inode/directory
+Actions=changeIcon;
+X-TDE-Priority=TopLevel
+Type=Service
+
+[Desktop Action changeIcon]
+Name=Change Icon...
+Icon=icons
+Exec=syluxium-change-icon %F
