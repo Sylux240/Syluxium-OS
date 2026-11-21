@@ -70,8 +70,9 @@ DEBIAN_PKGS  += 7zip
 DEBIAN_PKGS  += libinput-tools
 # Bluetooth: BlueZ (bluetoothd, bluetoothctl, btmgmt)
 DEBIAN_PKGS  += bluez
-# Broadcom b43 Wi-Fi (iMacs, older MacBooks): its firmware may not be shipped;
-# syluxium-b43-firmware fetches Broadcom's driver and cuts it out with this.
+# Broadcom b43 Wi-Fi (iMacs, older MacBooks): tools/b43-firmware.sh cuts its
+# firmware out of Broadcom's driver at build time (syluxium-b43-firmware can
+# still do it on the machine).
 DEBIAN_CONTRIB_REPO := http://deb.debian.org/debian|$(DEBIAN_SUITE)|contrib
 DEBIAN_PKGS  += b43-fwcutter
 # Accessories: WordPad (AbiWord, reads and writes .rtf/.doc/.odt), notify-send;
@@ -499,6 +500,8 @@ $(INITRAMFS): $(KERNEL) $(PICKER) $(DEBIAN_CONFIGURED) tools/merge-accounts.py t
 	    mkdir -p $(CURDIR)/$(ROOTFS)/usr/lib/firmware/$$(dirname $$f); \
 	    cp -L "$$f" $(CURDIR)/$(ROOTFS)/usr/lib/firmware/$$f; done
 	@ln -sf mediatek/mt7601u.bin $(ROOTFS)/usr/lib/firmware/mt7601u.bin # older drivers ask for it at the top level
+	@# Broadcom b43 (older MacBooks, iMacs): cut from Broadcom's driver at build time.
+	@tools/b43-firmware.sh $(ROOTFS)
 	@# Wine: 32-bit DLLs (WoW64), stripped DLLs, the template prefix.
 	@tools/wine-setup.sh $(ROOTFS) $(WINE_I386_ROOT)
 	@# What the installer puts on the new disk: kernel, Limine (UEFI + BIOS stages), its installer.
