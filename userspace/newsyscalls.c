@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/personality.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -105,12 +106,51 @@ static void test_mlock(void) {
     munmap(p, 65536);
 }
 
-int main(void) {
+// ASLR: two runs of a program get different stack, heap, code and mmap
+// addresses; with personality(ADDR_NO_RANDOMIZE) (setarch -R) they don't.
+static void run_addrs(int norandom, char* out, size_t n) {
+    int p[2];
+    if (pipe(p) < 0)
+        return;
+    pid_t c = fork();
+    if (c == 0) {
+        if (norandom)
+            personality(ADDR_NO_RANDOMIZE);
+        dup2(p[1], 1);
+        execl("/proc/self/exe", "newsyscalls", "addrs", (char*)NULL);
+        _exit(127);
+    }
+    close(p[1]);
+    ssize_t r = read(p[0], out, n - 1);
+    out[r > 0 ? r : 0] = 0;
+    close(p[0]);
+    waitpid(c, NULL, 0);
+}
+
+static void test_aslr(void) {
+    char a[200], b[200], c[200], d[200];
+    run_addrs(0, a, sizeof(a));
+    run_addrs(0, b, sizeof(b));
+    run_addrs(1, c, sizeof(c));
+    run_addrs(1, d, sizeof(d));
+    check(a[0] && strcmp(a, b) != 0, "ASLR: two runs get different addresses");
+    check(c[0] && strcmp(c, d) == 0, "ASLR off with personality(ADDR_NO_RANDOMIZE)");
+}
+
+int main(int argc, char** argv) {
+    if (argc > 1 && strcmp(argv[1], "addrs") == 0) {
+        int local;
+        void* heap = malloc(16);
+        void* map = mmap(NULL, 4096, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        printf("%p %p %p %p\n", (void*)&local, heap, (void*)main, map);
+        return 0;
+    }
     setvbuf(stdout, NULL, _IONBF, 0);
     test_copy_file_range();
     test_pidfd();
     test_sigtimedwait();
     test_mlock();
+    test_aslr();
     printf("newsyscalls: %d failed\n", fails);
     return fails;
 }

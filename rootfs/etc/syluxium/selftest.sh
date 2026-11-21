@@ -9,11 +9,12 @@ check() {
     # check "description" command...
     desc=$1
     shift
-    if "$@" >/dev/null 2>&1; then
+    if "$@" >/tmp/selftest.out 2>&1; then
         echo "  [PASS] $desc"
         pass=$((pass + 1))
     else
         echo "  [FAIL] $desc"
+        tail -n 6 /tmp/selftest.out | sed 's/^/         /'
         fail=$((fail + 1))
     fi
 }

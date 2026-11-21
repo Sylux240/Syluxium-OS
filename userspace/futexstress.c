@@ -16,6 +16,7 @@
 // (a lost wakeup), and every test checks its counters at the end.
 #define _GNU_SOURCE
 #include <errno.h>
+#include <fcntl.h>
 #include <linux/futex.h>
 #include <pthread.h>
 #include <signal.h>
@@ -139,8 +140,8 @@ static void* pipe_writer(void* arg) {
     int burst = 0;
     while (!atomic_load(&stop)) {
         for (int i = 0; i < (burst % 7) * 20 + 1; i++)
-            if (write(pipefd[1], "dlstatus:1:12.5:Retrieving file\n", 32) < 0)
-                return NULL;
+            if (write(pipefd[1], "dlstatus:1:12.5:Retrieving file\n", 32) < 0 && errno != EAGAIN)
+                return NULL; // (non-blocking: a full pipe at the end mustn't hang the writer)
         burst++;
         usleep(burst % 3 ? 100 : 3000);
     }
@@ -152,6 +153,7 @@ static int test_gil(void) {
     current_test = "gil handoff";
     if (pipe(pipefd) < 0)
         return 1;
+    fcntl(pipefd[1], F_SETFL, O_NONBLOCK);
     pthread_t t[8], w;
     pthread_create(&w, NULL, pipe_writer, NULL);
     for (long i = 0; i < 8; i++)
