@@ -12,6 +12,7 @@
 #include <power/cpupower.hpp>
 #include <block/block.hpp>
 #include <core/log.hpp>
+#include <core/smbios.hpp>
 #include <fs/ext2.hpp>
 #include <fs/genfs.hpp>
 #include <fs/vfs.hpp>
@@ -28,6 +29,7 @@
 #include <uacpi/sleep.h>
 #include <uacpi/namespace.h>
 #include <uacpi/notify.h>
+#include <uacpi/osi.h>
 #include <uacpi/uacpi.h>
 #include <uacpi/utilities.h>
 
@@ -482,6 +484,17 @@ void start_interpreter() {
         return;
     }
     uacpi_status r = uacpi_initialize(0);
+    // Apple firmware: answer _OSI("Darwin") and no Windows versions, as
+    // macOS does and Linux does on Macs (since 4.7). Some devices are only
+    // switched on for Darwin (the SPI keyboard/touchpad of 2015+ MacBooks,
+    // Thunderbolt), and Apple's firmware misbehaves when told both.
+    if (r == UACPI_STATUS_OK && !strncmp(smbios::machine_name(), "Apple Inc.", 10) &&
+        !strstr(boot::cmdline(), "acpi_osi=!Darwin")) {
+        uacpi_bulk_configure_interfaces(UACPI_INTERFACE_ACTION_DISABLE, UACPI_INTERFACE_KIND_VENDOR);
+        uacpi_install_interface("Darwin", UACPI_INTERFACE_KIND_VENDOR);
+        klog::info("ACPI: Apple firmware: _OSI(\"Darwin\") answered like macOS (boot option acpi_osi=!Darwin: "
+                   "Windows strings instead)");
+    }
     if (r == UACPI_STATUS_OK)
         r = uacpi_namespace_load();
     if (r == UACPI_STATUS_OK)
