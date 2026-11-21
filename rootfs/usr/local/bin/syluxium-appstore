@@ -1081,6 +1081,13 @@ class Store:
 
     def after(self, ok, out, success, pkg=None):
         self.busy(False)
+        if not ok and pkg and "RECOVERY: ok" in out:
+            # The repair finished the job (a setup script that failed the
+            # first time worked the second): it did happen after all.
+            inst = pkg in installed_packages()
+            if inst == success.endswith("was installed."):
+                ok = True
+                self.log_note(f"{display_name(pkg)}: finished by the repair step.\n")
         if ok:
             self.status.set_text(success)
         else:
@@ -1098,6 +1105,9 @@ class Store:
             elif pkg:
                 self.fill(display_name(pkg), [pkg])
         self.reload(again)
+
+    def log_note(self, text):
+        self.runner.log(text)
 
     def planned(self, args, then):
         """Simulate "apt-get <args>" in the background, then then(plan) on the main thread."""
@@ -1319,6 +1329,8 @@ class DebInstaller:
     def done(self, ok, out):
         self.close_btn.set_sensitive(True)
         self.close_btn.set_label("Close")
+        if not ok and "RECOVERY: ok" in out and self.pkg in installed_packages():
+            ok = True  # the repair step finished the job
         if ok:
             self.status.set_text(f"{display_name(self.pkg)} was installed.")
             self.install_btn.hide()

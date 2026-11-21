@@ -459,13 +459,13 @@ long sys_ioctl(SYSCALL_ARGS) {
     FileRef f(p, static_cast<long>(a0));
     if (!f)
         return -err::BADF;
-    // The generic ones (Python sets non-blocking mode with FIONBIO, not
-    // fcntl). Sockets keep their own FIONBIO for now: making it take effect
-    // there stalled the desktop session's start.
-    bool socket = (f->inode->mode & vfs::S_IFMT) == vfs::S_IFSOCK;
+    // Pipes: FIONBIO (Python sets non-blocking mode with it, not fcntl).
+    // Sockets and terminals keep their own FIONBIO handling for now: making
+    // it take effect everywhere stalled the desktop session's start.
+    bool pipe = (f->inode->mode & vfs::S_IFMT) == vfs::S_IFIFO;
     switch (static_cast<u32>(a1)) {
     case 0x5421: { // FIONBIO
-        if (socket)
+        if (!pipe)
             break;
         i32 on;
         if (long r = uaccess::get(&on, reinterpret_cast<const i32*>(a2)); r < 0)
