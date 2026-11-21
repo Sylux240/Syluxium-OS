@@ -676,6 +676,39 @@ typedef void *fl_owner_t;
 int kstrtouint_from_user(const char __user *s, size_t count, unsigned int base, unsigned int *res);
 #define kstrtou64(s, base, res) kstrtoull(s, base, (unsigned long long *)(res))
 
+/* ---- nouveau ---- */
+#include <linux/maple_tree.h>
+#include <linux/elf.h>
+#include <linux/ctype.h>
+#ifndef TASK_SIZE
+#define TASK_SIZE 0x00007ffffffff000UL
+#endif
+#define dma_alloc_noncoherent(dev, size, handle, dir, gfp) dma_alloc_coherent(dev, size, handle, gfp)
+#define dma_free_noncoherent(dev, size, cpu, handle, dir) dma_free_coherent(dev, size, cpu, handle)
+#define clk_get_rate(c) 0UL
+void *vmemdup_user(const void __user *src, size_t len);
+#define memdup_user(src, len) vmemdup_user(src, len)
+#define refcount_dec_and_mutex_lock(r, lock) ({ bool __r = false; if (refcount_dec_and_test(r)) { mutex_lock(lock); __r = true; } __r; })
+#define regulator_get_voltage(r) (-ENODEV)
+#define regulator_set_voltage(r, min, max) (-ENODEV)
+#define write_lock_irq(l) write_lock(l)
+#define write_unlock_irq(l) write_unlock(l)
+#define read_lock_irqsave(l, f) do { (f) = 0; read_lock(l); } while (0)
+#define read_unlock_irqrestore(l, f) do { (void)(f); read_unlock(l); } while (0)
+#define iommu_map(d, iova, pa, sz, prot, gfp) (-ENODEV)
+#define iommu_unmap(d, iova, sz) 0
+#define IOMMU_READ 1
+#define IOMMU_WRITE 2
+#define I2C_MODULE_PREFIX "i2c:"
+#define I2C_BOARD_INFO(dev_type, dev_addr) .type = dev_type, .addr = (dev_addr)
+#define to_i2c_driver(d) container_of(d, struct i2c_driver, driver)
+#define i2c_client_has_driver(c) false
+#define tegra_dev_iommu_get_stream_id(dev, id) false
+#define schedule_hrtimeout(expires, mode) ({ schedule_timeout(1); 0; })
+#define request_module(fmt, ...) (-ENOSYS)
+int match_string(const char * const *array, size_t n, const char *string);
+#define sysfs_match_string(a, s) match_string(a, ARRAY_SIZE(a), s)
+
 LKPI_EXTERN_C_END
 
 #endif

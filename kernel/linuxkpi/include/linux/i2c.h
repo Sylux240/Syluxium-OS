@@ -99,8 +99,10 @@ static inline int i2c_add_numbered_adapter(struct i2c_adapter *a) { return i2c_a
 struct i2c_device_id { char name[20]; unsigned long driver_data; };
 struct i2c_board_info { char type[20]; unsigned short flags; unsigned short addr; void *platform_data; };
 struct i2c_client { unsigned short flags; unsigned short addr; char name[20]; struct i2c_adapter *adapter; struct device dev; };
+struct i2c_board_info;
 struct i2c_driver {
 	int (*probe)(struct i2c_client *client);
+	int (*detect)(struct i2c_client *client, struct i2c_board_info *info);
 	void (*remove)(struct i2c_client *client);
 	struct device_driver driver;
 	const struct i2c_device_id *id_table;

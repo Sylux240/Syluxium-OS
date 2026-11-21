@@ -8,7 +8,7 @@
 typedef u64 resource_size_t;
 #endif
 struct resource { resource_size_t start, end; const char *name; unsigned long flags; struct resource *parent, *sibling, *child; unsigned long desc; };
-#define resource_size(r) ((r)->end - (r)->start + 1)
+static inline resource_size_t resource_size(const struct resource *res) { return res->end - res->start + 1; }
 #define DEFINE_RES_MEM(_start, _size) ((struct resource){ .start = (_start), .end = (_start) + (_size) - 1, .flags = 0x200 })
 #define DEFINE_RES_NAMED(_start, _size, _name, _flags) ((struct resource){ .start = (_start), .end = (_start) + (_size) - 1, .name = (_name), .flags = (_flags) })
 #ifndef IORESOURCE_IO

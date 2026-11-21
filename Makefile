@@ -100,7 +100,7 @@ CXXFLAGS := \
     -mno-80387 -mno-mmx -mno-sse -mno-sse2 -msoft-float \
     -Ikernel \
     -isystem $(LIMINE_PROTOCOL_DIR)/include \
-    -MMD -MP \
+    -MD -MP \
     $(EXTRA_CXXFLAGS)
 
 # Linux drivers (C) built against the LinuxKPI headers.
@@ -116,7 +116,7 @@ CFLAGS := \
     -nostdlibinc -mcmodel=kernel -mno-red-zone \
     -mno-80387 -mno-mmx -mno-sse -mno-sse2 -msoft-float \
     -isystem $(LKPI_INCLUDE) \
-    -MMD -MP
+    -MD -MP
 CXXFLAGS += -isystem $(LKPI_INCLUDE) -isystem deps/uacpi/include -DUACPI_USE_BUILTIN_STRING
 
 ASFLAGS := --target=x86_64-unknown-none-elf -g -Ikernel -MMD -MP
@@ -211,7 +211,7 @@ LKPI_LINUX_CFLAGS := -I$(LKPI_INCLUDE) -include linux/kconfig.h -Werror=implicit
     -Wno-initializer-overrides -Wno-unused-const-variable -Wno-implicit-fallthrough -Wno-format-zero-length \
     -Wno-missing-field-initializers -Wno-sign-compare -Wno-address-of-packed-member -Wno-tautological-constant-out-of-range-compare \
     -Wno-default-const-init-field-unsafe -Wno-unknown-warning-option
-lkpi_modname = $(if $(findstring /drm/i915/,$<),i915,$(if $(findstring /drm/radeon/,$<),radeon,$(if $(findstring /drm/amd/,$<),amdgpu,$(if $(findstring /drm/scheduler/,$<),gpu_sched,$(patsubst virtual,mac80211_hwsim,$(patsubst wireless,cfg80211,$(notdir $(patsubst %/,%,$(dir $<)))))))))
+lkpi_modname = $(if $(findstring /drm/i915/,$<),i915,$(if $(findstring /drm/radeon/,$<),radeon,$(if $(findstring /drm/amd/,$<),amdgpu,$(if $(findstring /drm/nouveau/,$<),nouveau,$(if $(findstring /drm/scheduler/,$<),gpu_sched,$(patsubst virtual,mac80211_hwsim,$(patsubst wireless,cfg80211,$(notdir $(patsubst %/,%,$(dir $<))))))))))
 # GPU drivers: their own include directory and Kconfig (drm/lkpi_<driver>_config.h).
 LKPI_I915 := kernel/linuxkpi/drivers/gpu/drm/i915
 $(OBJDIR)/$(LKPI_I915)/%: LKPI_DRV_CFLAGS = -I$(LKPI_I915) -DI915 -include drm/lkpi_i915_config.h -gline-tables-only
@@ -229,6 +229,9 @@ $(OBJDIR)/$(LKPI_AMD)/%: LKPI_DRV_CFLAGS = -I$(AMD_ASIC_REG) -I$(LKPI_AMD)/inclu
     -I$(LKPI_AMD)/pm/legacy-dpm -I$(LKPI_AMD)/amdkfd -I$(LKPI_AMD)/display -I$(LKPI_AMD)/display/include \
     -I$(LKPI_AMD)/display/modules/inc -I$(LKPI_AMD)/display/dc -I$(LKPI_AMD)/display/amdgpu_dm \
     -include drm/lkpi_amdgpu_config.h -gline-tables-only
+LKPI_NOUVEAU := kernel/linuxkpi/drivers/gpu/drm/nouveau
+$(OBJDIR)/$(LKPI_NOUVEAU)/%: LKPI_DRV_CFLAGS = -I$(LKPI_NOUVEAU)/include -I$(LKPI_NOUVEAU)/include/nvkm -I$(LKPI_NOUVEAU)/nvkm \
+    -I$(LKPI_NOUVEAU) -include drm/lkpi_nouveau_config.h -gline-tables-only
 $(filter $(OBJDIR)/$(LKPI_AMD)/%,$(OBJS)): | $(AMD_ASIC_REG)/.fetched
 $(AMD_ASIC_REG)/.fetched:
 	@echo "  GIT   Linux 6.12 amdgpu register headers"
@@ -299,7 +302,7 @@ $(DEBIAN_STAMP): tools/debian-fetch.py Makefile
 # Device firmware from Debian's non-free-firmware section: the packages are
 # huge (GPU firmware), so only the files our drivers load are kept.
 FIRMWARE_REPO  := http://deb.debian.org/debian|$(DEBIAN_SUITE)|non-free-firmware
-FIRMWARE_PKGS  := firmware-mediatek firmware-realtek firmware-intel-graphics firmware-amd-graphics
+FIRMWARE_PKGS  := firmware-mediatek firmware-realtek firmware-intel-graphics firmware-amd-graphics firmware-nvidia-graphics
 FIRMWARE_FILES := mediatek/mt7601u.bin rtlwifi/rtl8188eufw.bin rtlwifi/rtl8723bu_nic.bin rtl_bt/rtl8723b_fw.bin \
                   $(I915_FIRMWARE)
 # i915: display microcontroller (DMC) firmware for Skylake..Alder Lake, GuC/HuC
@@ -312,7 +315,9 @@ I915_FIRMWARE  := i915/skl_dmc_ver1_27.bin i915/kbl_dmc_ver1_04.bin i915/bxt_dmc
 # display core runs Volcanic Islands / Polaris: Tonga, Fiji, Polaris 10/11/12,
 # VegaM and the Carrizo/Stoney APUs (~13 MB).
 GPU_FIRMWARE   := radeon/* amdgpu/topaz_* amdgpu/tonga_* amdgpu/fiji_* amdgpu/carrizo_* amdgpu/stoney_* \
-                  amdgpu/polaris10_* amdgpu/polaris11_* amdgpu/polaris12_* amdgpu/vegam_*
+                  amdgpu/polaris10_* amdgpu/polaris11_* amdgpu/polaris12_* amdgpu/vegam_* nvidia/*/*/*
+# nouveau: Kepler and older need no firmware; Maxwell 2 .. Ada need NVIDIA's
+# signed firmware for acceleration (2.8 MB without the 25 MB GSP images)
 FIRMWARE_ROOT  := $(BUILD)/firmware-debian
 FIRMWARE_STAMP := $(FIRMWARE_ROOT)/.fetched
 
@@ -364,7 +369,8 @@ $(INITRAMFS): $(KERNEL) $(PICKER) tools/mkfontdir.py tools/debrand-tde.py tools/
 	    mkdir -p $(ROOTFS)/usr/lib/firmware/$$(dirname $$f); cp -L "$$src" $(ROOTFS)/usr/lib/firmware/$$f; done
 	@# GPU firmware sets (shell patterns, see GPU_FIRMWARE)
 	@cd $(FIRMWARE_ROOT)/usr/lib/firmware && for f in $(GPU_FIRMWARE); do \
-	    [ -e "$$f" ] || continue; mkdir -p $(CURDIR)/$(ROOTFS)/usr/lib/firmware/$$(dirname $$f); \
+	    [ -f "$$f" ] || continue; case $$f in */gsp/*) continue;; esac; \
+	    mkdir -p $(CURDIR)/$(ROOTFS)/usr/lib/firmware/$$(dirname $$f); \
 	    cp -L "$$f" $(CURDIR)/$(ROOTFS)/usr/lib/firmware/$$f; done
 	@ln -sf mediatek/mt7601u.bin $(ROOTFS)/usr/lib/firmware/mt7601u.bin # older drivers ask for it at the top level
 	@# Wine: 32-bit DLLs (WoW64), stripped DLLs, the template prefix.

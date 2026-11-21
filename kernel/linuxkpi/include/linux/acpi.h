@@ -57,6 +57,7 @@ struct fwnode_handle;
 #define acpi_get_name(h, type, buf) AE_NOT_FOUND
 #define acpi_get_handle(parent, path, ret) AE_NOT_FOUND
 #define acpi_has_method(h, name) false
+#define acpi_get_next_object(type, parent, child, out) AE_NOT_FOUND
 #define acpi_evaluate_object(h, path, args, ret) AE_NOT_FOUND
 #define acpi_evaluate_integer(h, path, args, ret) AE_NOT_FOUND
 #define acpi_evaluate_dsm(h, guid, rev, func, argv4) ((union acpi_object *)NULL)

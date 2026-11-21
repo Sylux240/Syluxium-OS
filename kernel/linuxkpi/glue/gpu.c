@@ -387,3 +387,26 @@ int kstrtouint_from_user(const char __user *s, size_t count, unsigned int base, 
 		*res = (unsigned int)v;
 	return r;
 }
+
+void *vmemdup_user(const void __user *src, size_t len)
+{
+	void *p = kvmalloc(len ? len : 1, GFP_KERNEL);
+	if (!p)
+		return ERR_PTR(-ENOMEM);
+	if (copy_from_user(p, src, len)) {
+		kvfree(p);
+		return ERR_PTR(-EFAULT);
+	}
+	return p;
+}
+
+int match_string(const char * const *array, size_t n, const char *string)
+{
+	for (size_t i = 0; i < n; i++) {
+		if (!array[i])
+			break;
+		if (!strcmp(array[i], string))
+			return i;
+	}
+	return -EINVAL;
+}

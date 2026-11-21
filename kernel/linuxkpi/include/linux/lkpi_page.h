@@ -82,8 +82,8 @@ void *lkpi_phys_to_direct(u64 phys);
 #define PageHighMem(p) false
 
 /* Always mapped: kmap is the direct-map address. */
-#define kmap(p) lkpi_page_address(p)
-#define kunmap(p) do { (void)(p); } while (0)
+static inline void *kmap(struct page *p) { return lkpi_page_address(p); }
+static inline void kunmap(struct page *p) { (void)p; }
 #define kmap_atomic(p) lkpi_page_address(p)
 #define kunmap_atomic(addr) do { (void)(addr); } while (0)
 #define kmap_local_page(p) lkpi_page_address(p)

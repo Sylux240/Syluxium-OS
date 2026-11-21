@@ -49,6 +49,7 @@ struct pci_dev {
     unsigned int no_64bit_msi:1;
     u8 msi_cap, msix_cap; /* appended: capability offsets */
     u32 saved_config_space[16];
+    u8 pm_cap;
 };
 
 struct pci_driver {
