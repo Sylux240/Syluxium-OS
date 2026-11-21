@@ -2271,19 +2271,6 @@ static int amdgpu_pci_probe(struct pci_dev *pdev,
 
 	flags = amdgpu_fix_asic_type(pdev, flags);
 
-#if !defined(CONFIG_DRM_AMD_DC)
-	/*
-	 * Syluxium: amdgpu is built without its display core (DC), so only the
-	 * GPUs with legacy display code (up to Polaris / VegaM) can light a
-	 * screen. Leave newer ones alone instead of taking the display over
-	 * and showing nothing.
-	 */
-	if ((flags & AMD_ASIC_MASK) >= CHIP_VEGA10) {
-		dev_info(&pdev->dev, "amdgpu: Vega and newer need the display core, not built yet: not binding\n");
-		return -ENODEV;
-	}
-#endif
-
 	/* Due to hardware bugs, S/G Display on raven requires a 1:1 IOMMU mapping,
 	 * however, SME requires an indirect IOMMU mapping because the encryption
 	 * bit is beyond the DMA mask of the chip.

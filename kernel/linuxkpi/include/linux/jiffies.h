@@ -45,6 +45,7 @@ static inline ktime_t ktime_get(void) { return (ktime_t)lkpi_ktime_ns(); }
 #define ktime_get_raw() ktime_get()
 static inline s64 ktime_to_ns(ktime_t t) { return t; }
 static inline s64 ktime_to_us(ktime_t t) { return t / 1000; }
+static inline s64 ktime_divns(ktime_t kt, s64 div) { return kt / div; }
 static inline s64 ktime_to_ms(ktime_t t) { return t / 1000000; }
 static inline ktime_t ns_to_ktime(u64 ns) { return (ktime_t)ns; }
 static inline ktime_t ms_to_ktime(u64 ms) { return (ktime_t)(ms * 1000000); }

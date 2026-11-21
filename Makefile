@@ -229,7 +229,25 @@ $(OBJDIR)/$(LKPI_AMD)/%: LKPI_DRV_CFLAGS = -I$(AMD_ASIC_REG) -I$(LKPI_AMD)/inclu
     -I$(LKPI_AMD)/pm/powerplay/inc -I$(LKPI_AMD)/pm/powerplay/smumgr -I$(LKPI_AMD)/pm/powerplay/hwmgr \
     -I$(LKPI_AMD)/pm/legacy-dpm -I$(LKPI_AMD)/amdkfd -I$(LKPI_AMD)/display -I$(LKPI_AMD)/display/include \
     -I$(LKPI_AMD)/display/modules/inc -I$(LKPI_AMD)/display/dc -I$(LKPI_AMD)/display/amdgpu_dm \
-    -include drm/lkpi_amdgpu_config.h -gline-tables-only
+    -I$(LKPI_AMD)/display/dc/inc -I$(LKPI_AMD)/display/dc/inc/hw -I$(LKPI_AMD)/display/dc/clk_mgr \
+    -I$(LKPI_AMD)/display/dc/hwss -I$(LKPI_AMD)/display/dc/resource -I$(LKPI_AMD)/display/dc/dsc \
+    -I$(LKPI_AMD)/display/dc/optc -I$(LKPI_AMD)/display/dc/dpp -I$(LKPI_AMD)/display/dc/hubbub \
+    -I$(LKPI_AMD)/display/dc/dccg -I$(LKPI_AMD)/display/dc/hubp -I$(LKPI_AMD)/display/dc/dio \
+    -I$(LKPI_AMD)/display/dc/dwb -I$(LKPI_AMD)/display/dc/hpo -I$(LKPI_AMD)/display/dc/mmhubbub \
+    -I$(LKPI_AMD)/display/dc/mpc -I$(LKPI_AMD)/display/dc/opp -I$(LKPI_AMD)/display/dc/pg \
+    -I$(LKPI_AMD)/display/modules/freesync -I$(LKPI_AMD)/display/modules/color \
+    -I$(LKPI_AMD)/display/modules/info_packet -I$(LKPI_AMD)/display/modules/power \
+    -I$(LKPI_AMD)/display/dmub/inc -I$(LKPI_AMD)/display/modules/hdcp -I$(LKPI_AMD)/display/dc/dml2 \
+    -I$(LKPI_AMD)/display/dc/dml2/dml21 -I$(LKPI_AMD)/display/dc/dml2/dml21/inc \
+    -I$(LKPI_AMD)/display/dc/dml2/dml21/src/dml2_core -I$(LKPI_AMD)/display/dc/dml2/dml21/src/dml2_dpmm \
+    -I$(LKPI_AMD)/display/dc/dml2/dml21/src/dml2_mcg -I$(LKPI_AMD)/display/dc/dml2/dml21/src/dml2_pmo \
+    -I$(LKPI_AMD)/display/dc/dml2/dml21/src/dml2_standalone_libraries \
+    -I$(LKPI_AMD)/display/dc/dml2/dml21/src/inc \
+    -DBUILD_FEATURE_TIMING_SYNC=0 -include drm/lkpi_amdgpu_dc_config.h -gline-tables-only
+# The display core's bandwidth maths use floating point: those files get SSE2,
+# and run inside kernel FPU sections (DC_FP_START/END -> kernel_fpu_begin/end).
+-include $(LKPI_AMD)/display/lkpi-fpu-objs.mk
+$(AMD_DC_FPU_OBJS): LKPI_FP_CFLAGS = -msse -msse2 -mno-soft-float
 LKPI_NOUVEAU := kernel/linuxkpi/drivers/gpu/drm/nouveau
 $(OBJDIR)/$(LKPI_NOUVEAU)/%: LKPI_DRV_CFLAGS = -I$(LKPI_NOUVEAU)/include -I$(LKPI_NOUVEAU)/include/nvkm -I$(LKPI_NOUVEAU)/nvkm \
     -I$(LKPI_NOUVEAU) -include drm/lkpi_nouveau_config.h -gline-tables-only
@@ -243,7 +261,7 @@ $(AMD_ASIC_REG)/.fetched:
 $(OBJDIR)/kernel/linuxkpi/%.c.o: kernel/linuxkpi/%.c
 	@mkdir -p $(dir $@)
 	@echo "  CC    $<"
-	@$(CC) $(filter-out -isystem $(LKPI_INCLUDE),$(CFLAGS)) $(LKPI_LINUX_CFLAGS) $(LKPI_DRV_CFLAGS) -DKBUILD_MODNAME='"$(lkpi_modname)"' -DKBUILD_BASENAME='"$(basename $(notdir $<))"' \
+	@$(CC) $(filter-out -isystem $(LKPI_INCLUDE),$(CFLAGS)) $(LKPI_LINUX_CFLAGS) $(LKPI_DRV_CFLAGS) $(LKPI_FP_CFLAGS) -DKBUILD_MODNAME='"$(lkpi_modname)"' -DKBUILD_BASENAME='"$(basename $(notdir $<))"' \
 	    -MJ $@.json -c $< -o $@
 
 $(OBJDIR)/%.S.o: %.S
@@ -325,6 +343,14 @@ GPU_FIRMWARE   := radeon/* amdgpu/topaz_* amdgpu/tonga_* amdgpu/fiji_* amdgpu/ca
                   amdgpu/polaris10_* amdgpu/polaris11_* amdgpu/polaris12_* amdgpu/vegam_* nvidia/*/*/*
 # nouveau: Kepler and older need no firmware; Maxwell 2 .. Ada need NVIDIA's
 # signed firmware for acceleration (2.8 MB without the 25 MB GSP images)
+# amdgpu with its display core: Vega 10/12/20, Raven/Picasso/Renoir/Cezanne/
+# Rembrandt/Phoenix APUs, Van Gogh, Navi 1x/2x/3x/4x (~85 MB, ~27 MB gzipped);
+# datacenter parts and the ISP (camera) are left out (GPU_FIRMWARE_SKIP)
+GPU_FIRMWARE   += amdgpu/vega10_* amdgpu/vega12_* amdgpu/vega20_* amdgpu/raven* amdgpu/picasso_* amdgpu/renoir_* \
+                  amdgpu/green_sardine_* amdgpu/yellow_carp_* amdgpu/navi1* amdgpu/sienna_cichlid_* amdgpu/navy_flounder_* \
+                  amdgpu/dimgrey_cavefish_* amdgpu/beige_goby_* amdgpu/vangogh_* amdgpu/gc_1[0-2]_* amdgpu/psp_1[0-4]_* \
+                  amdgpu/sdma_[5-7]_* amdgpu/smu_1[3-4]_* amdgpu/dcn_* amdgpu/vcn_[3-5]_* amdgpu/vpe_*
+GPU_FIRMWARE_SKIP := */gsp/* */gc_9_4_* */psp_13_0_6_* */psp_13_0_14_* */smu_13_0_6_* */smu_13_0_14_* */sdma_4_4_* */vcn_4_0_3_*
 FIRMWARE_ROOT  := $(BUILD)/firmware-debian
 FIRMWARE_STAMP := $(FIRMWARE_ROOT)/.fetched
 
@@ -377,7 +403,7 @@ $(INITRAMFS): $(KERNEL) $(PICKER) $(DEBIAN_CONFIGURED) tools/merge-accounts.py t
 	    mkdir -p $(ROOTFS)/usr/lib/firmware/$$(dirname $$f); cp -L "$$src" $(ROOTFS)/usr/lib/firmware/$$f; done
 	@# GPU firmware sets (shell patterns, see GPU_FIRMWARE)
 	@cd $(FIRMWARE_ROOT)/usr/lib/firmware && for f in $(GPU_FIRMWARE); do \
-	    [ -f "$$f" ] || continue; case $$f in */gsp/*) continue;; esac; \
+	    [ -f "$$f" ] || continue; skip=; for k in $(GPU_FIRMWARE_SKIP); do case $$f in $$k) skip=1;; esac; done; [ -z "$$skip" ] || continue; \
 	    mkdir -p $(CURDIR)/$(ROOTFS)/usr/lib/firmware/$$(dirname $$f); \
 	    cp -L "$$f" $(CURDIR)/$(ROOTFS)/usr/lib/firmware/$$f; done
 	@ln -sf mediatek/mt7601u.bin $(ROOTFS)/usr/lib/firmware/mt7601u.bin # older drivers ask for it at the top level

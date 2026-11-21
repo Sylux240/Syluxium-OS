@@ -9,6 +9,7 @@
 #include <fs/poll.hpp>
 #include <proc/process.hpp>
 #include <arch/x86_64/cpu.hpp>
+#include <arch/x86_64/fpu.hpp>
 #include <core/log.hpp>
 #include <core/panic.hpp>
 #include <cxx/runtime.hpp>
@@ -1615,3 +1616,14 @@ extern "C" bool lkpi_access_ok(const void* addr, unsigned long size) {
 }
 extern "C" u64 lkpi_local_clock(void) { return clock::now_ns(); }
 extern "C" unsigned long lkpi_tsc_khz(void) { return clock::tsc_frequency_hz() / 1000; }
+
+// Kernel FPU sections for Linux drivers (AMD display bandwidth maths).
+extern "C" int lkpi_in_interrupt(void);
+extern "C" void kernel_fpu_begin(void) {
+    if (lkpi_in_interrupt())
+        klog::warn("linuxkpi: kernel_fpu_begin() in an interrupt handler");
+    fpu::kernel_begin();
+}
+extern "C" void kernel_fpu_end(void) { fpu::kernel_end(); }
+extern "C" bool lkpi_irq_fpu_usable(void) { return !lkpi_in_interrupt(); }
+extern "C" bool lkpi_kernel_fpu_active(void) { return fpu::kernel_active(); }
