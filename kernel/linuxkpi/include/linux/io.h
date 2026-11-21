@@ -32,14 +32,45 @@ static inline void writeq(u64 v, volatile void __iomem* a) { *(volatile u64*)a =
 #define iowrite32 writel
 #define __raw_readl readl
 #define __raw_writel writel
+/* Device memory copies. Small ones use 4-byte accesses like Linux on x86
+ * (register blocks); bulk copies (4 KiB and up: VRAM and apertures) use
+ * 8-byte ones. Uncached PCIe reads cost about a microsecond each: amdgpu
+ * copies 32 MiB of VRAM around memory training, which byte accesses
+ * stretched to 40 s. */
+#define LKPI_IO_COPY(T, d, s, n)                                         \
+    for (; (n) >= sizeof(T); (n) -= sizeof(T), (s) += sizeof(T), (d) += sizeof(T))
 static inline void memcpy_fromio(void* dst, const volatile void __iomem* src, size_t n) {
-    for (size_t i = 0; i < n; i++) ((u8*)dst)[i] = ((const volatile u8*)src)[i];
+    u8* d = (u8*)dst;
+    const volatile u8* s = (const volatile u8*)src;
+    while (n && ((unsigned long)s & 3)) { *d++ = *s++; n--; }
+    if (n >= 4096) {
+        if (((unsigned long)s & 7) && n >= 4) { u32 v = *(const volatile u32*)s; __builtin_memcpy(d, &v, 4); s += 4; d += 4; n -= 4; }
+        LKPI_IO_COPY(u64, d, s, n) { u64 v = *(const volatile u64*)s; __builtin_memcpy(d, &v, 8); }
+    }
+    LKPI_IO_COPY(u32, d, s, n) { u32 v = *(const volatile u32*)s; __builtin_memcpy(d, &v, 4); }
+    while (n--) *d++ = *s++;
 }
 static inline void memcpy_toio(volatile void __iomem* dst, const void* src, size_t n) {
-    for (size_t i = 0; i < n; i++) ((volatile u8*)dst)[i] = ((const u8*)src)[i];
+    volatile u8* d = (volatile u8*)dst;
+    const u8* s = (const u8*)src;
+    while (n && ((unsigned long)d & 3)) { *d++ = *s++; n--; }
+    if (n >= 4096) {
+        if (((unsigned long)d & 7) && n >= 4) { u32 v; __builtin_memcpy(&v, s, 4); *(volatile u32*)d = v; s += 4; d += 4; n -= 4; }
+        LKPI_IO_COPY(u64, d, s, n) { u64 v; __builtin_memcpy(&v, s, 8); *(volatile u64*)d = v; }
+    }
+    LKPI_IO_COPY(u32, d, s, n) { u32 v; __builtin_memcpy(&v, s, 4); *(volatile u32*)d = v; }
+    while (n--) *d++ = *s++;
 }
 static inline void memset_io(volatile void __iomem* dst, int v, size_t n) {
-    for (size_t i = 0; i < n; i++) ((volatile u8*)dst)[i] = (u8)v;
+    volatile u8* d = (volatile u8*)dst;
+    u32 w = 0x01010101u * (u8)v;
+    while (n && ((unsigned long)d & 3)) { *d++ = (u8)v; n--; }
+    if (n >= 4096) {
+        if (((unsigned long)d & 7) && n >= 4) { *(volatile u32*)d = w; d += 4; n -= 4; }
+        for (; n >= 8; n -= 8, d += 8) *(volatile u64*)d = ((u64)w << 32) | w;
+    }
+    for (; n >= 4; n -= 4, d += 4) *(volatile u32*)d = w;
+    while (n--) *d++ = (u8)v;
 }
 
 /* Port I/O. */

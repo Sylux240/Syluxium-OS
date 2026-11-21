@@ -166,10 +166,10 @@ int lkpi_dev_printk(const char* level, const struct device* d, const char* fmt, 
 #define dev_info(d, fmt, ...) lkpi_dev_printk(KERN_INFO, d, fmt, ##__VA_ARGS__)
 #define dev_dbg(d, fmt, ...) do { if (0) lkpi_dev_printk(KERN_DEBUG, d, fmt, ##__VA_ARGS__); } while (0)
 #define dev_vdbg dev_dbg
-#define dev_err_once dev_err
-#define dev_warn_once dev_warn
-#define dev_info_once dev_info
-#define dev_notice_once dev_notice
+#define dev_err_once(...) lkpi_print_once(dev_err, __VA_ARGS__)
+#define dev_warn_once(...) lkpi_print_once(dev_warn, __VA_ARGS__)
+#define dev_info_once(...) lkpi_print_once(dev_info, __VA_ARGS__)
+#define dev_notice_once(...) lkpi_print_once(dev_notice, __VA_ARGS__)
 #define dev_dbg_once dev_dbg
 #define dev_err_ratelimited dev_err
 #define dev_warn_ratelimited dev_warn

@@ -52,9 +52,10 @@ char* kasprintf(gfp_t gfp, const char* fmt, ...) __printf(2, 3);
 #else /* as in Linux without dynamic debug: compiled out (arguments still checked) */
 #define pr_debug(fmt, ...) ({ if (0) printk(KERN_DEBUG pr_fmt(fmt), ##__VA_ARGS__); 0; })
 #endif
-#define pr_err_once pr_err
-#define pr_warn_once pr_warn
-#define pr_info_once pr_info
+#define lkpi_print_once(fn, ...) ({ static bool __printed; if (!__printed) { __printed = true; fn(__VA_ARGS__); } })
+#define pr_err_once(...) lkpi_print_once(pr_err, __VA_ARGS__)
+#define pr_warn_once(...) lkpi_print_once(pr_warn, __VA_ARGS__)
+#define pr_info_once(...) lkpi_print_once(pr_info, __VA_ARGS__)
 #define pr_err_ratelimited pr_err
 #define pr_warn_ratelimited pr_warn
 #define pr_info_ratelimited pr_info
@@ -159,9 +160,9 @@ struct lock_class_key { int unused; };
 #define print_hex_dump_bytes(...) do { } while (0)
 #define print_hex_dump_debug(...) do { } while (0)
 #define printk_ratelimited printk
-#define printk_once printk
+#define printk_once(...) lkpi_print_once(printk, __VA_ARGS__)
 #define pr_debug_once pr_debug
-#define pr_notice_once pr_notice
+#define pr_notice_once(...) lkpi_print_once(pr_notice, __VA_ARGS__)
 #define pr_warn_ratelimited_once pr_warn
 #define dump_stack() do { } while (0)
 #ifndef __cplusplus
