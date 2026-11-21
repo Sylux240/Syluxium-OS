@@ -204,7 +204,7 @@ class PartitionBar(Gtk.DrawingArea):
             cr.set_source_rgb(*(color or (0.80, 0.81, 0.83)))
             cr.rectangle(lx, h + 10, 12, 12)
             cr.fill()
-            cr.set_source_rgb(0.15, 0.15, 0.2)
+            cr.set_source_rgb(0.87, 0.89, 0.97)
             cr.move_to(lx + 16, h + 21)
             cr.show_text(label)
             lx += 26 + cr.text_extents(label).x_advance
