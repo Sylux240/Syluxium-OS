@@ -24,7 +24,7 @@ LKPI_EXTERN_C_BEGIN
 
 struct pci_driver;
 
-struct pci_bus { unsigned char number; struct pci_bus *parent; };
+struct pci_bus { unsigned char number; struct pci_bus *parent; struct pci_dev *self; unsigned char max_bus_speed, cur_bus_speed; };
 
 struct pci_dev {
     struct device dev;
@@ -45,6 +45,8 @@ struct pci_dev {
     void* lkpi_function; /* Syluxium pci::Function */
     struct pci_bus* bus; /* appended: layout shared with C++ */
     struct resource resource[DEVICE_COUNT_RESOURCE + 1]; /* BARs + expansion ROM (PCI_ROM_RESOURCE) */
+    u64 rom; size_t romlen; /* appended: firmware-provided ROM image (none) */
+    unsigned int no_64bit_msi:1;
 };
 
 struct pci_driver {

@@ -211,10 +211,12 @@ LKPI_LINUX_CFLAGS := -I$(LKPI_INCLUDE) -include linux/kconfig.h -Werror=implicit
     -Wno-initializer-overrides -Wno-unused-const-variable -Wno-implicit-fallthrough -Wno-format-zero-length \
     -Wno-missing-field-initializers -Wno-sign-compare -Wno-address-of-packed-member -Wno-tautological-constant-out-of-range-compare \
     -Wno-default-const-init-field-unsafe -Wno-unknown-warning-option
-lkpi_modname = $(if $(findstring /drm/i915/,$<),i915,$(patsubst virtual,mac80211_hwsim,$(patsubst wireless,cfg80211,$(notdir $(patsubst %/,%,$(dir $<))))))
+lkpi_modname = $(if $(findstring /drm/i915/,$<),i915,$(if $(findstring /drm/radeon/,$<),radeon,$(patsubst virtual,mac80211_hwsim,$(patsubst wireless,cfg80211,$(notdir $(patsubst %/,%,$(dir $<)))))))
 # GPU drivers: their own include directory and Kconfig (drm/lkpi_<driver>_config.h).
 LKPI_I915 := kernel/linuxkpi/drivers/gpu/drm/i915
 $(OBJDIR)/$(LKPI_I915)/%: LKPI_DRV_CFLAGS = -I$(LKPI_I915) -DI915 -include drm/lkpi_i915_config.h -gline-tables-only
+LKPI_RADEON := kernel/linuxkpi/drivers/gpu/drm/radeon
+$(OBJDIR)/$(LKPI_RADEON)/%: LKPI_DRV_CFLAGS = -I$(LKPI_RADEON) -include drm/lkpi_radeon_config.h -gline-tables-only
 $(OBJDIR)/kernel/linuxkpi/%.c.o: kernel/linuxkpi/%.c
 	@mkdir -p $(dir $@)
 	@echo "  CC    $<"
@@ -278,7 +280,7 @@ $(DEBIAN_STAMP): tools/debian-fetch.py Makefile
 # Device firmware from Debian's non-free-firmware section: the packages are
 # huge (GPU firmware), so only the files our drivers load are kept.
 FIRMWARE_REPO  := http://deb.debian.org/debian|$(DEBIAN_SUITE)|non-free-firmware
-FIRMWARE_PKGS  := firmware-mediatek firmware-realtek firmware-intel-graphics
+FIRMWARE_PKGS  := firmware-mediatek firmware-realtek firmware-intel-graphics firmware-amd-graphics
 FIRMWARE_FILES := mediatek/mt7601u.bin rtlwifi/rtl8188eufw.bin rtlwifi/rtl8723bu_nic.bin rtl_bt/rtl8723b_fw.bin \
                   $(I915_FIRMWARE)
 # i915: display microcontroller (DMC) firmware for Skylake..Alder Lake, GuC/HuC
@@ -287,6 +289,11 @@ FIRMWARE_FILES := mediatek/mt7601u.bin rtlwifi/rtl8188eufw.bin rtlwifi/rtl8723bu
 I915_FIRMWARE  := i915/skl_dmc_ver1_27.bin i915/kbl_dmc_ver1_04.bin i915/bxt_dmc_ver1_07.bin i915/glk_dmc_ver1_04.bin \
                   i915/icl_dmc_ver1_09.bin i915/tgl_dmc_ver2_12.bin i915/rkl_dmc_ver2_03.bin i915/adls_dmc_ver2_01.bin \
                   i915/adlp_dmc.bin i915/adlp_guc_70.bin i915/tgl_guc_70.bin i915/tgl_huc.bin
+# radeon (r100 .. Southern Islands): all of it (4 MB). amdgpu without its
+# display core runs Volcanic Islands / Polaris: Tonga, Fiji, Polaris 10/11/12,
+# VegaM and the Carrizo/Stoney APUs (~13 MB).
+GPU_FIRMWARE   := radeon/* amdgpu/topaz_* amdgpu/tonga_* amdgpu/fiji_* amdgpu/carrizo_* amdgpu/stoney_* \
+                  amdgpu/polaris10_* amdgpu/polaris11_* amdgpu/polaris12_* amdgpu/vegam_*
 FIRMWARE_ROOT  := $(BUILD)/firmware-debian
 FIRMWARE_STAMP := $(FIRMWARE_ROOT)/.fetched
 
@@ -336,6 +343,10 @@ $(INITRAMFS): $(KERNEL) $(PICKER) tools/mkfontdir.py tools/debrand-tde.py tools/
 	    src=$$(ls $(FIRMWARE_ROOT)/usr/lib/firmware/$$f $(FIRMWARE_ROOT)/lib/firmware/$$f 2>/dev/null | head -1); \
 	    [ -n "$$src" ] || { echo "  warning: firmware $$f not found"; continue; }; \
 	    mkdir -p $(ROOTFS)/usr/lib/firmware/$$(dirname $$f); cp -L "$$src" $(ROOTFS)/usr/lib/firmware/$$f; done
+	@# GPU firmware sets (shell patterns, see GPU_FIRMWARE)
+	@cd $(FIRMWARE_ROOT)/usr/lib/firmware && for f in $(GPU_FIRMWARE); do \
+	    [ -e "$$f" ] || continue; mkdir -p $(CURDIR)/$(ROOTFS)/usr/lib/firmware/$$(dirname $$f); \
+	    cp -L "$$f" $(CURDIR)/$(ROOTFS)/usr/lib/firmware/$$f; done
 	@ln -sf mediatek/mt7601u.bin $(ROOTFS)/usr/lib/firmware/mt7601u.bin # older drivers ask for it at the top level
 	@# Wine: 32-bit DLLs (WoW64), stripped DLLs, the template prefix.
 	@tools/wine-setup.sh $(ROOTFS) $(WINE_I386_ROOT)

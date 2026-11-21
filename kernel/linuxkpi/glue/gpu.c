@@ -116,8 +116,12 @@ int aperture_remove_conflicting_pci_devices(struct pci_dev *pdev, const char *na
 		if (!(pci_resource_flags(pdev, bar) & IORESOURCE_MEM) || !pci_resource_len(pdev, bar))
 			continue;
 		if (boot_fb.known && pci_resource_start(pdev, bar) < boot_fb.base + boot_fb.size &&
-		    boot_fb.base < pci_resource_start(pdev, bar) + pci_resource_len(pdev, bar))
+		    boot_fb.base < pci_resource_start(pdev, bar) + pci_resource_len(pdev, bar)) {
+			printk(KERN_INFO "aperture: %s: firmware framebuffer %#llx is in BAR %d (%#llx, %llu MiB)\n", name,
+			       (u64)boot_fb.base, bar, (u64)pci_resource_start(pdev, bar),
+			       (u64)pci_resource_len(pdev, bar) >> 20);
 			primary = true;
+		}
 	}
 	/* Linux also kicks the firmware framebuffer out for the primary VGA
 	 * device; with one display controller that is this one. On Intel the
@@ -127,6 +131,9 @@ int aperture_remove_conflicting_pci_devices(struct pci_dev *pdev, const char *na
 		primary = true;
 	if (primary)
 		remove_boot_fb(name);
+	else
+		printk(KERN_INFO "aperture: %s: firmware framebuffer %#llx is not on this device: it stays\n", name,
+		       (u64)boot_fb.base);
 	return 0;
 }
 

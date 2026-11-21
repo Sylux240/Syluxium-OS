@@ -154,4 +154,8 @@ static inline void list_bulk_move_tail(struct list_head *head, struct list_head 
 	last->next = head;
 	head->prev = last;
 }
+#ifndef list_for_each_entry_safe_from
+#define list_for_each_entry_safe_from(pos, n, head, member) \
+	for (n = list_next_entry(pos, member); &pos->member != (head); pos = n, n = list_next_entry(n, member))
+#endif
 #endif

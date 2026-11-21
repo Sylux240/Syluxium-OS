@@ -162,3 +162,32 @@ void cfb_imageblit(struct fb_info *info, const struct fb_image *image) { }
 void sys_fillrect(struct fb_info *info, const struct fb_fillrect *r) { if (info->var.bits_per_pixel == 32) fill32(info, info->screen_buffer, r); }
 void sys_copyarea(struct fb_info *info, const struct fb_copyarea *a) { if (info->var.bits_per_pixel == 32) copy32(info, info->screen_buffer, a); }
 void sys_imageblit(struct fb_info *info, const struct fb_image *image) { }
+int fb_io_mmap(struct fb_info *info, struct vm_area_struct *vma) { return -ENODEV; }
+
+/* ---- backlight class devices: kept for the driver, not exposed yet ---- */
+#include <linux/backlight.h>
+struct backlight_device *backlight_device_register(const char *name, struct device *parent, void *devdata,
+						   const struct backlight_ops *ops,
+						   const struct backlight_properties *props)
+{
+	struct backlight_device *bd = kzalloc(sizeof(*bd), GFP_KERNEL);
+	if (!bd)
+		return ERR_PTR(-ENOMEM);
+	mutex_init(&bd->update_lock);
+	mutex_init(&bd->ops_lock);
+	bd->ops = ops;
+	if (props)
+		bd->props = *props;
+	bd->dev.parent = parent;
+	dev_set_drvdata(&bd->dev, devdata);
+	dev_set_name(&bd->dev, "%s", name);
+	printk(KERN_INFO "backlight: %s registered (brightness %d of %d)\n", name, bd->props.brightness,
+	       bd->props.max_brightness);
+	return bd;
+}
+
+void backlight_device_unregister(struct backlight_device *bd)
+{
+	if (!IS_ERR_OR_NULL(bd))
+		kfree(bd);
+}

@@ -509,6 +509,45 @@ struct pinctrl;
 #define relay_buf_full(b) 0
 #define to_auxiliary_dev(d) container_of(d, struct auxiliary_device, dev)
 
+/* ---- radeon / amdgpu / nouveau ---- */
+struct dev_pm_domain { struct dev_pm_ops ops; void (*detach)(struct device *, bool); };
+#ifndef S_IRUGO
+#define S_IRWXU 00700
+#define S_IRUSR 00400
+#define S_IWUSR 00200
+#define S_IXUSR 00100
+#define S_IRGRP 00040
+#define S_IWGRP 00020
+#define S_IROTH 00004
+#define S_IWOTH 00002
+#define S_IRUGO (S_IRUSR | S_IRGRP | S_IROTH)
+#define S_IWUGO (S_IWUSR | S_IWGRP | S_IWOTH)
+#endif
+#define i2c_new_client_device(adap, info) ((struct i2c_client *)ERR_PTR(-ENODEV))
+#define i2c_unregister_device(c) do { } while (0)
+#define down_read_trylock(s) mutex_trylock(&(s)->m)
+#define down_write_trylock(s) mutex_trylock(&(s)->m)
+#define downgrade_write(s) do { } while (0)
+#define acpi_format_exception(s) "ACPI error"
+#define IRQ_NOTCONNECTED (1U << 31)
+#define FOLL_WRITE 0x01
+#define FOLL_LONGTERM 0x100
+#define untagged_addr(a) (a)
+#define set_memory_uc(addr, n) 0
+#define set_memory_wt(addr, n) 0
+#define release_pages(pages, n) do { for (int __i = 0; __i < (int)(n); __i++) put_page((pages)[__i]); } while (0)
+#define unpin_user_pages(pages, n) release_pages(pages, n)
+#define pcie_set_readrq(d, rq) 0
+#define pcie_get_readrq(d) 512
+#define pcie_get_mps(d) 128
+#define pcie_set_mps(d, mps) 0
+#define mmu_notifier_synchronize() do { } while (0)
+#define get_user_pages(start, n, flags, pages) (-EFAULT)
+#define pin_user_pages_fast(start, n, flags, pages) (-EFAULT)
+#define get_user_pages_fast(start, n, flags, pages) (-EFAULT)
+#define atomic64_xchg(v, n) __atomic_exchange_n(&(v)->counter, (n), __ATOMIC_SEQ_CST)
+#define atomic64_cmpxchg(v, o, n) ({ s64 __o = (o); __atomic_compare_exchange_n(&(v)->counter, &__o, (n), false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST); __o; })
+
 LKPI_EXTERN_C_END
 
 #endif
