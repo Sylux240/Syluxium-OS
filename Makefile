@@ -50,7 +50,7 @@ TRINITY_PKGS := dbus tdebase-trinity-bin twin-trinity kicker-trinity kdesktop-tr
                 tde-style-qtcurve-trinity twin-style-dekorator-trinity ksplash-trinity ksysguard-trinity \
                 kmag-trinity kvkbd-trinity ksystemlog-trinity kate-trinity tdeprint-trinity
 DEBIAN_PKGS  := bash busybox hello ncurses-base pciutils pci.ids netbase alsa-utils xserver-xorg-core xserver-xorg-video-fbdev xserver-xorg-input-evdev xinit x11-xserver-utils x11-xkb-utils xterm twm xfonts-base sudo libpam-runtime libpam-modules login fdisk e2fsprogs dosfstools xdotool firefox-esr \
-                wine wine64 iw wpasupplicant wireless-regdb hostapd fonts-wine xcape gparted python3 python3-gi gir1.2-gtk-3.0 librsvg2-common cups cups-bsd dpkg apt debconf libc-bin
+                wine wine64 iw wpasupplicant wireless-regdb hostapd fonts-wine xcape gparted python3 python3-gi gir1.2-gtk-3.0 librsvg2-common cups cups-bsd dpkg apt debconf libc-bin coreutils trinity-keyring ca-certificates
 DEBIAN_ROOT  := $(BUILD)/rootfs-debian
 DEBIAN_STAMP := $(DEBIAN_ROOT)/.fetched
 DEBIAN_CONFIGURED := $(DEBIAN_ROOT)/.configured

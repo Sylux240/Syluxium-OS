@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Syluxium Update
+GenericName=Syluxium Update
+Comment=Check for and install updates
+Exec=syluxium-update
+Icon=system-software-update
+X-TDE-SubstituteUID=true
+Categories=System;Settings;

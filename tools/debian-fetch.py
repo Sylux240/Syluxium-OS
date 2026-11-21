@@ -288,6 +288,26 @@ def main() -> None:
             open(os.path.join(d, f), "a").close()
     for name in order:
         total += extract(download(index, name, args.cache), args.out, args.dpkg_db)
+    if args.dpkg_db:
+        # Packages Syluxium leaves out on purpose (systemd, udev, Mesa, ...):
+        # empty placeholders, installed and held, so apt sees no broken
+        # dependencies and never installs or upgrades them.
+        with open(os.path.join(args.out, "var/lib/dpkg/status"), "a") as f:
+            for name in sorted(exclude):
+                fields = index["packages"].get(name)
+                if not fields or name in order:
+                    continue
+                entry = [f"Package: {name}", "Status: hold ok installed", "Priority: optional",
+                         "Section: syluxium", "Installed-Size: 0",
+                         "Maintainer: Syluxium <caleb@syluxium.com>",
+                         f"Architecture: {fields.get('Architecture', 'all')}"]
+                if fields.get("Multi-Arch"):
+                    entry.append(f"Multi-Arch: {fields['Multi-Arch']}")
+                if fields.get("Provides"):
+                    entry.append(f"Provides: {fields['Provides']}")
+                entry += [f"Version: {fields['Version']}",
+                          "Description: left out of Syluxium (placeholder, held)"]
+                f.write("\n".join(entry) + "\n\n")
     print(f"  debian: {len(order)} packages, {total} files: {' '.join(order)}", file=sys.stderr)
 
 

@@ -323,6 +323,88 @@ long Memory::unmap(uptr addr, usize len) {
     return 0;
 }
 
+long Memory::remap(uptr old_addr, usize old_len, usize new_len, u32 flags, uptr new_addr, uptr* out) {
+    constexpr u32 MREMAP_MAYMOVE = 1, MREMAP_FIXED = 2;
+    if ((old_addr & (PAGE_SIZE - 1)) || (flags & ~(MREMAP_MAYMOVE | MREMAP_FIXED)) ||
+        ((flags & MREMAP_FIXED) && !(flags & MREMAP_MAYMOVE)) || new_len == 0 || old_len == 0)
+        return -err::INVAL;
+    old_len = align_up<usize>(old_len, PAGE_SIZE);
+    new_len = align_up<usize>(new_len, PAGE_SIZE);
+    LockGuard guard(m_lock);
+    Vma* v = find(old_addr);
+    if (!v || old_addr + old_len > v->end)
+        return -err::FAULT; // the old range must lie in one mapping
+    bool fixed = flags & MREMAP_FIXED;
+    if (!fixed) {
+        if (new_len <= old_len) { // shrink
+            remove_range(old_addr + new_len, old_addr + old_len);
+            *out = old_addr;
+            return 0;
+        }
+        // Grow in place when the space after the mapping is free.
+        uptr new_end = old_addr + new_len;
+        if (old_addr + old_len == v->end && new_end > v->end && new_end <= task_end() &&
+            !overlaps(v->end, new_end)) {
+            if (v->file && v->file_bytes >= v->end - v->start)
+                v->file_bytes = new_end - v->start; // a whole-file mapping keeps showing the file
+            v->end = new_end;
+            *out = old_addr;
+            return 0;
+        }
+        if (!(flags & MREMAP_MAYMOVE))
+            return -err::NOMEM;
+    }
+    // Move. The destination first.
+    uptr dest;
+    if (fixed) {
+        if ((new_addr & (PAGE_SIZE - 1)) || new_addr < USER_MIN || new_addr + new_len > task_end() ||
+            (new_addr < old_addr + old_len && old_addr < new_addr + new_len))
+            return -err::INVAL;
+        remove_range(new_addr, new_addr + new_len);
+        dest = new_addr;
+        v = find(old_addr); // remove_range may have split neighbours
+    } else {
+        dest = find_gap(new_len);
+        if (!dest)
+            return -err::NOMEM;
+    }
+    if (new_len < old_len) {
+        remove_range(old_addr + new_len, old_addr + old_len);
+        old_len = new_len;
+        v = find(old_addr);
+    }
+    // Exactly [old_addr, old_addr + old_len) as one mapping.
+    if (v->start < old_addr)
+        v = split(v, old_addr);
+    if (v->end > old_addr + old_len)
+        split(v, old_addr + old_len);
+    // Move the present pages' entries; device pages fault in again from the driver.
+    bool device = v->kind == VMA_DEVICE;
+    u32 base_flags = prot_to_map_flags(v->prot);
+    for (usize off = 0; off < old_len; off += PAGE_SIZE) {
+        u64 phys;
+        if (!m_as->translate(old_addr + off, &phys))
+            continue;
+        m_as->unmap(old_addr + off);
+        if (device)
+            continue;
+        u32 f = base_flags;
+        if ((f & vmm::WRITE) && pmm::frame(phys)->refcount > 1)
+            f &= ~vmm::WRITE; // still shared copy-on-write
+        m_as->map(dest + off, phys, f);
+    }
+    vmm::shootdown(old_addr, old_len / PAGE_SIZE, m_as);
+    m_vmas.remove(v);
+    dev_untrack(v);
+    if (v->file && v->file_bytes >= old_len)
+        v->file_bytes = new_len;
+    v->start = dest;
+    v->end = dest + new_len;
+    insert(v);
+    *out = dest;
+    return 0;
+}
+
 long Memory::protect(uptr addr, usize len, u32 prot) {
     if (addr & (PAGE_SIZE - 1))
         return -err::INVAL;

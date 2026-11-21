@@ -135,7 +135,7 @@ static void limine_entries(void)
             UINTN i = 0;
             for (line++; line[i] && line[i] != '\r' && i < sizeof(e->title) - 1; i++) e->title[i] = line[i];
             e->title[i] = 0;
-            e->kind = has(e->title, "safe") ? K_SAFE : has(e->title, "text") || has(e->title, "console") ? K_CONSOLE : K_SYLUXIUM;
+            e->kind = has(e->title, "safe") || has(e->title, "recovery") ? K_SAFE : has(e->title, "text") || has(e->title, "console") ? K_CONSOLE : K_SYLUXIUM;
             /* Label under the icon: "Syluxium (text console)" -> "Text Console",
              * "... (safe mode: ...)" -> "Safe Mode". */
             char *lp = e->title, *q;

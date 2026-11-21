@@ -1,0 +1,58 @@
+#!/bin/bash
+# Syluxium Recovery: started by the "Recovery" boot entry (boot option
+# "recovery") instead of the desktop. Fix what keeps Syluxium from starting.
+clear
+while :; do
+    echo
+    echo "  ==================== Syluxium Recovery ===================="
+    echo
+    echo "   1  Continue to Syluxium (start the desktop)"
+    echo "   2  Check and repair disks"
+    echo "   3  Repair system packages (finish interrupted updates)"
+    echo "   4  Reset a user's desktop settings"
+    echo "   5  Reset a user's password"
+    echo "   6  Command prompt (administrator)"
+    echo "   7  Restart"
+    echo "   8  Shut down"
+    echo
+    read -r -p "  Choose 1-8: " choice
+    echo
+    case "$choice" in
+    1) exec /usr/local/bin/startdesktop ;;
+    2)
+        for dev in $(blkid -o device 2>/dev/null); do
+            type=$(blkid -o value -s TYPE "$dev")
+            mnt=$(awk -v d="$dev" '$1 == d {print $2}' /proc/mounts)
+            case "$type" in ext2|ext3|ext4|vfat|exfat) ;; *) continue ;; esac
+            if [ -n "$mnt" ]; then
+                echo "  $dev ($type) is in use at $mnt: checking read-only"
+                fsck -n "$dev"
+            else
+                echo "  $dev ($type): checking and repairing"
+                fsck -y "$dev"
+            fi
+        done ;;
+    3)
+        dpkg --configure -a
+        apt-get -y -o Dpkg::Options::=--force-confold --fix-broken install
+        echo "  Done." ;;
+    4)
+        read -r -p "  User name: " u
+        home=$(getent passwd "$u" | cut -d: -f6)
+        if [ -n "$home" ] && [ -d "$home/.trinity" ]; then
+            mv "$home/.trinity" "$home/.trinity.old-$(date +%Y%m%d-%H%M%S)"
+            echo "  $u's desktop settings were reset (the old ones are kept in $home)."
+        else
+            echo "  No desktop settings found for '$u'."
+        fi ;;
+    5)
+        read -r -p "  User name: " u
+        getent passwd "$u" > /dev/null && passwd "$u" || echo "  No user named '$u'." ;;
+    6) echo "  Type 'exit' to return to this menu."; /bin/bash -l ;;
+    7) sync; reboot ;;
+    8) sync; poweroff ;;
+    *) echo "  Please type a number from 1 to 8." ;;
+    esac
+    read -r -p "  Press Enter to continue... " _
+    clear
+done

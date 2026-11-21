@@ -105,10 +105,15 @@ interface_help_hidden: yes
     path: boot():/boot/syluxium.elf
     cmdline: root=UUID=$UUID
 
-/Syluxium (GPU acceleration test)
+/Syluxium (GPU test)
     protocol: limine
     path: boot():/boot/syluxium.elf
     cmdline: root=UUID=$UUID desktop gpu
+
+/Syluxium (Recovery)
+    protocol: limine
+    path: boot():/boot/syluxium.elf
+    cmdline: root=UUID=$UUID recovery
 CONF
 "$BOOT/limine" bios-install "$DISK" > /dev/null
 

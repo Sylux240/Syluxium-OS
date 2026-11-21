@@ -1,0 +1,5 @@
+# Parts of Debian that Syluxium replaces or leaves out: never install them
+# (Syluxium's kernel does what systemd/udev do; Mesa comes with the GPU work).
+Package: systemd systemd-sysv udev libpam-systemd dbus-user-session man-db groff-base xbase-clients
+Pin: release *
+Pin-Priority: -1

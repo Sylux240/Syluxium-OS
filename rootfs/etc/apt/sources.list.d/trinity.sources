@@ -1,0 +1,6 @@
+# The desktop (Trinity, R14.1.x) from Trinity's own repository (its mirrors redirect
+# to plain HTTP; apt checks the signature with Trinity's key either way).
+Types: deb
+URIs: http://mirror.ppa.trinitydesktop.org/trinity/deb/trinity-r14.1.x
+Suites: trixie
+Components: main deps

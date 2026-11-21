@@ -1,0 +1,132 @@
+#!/usr/bin/python3
+"""Syluxium Update: check for, choose and install updates (Debian and
+Trinity packages through apt), like Windows Update."""
+import os
+import re
+import subprocess
+import sys
+import threading
+sys.path.insert(0, "/usr/local/lib/syluxium/python")
+from syluxium_sys import *  # noqa: F401,F403
+
+ENV = dict(os.environ, DEBIAN_FRONTEND="noninteractive", LC_ALL="C.UTF-8")
+win = window("Syluxium Update", 640, 480, "system-software-update")
+box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, margin=12)
+win.add(box)
+title = label("Syluxium Update", bold=True, size="large")
+status = label("Check for updates to keep Syluxium secure and working well.", wrap=True)
+box.pack_start(title, False, False, 0)
+box.pack_start(status, False, False, 0)
+live = read("/proc/mounts").split("\n")[0].split(" ")[2:3] == ["rootfs"] or os.path.exists("/run/syluxium-live")
+if live:
+    box.pack_start(label("You are running Syluxium from the USB stick: updates last until you restart. "
+                         "Install Syluxium to keep them.", wrap=True), False, False, 0)
+store = Gtk.ListStore(bool, str, str, str)  # install?, package, installed, new
+view = Gtk.TreeView(model=store)
+toggle = Gtk.CellRendererToggle()
+toggle.connect("toggled", lambda _r, path: store.set_value(store.get_iter(path), 0, not store[path][0]))
+view.append_column(Gtk.TreeViewColumn("", toggle, active=0))
+for i, t in enumerate(("Update", "Installed version", "New version"), 1):
+    c = Gtk.TreeViewColumn(t, Gtk.CellRendererText(), text=i)
+    c.set_resizable(True)
+    view.append_column(c)
+sw = Gtk.ScrolledWindow()
+sw.add(view)
+box.pack_start(sw, True, True, 0)
+progress = Gtk.ProgressBar(show_text=True)
+box.pack_start(progress, False, False, 0)
+details = Gtk.TextView(editable=False, monospace=True)
+exp = Gtk.Expander(label="Details")
+dsw = Gtk.ScrolledWindow()
+dsw.set_size_request(-1, 120)
+dsw.add(details)
+exp.add(dsw)
+box.pack_start(exp, False, False, 0)
+buttons = Gtk.Box(spacing=6)
+check = Gtk.Button(label="Check for updates")
+install = Gtk.Button(label="Install updates")
+install.set_sensitive(False)
+buttons.pack_end(install, False, False, 0)
+buttons.pack_end(check, False, False, 0)
+box.pack_start(buttons, False, False, 0)
+
+
+def ui(fn, *a):
+    GLib.idle_add(lambda: fn(*a) and False)
+
+
+def log(text):
+    buf = details.get_buffer()
+    buf.insert(buf.get_end_iter(), text)
+    details.scroll_to_iter(buf.get_end_iter(), 0, False, 0, 0)
+
+
+def run(cmd, on_line=None):
+    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=ENV)
+    for line in p.stdout:
+        ui(log, line)
+        if on_line:
+            on_line(line)
+    return p.wait()
+
+
+def busy(on):
+    check.set_sensitive(not on)
+    install.set_sensitive(not on and len(store) > 0)
+
+
+def do_check():
+    ui(busy, True)
+    ui(progress.pulse)
+    ui(status.set_text, "Checking for updates...")
+    rc = run(["apt-get", "update"], lambda _l: ui(progress.pulse))
+    if rc != 0:
+        ui(status.set_text, "Could not check for updates. Are you connected to the Internet?")
+        ui(busy, False)
+        return
+    out = subprocess.run(["apt", "list", "--upgradable"], capture_output=True, text=True, env=ENV).stdout
+    # Held packages (the placeholders for what Syluxium leaves out) never update.
+    held = set(subprocess.run(["apt-mark", "showhold"], capture_output=True, text=True, env=ENV).stdout.split())
+    rows = []
+    for line in out.splitlines():
+        m = re.match(r"([^/]+)/\S+ (\S+) \S+ \[upgradable from: (\S+)\]", line)
+        if m and m.group(1) not in held:
+            rows.append((True, m.group(1), m.group(3), m.group(2)))
+
+    def fill():
+        store.clear()
+        for r in rows:
+            store.append(list(r))
+        progress.set_fraction(0)
+        progress.set_text("")
+        status.set_text(f"{len(rows)} update{'s' if len(rows) != 1 else ''} available." if rows
+                        else "Syluxium is up to date.")
+        busy(False)
+    ui(fill)
+
+
+def do_install(names):
+    ui(busy, True)
+    total = max(1, len(names))
+    done = [0]
+
+    def step(line):
+        if line.startswith("Setting up "):
+            done[0] += 1
+            ui(progress.set_fraction, min(1.0, done[0] / total))
+            ui(progress.set_text, f"Installing {done[0]} of {total}...")
+    ui(status.set_text, "Installing updates... Please do not turn off the computer.")
+    rc = run(["apt-get", "-y", "-o", "Dpkg::Options::=--force-confold", "install", "--only-upgrade"] + names, step)
+    ui(status.set_text, "Updates were installed." if rc == 0 else "Some updates could not be installed (see Details).")
+    ui(progress.set_fraction, 1.0 if rc == 0 else 0)
+    threading.Thread(target=do_check, daemon=True).start() if rc == 0 else ui(busy, False)
+
+
+check.connect("clicked", lambda *_: threading.Thread(target=do_check, daemon=True).start())
+install.connect("clicked", lambda *_: threading.Thread(
+    target=do_install, args=([r[1] for r in store if r[0]],), daemon=True).start())
+win.show_all()
+if not is_admin():
+    message(win, "Syluxium Update needs administrator rights.", "Start it from the Start menu (it asks for the password).",
+            Gtk.MessageType.WARNING)
+Gtk.main()

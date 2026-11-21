@@ -86,6 +86,13 @@ long sys_mmap(SYSCALL_ARGS) {
     return r < 0 ? r : static_cast<long>(result);
 }
 
+long sys_mremap(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    uptr result;
+    long r = current()->mem->remap(a0, a1, a2, static_cast<u32>(a3), a4, &result);
+    return r < 0 ? r : static_cast<long>(result);
+}
+
 long sys_munmap(SYSCALL_ARGS) {
     SYSCALL_UNUSED;
     return current()->mem->unmap(a0, a1);
@@ -119,6 +126,7 @@ void register_memory() {
     set(9, sys_mmap, "mmap");
     set(10, sys_mprotect, "mprotect");
     set(11, sys_munmap, "munmap");
+    set(25, sys_mremap, "mremap");
     set(12, sys_brk, "brk");
     set(26, sys_msync, "msync");
     set(28, sys_madvise, "madvise");
