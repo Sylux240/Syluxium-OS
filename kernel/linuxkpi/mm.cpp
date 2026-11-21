@@ -47,3 +47,4 @@ extern "C" void* ioremap_cache(u64 phys, usize size) {
     void* v = vmalloc::map_physical(base, size + (phys - base), vmm::WRITE);
     return v ? static_cast<u8*>(v) + (phys - base) : nullptr;
 }
+extern "C" bool lkpi_vmalloc_is_mapping(const void* addr) { return vmalloc::is_mapping(addr); }

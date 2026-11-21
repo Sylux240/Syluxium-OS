@@ -168,6 +168,40 @@ static void *vmap_phys_list(u64 *phys, unsigned int count, pgprot_t prot)
 	return lkpi_vmap_phys(phys, count, (pgprot_val(prot) & (LKPI_PROT_WC | LKPI_PROT_UC)) != 0);
 }
 
+/* vmap(VM_MAP_PUT_PAGES): the mapping owns the pages and the array; Linux
+ * frees them with vfree() (i915's shmem_unpin_map). Remembered here. */
+struct lkpi_vmap_owned {
+	const void *addr;
+	struct page **pages;
+	unsigned int count;
+	struct lkpi_vmap_owned *next;
+};
+static struct lkpi_vmap_owned *vmap_owned;
+static DEFINE_SPINLOCK(vmap_owned_lock);
+
+/* Called by vfree() (core.cpp) first: true if addr was such a mapping. */
+bool lkpi_vfree_vmap(const void *addr)
+{
+	struct lkpi_vmap_owned **link, *o = NULL;
+	spin_lock(&vmap_owned_lock);
+	for (link = &vmap_owned; *link; link = &(*link)->next) {
+		if ((*link)->addr == addr) {
+			o = *link;
+			*link = o->next;
+			break;
+		}
+	}
+	spin_unlock(&vmap_owned_lock);
+	if (!o)
+		return false;
+	lkpi_vunmap(addr);
+	for (unsigned int i = 0; i < o->count; i++)
+		put_page(o->pages[i]);
+	kvfree(o->pages);
+	kfree(o);
+	return true;
+}
+
 void *vmap(struct page **pages, unsigned int count, unsigned long flags, pgprot_t prot)
 {
 	u64 *phys;
@@ -179,6 +213,18 @@ void *vmap(struct page **pages, unsigned int count, unsigned long flags, pgprot_
 		phys[i] = page_to_phys(pages[i]);
 	v = vmap_phys_list(phys, count, prot);
 	kvfree(phys);
+	if (v && (flags & VM_MAP_PUT_PAGES)) {
+		struct lkpi_vmap_owned *o = kmalloc(sizeof(*o), GFP_KERNEL);
+		if (o) {
+			o->addr = v;
+			o->pages = pages;
+			o->count = count;
+			spin_lock(&vmap_owned_lock);
+			o->next = vmap_owned;
+			vmap_owned = o;
+			spin_unlock(&vmap_owned_lock);
+		}
+	}
 	return v;
 }
 

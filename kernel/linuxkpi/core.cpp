@@ -216,7 +216,18 @@ void lkpi_kfree_sensitive(const void* p) {
 
 void* lkpi_vmalloc(size_t size) { return sylux_valloc(size); }
 void* lkpi_vzalloc(size_t size) { return sylux_valloc(size); } // vmalloc memory is zeroed
+extern "C" bool lkpi_vfree_vmap(const void* addr); // glue/mm.c
+extern "C" bool lkpi_vmalloc_is_mapping(const void* addr);
+extern "C" void lkpi_vunmap(const void* virt);
 void lkpi_vfree(const void* p) {
+    // Linux's vfree() also takes vmap() mappings (VM_MAP_PUT_PAGES ones free
+    // their pages; plain ones are just unmapped).
+    if (p && lkpi_vfree_vmap(p))
+        return;
+    if (p && lkpi_vmalloc_is_mapping(p)) {
+        lkpi_vunmap(p);
+        return;
+    }
     if (p)
         sylux_vfree(const_cast<void*>(p));
 }

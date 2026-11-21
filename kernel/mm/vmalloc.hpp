@@ -18,6 +18,8 @@ usize size_of(const void* ptr); // usable size of a block, 0 if unknown
 // Map device registers (or other physical memory) into kernel space.
 void* map_physical(u64 phys, usize size, u32 flags = vmm::WRITE | vmm::CACHE_UC);
 void unmap_physical(void* virt);
+// A map_physical()/map_pages() mapping (not an allocation)?
+bool is_mapping(const void* virt);
 // Map scattered physical pages contiguously (Linux vmap); undo with unmap_physical.
 void* map_pages(const u64* phys, usize count, u32 flags = vmm::WRITE);
 
