@@ -1,13 +1,21 @@
 #!/usr/bin/python3
-"""Install Syluxium: a step-by-step wizard (disk, account, settings, software)
-in front of /usr/local/sbin/syluxium-install, which does the work."""
+"""Install Syluxium: a step-by-step installer in the style of Linux Mint's
+(language, keyboard, network, software, installation type with a partition
+view, a time-zone map, your account, then a slideshow while it installs).
+/usr/local/sbin/syluxium-install does the work.
+
+SYLUXIUM_INSTALLER_SHOTS=<dir>: walk through every page with sample answers
+and save a screenshot of each (for testing; nothing is installed)."""
+import json
+import math
 import os
 import re
 import subprocess
 import sys
 import threading
 
-if os.geteuid() != 0:  # the desktop icon asks for the administrator password
+SHOTS = os.environ.get("SYLUXIUM_INSTALLER_SHOTS")
+if os.geteuid() != 0 and not SHOTS:  # the desktop icon asks for the administrator password
     try:
         os.execvp("tdesudo", ["tdesudo", "-c", os.path.abspath(sys.argv[0])])
     except OSError:
@@ -16,312 +24,928 @@ if os.geteuid() != 0:  # the desktop icon asks for the administrator password
 sys.path.insert(0, "/usr/local/lib/syluxium/python")
 import syluxium_sys as S  # noqa: E402
 from syluxium_sys import Gtk, GLib  # noqa: E402
+from gi.repository import Gdk  # noqa: E402
 
 TITLE = "Install Syluxium"
 LOG = "/var/log/syluxium-install.log"
-STEPS = ["Welcome", "Disk", "Your account", "Settings", "Software", "Ready to install", "Installing", "Finished"]
 
-# Optional parts of the system: unticked ones are removed from the new system
-# (with whatever depends on them; the desktop itself is protected).
+CSS = b"""
+.banner { background: linear-gradient(to right, #0b2a6f, #1f5fbf); }
+.banner-title { color: white; font-size: 17pt; font-weight: bold; }
+.banner-sub { color: #dbe6ff; }
+.slide { background: #f4f7fc; border-radius: 6px; }
+.slide-title { font-size: 20pt; font-weight: bold; color: #1f4fa8; }
+.dot { color: #b9c6dd; font-size: 14pt; }
+.dot-on { color: #1f5fbf; font-size: 14pt; }
+.hint { color: #5a6475; }
+"""
+
 SOFTWARE = [
-    ("Firefox web browser", "firefox-esr", True),
-    ("Windows programs (Wine)", "wine wine64 libwine fonts-wine", True),
-    ("E-mail and notes (KMail, KNotes)", "kmail-trinity knotes-trinity", True),
-    ("Media player (Kaffeine)", "kaffeine-trinity", True),
-    ("Text editor for programmers (Kate)", "kate-trinity", True),
-    ("Partition editor (GParted)", "gparted", True),
-    ("Magnifier and on-screen keyboard", "kmag-trinity kvkbd-trinity", True),
+    ("Firefox web browser", "Browse the web.", "firefox-esr", True),
+    ("Windows programs (Wine)", "Run many Windows programs.", "wine wine64 libwine fonts-wine", True),
+    ("E-mail and notes", "KMail and KNotes.", "kmail-trinity knotes-trinity", True),
+    ("Media player", "Kaffeine plays music, videos and DVDs.", "kaffeine-trinity", True),
+    ("Programmer's text editor", "Kate, with syntax highlighting.", "kate-trinity", True),
+    ("Partition editor", "GParted, for disks and USB sticks.", "gparted", True),
+    ("Magnifier and on-screen keyboard", "Accessibility tools.", "kmag-trinity kvkbd-trinity", True),
 ]
 
-KEYBOARDS = [
-    ("us", "English (US)"), ("gb", "English (UK)"), ("us(intl)", "English (US, international)"),
-    ("ca", "French (Canada)"), ("de", "German"), ("ch", "German (Switzerland)"), ("fr", "French"),
-    ("be", "Belgian"), ("nl", "Dutch"), ("es", "Spanish"), ("latam", "Spanish (Latin America)"),
-    ("pt", "Portuguese"), ("br", "Portuguese (Brazil)"), ("it", "Italian"), ("se", "Swedish"),
-    ("no", "Norwegian"), ("dk", "Danish"), ("fi", "Finnish"), ("pl", "Polish"), ("cz", "Czech"),
-    ("hu", "Hungarian"), ("ru", "Russian"), ("ua", "Ukrainian"), ("tr", "Turkish"), ("gr", "Greek"),
-    ("jp", "Japanese"), ("kr", "Korean"),
+SLIDES = [
+    ("Welcome to Syluxium", "A complete desktop with a launcher, taskbar and file manager. "
+                            "Everything you need is one click away.", "logo"),
+    ("Your programs", "Thousands of programs from the App Store, Windows programs through Wine, "
+                      "and Linux apps out of the box.", "system-software-install"),
+    ("Stay connected", "Wired and Wi-Fi networking, printing, and a full web browser.", "network-wireless"),
+    ("Made for your hardware", "Graphics, sound, USB and Wi-Fi drivers start automatically, and the "
+                               "Device Manager shows every part of your computer.", "computer"),
+    ("Safe and up to date", "Syluxium Update keeps your system current; Recovery helps if something "
+                            "goes wrong.", "system-software-update"),
 ]
+
+
+LOGO_DIR = "/usr/share/syluxium/dusk"
+
+
+def logo_image(name, height):
+    from gi.repository import GdkPixbuf
+    try:
+        return Gtk.Image.new_from_pixbuf(GdkPixbuf.Pixbuf.new_from_file_at_scale(f"{LOGO_DIR}/{name}", -1, height, True))
+    except GLib.Error:
+        return Gtk.Image.new_from_icon_name("computer", Gtk.IconSize.DIALOG)
+
+
+def run(*cmd, timeout=15):
+    try:
+        return subprocess.run(list(cmd), capture_output=True, text=True, timeout=timeout).stdout
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+# ---- data ----
+def xkb_layouts():
+    layouts, variants, section = [], {}, None
+    for line in S.read("/usr/share/X11/xkb/rules/evdev.lst").splitlines():
+        if line.startswith("! "):
+            section = line[2:].strip()
+            continue
+        if not line.strip():
+            continue
+        if section == "layout":
+            code, name = line.split(None, 1)
+            layouts.append((code, name.strip()))
+        elif section == "variant":
+            code, rest = line.split(None, 1)
+            lay, name = rest.split(":", 1)
+            variants.setdefault(lay, []).append((code, name.strip()))
+    layouts.sort(key=lambda x: x[1])
+    return layouts or [("us", "English (US)")], variants
+
+
+def parse_coord(s):
+    """ISO 6709 +DDMM[SS]+DDDMM[SS] -> (lat, lon) degrees."""
+    m = re.match(r"([+-])(\d{2})(\d{2})(\d{2})?([+-])(\d{3})(\d{2})(\d{2})?$", s)
+    if not m:
+        return None
+    lat = int(m[2]) + int(m[3]) / 60 + int(m[4] or 0) / 3600
+    lon = int(m[6]) + int(m[7]) / 60 + int(m[8] or 0) / 3600
+    return (-lat if m[1] == "-" else lat, -lon if m[5] == "-" else lon)
 
 
 def time_zones():
     zones = []
     for tab in ("/usr/share/zoneinfo/zone1970.tab", "/usr/share/zoneinfo/zone.tab"):
         for line in S.read(tab).splitlines():
-            if line and not line.startswith("#"):
-                f = line.split("\t")
-                if len(f) >= 3:
-                    zones.append(f[2])
+            if line.startswith("#"):
+                continue
+            f = line.split("\t")
+            if len(f) >= 3:
+                c = parse_coord(f[1])
+                if c:
+                    zones.append((f[2], c[0], c[1]))
         if zones:
             break
-    return sorted(set(zones)) or ["Etc/UTC"]
+    return sorted(zones) or [("Etc/UTC", 0.0, 0.0)]
 
 
 def current_zone():
     z = S.read("/etc/timezone")
-    if z:
+    if z and z != "Etc/UTC":
         return z
+    return "America/New_York"
+
+
+def partition_table(dev):
+    """[(name, start, size_sectors, type, fstype, label)], free regions, total sectors, label type."""
     try:
-        return os.readlink("/etc/localtime").split("zoneinfo/", 1)[1]
-    except (OSError, IndexError):
-        return "Etc/UTC"
+        t = json.loads(run("sfdisk", "-J", dev) or "{}").get("partitiontable", {})
+    except ValueError:
+        t = {}
+    total = int(S.read(f"/sys/block/{os.path.basename(dev)}/size", "0") or 0)
+    info = {p[0]: p for d in S.disks() for p in d["parts"]}
+    parts = []
+    for p in t.get("partitions", []):
+        name = os.path.basename(p["node"])
+        i = info.get(name, (name, 0, "", "", ""))
+        parts.append((name, int(p["start"]), int(p["size"]), p.get("type", ""), i[2], i[3]))
+    free = []
+    for line in run("sfdisk", "-F", dev).splitlines():
+        f = line.split()
+        if len(f) >= 3 and f[0].isdigit():
+            free.append((int(f[0]), int(f[2])))
+    return parts, free, total, t.get("label", "")
 
 
-class Wizard:
+ESP_TYPES = ("c12a7328-f81f-11d2-ba4b-00a0c93ec93b", "ef")
+
+
+# ---- widgets ----
+class PartitionBar(Gtk.DrawingArea):
+    """The disk as a coloured bar: one block per partition, grey free space."""
+    COLORS = [(0.27, 0.51, 0.85), (0.93, 0.55, 0.20), (0.40, 0.70, 0.35), (0.65, 0.40, 0.75), (0.85, 0.30, 0.35),
+              (0.25, 0.65, 0.70)]
+
     def __init__(self):
-        self.win = S.window(TITLE, 760, 520, "system-software-install")
-        self.win.connect("delete-event", self.on_close)
-        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        self.win.add(outer)
-        body = Gtk.Box()
-        outer.pack_start(body, True, True, 0)
+        super().__init__()
+        self.set_size_request(-1, 64)
+        self.blocks = []  # (start, size, label, color or None, hatched)
+        self.total = 1
+        self.connect("draw", self.on_draw)
 
-        # Left: the steps, the current one in bold (as in the XP setup).
-        side = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10, margin=18)
-        side.get_style_context().add_class("sidebar")
-        side.set_size_request(190, -1)
-        side.pack_start(S.label("Syluxium Setup", bold=True, size="large"), False, False, 6)
-        self.step_labels = []
-        for name in STEPS:
-            lab = S.label(name)
-            side.pack_start(lab, False, False, 0)
-            self.step_labels.append(lab)
-        body.pack_start(side, False, False, 0)
-        body.pack_start(Gtk.Separator(orientation=Gtk.Orientation.VERTICAL), False, False, 0)
+    def set_layout(self, total, blocks):
+        self.total, self.blocks = max(total, 1), blocks
+        self.queue_draw()
 
-        self.stack = Gtk.Stack(transition_type=Gtk.StackTransitionType.SLIDE_LEFT_RIGHT)
-        body.pack_start(self.stack, True, True, 0)
-        self.pages = [self.page_welcome(), self.page_disk(), self.page_account(), self.page_settings(),
-                      self.page_software(), self.page_summary(), self.page_progress(), self.page_done()]
-        for i, p in enumerate(self.pages):
-            self.stack.add_named(p, str(i))
+    def on_draw(self, _w, cr):
+        w, h = self.get_allocated_width(), 40
+        cr.set_source_rgb(0.85, 0.86, 0.88)
+        cr.rectangle(0, 0, w, h)
+        cr.fill()
+        for start, size, label, color, new in self.blocks:
+            x, bw = w * start / self.total, max(2, w * size / self.total)
+            cr.set_source_rgb(*(color or (0.80, 0.81, 0.83)))
+            cr.rectangle(x, 0, bw, h)
+            cr.fill()
+            if new:  # the part Syluxium will use: striped
+                cr.set_source_rgba(1, 1, 1, 0.35)
+                for sx in range(int(x) - h, int(x + bw), 10):
+                    cr.move_to(max(sx, x), min(h, h - (max(sx, x) - sx)))
+                    cr.line_to(min(sx + h, x + bw), max(0, h - (min(sx + h, x + bw) - sx)))
+                cr.set_line_width(3)
+                cr.stroke()
+            cr.set_source_rgb(1, 1, 1)
+            cr.rectangle(x + bw - 1, 0, 1, h)
+            cr.fill()
+        # legend
+        lx = 0
+        cr.set_font_size(11)
+        for start, size, label, color, new in self.blocks:
+            if not label:
+                continue
+            cr.set_source_rgb(*(color or (0.80, 0.81, 0.83)))
+            cr.rectangle(lx, h + 10, 12, 12)
+            cr.fill()
+            cr.set_source_rgb(0.15, 0.15, 0.2)
+            cr.move_to(lx + 16, h + 21)
+            cr.show_text(label)
+            lx += 26 + cr.text_extents(label).x_advance
+            if lx > w - 60:
+                break
+        return False
 
-        outer.pack_start(Gtk.Separator(), False, False, 0)
-        buttons = Gtk.Box(spacing=8, margin=10)
-        self.back = Gtk.Button(label="< Back")
-        self.next = Gtk.Button(label="Next >")
-        self.cancel = Gtk.Button(label="Cancel")
-        self.back.connect("clicked", lambda *_: self.go(self.current - 1))
-        self.next.connect("clicked", self.on_next)
-        self.cancel.connect("clicked", lambda *_: self.on_close())
-        buttons.pack_end(self.cancel, False, False, 0)
-        buttons.pack_end(self.next, False, False, 0)
-        buttons.pack_end(self.back, False, False, 0)
-        outer.pack_start(buttons, False, False, 0)
+
+class ZoneMap(Gtk.DrawingArea):
+    """World map of the time zones (equirectangular): every zone a dot,
+    land drawn from the dots themselves; click to choose."""
+
+    def __init__(self, zones, on_pick):
+        super().__init__()
+        self.zones, self.on_pick, self.selected = zones, on_pick, None
+        self.set_size_request(520, 260)
+        self.add_events(Gdk.EventMask.BUTTON_PRESS_MASK)
+        self.connect("draw", self.on_draw)
+        self.connect("button-press-event", self.on_click)
+
+    def xy(self, lat, lon):
+        w, h = self.get_allocated_width(), self.get_allocated_height()
+        return (lon + 180) / 360 * w, (90 - min(max(lat, -60), 85)) / 145 * h
+
+    def on_draw(self, _w, cr):
+        w, h = self.get_allocated_width(), self.get_allocated_height()
+        cr.set_source_rgb(0.62, 0.77, 0.93)  # sea
+        cr.rectangle(0, 0, w, h)
+        cr.fill()
+        cr.set_source_rgba(1, 1, 1, 0.35)  # grid
+        cr.set_line_width(1)
+        for lon in range(-180, 181, 30):
+            x, _ = self.xy(0, lon)
+            cr.move_to(x, 0)
+            cr.line_to(x, h)
+        for lat in range(-60, 90, 30):
+            _, y = self.xy(lat, 0)
+            cr.move_to(0, y)
+            cr.line_to(w, y)
+        cr.stroke()
+        cr.set_source_rgb(0.80, 0.86, 0.66)  # land: soft blobs around the zone cities
+        for _, lat, lon in self.zones:
+            x, y = self.xy(lat, lon)
+            cr.arc(x, y, 9, 0, 2 * math.pi)
+            cr.fill()
+        cr.set_source_rgb(0.36, 0.45, 0.33)
+        for _, lat, lon in self.zones:
+            x, y = self.xy(lat, lon)
+            cr.arc(x, y, 1.6, 0, 2 * math.pi)
+            cr.fill()
+        if self.selected:
+            name, lat, lon = self.selected
+            x, y = self.xy(lat, lon)
+            cr.set_source_rgba(0.1, 0.3, 0.8, 0.25)  # the zone's band
+            off = run_offset(name)
+            if off is not None:
+                bx, _ = self.xy(0, off * 15 - 7.5)
+                cr.rectangle(bx, 0, w / 24, h)
+                cr.fill()
+            cr.set_source_rgb(0.85, 0.15, 0.15)
+            cr.arc(x, y, 5, 0, 2 * math.pi)
+            cr.fill()
+            label = name.split("/")[-1].replace("_", " ")
+            cr.set_font_size(12)
+            tw = cr.text_extents(label).x_advance
+            tx = min(max(x - tw / 2, 4), w - tw - 8)
+            ty = y - 12 if y > 30 else y + 22
+            cr.set_source_rgba(1, 1, 1, 0.85)
+            cr.rectangle(tx - 4, ty - 13, tw + 8, 18)
+            cr.fill()
+            cr.set_source_rgb(0.1, 0.1, 0.15)
+            cr.move_to(tx, ty)
+            cr.show_text(label)
+        return False
+
+    def on_click(self, _w, ev):
+        best = min(self.zones, key=lambda z: (self.xy(z[1], z[2])[0] - ev.x) ** 2 + (self.xy(z[1], z[2])[1] - ev.y) ** 2)
+        self.select(best[0])
+        self.on_pick(best[0])
+
+    def select(self, name):
+        for z in self.zones:
+            if z[0] == name:
+                self.selected = z
+        self.queue_draw()
+
+
+def run_offset(zone):
+    """The zone's current UTC offset in hours (for the map's band)."""
+    out = run("env", f"TZ={zone}", "date", "+%z").strip()
+    if re.fullmatch(r"[+-]\d{4}", out):
+        return (1 if out[0] == "+" else -1) * (int(out[1:3]) + int(out[3:]) / 60)
+    return None
+
+
+# ---- the installer ----
+class Installer:
+    PAGES = ["welcome", "keyboard", "network", "software", "type", "where", "who", "install", "done"]
+    HEADINGS = {
+        "welcome": ("Welcome", "Choose your language"),
+        "keyboard": ("Keyboard layout", "Choose your keyboard layout"),
+        "network": ("Connect to a network", "Connecting lets the installer download updates (optional)"),
+        "software": ("Software", "Choose what to install"),
+        "type": ("Installation type", "Where should Syluxium go?"),
+        "where": ("Where are you?", "Choose your time zone"),
+        "who": ("Who are you?", "Create your account"),
+        "install": ("Installing Syluxium", "This takes a few minutes"),
+        "done": ("Installation complete", ""),
+    }
+
+    def __init__(self):
         self.installing = False
-        self.current = 0
-        self.go(0)
-        self.win.show_all()
+        self.online = False
+        prov = Gtk.CssProvider()
+        prov.load_from_data(CSS)
+        Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), prov, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+        self.win = S.window(TITLE, 880, 620, "system-software-install")
+        self.win.connect("delete-event", self.on_quit)
+        root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        self.win.add(root)
 
-    # ---- pages ----
-    def page(self, title, text=""):
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10, margin=22)
-        box.pack_start(S.label(title, bold=True, size="x-large"), False, False, 0)
-        if text:
-            box.pack_start(S.label(text, wrap=True), False, False, 0)
+        banner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        banner.get_style_context().add_class("banner")
+        self.h_title, self.h_sub = Gtk.Label(xalign=0), Gtk.Label(xalign=0)
+        self.h_title.get_style_context().add_class("banner-title")
+        self.h_sub.get_style_context().add_class("banner-sub")
+        for lab in (self.h_title, self.h_sub):
+            lab.set_margin_start(22)
+        self.h_title.set_margin_top(14)
+        self.h_sub.set_margin_bottom(12)
+        banner.pack_start(self.h_title, False, False, 0)
+        banner.pack_start(self.h_sub, False, False, 0)
+        root.pack_start(banner, False, False, 0)
+
+        self.stack = Gtk.Stack(transition_type=Gtk.StackTransitionType.CROSSFADE, transition_duration=150)
+        root.pack_start(self.stack, True, True, 0)
+        builders = {"welcome": self.page_welcome, "keyboard": self.page_keyboard, "network": self.page_network,
+                    "software": self.page_software, "type": self.page_type, "where": self.page_where,
+                    "who": self.page_who, "install": self.page_install, "done": self.page_done}
+        for name in self.PAGES:
+            box = builders[name]()
+            box.set_margin_start(26)
+            box.set_margin_end(26)
+            box.set_margin_top(16)
+            box.set_margin_bottom(8)
+            self.stack.add_named(box, name)
+
+        root.pack_start(Gtk.Separator(), False, False, 0)
+        bottom = Gtk.Box(spacing=8, margin=10)
+        self.dots = Gtk.Box(spacing=4)
+        self.dot_labels = []
+        for _ in self.PAGES[:-2]:
+            d = Gtk.Label(label="●")
+            self.dots.pack_start(d, False, False, 0)
+            self.dot_labels.append(d)
+        bottom.pack_start(self.dots, False, False, 6)
+        self.quit_b = Gtk.Button(label="Quit")
+        self.back_b = Gtk.Button(label="Back")
+        self.next_b = Gtk.Button(label="Continue")
+        self.next_b.get_style_context().add_class("suggested-action")
+        self.quit_b.connect("clicked", self.on_quit)
+        self.back_b.connect("clicked", lambda *_: self.show(self.index - 1))
+        self.next_b.connect("clicked", self.on_next)
+        for b in (self.next_b, self.back_b, self.quit_b):
+            bottom.pack_end(b, False, False, 0)
+        root.pack_start(bottom, False, False, 0)
+        self.installing = False
+        self.index = 0
+        self.show(0)
+        self.win.show_all()
+        self.update_type_page()
+
+    # -------- pages --------
+    def page_welcome(self):
+        box = Gtk.Box(spacing=20)
+        langs = Gtk.ListBox()
+        for name in ("English (United States)", "English (United Kingdom)", "English (Canada)",
+                     "English (Australia)"):
+            row = Gtk.ListBoxRow()
+            lab = S.label(name)
+            lab.set_margin_start(8)
+            lab.set_margin_top(6)
+            lab.set_margin_bottom(6)
+            row.add(lab)
+            langs.add(row)
+        langs.select_row(langs.get_row_at_index(0))
+        sw = Gtk.ScrolledWindow(min_content_width=260)
+        sw.add(langs)
+        box.pack_start(sw, False, False, 0)
+        right = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        img = logo_image("logo-word.png", 150)
+        right.pack_start(img, False, False, 10)
+        right.pack_start(S.label("Install Syluxium on this computer", bold=True, size="x-large", xalign=0.5),
+                         False, False, 0)
+        right.pack_start(S.label("Syluxium will be copied to this computer's disk, so it starts without the USB "
+                                 "stick and keeps your files and settings.\n\nYou can keep trying Syluxium from the "
+                                 "stick instead: close this window. Nothing on your disk changes until you confirm "
+                                 "the installation type.", wrap=True), False, False, 0)
+        right.pack_start(S.label("Other languages will be offered in a later version.", wrap=True), False, False, 0)
+        right.get_children()[-1].get_style_context().add_class("hint")
+        box.pack_start(right, True, True, 0)
         return box
 
-    def page_welcome(self):
-        return self.page("Welcome to Syluxium Setup",
-                         "This wizard installs Syluxium on this computer's disk, so it starts without the "
-                         "USB stick and keeps your files and settings.\n\nYou'll choose a disk, create your "
-                         "account and pick the software you want. Nothing is changed until you click "
-                         "Install on the last page.\n\nClick Next to continue.")
+    def page_keyboard(self):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        lists = Gtk.Box(spacing=12, homogeneous=True)
+        self.layouts, self.variants = xkb_layouts()
+        self.lay_store = Gtk.ListStore(str, str)
+        for code, name in self.layouts:
+            self.lay_store.append([code, name])
+        self.lay_view = Gtk.TreeView(model=self.lay_store, headers_visible=False)
+        self.lay_view.append_column(Gtk.TreeViewColumn("", Gtk.CellRendererText(), text=1))
+        self.var_store = Gtk.ListStore(str, str)
+        self.var_view = Gtk.TreeView(model=self.var_store, headers_visible=False)
+        self.var_view.append_column(Gtk.TreeViewColumn("", Gtk.CellRendererText(), text=1))
+        for v in (self.lay_view, self.var_view):
+            sw = Gtk.ScrolledWindow()
+            sw.add(v)
+            lists.pack_start(sw, True, True, 0)
+        box.pack_start(lists, True, True, 0)
+        self.lay_view.get_selection().connect("changed", self.on_layout)
+        self.var_view.get_selection().connect("changed", lambda *_: self.apply_keyboard())
+        self.kb_test = Gtk.Entry(placeholder_text="Type here to test your keyboard")
+        box.pack_start(self.kb_test, False, False, 0)
+        for i, row in enumerate(self.lay_store):
+            if row[0] == "us":
+                self.lay_view.get_selection().select_path(Gtk.TreePath(i))
+                self.lay_view.scroll_to_cell(Gtk.TreePath(i), None, True, 0.3, 0)
+        return box
 
-    def page_disk(self):
-        box = self.page("Where should Syluxium be installed?",
-                        "Choose a disk. Everything on it will be erased: all files, programs and other "
-                        "operating systems on that disk.")
-        self.disk_store = Gtk.ListStore(str, str, str, str)  # device, size, model, note
-        view = Gtk.TreeView(model=self.disk_store)
-        for i, t in enumerate(("Disk", "Size", "Model", "")):
-            view.append_column(Gtk.TreeViewColumn(t, Gtk.CellRendererText(), text=i))
-        self.disk_view = view
+    def on_layout(self, *_):
+        model, it = self.lay_view.get_selection().get_selected()
+        if not it:
+            return
+        code, name = model[it][0], model[it][1]
+        self.var_store.clear()
+        self.var_store.append(["", name])
+        for vcode, vname in self.variants.get(code, []):
+            self.var_store.append([vcode, vname])
+        self.var_view.get_selection().select_path(Gtk.TreePath(0))
+        self.apply_keyboard()
+
+    def keyboard(self):
+        model, it = self.lay_view.get_selection().get_selected()
+        lay = model[it][0] if it else "us"
+        vm, vit = self.var_view.get_selection().get_selected()
+        var = vm[vit][0] if vit else ""
+        return lay, var
+
+    def apply_keyboard(self):
+        lay, var = self.keyboard()
+        if not SHOTS:
+            subprocess.call(["setxkbmap", lay] + (["-variant", var] if var else []), stderr=subprocess.DEVNULL)
+
+    def page_network(self):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        box.pack_start(S.label("With an Internet connection, the installer can download the latest updates. You can "
+                               "also connect later.", wrap=True), False, False, 0)
+        self.net_store = Gtk.ListStore(str, str, str)  # icon, name, state
+        view = Gtk.TreeView(model=self.net_store)
+        col = Gtk.TreeViewColumn("Connection")
+        ic, tx = Gtk.CellRendererPixbuf(), Gtk.CellRendererText()
+        col.pack_start(ic, False)
+        col.pack_start(tx, True)
+        col.add_attribute(ic, "icon-name", 0)
+        col.add_attribute(tx, "text", 1)
+        col.set_expand(True)
+        view.append_column(col)
+        view.append_column(Gtk.TreeViewColumn("Status", Gtk.CellRendererText(), text=2))
         sw = Gtk.ScrolledWindow(min_content_height=160)
         sw.add(view)
         box.pack_start(sw, True, True, 0)
+        row = Gtk.Box(spacing=8)
+        wifi = Gtk.Button(label="Connect to Wi-Fi...")
+        wifi.connect("clicked", lambda *_: S.launch("syluxium-wifi-menu"))
+        row.pack_start(wifi, False, False, 0)
+        self.net_status = S.label("")
+        row.pack_start(self.net_status, False, False, 8)
+        box.pack_start(row, False, False, 0)
+        self.refresh_network()
+        GLib.timeout_add_seconds(3, self.refresh_network)
+        return box
+
+    def refresh_network(self):
+        self.net_store.clear()
+        online = False
+        addrs = run("ip", "-4", "-o", "addr", "show")
+        for name in sorted(os.listdir("/sys/class/net")) if os.path.isdir("/sys/class/net") else []:
+            if name == "lo":
+                continue
+            wireless = os.path.isdir(f"/sys/class/net/{name}/wireless") or name.startswith("wl")
+            m = re.search(rf"\b{re.escape(name)}\s+inet (\S+)", addrs)
+            up = S.read(f"/sys/class/net/{name}/operstate") == "up"
+            state = f"Connected ({m[1].split('/')[0]})" if m else ("Cable connected, no address" if up else
+                                                                    "Not connected")
+            online |= bool(m)
+            self.net_store.append(["network-wireless" if wireless else "network-wired",
+                                   ("Wi-Fi " if wireless else "Wired ") + name, state])
+        self.online = online
+        self.net_status.set_text("You're connected to the Internet." if online else "Not connected.")
+        if hasattr(self, "updates"):
+            self.updates.set_sensitive(online)
+            if not online:
+                self.updates.set_active(False)
+        return True
+
+    def page_software(self):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        self.updates = Gtk.CheckButton(label="Download updates while installing Syluxium")
+        box.pack_start(self.updates, False, False, 0)
+        hint = S.label("Needs an Internet connection; the installation takes longer.", wrap=True)
+        hint.get_style_context().add_class("hint")
+        hint.set_margin_start(26)
+        box.pack_start(hint, False, False, 0)
+        box.pack_start(Gtk.Separator(), False, False, 6)
+        box.pack_start(S.label("Included programs (untick what you don't need; you can add them later from the App "
+                               "Store):", wrap=True), False, False, 0)
+        grid = Gtk.Grid(column_spacing=24, row_spacing=6)
+        self.soft = []
+        for i, (name, desc, pkgs, default) in enumerate(SOFTWARE):
+            c = Gtk.CheckButton()
+            c.set_active(default)
+            lab = Gtk.Label(xalign=0)
+            lab.set_markup(f"<b>{GLib.markup_escape_text(name)}</b>\n<small>{GLib.markup_escape_text(desc)}</small>")
+            c.add(lab)
+            grid.attach(c, i % 2, i // 2, 1, 1)
+            self.soft.append((c, pkgs, name))
+        box.pack_start(grid, False, False, 0)
+        self.refresh_network()
+        return box
+
+    def page_type(self):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        row = Gtk.Box(spacing=8)
+        row.pack_start(S.label("Disk:"), False, False, 0)
+        self.disk_combo = Gtk.ComboBoxText()
+        self.disk_combo.connect("changed", lambda *_: self.update_type_page())
+        row.pack_start(self.disk_combo, True, True, 0)
         refresh = Gtk.Button(label="Refresh")
         refresh.connect("clicked", lambda *_: self.fill_disks())
-        row = Gtk.Box()
         row.pack_start(refresh, False, False, 0)
         box.pack_start(row, False, False, 0)
-        self.erase_ok = Gtk.CheckButton(label="I understand that everything on this disk will be erased")
-        box.pack_start(self.erase_ok, False, False, 0)
+        self.bar = PartitionBar()
+        box.pack_start(self.bar, False, False, 4)
+        self.mode_erase = Gtk.RadioButton.new_with_label(None, "Erase disk and install Syluxium")
+        self.mode_free = Gtk.RadioButton.new_with_label_from_widget(self.mode_erase,
+                                                                    "Install Syluxium alongside the other systems")
+        self.mode_manual = Gtk.RadioButton.new_with_label_from_widget(self.mode_erase, "Something else")
+        self.mode_hint = {}
+        for rb, text in ((self.mode_erase, "Deletes all programs, documents, photos, music and other files on the disk."),
+                         (self.mode_free, "Uses the disk's free space; Windows and other systems stay, and you choose "
+                                          "between them when the computer starts."),
+                         (self.mode_manual, "Choose the partitions yourself (and resize or create them with the "
+                                            "partition editor).")):
+            rb.connect("toggled", lambda *_: self.update_type_page())
+            box.pack_start(rb, False, False, 0)
+            h = S.label(text, wrap=True)
+            h.get_style_context().add_class("hint")
+            h.set_margin_start(26)
+            box.pack_start(h, False, False, 0)
+            self.mode_hint[rb] = h
+        # "Something else": the partition list
+        self.manual_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        self.part_store = Gtk.ListStore(str, str, str, str, str)  # dev, size, type, label, use
+        self.part_view = Gtk.TreeView(model=self.part_store)
+        for i, t in enumerate(("Partition", "Size", "File system", "Label", "Use as")):
+            self.part_view.append_column(Gtk.TreeViewColumn(t, Gtk.CellRendererText(), text=i))
+        sw = Gtk.ScrolledWindow(min_content_height=90)
+        sw.add(self.part_view)
+        self.manual_box.pack_start(sw, True, True, 0)
+        mrow = Gtk.Box(spacing=8)
+        b_root = Gtk.Button(label="Use for Syluxium (/)")
+        b_esp = Gtk.Button(label="Use as EFI partition")
+        b_ed = Gtk.Button(label="Partition editor...")
+        b_root.connect("clicked", lambda *_: self.assign("root"))
+        b_esp.connect("clicked", lambda *_: self.assign("esp"))
+        b_ed.connect("clicked", lambda *_: self.partition_editor())
+        for b in (b_root, b_esp, b_ed):
+            mrow.pack_start(b, False, False, 0)
+        self.format_esp = Gtk.CheckButton(label="Format the EFI partition")
+        mrow.pack_start(self.format_esp, False, False, 8)
+        self.manual_box.pack_start(mrow, False, False, 0)
+        box.pack_start(self.manual_box, True, True, 0)
+        self.root_part = self.esp_part = None
         self.fill_disks()
         return box
 
     def fill_disks(self):
-        self.disk_store.clear()
+        self.disk_combo.remove_all()
+        self.disk_list = []
         for d in S.disks():
             if d["system"] or d["size"] < 8 * 1000**3:
                 continue  # the stick Syluxium runs from, or too small
-            note = "removable" if d["removable"] else ""
-            self.disk_store.append([f"/dev/{d['name']}", S.human(d["size"]), d["model"], note])
-        if len(self.disk_store):
-            self.disk_view.get_selection().select_path(Gtk.TreePath(0))
+            self.disk_list.append(d)
+            self.disk_combo.append(d["name"], f"/dev/{d['name']} - {S.human(d['size'])} {d['model']}"
+                                   + ("  (removable)" if d["removable"] else ""))
+        if self.disk_list:
+            self.disk_combo.set_active(0)
 
-    def page_account(self):
-        box = self.page("Your account", "This is the account you'll sign in with. It can install "
-                                        "software and change settings (as an administrator).")
-        grid = Gtk.Grid(column_spacing=12, row_spacing=10)
-        self.fullname, self.user, self.pass1, self.pass2, self.host = (Gtk.Entry() for _ in range(5))
-        self.pass1.set_visibility(False)
-        self.pass2.set_visibility(False)
-        self.fullname.connect("changed", self.suggest_names)
-        self.user.connect("changed", lambda *_: setattr(self, "user_edited", self.user.has_focus()) or None)
-        self.user_edited = False
-        for i, (text, entry) in enumerate((("Your name:", self.fullname), ("User name:", self.user),
-                                           ("Password:", self.pass1), ("Type it again:", self.pass2),
-                                           ("Computer name:", self.host))):
-            grid.attach(S.label(text), 0, i, 1, 1)
-            entry.set_hexpand(True)
-            grid.attach(entry, 1, i, 1, 1)
-        box.pack_start(grid, False, False, 0)
-        self.account_error = S.label("")
-        box.pack_start(self.account_error, False, False, 0)
+    def disk(self):
+        name = self.disk_combo.get_active_id()
+        return f"/dev/{name}" if name else None
+
+    def update_type_page(self):
+        dev = self.disk()
+        if not hasattr(self, "bar"):
+            return
+        if not dev:
+            self.bar.set_layout(1, [])
+            for rb in (self.mode_erase, self.mode_free, self.mode_manual):
+                rb.set_sensitive(False)
+            self.mode_hint[self.mode_erase].set_text("No disk to install on was found (at least 8 GB is needed; the "
+                                                     "USB stick Syluxium runs from isn't listed).")
+            self.manual_box.hide()
+            return
+        parts, free, total, label = partition_table(dev)
+        self.parts, self.free, self.total = parts, free, total
+        big = max((f[1] for f in free), default=0)
+        self.mode_free.set_sensitive(bool(label) and big >= 20 * 1024**3 // 512)
+        self.mode_hint[self.mode_free].set_text(
+            "Uses the disk's free space; Windows and other systems stay, and you choose between them when the "
+            "computer starts." if self.mode_free.get_sensitive() else
+            f"Needs at least 20 GB of free (unpartitioned) space; this disk has {S.human(big * 512)}. Make room "
+            "with \"Something else\" and the partition editor, or in Windows' Disk Management.")
+        if not self.mode_free.get_sensitive() and self.mode_free.get_active():
+            self.mode_erase.set_active(True)
+        blocks = []
+        if self.mode_erase.get_active():
+            blocks = [(0, total, f"Syluxium (new) {S.human(total * 512)}", PartitionBar.COLORS[0], True)]
+        else:
+            for i, (name, start, size, ptype, fs, lab) in enumerate(parts):
+                desc = f"{name} {lab or fs or ''} {S.human(size * 512)}".replace("  ", " ")
+                blocks.append((start, size, desc, PartitionBar.COLORS[(i + 1) % len(PartitionBar.COLORS)], False))
+            for start, size in free:
+                if self.mode_free.get_active() and size == big:
+                    blocks.append((start, size, f"Syluxium (new) {S.human(size * 512)}", PartitionBar.COLORS[0], True))
+                elif size * 512 > 8 * 1024**2:
+                    blocks.append((start, size, f"free {S.human(size * 512)}", None, False))
+        self.bar.set_layout(total, blocks)
+        self.manual_box.set_visible(self.mode_manual.get_active())
+        self.part_store.clear()
+        for name, start, size, ptype, fs, lab in parts:
+            use = "/ (Syluxium, formatted)" if f"/dev/{name}" == self.root_part else \
+                  "EFI system partition" if f"/dev/{name}" == self.esp_part else ""
+            self.part_store.append([f"/dev/{name}", S.human(size * 512), fs or "-", lab, use])
+        if self.esp_part is None:
+            for name, start, size, ptype, fs, lab in parts:
+                if ptype.lower() in ESP_TYPES:
+                    self.esp_part = f"/dev/{name}"
+
+    def assign(self, what):
+        model, it = self.part_view.get_selection().get_selected()
+        if not it:
+            S.message(self.win, "Select a partition in the list first.")
+            return
+        dev = model[it][0]
+        if what == "root":
+            self.root_part = dev
+            if self.esp_part == dev:
+                self.esp_part = None
+        else:
+            self.esp_part = dev
+            if self.root_part == dev:
+                self.root_part = None
+        self.update_type_page()
+
+    def partition_editor(self):
+        subprocess.call(["gparted", self.disk() or ""])
+        self.update_type_page()
+
+    def page_where(self):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        self.zones = time_zones()
+        self.map = ZoneMap(self.zones, self.on_zone_picked)
+        frame = Gtk.Frame()
+        frame.add(self.map)
+        box.pack_start(frame, True, True, 0)
+        row = Gtk.Box(spacing=8)
+        row.pack_start(S.label("Region:"), False, False, 0)
+        self.region = Gtk.ComboBoxText()
+        regions = sorted({z[0].split("/")[0] for z in self.zones})
+        for r in regions:
+            self.region.append(r, r)
+        row.pack_start(self.region, False, False, 0)
+        row.pack_start(S.label("City:"), False, False, 8)
+        self.city = Gtk.ComboBoxText()
+        row.pack_start(self.city, True, True, 0)
+        self.zone_time = S.label("")
+        row.pack_start(self.zone_time, False, False, 8)
+        box.pack_start(row, False, False, 0)
+        self.region.connect("changed", self.on_region)
+        self.city.connect("changed", self.on_city)
+        self.set_zone(current_zone())
         return box
 
-    def suggest_names(self, *_):
-        if self.user_edited:
+    def set_zone(self, zone):
+        self._zone = zone
+        self.region.set_active_id(zone.split("/")[0])
+        self.city.set_active_id(zone)
+        self.map.select(zone)
+        t = run("env", f"TZ={zone}", "date", "+%H:%M (UTC%:z)").strip()
+        self.zone_time.set_text(f"Time there: {t}" if t else "")
+
+    def on_zone_picked(self, zone):
+        self.set_zone(zone)
+
+    def on_region(self, *_):
+        r = self.region.get_active_id()
+        self.city.remove_all()
+        for z in self.zones:
+            if z[0].split("/")[0] == r:
+                self.city.append(z[0], z[0].split("/", 1)[-1].replace("_", " ").replace("/", " - "))
+        if getattr(self, "_zone", "").split("/")[0] == r:
+            self.city.set_active_id(self._zone)
+        else:
+            self.city.set_active(0)
+
+    def on_city(self, *_):
+        z = self.city.get_active_id()
+        if z and z != getattr(self, "_zone", None):
+            self.set_zone(z)
+
+    def page_who(self):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        grid = Gtk.Grid(column_spacing=12, row_spacing=10)
+        self.fullname, self.host, self.user, self.pass1, self.pass2 = (Gtk.Entry() for _ in range(5))
+        for e in (self.pass1, self.pass2):
+            e.set_visibility(False)
+        self.fullname.connect("changed", self.suggest)
+        self.user.connect("changed", self.check_who_live)
+        self.pass1.connect("changed", self.check_who_live)
+        self.pass2.connect("changed", self.check_who_live)
+        self.host.connect("changed", self.check_who_live)
+        self.user_touched = False
+        self.user.connect("key-press-event", lambda *_: setattr(self, "user_touched", True) or False)
+        self.marks = {}
+        for i, (text, e, hint) in enumerate((("Your name:", self.fullname, ""),
+                                             ("Your computer's name:", self.host, "The name it uses on the network."),
+                                             ("Pick a username:", self.user, ""),
+                                             ("Choose a password:", self.pass1, ""),
+                                             ("Confirm your password:", self.pass2, ""))):
+            grid.attach(S.label(text, xalign=1.0), 0, i, 1, 1)
+            e.set_hexpand(True)
+            grid.attach(e, 1, i, 1, 1)
+            mark = S.label(hint)
+            mark.get_style_context().add_class("hint")
+            grid.attach(mark, 2, i, 1, 1)
+            self.marks[e] = mark
+        box.pack_start(grid, False, False, 0)
+        self.login_auto = Gtk.RadioButton.new_with_label(None, "Log in automatically")
+        self.login_pass = Gtk.RadioButton.new_with_label_from_widget(self.login_auto, "Require my password to log in")
+        self.login_pass.set_active(True)
+        box.pack_start(self.login_auto, False, False, 0)
+        box.pack_start(self.login_pass, False, False, 0)
+        return box
+
+    def suggest(self, *_):
+        if self.user_touched:
             return
-        first = (self.fullname.get_text().split() or ["user"])[0].lower()
-        name = re.sub(r"[^a-z0-9_-]", "", first) or "user"
-        if not name[0].isalpha():
+        first = (self.fullname.get_text().split() or [""])[0].lower()
+        name = re.sub(r"[^a-z0-9_-]", "", first)
+        if name and not name[0].isalpha():
             name = "u" + name
         self.user.set_text(name)
-        self.host.set_text(f"{name}-pc")
+        self.host.set_text(f"{name}-pc" if name else "")
 
-    def page_settings(self):
-        box = self.page("Settings")
-        grid = Gtk.Grid(column_spacing=12, row_spacing=10)
-        self.zone = Gtk.ComboBoxText()
-        zones = time_zones()
-        cur = current_zone()
-        for z in zones:
-            self.zone.append(z, z.replace("_", " "))
-        self.zone.set_active_id(cur if cur in zones else ("America/New_York" if "America/New_York" in zones else zones[0]))
-        self.keyboard = Gtk.ComboBoxText()
-        for code, name in KEYBOARDS:
-            self.keyboard.append(code, name)
-        self.keyboard.set_active_id("us")
-        self.autologin = Gtk.CheckButton(label="Sign in automatically (no password at start-up)")
-        grid.attach(S.label("Time zone:"), 0, 0, 1, 1)
-        grid.attach(self.zone, 1, 0, 1, 1)
-        grid.attach(S.label("Keyboard layout:"), 0, 1, 1, 1)
-        grid.attach(self.keyboard, 1, 1, 1, 1)
-        grid.attach(self.autologin, 0, 2, 2, 1)
-        box.pack_start(grid, False, False, 0)
+    def check_who_live(self, *_):
+        u, p1, p2 = self.user.get_text(), self.pass1.get_text(), self.pass2.get_text()
+        self.marks[self.user].set_text("" if not u or (re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}", u) and u != "root")
+                                       else "small letters, numbers, - and _")
+        strength = "" if not p1 else ("Short password" if len(p1) < 6 else "Fair password" if len(p1) < 10 or
+                                      p1.isalpha() or p1.isdigit() else "Strong password")
+        self.marks[self.pass1].set_text(strength)
+        self.marks[self.pass2].set_text("" if not p2 else ("Passwords match" if p1 == p2 else "Passwords do not match"))
+
+    def page_install(self):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        slide = Gtk.Box(spacing=24)
+        slide.get_style_context().add_class("slide")
+        self.slide_icon = Gtk.Image()
+        self.slide_icon.set_pixel_size(128)
+        self.slide_icon.set_margin_start(30)
+        slide.pack_start(self.slide_icon, False, False, 0)
+        texts = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, valign=Gtk.Align.CENTER)
+        self.slide_title, self.slide_text = Gtk.Label(xalign=0), Gtk.Label(xalign=0)
+        self.slide_title.get_style_context().add_class("slide-title")
+        self.slide_text.set_line_wrap(True)
+        self.slide_text.set_max_width_chars(46)
+        texts.pack_start(self.slide_title, False, False, 0)
+        texts.pack_start(self.slide_text, False, False, 0)
+        slide.pack_start(texts, True, True, 20)
+        box.pack_start(slide, True, True, 0)
+        self.progress = Gtk.ProgressBar(show_text=True)
+        box.pack_start(self.progress, False, False, 0)
+        self.step_label = S.label("")
+        box.pack_start(self.step_label, False, False, 0)
+        self.slide_n = 0
+        self.show_slide()
         return box
 
-    def page_software(self):
-        box = self.page("Software", "Untick what you don't need: it's left out of the installed system "
-                                    "(you can add it again later from the App Store).")
-        self.soft_checks = []
-        for name, pkgs, default in SOFTWARE:
-            c = Gtk.CheckButton(label=name)
-            c.set_active(default)
-            box.pack_start(c, False, False, 0)
-            self.soft_checks.append((c, pkgs))
-        return box
-
-    def page_summary(self):
-        box = self.page("Ready to install", "Check your choices. Click Install to begin; this takes a few "
-                                            "minutes.")
-        self.summary = S.label("", wrap=True)
-        box.pack_start(self.summary, False, False, 0)
-        return box
-
-    def page_progress(self):
-        box = self.page("Installing Syluxium", "Please wait. Don't turn off the computer or remove the "
-                                               "USB stick.")
-        self.bar = Gtk.ProgressBar(show_text=True)
-        box.pack_start(self.bar, False, False, 8)
-        self.status = S.label("")
-        box.pack_start(self.status, False, False, 0)
-        return box
+    def show_slide(self):
+        title, text, icon = SLIDES[self.slide_n % len(SLIDES)]
+        self.slide_title.set_text(title)
+        self.slide_text.set_text(text)
+        if icon == "logo":
+            self.slide_icon.set_from_pixbuf(logo_image("logo-hex.png", 128).get_pixbuf())
+        else:
+            self.slide_icon.set_from_icon_name(icon, Gtk.IconSize.DIALOG)
+            self.slide_icon.set_pixel_size(128)
+        self.slide_n += 1
+        return self.installing
 
     def page_done(self):
-        box = self.page("Finished")
-        self.done_text = S.label("", wrap=True)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
+        self.done_icon = Gtk.Image()
+        self.done_icon.set_pixel_size(96)
+        box.pack_start(self.done_icon, False, False, 20)
+        self.done_text = S.label("", wrap=True, xalign=0.5)
         box.pack_start(self.done_text, False, False, 0)
         return box
 
-    # ---- navigation ----
-    def chosen_disk(self):
-        model, it = self.disk_view.get_selection().get_selected()
-        return model[it][0] if it else None
+    # -------- navigation --------
+    def show(self, i):
+        self.index = i
+        name = self.PAGES[i]
+        self.stack.set_visible_child_name(name)
+        t, sub = self.HEADINGS[name]
+        self.h_title.set_text(t)
+        self.h_sub.set_text(sub)
+        self.h_sub.set_visible(bool(sub))
+        for k, d in enumerate(self.dot_labels):
+            ctx = d.get_style_context()
+            ctx.remove_class("dot-on")
+            ctx.remove_class("dot")
+            ctx.add_class("dot-on" if k <= i else "dot")
+        self.back_b.set_visible(0 < i < 7)
+        self.quit_b.set_visible(i < 7)
+        self.next_b.set_label({4: "Install Now", 8: "Restart Now"}.get(i, "Continue"))
+        self.next_b.set_visible(i != 7)
+        self.dots.set_visible(i < 7)
+        if name == "type":
+            self.update_type_page()
+        elif name == "who" and not self.fullname.get_text():
+            self.fullname.grab_focus()
 
-    def removed(self):
-        return " ".join(p for c, p in self.soft_checks if not c.get_active())
-
-    def check(self, page):
-        if page == 1:
-            if not self.chosen_disk():
-                return "Choose a disk (at least 8 GB). The USB stick Syluxium runs from isn't listed."
-            if not self.erase_ok.get_active():
-                return "Tick the box to confirm that the disk may be erased."
-        if page == 2:
+    def problem(self):
+        name = self.PAGES[self.index]
+        if name == "type":
+            if not self.disk():
+                return "No disk to install on was found."
+            if self.mode_manual.get_active():
+                if not self.root_part:
+                    return "Choose the partition for Syluxium (select it, then \"Use for Syluxium\")."
+                if not self.esp_part:
+                    return "Choose the EFI system partition (select it, then \"Use as EFI partition\")."
+        if name == "who":
             u, p1, p2 = self.user.get_text(), self.pass1.get_text(), self.pass2.get_text()
             if not re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}", u) or u == "root":
-                return "User name: small letters, numbers, - and _, starting with a letter."
+                return "Pick a username: small letters, numbers, - and _, starting with a letter."
             if not p1:
                 return "Choose a password."
             if p1 != p2:
-                return "The passwords don't match."
+                return "The passwords do not match."
             if not re.fullmatch(r"[A-Za-z0-9-]{1,63}", self.host.get_text()):
-                return "Computer name: letters, numbers and -."
+                return "Your computer's name: letters, numbers and -."
         return None
 
+    def confirm_install(self):
+        dev = self.disk()
+        if self.mode_erase.get_active():
+            text = f"All data on {dev} will be erased:\n\n" + "\n".join(
+                f"  {n}  {lab or fs or 'partition'}  {S.human(sz * 512)}" for n, _, sz, _, fs, lab in self.parts) \
+                if self.parts else f"{dev} will be partitioned and formatted."
+        elif self.mode_free.get_active():
+            text = f"A new partition for Syluxium will be created in the free space on {dev}.\n" \
+                   "Existing partitions are not changed."
+        else:
+            text = f"{self.root_part} will be formatted (ext4) for Syluxium." + \
+                   (f"\n{self.esp_part} will be formatted (EFI system partition)." if self.format_esp.get_active()
+                    else f"\nThe boot files go onto {self.esp_part} (shared; nothing there is removed).")
+        d = Gtk.MessageDialog(transient_for=self.win, modal=True, message_type=Gtk.MessageType.WARNING,
+                              buttons=Gtk.ButtonsType.NONE, text="Write the changes to disk?")
+        d.format_secondary_text(text)
+        d.add_button("Go Back", Gtk.ResponseType.CANCEL)
+        d.add_button("Continue", Gtk.ResponseType.OK)
+        r = d.run()
+        d.destroy()
+        return r == Gtk.ResponseType.OK
+
     def on_next(self, *_):
-        if self.current == 5:
+        name = self.PAGES[self.index]
+        if name == "done":
+            subprocess.call(["reboot"])
+            return
+        p = self.problem()
+        if p:
+            S.message(self.win, p, kind=Gtk.MessageType.WARNING)
+            return
+        if name == "type" and not SHOTS and not self.confirm_install():
+            return
+        if name == "who":
             self.start_install()
             return
-        if self.current == 7:
-            self.finish()
-            return
-        problem = self.check(self.current)
-        if problem:
-            S.message(self.win, problem, kind=Gtk.MessageType.WARNING)
-            return
-        self.go(self.current + 1)
+        self.show(self.index + 1)
 
-    def go(self, i):
-        self.current = i
-        self.stack.set_visible_child_name(str(i))
-        for k, lab in enumerate(self.step_labels):
-            lab.set_markup(f"<b>{GLib.markup_escape_text(STEPS[k])}</b>" if k == i
-                           else GLib.markup_escape_text(STEPS[k]))
-        if i == 5:
-            gone = [n for (n, _, _), (c, _) in zip(SOFTWARE, self.soft_checks) if not c.get_active()]
-            self.summary.set_text(
-                f"Disk: {self.chosen_disk()} (will be erased)\n"
-                f"Account: {self.fullname.get_text() or self.user.get_text()} ({self.user.get_text()})\n"
-                f"Computer name: {self.host.get_text()}\n"
-                f"Time zone: {self.zone.get_active_id()}\n"
-                f"Keyboard: {dict(KEYBOARDS).get(self.keyboard.get_active_id(), 'English (US)')}\n"
-                f"Automatic sign-in: {'yes' if self.autologin.get_active() else 'no'}\n"
-                f"Left out: {', '.join(gone) if gone else 'nothing'}")
-        self.back.set_sensitive(0 < i < 6)
-        self.next.set_sensitive(i != 6)
-        self.next.set_label({5: "Install", 7: "Restart now"}.get(i, "Next >"))
-        self.cancel.set_label("Close" if i == 7 else "Cancel")
-        self.cancel.set_sensitive(i != 6)
+    def on_quit(self, *_):
+        if self.installing:
+            return True
+        Gtk.main_quit()
+        return False
 
-    # ---- installing ----
+    # -------- installing --------
+    def command(self):
+        lay, var = self.keyboard()
+        cmd = ["syluxium-install", "--user", self.user.get_text(), "--password", self.pass1.get_text(),
+               "--fullname", self.fullname.get_text() or self.user.get_text(), "--hostname", self.host.get_text(),
+               "--timezone", self._zone, "--keyboard", f"{lay}({var})" if var else lay]
+        if self.mode_erase.get_active():
+            cmd += ["--mode", "erase", "--disk", self.disk()]
+        elif self.mode_free.get_active():
+            cmd += ["--mode", "free", "--disk", self.disk()]
+        else:
+            cmd += ["--mode", "manual", "--root", self.root_part, "--esp", self.esp_part]
+            if self.format_esp.get_active():
+                cmd.append("--format-esp")
+        if self.login_auto.get_active():
+            cmd.append("--autologin")
+        if self.updates.get_active():
+            cmd.append("--update")
+        removed = " ".join(p for c, p, _ in self.soft if not c.get_active())
+        if removed:
+            cmd += ["--remove", removed]
+        return cmd
+
     def start_install(self):
         self.installing = True
-        self.go(6)
-        cmd = ["syluxium-install", "--disk", self.chosen_disk(), "--user", self.user.get_text(),
-               "--password", self.pass1.get_text(), "--fullname", self.fullname.get_text() or self.user.get_text(),
-               "--hostname", self.host.get_text(), "--timezone", self.zone.get_active_id() or "Etc/UTC",
-               "--keyboard", self.keyboard.get_active_id() or "us"]
-        if self.autologin.get_active():
-            cmd.append("--autologin")
-        if self.removed():
-            cmd += ["--remove", self.removed()]
-        threading.Thread(target=self.run, args=(cmd,), daemon=True).start()
+        self.show(7)
+        GLib.timeout_add_seconds(9, self.show_slide)
+        threading.Thread(target=self.worker, args=(self.command(),), daemon=True).start()
 
-    def run(self, cmd):
+    def worker(self, cmd):
         ok = False
         try:
             with open(LOG, "w") as log:
@@ -331,42 +955,73 @@ class Wizard:
                     log.flush()
                     m = re.match(r"\[install\] (\d+)/(\d+) (.*)", line)
                     if m:
-                        GLib.idle_add(self.progress, int(m[1]), int(m[2]), m[3])
+                        GLib.idle_add(self.set_progress, int(m[1]), int(m[2]), m[3])
                 ok = p.wait() == 0
         except OSError as e:
             with open(LOG, "a") as log:
                 log.write(f"cannot run the installer: {e}\n")
-        GLib.idle_add(self.done, ok)
+        GLib.idle_add(self.finished, ok)
 
-    def progress(self, n, total, text):
-        self.bar.set_fraction(min(1.0, n / total))
-        self.bar.set_text(f"{n * 100 // total}%")
-        self.status.set_text(text)
+    def set_progress(self, n, total, text):
+        self.progress.set_fraction(min(1.0, n / total))
+        self.progress.set_text(f"{n * 100 // total}%")
+        self.step_label.set_text(text)
 
-    def done(self, ok):
+    def finished(self, ok):
         self.installing = False
+        self.show(8)
         if ok:
-            self.done_text.set_text(f"Syluxium is installed.\n\nRemove the USB stick, then restart the computer. "
-                                    f"Sign in as \"{self.user.get_text()}\" with the password you chose.")
+            self.done_icon.set_from_icon_name("emblem-default", Gtk.IconSize.DIALOG)
+            self.done_text.set_markup(
+                "<big><b>Syluxium is installed.</b></big>\n\nRemove the USB stick when the computer restarts. "
+                f"Sign in as <b>{GLib.markup_escape_text(self.user.get_text())}</b>."
+                + ("\n\nThe first time, choose this disk in the computer's boot menu (often F12, F11 or Esc); "
+                   "after that Syluxium starts by itself and offers your other system too."
+                   if not self.mode_erase.get_active() else ""))
         else:
+            self.done_icon.set_from_icon_name("dialog-error", Gtk.IconSize.DIALOG)
             tail = "".join(open(LOG).readlines()[-6:]) if os.path.exists(LOG) else ""
-            self.done_text.set_text(f"The installation failed. Nothing on the USB stick was changed.\n\n"
-                                    f"Details ({LOG}):\n{tail}")
-            self.next.set_label("Restart now")
-        self.go(7)
-        if not ok:
-            self.next.set_sensitive(False)
+            self.done_text.set_markup("<big><b>The installation failed.</b></big>\n\nThe USB stick wasn't "
+                                      f"changed. Details are in {LOG}:\n\n<small>{GLib.markup_escape_text(tail)}</small>")
+            self.next_b.set_label("Restart Now")
 
-    def finish(self):
-        subprocess.call(["reboot"])
 
-    def on_close(self, *_):
-        if self.installing:
-            return True  # not while the disk is being written
-        Gtk.main_quit()
+def screenshots(app, out):
+    """Test mode: every page with sample answers, saved as PNGs."""
+    os.makedirs(out, exist_ok=True)
+    app.fullname.set_text("Alex Example")
+    app.pass1.set_text("correct horse 42")
+    app.pass2.set_text("correct horse 42")
+    steps = list(range(len(app.PAGES)))
+
+    def shot(i):
+        if i == len(steps):
+            Gtk.main_quit()
+            return False
+        if app.PAGES[i] == "type" and app.mode_free.get_sensitive():
+            app.mode_free.set_active(True)
+        app.show(i)
+        if app.PAGES[i] == "install":
+            app.set_progress(4, 10, "Copying Syluxium (this takes a few minutes)")
+        if app.PAGES[i] == "done":
+            app.done_icon.set_from_icon_name("emblem-default", Gtk.IconSize.DIALOG)
+            app.done_text.set_markup("<big><b>Syluxium is installed.</b></big>\n\nRemove the USB stick when the "
+                                     "computer restarts. Sign in as <b>alex</b>.")
+
+        def grab():
+            w = app.win.get_window()
+            pb = Gdk.pixbuf_get_from_window(w, 0, 0, w.get_width(), w.get_height())
+            if pb:
+                pb.savev(f"{out}/{i + 1:02d}-{app.PAGES[i]}.png", "png", [], [])
+            GLib.timeout_add(300, shot, i + 1)
+            return False
+        GLib.timeout_add(900, grab)
         return False
+    GLib.timeout_add(1500, shot, 0)
 
 
 if __name__ == "__main__":
-    Wizard()
+    installer = Installer()
+    if SHOTS:
+        screenshots(installer, SHOTS)
     Gtk.main()

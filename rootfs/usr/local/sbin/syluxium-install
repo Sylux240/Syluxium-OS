@@ -5,6 +5,7 @@
 #                    [--timezone Europe/Berlin] [--keyboard us] [--autologin]
 #                    [--remove "package ..."]   (software left out; apt removes it
 #                                                and whatever depends on it)
+#                    [--update]   (download and install updates, if online)
 #                    [--mode erase|free|manual] [--root PART] [--esp PART] [--format-esp]
 #   erase  (default) the whole disk: GPT, BIOS boot + EFI + ext4 root
 #   free   the largest free space on the disk: an ext4 root there (plus an EFI
@@ -20,7 +21,7 @@ BOOT=/usr/lib/syluxium/boot
 TARGET=/mnt/syluxium-target
 DISK= USERNAME= PASSWORD= FULLNAME= HOSTNAME_NEW=syluxium PROGRESS=
 TIMEZONE= KEYBOARD= AUTOLOGIN= REMOVE=
-MODE=erase ROOT= ESP= FORMAT_ESP=
+MODE=erase ROOT= ESP= FORMAT_ESP= UPDATE=
 while [ $# -gt 0 ]; do
     case "$1" in
         --disk) DISK=$2; shift ;;
@@ -37,6 +38,7 @@ while [ $# -gt 0 ]; do
         --root) ROOT=$2; shift ;;
         --esp) ESP=$2; shift ;;
         --format-esp) FORMAT_ESP=1 ;;
+        --update) UPDATE=1 ;;
         *) echo "unknown option $1" >&2; exit 2 ;;
     esac
     shift
@@ -182,6 +184,20 @@ if [ -n "$REMOVE" ]; then
             DEBIAN_FRONTEND=noninteractive chroot "$TARGET" apt-get -y -q --no-download purge $installed \
                 || echo "[install] warning: removing $installed failed; it stays installed"
         fi
+    fi
+    umount "$TARGET/dev" "$TARGET/proc" 2>/dev/null || true
+fi
+if [ -n "$UPDATE" ]; then
+    # Updates from the Internet (skipped quietly when offline).
+    echo "[install] downloading updates"
+    cp /etc/resolv.conf "$TARGET/etc/resolv.conf" 2>/dev/null || true
+    mount -t proc proc "$TARGET/proc" && mount --bind /dev "$TARGET/dev" || true
+    if chroot "$TARGET" apt-get -q update > /dev/null 2>&1; then
+        DEBIAN_FRONTEND=noninteractive chroot "$TARGET" apt-get -y -q -o Dpkg::Options::=--force-confold upgrade \
+            || echo "[install] warning: some updates could not be installed"
+        chroot "$TARGET" apt-get -q clean || true
+    else
+        echo "[install] no Internet connection: updates skipped"
     fi
     umount "$TARGET/dev" "$TARGET/proc" 2>/dev/null || true
 fi
