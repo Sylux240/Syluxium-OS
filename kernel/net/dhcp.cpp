@@ -23,6 +23,7 @@ struct Client {
     usize reply_len = 0;
     bool waiting = false;
     volatile bool kick = false; // link (re)gained: start over now
+    u32 tries = 0;              // DISCOVERs without an offer (for the log)
 };
 
 constexpr usize MAX_CLIENTS = 4;
@@ -135,12 +136,18 @@ void client_thread(void* arg) {
             continue;
         }
         c->xid = static_cast<u32>(clock::now_ns() ^ (c->iface->mac[5] << 24));
+        if (!c->tries++)
+            klog::info("DHCP: %s: asking for an address", c->iface->name);
         send_packet(c, DISCOVER, 0, 0);
         Reply offer;
         if (!wait_reply(c, OFFER, OFFER, &offer, backoff)) {
             backoff = min<u64>(backoff * 2, 16000);
+            if (c->tries == 4 || c->tries % 16 == 0)
+                klog::warn("DHCP: %s: no offer after %u requests (%lu packets received on it)", c->iface->name,
+                           c->tries, c->iface->rx_packets);
             continue;
         }
+        c->tries = 0;
         send_packet(c, REQUEST, offer.yiaddr, offer.server);
         Reply ack;
         if (!wait_reply(c, ACK, NAK, &ack, 3000) || ack.type == NAK) {

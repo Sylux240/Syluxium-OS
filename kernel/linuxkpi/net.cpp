@@ -101,10 +101,13 @@ void lkpi_sylux_netif_unregister(void* iface) { net::unregister_interface(static
 
 void lkpi_sylux_netif_link(void* iface, int carrier) {
     auto* f = static_cast<net::Interface*>(iface);
-    if (carrier && !f->link_up)
+    if (carrier && !f->link_up) {
+        klog::info("Network: %s link up", f->name);
         net::link_up(f);
-    else if (!carrier)
+    } else if (!carrier && f->link_up) {
+        klog::info("Network: %s link down", f->name);
         f->link_up = false;
+    }
 }
 
 void lkpi_sylux_netif_flags(void* iface, int up) {
