@@ -831,6 +831,15 @@ static void quirk_broken_nv_runpm(struct pci_dev *pdev)
 	}
 }
 
+/*
+ * Syluxium: probe steps go to the boot log, and "gpufail=<step>" makes a
+ * step fail (fallback test), as for i915.
+ */
+int lkpi_gpu_fail_step(void);
+#define LKPI_STEP(n, name) pr_info("nouveau: probe step %d: %s\n", n, name)
+#define LKPI_INJECT(n, r) do { if (lkpi_gpu_fail_step() == (n) && (r) >= 0) { \
+	pr_err("nouveau: gpufail=%d: failing this step on purpose\n", n); (r) = -EIO; } } while (0)
+
 static int nouveau_drm_probe(struct pci_dev *pdev,
 			     const struct pci_device_id *pent)
 {
@@ -844,11 +853,14 @@ static int nouveau_drm_probe(struct pci_dev *pdev,
 	/* We need to check that the chipset is supported before booting
 	 * fbdev off the hardware, as there's no way to put it back.
 	 */
+	LKPI_STEP(1, "nvkm device (chipset, VBIOS, subdevices)");
 	ret = nvkm_device_pci_new(pdev, nouveau_config, nouveau_debug, &device);
 	if (ret)
 		return ret;
+	pr_info("nouveau: chipset %s (%s)\n", device->chip->name, device->name);
 
 	/* Remove conflicting drivers (vesafb, efifb etc). */
+	LKPI_STEP(2, "take the display over from the firmware framebuffer");
 	ret = drm_aperture_remove_conflicting_pci_framebuffers(pdev, &driver_pci);
 	if (ret)
 		return ret;
@@ -868,9 +880,12 @@ static int nouveau_drm_probe(struct pci_dev *pdev,
 	if (ret)
 		goto fail_drm;
 
+	LKPI_STEP(3, "device init (memory, firmware, engines, display)");
 	ret = nouveau_drm_device_init(drm);
+	LKPI_INJECT(3, ret);
 	if (ret)
 		goto fail_pci;
+	LKPI_STEP(4, "fbdev console");
 
 	if (drm->client.device.info.ram_size <= 32 * 1024 * 1024)
 		drm_fbdev_ttm_setup(drm->dev, 8);
@@ -878,6 +893,7 @@ static int nouveau_drm_probe(struct pci_dev *pdev,
 		drm_fbdev_ttm_setup(drm->dev, 32);
 
 	quirk_broken_nv_runpm(pdev);
+	pr_info("nouveau: probe complete\n");
 	return 0;
 
 fail_pci:

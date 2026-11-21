@@ -109,6 +109,17 @@ int __aperture_remove_legacy_vga_devices(struct pci_dev *pdev)
 	return 0; /* no vgacon / vga16fb */
 }
 
+/* No other VGA / display controller in the machine (an Intel IGD next to a
+ * discrete card must not take the discrete card's framebuffer). */
+static bool only_display_controller(struct pci_dev *pdev)
+{
+	struct pci_dev *other = NULL;
+	while ((other = pci_get_device(PCI_ANY_ID, PCI_ANY_ID, other)))
+		if (other != pdev && (other->class >> 16) == PCI_BASE_CLASS_DISPLAY)
+			return false;
+	return true;
+}
+
 int aperture_remove_conflicting_pci_devices(struct pci_dev *pdev, const char *name)
 {
 	bool primary = false;
@@ -127,7 +138,7 @@ int aperture_remove_conflicting_pci_devices(struct pci_dev *pdev, const char *na
 	 * device; with one display controller that is this one. On Intel the
 	 * GOP framebuffer can sit in stolen memory outside every BAR. */
 	if (!primary && boot_fb.known && (pdev->class >> 8) == PCI_CLASS_DISPLAY_VGA &&
-	    pdev->vendor == PCI_VENDOR_ID_INTEL)
+	    pdev->vendor == PCI_VENDOR_ID_INTEL && only_display_controller(pdev))
 		primary = true;
 	if (primary)
 		remove_boot_fb(name);
