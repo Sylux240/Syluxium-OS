@@ -299,6 +299,7 @@ struct napi_struct {
     volatile unsigned long state;
     struct work_struct lkpi_work;
     unsigned int napi_id; /* appended */
+    struct sk_buff* skb;  /* appended: napi_get_frags()'s packet in the making */
 };
 #define NAPI_POLL_WEIGHT 64
 
