@@ -28,6 +28,7 @@ static int drm_cards; /* /dev/dri/cardN nodes */
 
 void lkpi_register_boot_framebuffer(u64 phys, u32 width, u32 height, u32 pitch, u32 red_shift);
 void lkpi_display_released(void); /* core.cpp: the kernel stops drawing on the firmware framebuffer */
+void lkpi_display_restored(void);  /* core.cpp: ... and draws there again */
 
 /* Called by core.cpp before any driver probes. */
 void lkpi_boot_fb_set(u64 base, u32 width, u32 height, u32 pitch, u32 red_shift)
@@ -68,6 +69,7 @@ void lkpi_gpu_probe_failed(const char *driver)
 	printk(KERN_WARNING "aperture: %s failed after taking over the display: back to the firmware framebuffer\n",
 	       driver ? driver : "the GPU driver");
 	lkpi_register_boot_framebuffer(boot_fb.base, boot_fb.width, boot_fb.height, boot_fb.pitch, boot_fb.red_shift);
+	lkpi_display_restored();
 }
 
 int devm_aperture_acquire_for_platform_device(struct platform_device *pdev, resource_size_t base,

@@ -204,6 +204,7 @@ bool lkpi_match(const dev::Driver* drv, const dev::Device* d) {
 }
 
 extern "C" void lkpi_gpu_probe_failed(const char* driver);
+extern "C" int aperture_remove_conflicting_pci_devices(struct pci_dev* pdev, const char* name);
 
 // A pci_dev for function `f` (bound or not: drivers also look at bridges
 // and sibling functions).
@@ -247,6 +248,69 @@ void fill_pdev(pci_dev* pdev, pci::Function* f, dev::Device* d) {
     }
 }
 
+// ---- GPU driver probes: watched, so a hanging driver can't stop the boot ----
+// "gputimeout=<seconds>" (default 90): how long a GPU driver may take to probe.
+// "gpufail=<step>": i915 fails that probe step (1..9, see i915_driver.c);
+// "gpufail=takeover" / "gpufail=hang": any GPU driver takes the display over,
+// then fails / hangs (tests the fallback and the watchdog in QEMU).
+long cmdline_number(const char* key, long fallback) {
+    const char* p = strstr(boot::cmdline(), key);
+    if (!p || (p != boot::cmdline() && p[-1] != ' '))
+        return fallback;
+    p += strlen(key);
+    if (*p < '0' || *p > '9')
+        return fallback;
+    long v = 0;
+    while (*p >= '0' && *p <= '9')
+        v = v * 10 + (*p++ - '0');
+    return v;
+}
+
+struct GpuProbe {
+    pci_driver* drv;
+    pci_dev* pdev;
+    const pci_device_id* id;
+    int result;
+    sched::Semaphore done{0};
+};
+
+void gpu_probe_thread(void* arg) {
+    auto* job = static_cast<GpuProbe*>(arg);
+    if (cmdline_word("gpufail=takeover") || cmdline_word("gpufail=hang")) {
+        aperture_remove_conflicting_pci_devices(job->pdev, job->drv->name);
+        if (cmdline_word("gpufail=hang")) {
+            klog::warn("linuxkpi: gpufail=hang: %s probe hangs on purpose", job->drv->name);
+            for (;;)
+                sched::sleep_ms(1000);
+        }
+        klog::warn("linuxkpi: gpufail=takeover: %s probe fails on purpose", job->drv->name);
+        job->result = -EIO;
+    } else {
+        job->result = job->drv->probe(job->pdev, job->id);
+    }
+    job->done.signal();
+}
+
+int gpu_probe(pci_driver* drv, pci_dev* pdev, const pci_device_id* id) {
+    long timeout = cmdline_number("gputimeout=", 90);
+    auto* job = new GpuProbe{drv, pdev, id, 0};
+    klog::info("linuxkpi: %s: probing %s (watchdog %ld s)", drv->name, pdev->dev.lkpi_name, timeout);
+    u64 start = clock::now_ms();
+    sched::spawn("gpu-probe", gpu_probe_thread, job, -1, true);
+    if (!job->done.wait_timeout(static_cast<u64>(timeout) * 1'000'000'000ull)) {
+        klog::error("linuxkpi: %s: probe still running after %ld s - giving up on it (boot continues on the "
+                    "firmware framebuffer; boot with nogpu to skip GPU drivers)", drv->name, timeout);
+        return -ETIMEDOUT; // job leaks: the thread may still finish and touch it
+    }
+    int r = job->result;
+    delete job;
+    if (r)
+        klog::error("linuxkpi: %s: probe failed (%d) after %lu ms", drv->name, r, clock::now_ms() - start);
+    else
+        klog::ok("linuxkpi: %s: probe finished in %lu ms", drv->name, clock::now_ms() - start);
+    return r;
+}
+
 // pci_devs handed out for functions no LinuxKPI driver is bound to, one per function.
 pci_dev* g_shadow[256];
 pci_dev* g_bound[256]; // LinuxKPI drivers' pci_devs, by function index
@@ -268,7 +332,16 @@ long lkpi_probe(const dev::Driver* drv, dev::Device* d) {
     pdev->dev.driver = &pdrv->driver;
     d->driver_data = pdev;
     set_bound(f, pdev);
-    int r = pdrv->probe(pdev, find_id(pdrv, d));
+    bool gpu = (d->class_code >> 16) == 0x03;
+    int r = gpu ? gpu_probe(pdrv, pdev, find_id(pdrv, d)) : pdrv->probe(pdev, find_id(pdrv, d));
+    if (r == -ETIMEDOUT && gpu) {
+        // The probe thread is stuck and still uses pdev: keep it, but give
+        // the screen back to the firmware framebuffer and boot on.
+        d->driver_data = nullptr;
+        set_bound(f, nullptr);
+        lkpi_gpu_probe_failed(pdrv->name);
+        return r;
+    }
     if (r) {
         d->driver_data = nullptr;
         set_bound(f, nullptr);
@@ -780,3 +853,6 @@ namespace linuxkpi {
 void init_pci() {}
 
 } // namespace linuxkpi
+
+// i915_driver.c: "gpufail=<n>" fails probe step n.
+extern "C" int lkpi_gpu_fail_step(void) { return static_cast<int>(cmdline_number("gpufail=", 0)); }

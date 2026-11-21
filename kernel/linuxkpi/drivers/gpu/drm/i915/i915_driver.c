@@ -747,6 +747,16 @@ i915_driver_create(struct pci_dev *pdev, const struct pci_device_id *ent)
  *   - allocate initial config memory
  *   - setup the DRM framebuffer with the allocated memory
  */
+/*
+ * Syluxium: every probe step goes to the boot log (a black screen still
+ * leaves the log on the USB stick), and "gpufail=<step>" makes a step fail
+ * to test the fallback to the firmware framebuffer.
+ */
+int lkpi_gpu_fail_step(void);
+#define LKPI_STEP(n, name) pr_info("i915: probe step %d: %s\n", n, name)
+#define LKPI_INJECT(n, r) do { if (lkpi_gpu_fail_step() == (n) && (r) >= 0) { \
+	pr_err("i915: gpufail=%d: failing this step on purpose\n", n); (r) = -EIO; } } while (0)
+
 int i915_driver_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 {
 	struct drm_i915_private *i915;
@@ -764,7 +774,9 @@ int i915_driver_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 		return PTR_ERR(i915);
 	}
 
+	LKPI_STEP(1, "early probe (MMIO, PCH, DRAM, runtime PM)");
 	ret = i915_driver_early_probe(i915);
+	LKPI_INJECT(1, ret);
 	if (ret < 0)
 		goto out_pci_disable;
 
@@ -772,31 +784,45 @@ int i915_driver_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 
 	intel_vgpu_detect(i915);
 
+	LKPI_STEP(2, "GT probe");
 	ret = intel_gt_probe_all(i915);
+	LKPI_INJECT(2, ret);
 	if (ret < 0)
 		goto out_runtime_pm_put;
 
+	LKPI_STEP(3, "MMIO / uncore / forcewake");
 	ret = i915_driver_mmio_probe(i915);
+	LKPI_INJECT(3, ret);
 	if (ret < 0)
 		goto out_runtime_pm_put;
 
+	LKPI_STEP(4, "hardware probe (DMA mask, GGTT, stolen memory, MSI)");
 	ret = i915_driver_hw_probe(i915);
+	LKPI_INJECT(4, ret);
 	if (ret < 0)
 		goto out_cleanup_mmio;
 
+	LKPI_STEP(5, "display probe before interrupts (VBT, DMC, power wells, cdclk)");
 	ret = intel_display_driver_probe_noirq(i915);
+	LKPI_INJECT(5, ret);
 	if (ret < 0)
 		goto out_cleanup_hw;
 
+	LKPI_STEP(6, "interrupts");
 	ret = intel_irq_install(i915);
+	LKPI_INJECT(6, ret);
 	if (ret)
 		goto out_cleanup_modeset;
 
+	LKPI_STEP(7, "display: outputs, hardware state readout");
 	ret = intel_display_driver_probe_nogem(i915);
+	LKPI_INJECT(7, ret);
 	if (ret)
 		goto out_cleanup_irq;
 
+	LKPI_STEP(8, "GEM / GT init (engines, firmware, contexts)");
 	ret = i915_gem_init(i915);
+	LKPI_INJECT(8, ret);
 	if (ret)
 		goto out_cleanup_modeset2;
 
@@ -804,11 +830,15 @@ int i915_driver_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	if (ret && ret != -ENODEV)
 		drm_dbg(&i915->drm, "pxp init failed with %d\n", ret);
 
+	LKPI_STEP(9, "display: initial plane and modeset");
 	ret = intel_display_driver_probe(i915);
+	LKPI_INJECT(9, ret);
 	if (ret)
 		goto out_cleanup_gem;
 
+	LKPI_STEP(10, "register /dev/dri/card");
 	i915_driver_register(i915);
+	pr_info("i915: probe complete\n");
 
 	enable_rpm_wakeref_asserts(&i915->runtime_pm);
 

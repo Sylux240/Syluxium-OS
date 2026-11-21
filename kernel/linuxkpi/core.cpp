@@ -1452,6 +1452,7 @@ void apply_module_params() {
 } // namespace
 
 extern "C" void lkpi_register_boot_framebuffer(u64 phys, u32 width, u32 height, u32 pitch, u32 red_shift);
+extern "C" unsigned long __drm_debug;
 extern "C" void lkpi_boot_fb_set(u64 base, u32 width, u32 height, u32 pitch, u32 red_shift);
 
 // A GPU driver took the display over (glue/gpu.c): the kernel must stop
@@ -1462,6 +1463,13 @@ extern "C" void lkpi_display_released(void) {
     splash::handover();
     splash::finish();
     console::set_graphics(true);
+}
+
+// The GPU driver failed and the firmware framebuffer is back: show the
+// console again (it reports what happened).
+extern "C" void lkpi_display_restored(void) {
+    klog::warn("linuxkpi: display back on the firmware framebuffer");
+    console::set_graphics(false);
 }
 extern "C" lkpi_initcall_t __lkpi_initcalls_start[];
 extern "C" lkpi_initcall_t __lkpi_initcalls_end[];
@@ -1475,6 +1483,10 @@ void init() {
     system_wq = make_wq("lkpi-events");
     system_highpri_wq = system_long_wq = system_unbound_wq = system_freezable_wq = system_power_efficient_wq = system_wq;
     init_pci();
+    // GPU acceleration test boots ("gpu"): DRM driver + modesetting debug
+    // messages go to the boot log unless drm.debug= says otherwise.
+    if (strstr(boot::cmdline(), " gpu") || !strncmp(boot::cmdline(), "gpu", 3))
+        __drm_debug = 0x06; // DRM_UT_DRIVER | DRM_UT_KMS
     apply_module_params();
     // GPU drivers (probed later) take the display over from the firmware
     // framebuffer when it lies in their memory (glue/gpu.c).
