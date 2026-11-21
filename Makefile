@@ -64,6 +64,8 @@ DEBIAN_PKGS  := bash busybox hello ncurses-base pciutils pci.ids netbase alsa-ut
                 libgl1-mesa-dri libglx-mesa0 libegl-mesa0 mesa-utils
 # Right-click "Extract Here" for .7z (zip and tar are handled without it).
 DEBIAN_PKGS  += 7zip
+# libinput (Wayland shell input) and its "libinput list-devices / debug-events" tools (~4 MB)
+DEBIAN_PKGS  += libinput-tools
 # Broadcom b43 Wi-Fi (iMacs, older MacBooks): its firmware may not be shipped;
 # syluxium-b43-firmware fetches Broadcom's driver and cuts it out with this.
 DEBIAN_CONTRIB_REPO := http://deb.debian.org/debian|$(DEBIAN_SUITE)|contrib
