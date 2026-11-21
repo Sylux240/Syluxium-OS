@@ -151,10 +151,6 @@ static inline bool __netdev_sent_queue(struct net_device *dev, unsigned int byte
 static inline void netdev_tx_reset_queue(struct netdev_queue *q) { }
 
 #define IRQF_NO_THREAD 0
-#ifndef NET_ADDR_RANDOM
-#define NET_ADDR_PERM 0
-#define NET_ADDR_RANDOM 1
-#endif
 #define netdev_warn_once(dev, fmt, ...) netdev_warn(dev, fmt, ##__VA_ARGS__)
 static inline void netif_set_tso_max_size(struct net_device *dev, unsigned int size) { }
 static inline void netif_set_tso_max_segs(struct net_device *dev, unsigned int segs) { }
@@ -168,7 +164,6 @@ static inline int pm_request_resume(struct device *dev) { return 0; }
 static inline int pcim_set_mwi(struct pci_dev *dev) { return 0; }
 static inline int pci_reset_bus(struct pci_dev *dev) { return -ENOTTY; }
 static inline u16 pci_status_get_and_clear_errors(struct pci_dev *pdev) { return 0; }
-static inline int eth_platform_get_mac_address(struct device *dev, u8 *mac_addr) { return -ENODEV; }
 static inline void netdev_sw_irq_coalesce_default_on(struct net_device *dev) { }
 static inline int pci_select_bars(struct pci_dev *dev, unsigned long flags)
 {

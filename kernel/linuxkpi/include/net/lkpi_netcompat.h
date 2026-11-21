@@ -196,3 +196,25 @@ static inline int timespec64_compare(const struct timespec64 *a, const struct ti
 }
 static inline void pcie_print_link_status(struct pci_dev *dev) { }
 static inline void pci_disable_ptm(struct pci_dev *dev) { }
+
+/* (shared by several drivers) */
+#define devm_kasprintf(dev, gfp, fmt, ...) kasprintf(gfp, fmt, ##__VA_ARGS__)
+static inline bool pci_pme_capable(struct pci_dev *dev, int state) { return false; }
+#ifndef NET_ADDR_RANDOM
+#define NET_ADDR_PERM 0
+#define NET_ADDR_RANDOM 1
+#endif
+static inline int eth_platform_get_mac_address(struct device *dev, u8 *mac_addr) { return -ENODEV; }
+#define cpu_to_le16p(p) cpu_to_le16(*(p))
+#define pci_err(pdev, fmt, ...) dev_err(&(pdev)->dev, fmt, ##__VA_ARGS__)
+#define pci_warn(pdev, fmt, ...) dev_warn(&(pdev)->dev, fmt, ##__VA_ARGS__)
+#define pci_info(pdev, fmt, ...) dev_info(&(pdev)->dev, fmt, ##__VA_ARGS__)
+#define pci_dbg(pdev, fmt, ...) dev_dbg(&(pdev)->dev, fmt, ##__VA_ARGS__)
+static inline int kstrtou8_from_user(const char __user *s, size_t count, unsigned int base, u8 *res) { return -EINVAL; }
+#include <linux/platform_device.h>
+/* Probe the platform devices present now (none here unless registered). */
+static inline int platform_driver_probe(struct platform_driver *drv, int (*probe)(struct platform_device *))
+{
+    drv->probe = probe;
+    return platform_driver_register(drv);
+}
