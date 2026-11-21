@@ -73,7 +73,15 @@ syluxium-automount > /var/log/automount.log 2>&1 &
 # Wi-Fi: wpa_supplicant for every wireless interface (network icon in the session).
 syluxium-wifi > /var/log/syluxium-wifi.log 2>&1 &
 # Adapter settings from Network Connections (static addresses, disabled adapters).
-{ syluxium-netconfig apply; exec syluxium-netconfig watch; } > /var/log/syluxium-netconfig.log 2>&1 &
+syluxium-netconfig apply > /var/log/syluxium-netconfig.log 2>&1 &
+# Network printers and other devices announced on the local network (mDNS /
+# DNS-SD): avahi-daemon finds them, cups-browsed adds the printers to CUPS.
+if [ -x /usr/sbin/avahi-daemon ]; then
+    mkdir -p /run/avahi-daemon && chown avahi:avahi /run/avahi-daemon 2>/dev/null
+    pidof avahi-daemon > /dev/null || avahi-daemon --daemonize --no-chroot --syslog 2> /var/log/avahi-daemon.log
+    [ -x /usr/sbin/cups-browsed ] && ! pidof cups-browsed > /dev/null && \
+        cups-browsed > /var/log/cups-browsed.log 2>&1 &
+fi
 # Boot option "shell": the new Syluxium shell (Wayland, preview) instead of
 # the login screen and the X11 desktop.
 if grep -qw shell /proc/cmdline; then

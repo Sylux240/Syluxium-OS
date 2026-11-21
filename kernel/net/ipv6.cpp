@@ -152,6 +152,17 @@ void format6(const u8* a, char* out, usize size) {
         out[--pos] = 0;
 }
 
+Addr6 to_addr6(const AddrEntry& e) {
+    Addr6 a{};
+    memcpy(a.addr, e.addr, 16);
+    a.prefix_len = e.prefix;
+    a.scope = ip6::is_loopback(e.addr) ? SCOPE_HOST : ip6::is_link_local(e.addr) ? SCOPE_LINK : SCOPE_GLOBAL;
+    a.flags = e.dynamic ? 0 : IFA_F_PERMANENT;
+    a.dynamic = e.dynamic;
+    a.ifindex = e.ifindex;
+    return a;
+}
+
 long add_addr_entry(u32 ifindex, const u8* addr, u8 prefix, bool dynamic) {
     if (find_addr(addr))
         return -err::EXIST;
@@ -163,6 +174,7 @@ long add_addr_entry(u32 ifindex, const u8* addr, u8 prefix, bool dynamic) {
         memcpy(e.addr, addr, 16);
         e.prefix = prefix;
         e.dynamic = dynamic;
+        rtnl_addr6_event(to_addr6(e), true);
         return 0;
     }
     return -ENOBUFS;
@@ -674,6 +686,8 @@ void ip6_input(Interface* in, const u8* p, usize len) {
     if (!for_us && dst[0] == 0xFF && dst[1] == 0x02 && dst[11] == 1 && dst[12] == 0xFF) // solicited-node group
         for (auto& e : g_addrs)
             for_us |= e.used && e.ifindex == in->index && memcmp(e.addr + 13, dst + 13, 3) == 0;
+    if (!for_us && ip6::is_multicast(dst))
+        for_us = mc_joined(in->index, ep6(dst)); // groups programs joined (mDNS ff02::fb, ...)
     if (!for_us)
         return;
     // Link-local peers are only meaningful together with their interface.
@@ -838,14 +852,7 @@ void for_each_addr6(void (*fn)(const Addr6&, void*), void* ctx) {
     for (auto& e : g_addrs) {
         if (!e.used)
             continue;
-        Addr6 a{};
-        memcpy(a.addr, e.addr, 16);
-        a.prefix_len = e.prefix;
-        a.scope = ip6::is_loopback(e.addr) ? SCOPE_HOST : ip6::is_link_local(e.addr) ? SCOPE_LINK : SCOPE_GLOBAL;
-        a.flags = e.dynamic ? 0 : IFA_F_PERMANENT;
-        a.dynamic = e.dynamic;
-        a.ifindex = e.ifindex;
-        fn(a, ctx);
+        fn(to_addr6(e), ctx);
     }
 }
 
@@ -893,6 +900,7 @@ long del_addr6(u32 ifindex, const u8* addr) {
     if (!e || e->ifindex != ifindex)
         return -EADDRNOTAVAIL;
     e->used = false;
+    rtnl_addr6_event(to_addr6(*e), false);
     return 0;
 }
 

@@ -172,6 +172,10 @@ Interface* route(u32 dst, u32* next_hop) {
         *next_hop = dst;
         return g_loopback;
     }
+    if (is_mcast4(dst)) { // senders normally name the interface (IP_MULTICAST_IF)
+        *next_hop = dst;
+        return mc_interface(false, 0);
+    }
     for (u32 i = 0; i < g_iface_count; i++) {
         Interface* f = g_ifaces[i];
         if (f == g_loopback || !f->addr || !(f->flags & IFF_UP))
@@ -213,7 +217,10 @@ void ip_input(Interface* iface, const u8* p, usize len) {
         return;
     u32 dst = get32(p + 16);
     bool for_us = iface->addr == 0 || dst == iface->addr || dst == 0xFFFFFFFF || is_local_address(dst) ||
-                  (iface->netmask && dst == (iface->addr | ~iface->netmask)) || iface == g_loopback;
+                  (iface->netmask && dst == (iface->addr | ~iface->netmask)) || iface == g_loopback ||
+                  (is_mcast4(dst) && mc_joined(iface->index, ep4(dst))) ||
+                  // DHCP replies to the address being offered (a restarted client still has the old one)
+                  (p[9] == PROTO_UDP && total >= hl + 4 && get16(p + hl + 2) == 68);
     if (!for_us)
         return;
     const u8* data = p + hl;
@@ -224,7 +231,9 @@ void ip_input(Interface* iface, const u8* p, usize len) {
         return;
     }
     Endpoint src = ep4(get32(p + 12)), to = ep4(dst);
+    raw_deliver(iface, p, total);
     switch (p[9]) {
+    case 2: igmp_input(iface, data, dlen); break;
     case PROTO_ICMP: icmp_input(iface, p, total, data, dlen); break;
     case PROTO_UDP: udp_input(iface, p, total, src, to, data, dlen); break;
     case PROTO_TCP: tcp_input(iface, src, to, data, dlen); break;
@@ -263,11 +272,41 @@ void reassemble4(Interface* iface, const u8* p, usize hl, const u8* data, usize 
     (void)hl;
 }
 
+// rtnetlink events for link and IPv4 address changes, whoever made them
+// (DHCP, ip/ifconfig, drivers reporting carrier from any context): the
+// timer compares each interface with what it last saw (lock held).
+struct IfSeen {
+    bool known;
+    u32 flags;
+    bool link;
+    u32 addr, mask;
+};
+IfSeen g_seen[MAX_IFACES];
+
+void report_changes() {
+    for (u32 i = 0; i < g_iface_count; i++) {
+        Interface* f = g_ifaces[i];
+        IfSeen& s = g_seen[i];
+        IfSeen now{true, f->flags & IFF_UP, f->link_up, f->addr, f->netmask};
+        if (s.known && (s.flags != now.flags || s.link != now.link))
+            rtnl_link_event(f);
+        if (s.known && (s.addr != now.addr || s.mask != now.mask)) {
+            if (s.addr)
+                rtnl_addr4_event(f, false, s.addr, s.mask);
+            if (now.addr)
+                rtnl_addr4_event(f, true, now.addr, now.mask);
+        }
+        s = now;
+    }
+}
+
 void timer_thread(void*) {
-    for (;;) {
+    for (u32 tick = 0;; tick++) {
         sched::sleep_ms(10);
         u64 now = clock::now_ms();
         LockGuard guard(g_lock);
+        if (tick % 10 == 0)
+            report_changes();
         tcp_timer(now);
         ipv6_timer(now);
         frag_timer(now);
@@ -452,6 +491,12 @@ void ip_transmit(Interface* f, u32 hop, u32 dst, const u8* packet, usize total) 
         eth_send(f, broadcast, ETH_IPV4, packet, total);
         return;
     }
+    if (is_mcast4(dst)) { // 01:00:5e + the group's low 23 bits (RFC 1112)
+        const u8 mac[6] = {0x01, 0x00, 0x5E, static_cast<u8>((dst >> 16) & 0x7F), static_cast<u8>(dst >> 8),
+                           static_cast<u8>(dst)};
+        eth_send(f, mac, ETH_IPV4, packet, total);
+        return;
+    }
     ArpEntry* e = arp_find(hop);
     if (e && e->resolved) {
         eth_send(f, e->mac, ETH_IPV4, packet, total);
@@ -516,6 +561,33 @@ long ip_send(u32 src, u32 dst, u8 proto, const u8* payload, usize len, u8 ttl, I
         ip_transmit(f, hop, dst, packet, 20 + n);
         off += n;
     } while (off < len);
+    return 0;
+}
+
+// A complete IPv4 packet from a raw socket (IP_HDRINCL): routed by its
+// destination; the checksum, length and id are filled in as Linux does.
+long ip_send_raw(const u8* packet, usize len) {
+    if (len < 20 || len > MAX_FRAME - 14 || (packet[0] >> 4) != 4)
+        return -err::INVAL;
+    usize hl = (packet[0] & 0xF) * 4u;
+    if (hl < 20 || hl > len)
+        return -err::INVAL;
+    u32 dst = get32(packet + 16), hop = dst;
+    Interface* f = route(dst, &hop);
+    if (!f)
+        return -101; // ENETUNREACH
+    if (len > min<usize>(f->mtu, MAX_FRAME - 14))
+        return -90; // EMSGSIZE
+    u8 copy[MAX_FRAME];
+    memcpy(copy, packet, len);
+    put16(copy + 2, static_cast<u16>(len));
+    if (!get16(copy + 4))
+        put16(copy + 4, g_ip_id++);
+    if (!get32(copy + 12))
+        put32(copy + 12, f->addr);
+    put16(copy + 10, 0);
+    put16(copy + 10, checksum_finish(checksum_add(0, copy, hl)));
+    ip_transmit(f, hop, dst, copy, len);
     return 0;
 }
 

@@ -29,6 +29,10 @@ public:
         return 0;
     }
 
+    // Link speed in Mbit/s and duplex, for ethtool and /sys/class/net/<if>/speed;
+    // false when the driver doesn't know (no link, Wi-Fi). May sleep.
+    virtual bool link_settings(u32* mbps, bool* full_duplex) { return false; }
+
     char name[16] = {};          // "eth0", "lo"
     u8 mac[6] = {};
     u32 mtu = 1500;

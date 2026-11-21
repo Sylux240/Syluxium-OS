@@ -62,6 +62,17 @@ public:
     u32 rd(u32 r) { return *reinterpret_cast<volatile u32*>(regs + r); }
     void wr(u32 r, u32 v) { *reinterpret_cast<volatile u32*>(regs + r) = v; }
 
+    // STATUS: bit 0 full duplex, bits 7:6 speed (0 = 10, 1 = 100, 2/3 = 1000 Mbit/s).
+    bool link_settings(u32* mbps, bool* full_duplex) override {
+        u32 st = rd(STATUS);
+        if (!(st & 2))
+            return false;
+        u32 sp = (st >> 6) & 3;
+        *mbps = sp == 0 ? 10 : sp == 1 ? 100 : 1000;
+        *full_duplex = st & 1;
+        return true;
+    }
+
     long transmit(const u8* frame, usize len) override {
         if (len > BUF_SIZE)
             return -err::INVAL;
