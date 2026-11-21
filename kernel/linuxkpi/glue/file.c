@@ -9,6 +9,7 @@
 #include <linux/anon_inodes.h>
 #include <linux/slab.h>
 #include <linux/uaccess.h>
+#include <linux/lkpi_binder.h>
 
 /* ---- Syluxium side (file.cpp) ---- */
 int lkpi_vfs_fd_reserve(unsigned int flags);
@@ -36,6 +37,7 @@ struct file *lkpi_file_alloc(const struct file_operations *fops, void *priv, uns
 	f->f_mode = ((flags & O_ACCMODE) != O_WRONLY ? FMODE_READ : 0) | ((flags & O_ACCMODE) != O_RDONLY ? FMODE_WRITE : 0);
 	f->f_inode = inode;
 	f->f_mapping = inode->i_mapping;
+	f->f_cred = lkpi_current_cred();
 	atomic_long_set(&f->f_count, 1);
 	return f;
 }
@@ -53,7 +55,29 @@ void fput(struct file *f)
 		return;
 	if (f->f_op && f->f_op->release)
 		f->f_op->release(f->f_inode, f);
+	put_cred(f->f_cred);
 	kfree(f);
+}
+
+/* A Syluxium file (memfd, socket, pipe, ...) carried through Linux code:
+ * binder passes descriptors between processes. The wrapper holds a
+ * reference to the vfs::File; fd_install() puts the file itself back. */
+void lkpi_native_put(void *vfs_file);
+static int native_release(struct inode *inode, struct file *f)
+{
+	lkpi_native_put(f->lkpi_native);
+	kfree(inode);
+	return 0;
+}
+static const struct file_operations native_fops = { .release = native_release };
+struct file *lkpi_native_wrap(void *vfs_file)
+{
+	struct file *f = lkpi_file_alloc(&native_fops, NULL, O_RDWR, NULL);
+	if (f)
+		f->lkpi_native = vfs_file;
+	else
+		lkpi_native_put(vfs_file);
+	return f;
 }
 
 struct file *anon_inode_getfile(const char *name, const struct file_operations *fops, void *priv, int flags)
@@ -275,6 +299,7 @@ struct lkpi_vma {
 	struct vm_area_struct vma;
 	struct mutex lock;
 	int refs;               /* Syluxium mappings (VMAs, split parts, fork copies) + the mmap() call */
+	unsigned long key;      /* the substitute file offset Syluxium maps it by ((id + 1) << LKPI_VMA_SHIFT) */
 	unsigned long base_pfn; /* remap_pfn_range: pfn at vm_start */
 	bool remapped;
 	unsigned long npages;
@@ -305,7 +330,12 @@ static struct lkpi_vma *vma_of(unsigned long off)
 
 /* The mapping starts with one reference, which sys_mmap drops once the
  * address-space mapping (which takes its own) exists. */
-long lkpi_file_mmap(struct file *f, unsigned long offset, unsigned long len, bool writable, unsigned long *handle)
+struct mm_struct *lkpi_current_mm(void);
+/* user_addr: where the mapping will be (0: not known yet). Drivers that ask
+ * for it (lkpi_user_address: binder hands out pointers into its buffers) see
+ * it as vm_start; for the others vm_start is the substitute offset. */
+long lkpi_file_mmap(struct file *f, unsigned long offset, unsigned long len, bool writable, unsigned long user_addr,
+		    unsigned long *handle)
 {
 	struct lkpi_vma *m;
 	int id, r;
@@ -347,8 +377,11 @@ long lkpi_file_mmap(struct file *f, unsigned long offset, unsigned long len, boo
 	}
 	mutex_init(&m->lock);
 	m->refs = 1;
-	m->vma.vm_start = (unsigned long)(id + 1) << LKPI_VMA_SHIFT;
+	m->key = (unsigned long)(id + 1) << LKPI_VMA_SHIFT;
+	m->vma.vm_start = f->f_op->lkpi_user_address && user_addr ? user_addr : m->key;
 	m->vma.vm_end = m->vma.vm_start + PAGE_ALIGN(len);
+	if (f->f_op->lkpi_user_address)
+		m->vma.vm_mm = lkpi_current_mm();
 	m->vma.vm_pgoff = offset >> PAGE_SHIFT;
 	m->vma.vm_flags = VM_SHARED | VM_MAYSHARE | VM_READ | VM_MAYREAD | (writable ? VM_WRITE | VM_MAYWRITE : 0);
 	m->vma.vm_page_prot = PAGE_KERNEL;
@@ -369,7 +402,7 @@ long lkpi_file_mmap(struct file *f, unsigned long offset, unsigned long len, boo
 		kfree(m);
 		return r;
 	}
-	*handle = m->vma.vm_start;
+	*handle = m->key;
 	return 0;
 }
 
@@ -409,7 +442,7 @@ int lkpi_vma_cache(unsigned long off)
 	u64 bits;
 	if (!m)
 		return 0;
-	pg = ((off & ~(PAGE_SIZE - 1)) - m->vma.vm_start) >> PAGE_SHIFT;
+	pg = ((off & ~(PAGE_SIZE - 1)) - m->key) >> PAGE_SHIFT;
 	bits = pg < m->npages && (m->pages[pg] & LKPI_PTE_VALID) ? m->pages[pg] : prot_bits(m->vma.vm_page_prot);
 	return (bits & LKPI_PTE_WC) ? 1 : (bits & LKPI_PTE_UC) ? 2 : 0;
 }
@@ -421,11 +454,11 @@ long lkpi_vma_phys(unsigned long off, u64 *phys)
 	struct vm_fault vmf = { 0 };
 	vm_fault_t ret;
 	unsigned long pg;
-	if (!m || addr >= m->vma.vm_end)
+	if (!m || addr >= m->key + (m->npages << PAGE_SHIFT))
 		return -ENXIO;
-	pg = (addr - m->vma.vm_start) >> PAGE_SHIFT;
+	pg = (addr - m->key) >> PAGE_SHIFT;
 	if (m->remapped) {
-		*phys = PFN_PHYS(m->base_pfn) + (addr - m->vma.vm_start);
+		*phys = PFN_PHYS(m->base_pfn) + (addr - m->key);
 		return 0;
 	}
 	mutex_lock(&m->lock);
@@ -439,7 +472,7 @@ long lkpi_vma_phys(unsigned long off, u64 *phys)
 		return -ENXIO;
 	}
 	vmf.vma = &m->vma;
-	vmf.address = addr;
+	vmf.address = m->vma.vm_start + (pg << PAGE_SHIFT);
 	vmf.pgoff = m->vma.vm_pgoff + pg;
 	ret = m->vma.vm_ops->fault(&vmf);
 	if (m->pages[pg] & LKPI_PTE_VALID)
@@ -526,9 +559,9 @@ void unmap_mapping_range(struct address_space *mapping, loff_t const holebegin, 
 			for (unsigned long pg = zbeg; pg < zend; pg++)
 				m->pages[pg - beg] = 0;
 			mutex_unlock(&m->lock);
-			lkpi_zap_user_range(m->vma.vm_start + ((zbeg - beg) << PAGE_SHIFT), (zend - zbeg) << PAGE_SHIFT);
+			lkpi_zap_user_range(m->key + ((zbeg - beg) << PAGE_SHIFT), (zend - zbeg) << PAGE_SHIFT);
 		}
-		lkpi_vma_ref(m->vma.vm_start, -1);
+		lkpi_vma_ref(m->key, -1);
 	}
 }
 
@@ -542,7 +575,7 @@ void zap_vma_ptes(struct vm_area_struct *vma, unsigned long address, unsigned lo
 	for (unsigned long i = beg; i < beg + n && i < m->npages; i++)
 		m->pages[i] = 0;
 	mutex_unlock(&m->lock);
-	lkpi_zap_user_range(address, size);
+	lkpi_zap_user_range(m->key + (beg << PAGE_SHIFT), size);
 }
 
 /* i915 (remap_io_mapping / remap_io_sg): pages [addr, addr + n pages) of a
@@ -572,4 +605,34 @@ struct file *lkpi_get_file_active(struct file **f)
 			return NULL;
 	} while (!__atomic_compare_exchange_n(&file->f_count.counter, &c, c + 1, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST));
 	return file;
+}
+
+/* ---- binder's view of a process's mappings ---- */
+/* The VMA of mm containing addr (a real user address). */
+struct vm_area_struct *vma_lookup(struct mm_struct *mm, unsigned long addr)
+{
+	struct vm_area_struct *found = NULL;
+	spin_lock(&lkpi_vmas_lock);
+	for (int id = 0; id < LKPI_MAX_VMAS && !found; id++) {
+		struct lkpi_vma *m = lkpi_vmas[id];
+		if (m && m->vma.vm_mm == mm && addr >= m->vma.vm_start && addr < m->vma.vm_end)
+			found = &m->vma;
+	}
+	spin_unlock(&lkpi_vmas_lock);
+	return found;
+}
+
+int vm_insert_page(struct vm_area_struct *vma, unsigned long addr, struct page *page)
+{
+	struct lkpi_vma *m = vma->lkpi;
+	int r;
+	mutex_lock(&m->lock);
+	r = lkpi_vma_insert_range(vma, addr, page_to_pfn(page), 1, vma->vm_page_prot);
+	mutex_unlock(&m->lock);
+	return r;
+}
+
+void zap_page_range_single(struct vm_area_struct *vma, unsigned long address, unsigned long size, void *details)
+{
+	zap_vma_ptes(vma, address, size);
 }

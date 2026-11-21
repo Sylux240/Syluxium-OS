@@ -27,6 +27,7 @@ long sys_mmap(SYSCALL_ARGS) {
     vfs::Inode* file = nullptr;
     vfs::File* f = nullptr;
     bool prepared = false; // mmap_prepare's reference on the device mapping, dropped below
+    uptr reserved = 0;     // the address picked up front for drivers that want it (binder)
     if (!(flags & MAP_ANONYMOUS)) {
         f = fd_get(p, fd);
         if (!f)
@@ -36,16 +37,36 @@ long sys_mmap(SYSCALL_ARGS) {
             // driver must support it, and the mapping is always shared.
             // Check the first and last page now so mmap() fails cleanly.
             u64 phys;
-            long r = !(flags & MAP_SHARED) ? -err::INVAL : f->inode->mmap_prepare(f, offset, len, prot & PROT_WRITE, &offset);
+            bool wants_address = f->inode->mmap_wants_address(f);
+            // Binder: libbinder maps it MAP_PRIVATE, read-only; the driver
+            // refuses writable mappings, so private is the same as shared.
+            if (wants_address && !(flags & MAP_SHARED) && !(prot & PROT_WRITE))
+                flags = (flags & ~MAP_PRIVATE) | MAP_SHARED;
+            long r = !(flags & MAP_SHARED) ? -err::INVAL : 0;
+            if (r == 0 && wants_address) {
+                // Reserve the range first (inaccessible); the device mapping replaces it.
+                r = p->mem->map(addr, len, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | (flags & MAP_FIXED), nullptr, 0,
+                                ~0ull, &reserved);
+                if (r == 0) {
+                    addr = reserved;
+                    flags |= MAP_FIXED;
+                }
+            }
+            if (r == 0)
+                r = reserved ? f->inode->mmap_prepare_at(f, offset, len, prot & PROT_WRITE, reserved, &offset)
+                             : f->inode->mmap_prepare(f, offset, len, prot & PROT_WRITE, &offset);
             prepared = r == 0;
             u64 last = offset + align_up<u64>(len, 4096) - 4096;
-            if (r == 0)
+            // (Binder fills its mapping later, page by page, as buffers are used.)
+            if (r == 0 && !wants_address)
                 r = f->inode->mmap_phys(offset, &phys);
-            if (r == 0)
+            if (r == 0 && !wants_address)
                 r = f->inode->mmap_phys(last, &phys);
             if (r < 0) {
                 if (prepared)
                     f->inode->mmap_range_ref(offset, -1);
+                if (reserved)
+                    p->mem->unmap(reserved, len);
                 vfs::file_put(f);
                 return r;
             }
@@ -79,6 +100,8 @@ long sys_mmap(SYSCALL_ARGS) {
     // MAP_SHARED of disk files (ext2, FAT) is still a private copy.
     uptr result;
     long r = p->mem->map(addr, len, prot, flags, file, offset, ~0ull, &result);
+    if (r < 0 && reserved)
+        p->mem->unmap(reserved, len);
     if (prepared)
         file->mmap_range_ref(offset, -1); // the mapping holds its own reference now (or failed)
     if (f)

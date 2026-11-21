@@ -85,6 +85,13 @@ public:
         *new_offset = offset;
         return 0;
     }
+    // Drivers that need the mapping's user address when they set it up
+    // (binder hands out pointers into its buffer): mmap() picks the address
+    // first and calls mmap_prepare_at() with it.
+    virtual bool mmap_wants_address(File* f) { return false; }
+    virtual long mmap_prepare_at(File* f, u64 offset, u64 len, bool writable, uptr addr, u64* new_offset) {
+        return mmap_prepare(f, offset, len, writable, new_offset);
+    }
     // Regular files whose pages can be mapped MAP_SHARED (ramfs/tmpfs): the
     // mapping uses mmap_phys() and writes are seen by every process.
     virtual bool shared_mappable() const { return false; }

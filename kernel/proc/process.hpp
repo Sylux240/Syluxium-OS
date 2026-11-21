@@ -67,6 +67,11 @@ struct Process {
     u32 umask = 022;
     Cred cred;
     int oom_score_adj = 0; // /proc/<pid>/oom_score_adj (kept, not used: no OOM killer yet)
+    // LinuxKPI's view of this process (binder): its task_struct (the threads'
+    // group_leader) and mm_struct, created on first use, released with it.
+    void* lkpi_task = nullptr;
+    void* lkpi_mm = nullptr;
+    ~Process();
 
     sched::Thread* main_thread = nullptr;     // the thread the process started with
 

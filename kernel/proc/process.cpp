@@ -946,3 +946,11 @@ void kill_current_on_fault(const char* what, u64 address, u64 ip, int sig) {
 }
 
 } // namespace proc
+
+namespace linuxkpi {
+void process_gone(proc::Process* p); // kernel/linuxkpi/binder.cpp
+}
+proc::Process::~Process() {
+    if (lkpi_task || lkpi_mm)
+        linuxkpi::process_gone(this);
+}

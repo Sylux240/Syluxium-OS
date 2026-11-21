@@ -24,7 +24,9 @@ unsigned int lkpi_file_poll(file* f);
 void fput(file* f);
 file* get_file(file* f);
 file* lkpi_chrdev_open(unsigned int major, unsigned int minor, unsigned int flags, int* err);
-long lkpi_file_mmap(file* f, unsigned long offset, unsigned long len, bool writable, unsigned long* handle);
+long lkpi_file_mmap(file* f, unsigned long offset, unsigned long len, bool writable, unsigned long user_addr,
+                    unsigned long* handle);
+bool lkpi_file_wants_address(file* f);
 long lkpi_vma_phys(unsigned long off, u64* phys);
 void lkpi_vma_ref(unsigned long off, int delta);
 int lkpi_vma_cache(unsigned long off);
@@ -73,11 +75,18 @@ public:
     ~LinuxFileNode() override { fput(m_file); }
     void* linux_file(vfs::File*) override { return m_file; }
     long mmap_prepare(vfs::File* f, u64 offset, u64 len, bool writable, u64* new_offset) override {
+        return mmap_prepare_at(f, offset, len, writable, 0, new_offset);
+    }
+    long mmap_prepare_at(vfs::File* f, u64 offset, u64 len, bool writable, uptr addr, u64* new_offset) override {
         unsigned long h;
-        long r = lkpi_file_mmap(static_cast<file*>(linux_file(f)), offset, len, writable, &h);
+        long r = lkpi_file_mmap(static_cast<file*>(linux_file(f)), offset, len, writable, addr, &h);
         if (r == 0)
             *new_offset = h;
         return r;
+    }
+    bool mmap_wants_address(vfs::File* f) override {
+        auto* lf = static_cast<file*>(linux_file(f));
+        return lf && lkpi_file_wants_address(lf);
     }
     long mmap_phys(u64 offset, u64* phys) override { return lkpi_vma_phys(offset, phys); }
     void mmap_range_ref(u64 offset, int delta) override { lkpi_vma_ref(offset, delta); }
@@ -109,11 +118,18 @@ public:
     bool seekable() const override { return false; }
     void* linux_file(vfs::File* f) override { return f->private_data; }
     long mmap_prepare(vfs::File* f, u64 offset, u64 len, bool writable, u64* new_offset) override {
+        return mmap_prepare_at(f, offset, len, writable, 0, new_offset);
+    }
+    long mmap_prepare_at(vfs::File* f, u64 offset, u64 len, bool writable, uptr addr, u64* new_offset) override {
         unsigned long h;
-        long r = lkpi_file_mmap(static_cast<file*>(linux_file(f)), offset, len, writable, &h);
+        long r = lkpi_file_mmap(static_cast<file*>(linux_file(f)), offset, len, writable, addr, &h);
         if (r == 0)
             *new_offset = h;
         return r;
+    }
+    bool mmap_wants_address(vfs::File* f) override {
+        auto* lf = static_cast<file*>(linux_file(f));
+        return lf && lkpi_file_wants_address(lf);
     }
     long mmap_phys(u64 offset, u64* phys) override { return lkpi_vma_phys(offset, phys); }
     void mmap_range_ref(u64 offset, int delta) override { lkpi_vma_ref(offset, delta); }
@@ -179,8 +195,19 @@ int lkpi_vfs_fd_reserve(unsigned int flags) {
 
 void lkpi_vfs_fd_release(unsigned int fd) { proc::fd_close(proc::current(), static_cast<int>(fd)); }
 
+file* lkpi_native_wrap(void* vfs_file); // glue/file.c
+void* lkpi_file_native(file* lf);       // glue/binder.c
+
 // The descriptor takes over the caller's reference to `lf`.
 void lkpi_vfs_fd_install(unsigned int fd, file* lf) {
+    if (auto* native = static_cast<vfs::File*>(lkpi_file_native(lf))) {
+        // A Syluxium file that travelled through Linux code (binder): the
+        // descriptor gets the file itself.
+        vfs::file_get(native);
+        proc::fd_replace(proc::current(), static_cast<int>(fd), native);
+        fput(lf);
+        return;
+    }
     auto* node = new LinuxFileNode(lf);
     vfs::File* f = vfs::open_inode(node, vfs::O_RDWR);
     char name[32];
@@ -229,3 +256,32 @@ extern "C" void lkpi_sysfs_char_device(unsigned int major, unsigned int minor, c
                                        const char* pci_bus_id) {
     sysfs::add_char_device(major, minor, devname, pci_bus_id);
 }
+
+// ---- descriptors as binder moves them ----
+extern "C" {
+
+void lkpi_native_put(void* vfs_file) { vfs::file_put(static_cast<vfs::File*>(vfs_file)); }
+
+// fget() for binder: any open file, as it is (a Linux file's own struct file
+// wouldn't keep Syluxium-side state like the node or path for others).
+file* lkpi_fget_native(unsigned int fd) {
+    vfs::File* f = proc::fd_get(proc::current(), static_cast<int>(fd));
+    return f ? lkpi_native_wrap(f) : nullptr;
+}
+
+// Take the descriptor out of the table, keeping the file (binder closes
+// descriptors of failed transactions this way).
+file* file_close_fd(unsigned int fd) {
+    vfs::File* f = proc::fd_get(proc::current(), static_cast<int>(fd));
+    if (!f)
+        return nullptr;
+    proc::fd_close(proc::current(), static_cast<int>(fd));
+    return lkpi_native_wrap(f);
+}
+
+} // extern "C"
+
+namespace linuxkpi {
+// A device node for a Linux character device (binderfs' devices).
+vfs::Inode* make_char_node(u32 major, u32 minor, u32 perms) { return new LinuxCharNode(major, minor, perms); }
+} // namespace linuxkpi

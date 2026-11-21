@@ -59,6 +59,7 @@ struct file_operations {
 	int (*fasync)(int, struct file *, int);
 	void (*show_fdinfo)(struct seq_file *, struct file *);
 	unsigned long fop_flags;
+	bool lkpi_user_address; /* LinuxKPI: mmap() sees the real user address in vm_start (binder) */
 };
 #define FOP_UNSIGNED_OFFSET 0x1
 
@@ -73,6 +74,8 @@ struct file {
 	struct path f_path;
 	atomic_long_t f_count;
 	void *lkpi_vfs; /* the Syluxium vfs::File */
+	const struct cred *f_cred; /* the opener's ids */
+	void *lkpi_native; /* a Syluxium file carried through Linux code (binder fd passing): its vfs::File */
 };
 struct file *lkpi_file_alloc(const struct file_operations *fops, void *priv, unsigned int flags, struct inode *inode);
 #define file_inode(f) ((f)->f_inode)

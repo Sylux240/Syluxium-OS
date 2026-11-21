@@ -20,6 +20,10 @@
 #include <time/clock.hpp>
 #include <syscall/syscall.hpp>
 
+namespace linuxkpi {
+vfs::Inode* binderfs_mount(); // kernel/linuxkpi/binder.cpp
+}
+
 namespace syscall {
 
 namespace {
@@ -1649,6 +1653,8 @@ long sys_mount(SYSCALL_ARGS) {
         root->mode = S_IFDIR | 01777;
         return vfs::mount_at(abs, root, "tmpfs", "tmpfs");
     }
+    if (strcmp(t, "binder") == 0) // binderfs: Android binder devices (kernel/linuxkpi/binder.cpp)
+        return vfs::mount_at(abs, linuxkpi::binderfs_mount(), "binder", "binder");
     return -err::NODEV; // unknown file system type
 }
 

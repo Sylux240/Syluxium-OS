@@ -6,7 +6,7 @@
 #include <linux/fs.h>
 struct file;
 struct inode;
-struct seq_file { void* private; };
+struct seq_file { void* private; size_t count; };
 static inline void seq_printf(struct seq_file* m, const char* fmt, ...) {}
 static inline void seq_puts(struct seq_file* m, const char* s) {}
 static inline void seq_putc(struct seq_file* m, char c) {}

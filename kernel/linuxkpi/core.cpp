@@ -1047,20 +1047,47 @@ struct LkpiTask {
 LkpiTask* task_of(struct task_struct* t) { return reinterpret_cast<LkpiTask*>(t); }
 } // namespace
 
+// The task of a whole process (group_leader of its threads' tasks): what
+// binder identifies a process by. Reference counted; the process holds one.
+static struct task_struct* group_task(proc::Process* p) {
+    if (!p->lkpi_task) {
+        auto* lt = new LkpiTask{};
+        snprintf(lt->t.comm, sizeof(lt->t.comm), "%s", p->name);
+        lt->t.pid = lt->t.tgid = p->pid;
+        lt->t.group_leader = &lt->t;
+        lt->t.lkpi_usage = 1;
+        lt->t.lkpi_process = p;
+        void* expected = nullptr;
+        if (!__atomic_compare_exchange_n(&p->lkpi_task, &expected, static_cast<void*>(lt), false, __ATOMIC_ACQ_REL,
+                                         __ATOMIC_ACQUIRE))
+            delete lt;
+    }
+    return &static_cast<LkpiTask*>(p->lkpi_task)->t;
+}
+
+extern "C" void lkpi_task_free(struct task_struct* t) { delete task_of(t); }
+
+// Threads' tasks: pid is the thread id (as in Linux), tgid the process id.
+// They live as long as their thread (never freed, like the thread's own).
 struct task_struct* lkpi_current(void) {
     sched::Thread* th = sched::current();
     if (!th) {
         static LkpiTask boot;
         boot.t.group_leader = &boot.t;
+        boot.t.lkpi_usage = 1;
         return &boot.t;
     }
     if (!th->lkpi_task) {
         auto* lt = new LkpiTask{};
         snprintf(lt->t.comm, sizeof(lt->t.comm), "%s", th->name);
         lt->t.lkpi_thread = th;
+        lt->t.lkpi_usage = 1;
         lt->t.group_leader = &lt->t;
-        if (th->process)
-            lt->t.pid = lt->t.tgid = th->process->pid;
+        if (th->process) {
+            lt->t.tgid = th->process->pid;
+            lt->t.pid = th->user_tid ? th->user_tid : th->process->pid;
+            lt->t.group_leader = group_task(th->process);
+        }
         th->lkpi_task = lt;
     }
     return &static_cast<LkpiTask*>(th->lkpi_task)->t;

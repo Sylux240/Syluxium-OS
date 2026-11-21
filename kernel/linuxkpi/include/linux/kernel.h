@@ -318,7 +318,9 @@ struct task_struct {
     struct mm_struct* mm;  /* appended: always NULL (no Linux address spaces) */
     unsigned int flags;    /* PF_* (none set) */
     int exit_code;
-    struct task_struct* group_leader; /* the task itself */
+    struct task_struct* group_leader; /* the process's task (binder: one per process) */
+    int lkpi_usage;        /* get/put_task_struct; a process's task is freed at 0 */
+    void* lkpi_process;    /* a process's task: its proc::Process (NULL once it's gone) */
 };
 struct task_struct* lkpi_current(void);
 
