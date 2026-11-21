@@ -119,10 +119,11 @@ bool blocked_somewhere(proc::Process* p, int sig) {
 }
 
 // Who sends: a user process (kill/tgkill: its pid and real uid) or the kernel.
-void sender_info(i32 code, i32* code_out, i32* pid_out, u32* uid_out) {
+// The sender as `to` numbers it (PID namespaces: 0 if it's outside to's).
+void sender_info(i32 code, i32* code_out, i32* pid_out, u32* uid_out, const proc::Process* to = nullptr) {
     proc::Process* me = proc::current();
     *code_out = code;
-    *pid_out = (code != SI_KERNEL && me) ? me->pid : 0;
+    *pid_out = (code != SI_KERNEL && me) ? (to && to->pidns ? (me->pidns == to->pidns ? me->vpid : 0) : me->pid) : 0;
     *uid_out = (code != SI_KERNEL && me) ? me->cred.ruid : 0;
 }
 
@@ -133,7 +134,7 @@ void send(proc::Process* p, int sig, i32 code) {
         return;
     if (is_ignored(p, sig) && (p->sigactions[sig].handler == SIG_IGN || !blocked_somewhere(p, sig)))
         return; // would be discarded on delivery anyway
-    sender_info(code, &p->sig_code[sig], &p->sig_pid[sig], &p->sig_uid[sig]);
+    sender_info(code, &p->sig_code[sig], &p->sig_pid[sig], &p->sig_uid[sig], p);
     __atomic_or_fetch(&p->sig_pending, bit(sig), __ATOMIC_RELEASE);
     wake_process(p);
     poll::notify(); // signalfd readers
@@ -147,7 +148,7 @@ void send_thread(sched::Thread* t, int sig, i32 code) {
         return;
     if (is_ignored(p, sig) && (p->sigactions[sig].handler == SIG_IGN || !(t->sigmask & bit(sig))))
         return;
-    sender_info(code, &t->sig_code[sig], &t->sig_pid[sig], &t->sig_uid[sig]);
+    sender_info(code, &t->sig_code[sig], &t->sig_pid[sig], &t->sig_uid[sig], t->process);
     __atomic_or_fetch(&t->sig_pending, bit(sig), __ATOMIC_RELEASE);
     if (t->state == sched::ThreadState::Blocked)
         sched::wake(t);

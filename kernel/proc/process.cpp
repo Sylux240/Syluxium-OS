@@ -93,13 +93,14 @@ void close_all_files(Process* p, bool only_cloexec) {
 int allocate_pid() { return __atomic_fetch_add(&g_next_pid, 1, __ATOMIC_RELAXED); }
 
 // Create the thread that runs a process's user code.
-sched::Thread* make_user_thread(Process* p, const interrupts::Frame& frame, int tid) {
+sched::Thread* make_user_thread(Process* p, const interrupts::Frame& frame, int tid, int vtid = 0) {
     auto* start = new UserStart{frame};
     sched::Thread* t = sched::create(p->name, user_thread_entry, start, true);
     t->process = p;
     t->aspace = p->mem->aspace();
     t->fpu_state = fpu::alloc_state();
     t->user_tid = tid;
+    t->vtid = vtid ? vtid : tid;
     {
         LockGuard guard(p->thread_lock);
         p->threads.push_back(t);
@@ -207,6 +208,10 @@ void init() {
     vfs::set_process_root_hook([]() -> vfs::Inode* {
         Process* p = current();
         return p ? p->root : nullptr;
+    });
+    vfs::set_process_mounts_hook([]() -> void* {
+        Process* p = current();
+        return p ? p->mntns : nullptr;
     });
     interrupts::set_handler(interrupts::VEC_PAGE_FAULT, page_fault);
     interrupts::set_user_fault_hook(user_fault);
@@ -420,6 +425,7 @@ long spawn(const char* path, const char* const* argv, const char* const* envp, P
     {
         LockGuard guard(g_table_lock);
         p->pid = allocate_pid();
+        p->vpid = p->pid;
         p->pgid = p->sid = p->pid; // its own session and process group
         g_processes.push_back(p);
     }
@@ -459,11 +465,16 @@ long clone_thread(interrupts::Frame* frame, u64 flags, u64 new_sp, u64 parent_ti
         return -err::AGAIN;
 
     int tid = allocate_pid();
+    int vtid = tid;
+    if (p->pidns) {
+        LockGuard guard(g_table_lock);
+        vtid = p->pidns->next++;
+    }
     interrupts::Frame cf = *frame;
     cf.rax = 0;
     if (new_sp)
         cf.rsp = new_sp;
-    sched::Thread* t = make_user_thread(p, cf, tid);
+    sched::Thread* t = make_user_thread(p, cf, tid, vtid);
     fpu::save(me->fpu_state);
     memcpy(t->fpu_state, me->fpu_state, fpu::state_size());
     t->fs_base = (flags & CLONE_SETTLS) ? tls : me->fs_base;
@@ -478,22 +489,29 @@ long clone_thread(interrupts::Frame* frame, u64 flags, u64 new_sp, u64 parent_ti
 
     // Shared memory: the tid words are written directly in our address space.
     if (flags & CLONE_PARENT_SETTID)
-        uaccess::put(reinterpret_cast<i32*>(parent_tid), tid);
+        uaccess::put(reinterpret_cast<i32*>(parent_tid), vtid);
     if (flags & CLONE_CHILD_SETTID)
-        uaccess::put(reinterpret_cast<i32*>(child_tid), tid);
+        uaccess::put(reinterpret_cast<i32*>(child_tid), vtid);
     if (flags & CLONE_CHILD_CLEARTID)
         t->clear_child_tid = child_tid;
 
     sched::start(t);
-    return tid;
+    return vtid;
 }
 
 } // namespace
 
 long do_clone(interrupts::Frame* frame, u64 flags, u64 new_sp, u64 parent_tid, u64 child_tid, u64 tls) {
+    constexpr u64 CLONE_NEWPID = 0x20000000;
     if (flags & CLONE_THREAD)
         return clone_thread(frame, flags, new_sp, parent_tid, child_tid, tls);
     Process* parent = current();
+    if (flags & CLONE_NEWPID) {
+        if (!capable())
+            return -err::PERM;
+        if (parent->pidns)
+            return -err::INVAL; // one level of PID namespaces
+    }
     sched::Thread* parent_thread = sched::current();
 
     auto* child = new Process;
@@ -513,6 +531,12 @@ long do_clone(interrupts::Frame* frame, u64 flags, u64 new_sp, u64 parent_tid, u
     memcpy(child->cwd_path, parent->cwd_path, sizeof(child->cwd_path));
     child->cwd = parent->cwd;
     child->root = parent->root;
+    if (flags & 0x20000 /* CLONE_NEWNS */) {
+        child->mntns = vfs::mount_ns_copy(parent->mntns);
+    } else {
+        child->mntns = parent->mntns;
+        vfs::mount_ns_get(child->mntns);
+    }
     if (flags & 0x04000000 /* CLONE_NEWUTS */) {
         child->uts = new Uts(*(parent->uts ? parent->uts : system_uts()));
         child->uts->refs = 1;
@@ -544,6 +568,16 @@ long do_clone(interrupts::Frame* frame, u64 flags, u64 new_sp, u64 parent_tid, u
     {
         LockGuard guard(g_table_lock);
         child->pid = allocate_pid();
+        child->vpid = child->pid;
+        if (flags & CLONE_NEWPID) {
+            child->pidns = new PidNs;
+            child->pidns->init = child;
+            child->vpid = child->pidns->next++;
+        } else if (parent->pidns || parent->child_pidns) {
+            child->pidns = parent->pidns ? parent->pidns : parent->child_pidns;
+            __atomic_add_fetch(&child->pidns->refs, 1, __ATOMIC_RELAXED);
+            child->vpid = child->pidns->next++;
+        }
         child->pgid = parent->pgid;
         child->sid = parent->sid;
         child->parent = (flags & CLONE_PARENT) && parent->parent ? parent->parent : parent;
@@ -551,6 +585,8 @@ long do_clone(interrupts::Frame* frame, u64 flags, u64 new_sp, u64 parent_tid, u
         g_processes.push_back(child);
     }
     int pid = child->pid;
+    int vpid = child->vpid;              // what the child calls itself
+    int parent_view = pid_nr(child, parent); // what the parent calls it
 
     // The child resumes from the same syscall, seeing 0 as the result.
     interrupts::Frame cf = *frame;
@@ -558,7 +594,7 @@ long do_clone(interrupts::Frame* frame, u64 flags, u64 new_sp, u64 parent_tid, u
     if (new_sp)
         cf.rsp = new_sp;
     child->start_ns = clock::now_ns();
-    sched::Thread* t = make_user_thread(child, cf, pid);
+    sched::Thread* t = make_user_thread(child, cf, pid, vpid);
     t->sigmask = parent_thread->sigmask;
     fpu::save(parent_thread->fpu_state);
     memcpy(t->fpu_state, parent_thread->fpu_state, fpu::state_size());
@@ -569,9 +605,9 @@ long do_clone(interrupts::Frame* frame, u64 flags, u64 new_sp, u64 parent_tid, u
         t->user_fs_sel = 0;
 
     if (flags & CLONE_PARENT_SETTID)
-        uaccess::put(reinterpret_cast<i32*>(parent_tid), pid);
+        uaccess::put(reinterpret_cast<i32*>(parent_tid), parent_view);
     if (flags & CLONE_CHILD_SETTID)
-        child->mem->write_remote(child_tid, &pid, sizeof(i32));
+        child->mem->write_remote(child_tid, &vpid, sizeof(i32));
     if (flags & CLONE_CHILD_CLEARTID)
         t->clear_child_tid = child_tid;
 
@@ -579,7 +615,7 @@ long do_clone(interrupts::Frame* frame, u64 flags, u64 new_sp, u64 parent_tid, u
 
     if (flags & CLONE_VFORK)
         child->vfork_done.wait(); // the child can't be reaped before we return: we're its parent
-    return pid;
+    return parent_view;
 }
 
 // ---- execve ----------------------------------------------------------------
@@ -724,6 +760,9 @@ long do_execve(interrupts::Frame* frame, const char* path, const char* const* ar
 
 // ---- wait4 -----------------------------------------------------------------
 
+int pid_nr_locked(const Process* p, const Process* viewer);
+int pgid_global_locked(int pgid, const Process* viewer);
+
 long do_wait4(int pid, int* status_out, int options, u32* uid_out) {
     constexpr int WNOWAIT = 0x01000000; // report, but leave the child to be waited for again
     Process* me = current();
@@ -738,11 +777,12 @@ long do_wait4(int pid, int* status_out, int options, u32* uid_out) {
         bool any = false;
         {
             LockGuard guard(g_table_lock);
+            int want_pgid = pid < -1 ? pgid_global_locked(-pid, me) : 0;
             for (Process* c : me->children) {
-                bool match = pid > 0 ? c->pid == pid
+                bool match = pid > 0 ? pid_nr_locked(c, me) == pid
                            : pid == -1 ? true
                            : pid == 0 ? c->pgid == me->pgid
-                                      : c->pgid == -pid;
+                                      : c->pgid == want_pgid;
                 if (!match)
                     continue;
                 any = true;
@@ -758,7 +798,11 @@ long do_wait4(int pid, int* status_out, int options, u32* uid_out) {
         }
 
         if (reaped) {
-            int child_pid = reaped->pid;
+            int child_pid;
+            {
+                LockGuard guard(g_table_lock);
+                child_pid = pid_nr_locked(reaped, me);
+            }
             *status_out = reaped->exit_status;
             if (uid_out)
                 *uid_out = reaped->cred.ruid;
@@ -802,14 +846,39 @@ namespace {
     bool free_self = false;
     {
         LockGuard guard(g_table_lock);
+        // In a PID namespace its init adopts our children (and reaps them);
+        // the init's own death ends the namespace: everyone in it is killed.
+        PidNs* ns = p->pidns;
+        Process* adopter = ns && ns->init && ns->init != p && ns->init->state != State::Zombie ? ns->init : nullptr;
+        if (ns && ns->init == p) {
+            ns->init = nullptr;
+            for (Process* q : g_processes)
+                if (q->pidns == ns && q != p && q->state != State::Zombie)
+                    signal::send(q, 9 /* SIGKILL */);
+        }
+        bool adopted_zombie = false;
         // Our children lose their parent. Zombies among them are freed now;
         // living ones free themselves when they exit.
         while (Process* c = p->children.pop_front()) {
+            if (adopter) {
+                c->parent = adopter;
+                adopter->children.push_back(c);
+                adopted_zombie |= c->state == State::Zombie;
+                continue;
+            }
             c->parent = nullptr;
             if (c->state == State::Zombie && orphan_count < 32) {
                 g_processes.remove(c);
                 orphan_zombies[orphan_count++] = c;
             }
+        }
+        if (adopted_zombie) {
+            {
+                LockGuard wq_guard(adopter->child_wait.lock());
+                adopter->child_events++;
+            }
+            adopter->child_wait.wake_all();
+            signal::send(adopter, 17 /* SIGCHLD */);
         }
         p->exit_status = wait_status;
         p->state = State::Zombie;
@@ -888,6 +957,70 @@ void exit_group(int wait_status) {
 
 void exit_current(int wait_status) { exit_group(wait_status); }
 
+// ---- PID namespaces ----
+
+int pid_nr_locked(const Process* p, const Process* viewer) {
+    if (!viewer || !viewer->pidns)
+        return p->pid;
+    return p->pidns == viewer->pidns ? p->vpid : 0;
+}
+
+int pid_nr(const Process* p, const Process* viewer) {
+    LockGuard guard(g_table_lock);
+    return pid_nr_locked(p, viewer);
+}
+
+bool visible(const Process* p, const Process* viewer) {
+    return !viewer || !viewer->pidns || p->pidns == viewer->pidns;
+}
+
+Process* find_visible(int pid, const Process* viewer) {
+    if (!viewer || !viewer->pidns)
+        return find(pid);
+    for (Process* p : g_processes)
+        if (p->pidns == viewer->pidns && p->vpid == pid)
+            return p;
+    return nullptr;
+}
+
+int pgid_nr(int global_pgid, const Process* viewer) {
+    if (!viewer || !viewer->pidns)
+        return global_pgid;
+    LockGuard guard(g_table_lock);
+    Process* leader = find(global_pgid);
+    return leader && leader->pidns == viewer->pidns ? leader->vpid : 0;
+}
+
+int pgid_global_locked(int pgid, const Process* viewer) {
+    if (!viewer || !viewer->pidns)
+        return pgid;
+    Process* leader = find_visible(pgid, viewer);
+    return leader ? leader->pid : -1;
+}
+
+int pgid_global(int pgid, const Process* viewer) {
+    LockGuard guard(g_table_lock);
+    return pgid_global_locked(pgid, viewer);
+}
+
+int tid_nr(const sched::Thread* t, const Process* viewer) {
+    if (!viewer || !viewer->pidns)
+        return t->user_tid;
+    return t->process && t->process->pidns == viewer->pidns ? t->vtid : 0;
+}
+
+sched::Thread* find_visible_thread(int tid, const Process* viewer) {
+    for (Process* p : g_processes) {
+        if (!visible(p, viewer))
+            continue;
+        LockGuard guard(p->thread_lock);
+        for (sched::Thread* t : p->threads)
+            if ((viewer && viewer->pidns ? t->vtid : t->user_tid) == tid)
+                return t;
+    }
+    return nullptr;
+}
+
 sched::Thread* find_thread(int tid) {
     for (Process* p : g_processes) {
         LockGuard guard(p->thread_lock);
@@ -965,8 +1098,13 @@ void process_gone(proc::Process* p); // kernel/linuxkpi/binder.cpp
 proc::Process::~Process() {
     if (lkpi_task || lkpi_mm)
         linuxkpi::process_gone(this);
+    if (pidns && __atomic_sub_fetch(&pidns->refs, 1, __ATOMIC_ACQ_REL) == 0)
+        delete pidns;
+    if (child_pidns && __atomic_sub_fetch(&child_pidns->refs, 1, __ATOMIC_ACQ_REL) == 0)
+        delete child_pidns;
     if (uts)
         proc::uts_put(uts);
+    vfs::mount_ns_put(mntns);
 }
 
 namespace proc {

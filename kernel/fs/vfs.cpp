@@ -45,15 +45,31 @@ struct Mount {
 };
 
 constexpr usize MAX_MOUNTS = 256; // containers bring dozens
-Mount g_mounts[MAX_MOUNTS];
-usize g_mount_count = 0;
+
+// A mount namespace's table. Processes share the system's until they
+// unshare(CLONE_NEWNS) (or clone with it): then they get a copy, and their
+// mounts are theirs alone. One lock for all tables.
+struct MountTable {
+    Mount mounts[MAX_MOUNTS];
+    usize count = 0;
+    u32 refs = 1;
+};
+MountTable g_system_mounts;
+void* (*g_process_mounts)() = nullptr; // set by the process layer
 IrqSpinlock g_mount_lock;
+
+MountTable* current_table() {
+    void* t = g_process_mounts ? g_process_mounts() : nullptr;
+    return t ? static_cast<MountTable*>(t) : &g_system_mounts;
+}
+#define g_mounts (current_table()->mounts)
+#define g_mount_count (current_table()->count)
 
 // The file system mounted on `dir`, if any (newest first, following stacks).
 Inode* cross_down(Inode* dir) {
     LockGuard guard(g_mount_lock);
-    for (bool moved = true; moved;) {
-        moved = false;
+    for (usize hops = 0, moved = 1; moved && hops < MAX_MOUNTS; hops++) { // (a cycle can't hang us)
+        moved = 0;
         for (usize i = g_mount_count; i-- > 0;) {
             if (g_mounts[i].covered == dir) {
                 dir = g_mounts[i].root;
@@ -418,6 +434,8 @@ long mount_at(const char* path, Inode* fs_root, const char* source, const char* 
     // single files and device nodes, as containers do).
     if (is_dir(target->mode) != is_dir(fs_root->mode))
         return is_dir(target->mode) ? -err::NOTDIR : -err::ISDIR;
+    if (target == fs_root)
+        return 0; // already what's there (a bind of a directory onto itself)
     LockGuard guard(g_mount_lock);
     if (g_mount_count >= MAX_MOUNTS)
         return -err::NOMEM;
@@ -469,6 +487,17 @@ long move_mount(const char* from, const char* to) {
     return 0;
 }
 
+// The source (device) recorded for the mount `path` names; "" if none.
+void mount_source(const char* path, char* out, usize size) {
+    out[0] = 0;
+    LockGuard guard(g_mount_lock);
+    for (usize i = g_mount_count; i-- > 0;)
+        if (strcmp(g_mounts[i].path, path) == 0) {
+            snprintf(out, size, "%s", g_mounts[i].source);
+            return;
+        }
+}
+
 long unmount(const char* path) {
     Inode* node;
     if (long r = resolve(path, nullptr, true, &node); r < 0)
@@ -516,6 +545,33 @@ void for_each_mount(void (*fn)(const char*, const char*, const char*, void*), vo
     LockGuard guard(g_mount_lock);
     for (usize i = 0; i < g_mount_count; i++)
         fn(g_mounts[i].source, g_mounts[i].path, g_mounts[i].type, ctx);
+}
+
+} // namespace vfs
+
+namespace vfs {
+
+void set_process_mounts_hook(void* (*fn)()) { g_process_mounts = fn; }
+
+// A new mount namespace: a copy of `from`'s table (nullptr: the system's).
+void* mount_ns_copy(void* from) {
+    auto* t = new MountTable;
+    LockGuard guard(g_mount_lock);
+    MountTable* src = from ? static_cast<MountTable*>(from) : &g_system_mounts;
+    for (usize i = 0; i < src->count; i++)
+        t->mounts[i] = src->mounts[i];
+    t->count = src->count;
+    return t;
+}
+
+void mount_ns_get(void* ns) {
+    if (ns)
+        __atomic_add_fetch(&static_cast<MountTable*>(ns)->refs, 1, __ATOMIC_RELAXED);
+}
+
+void mount_ns_put(void* ns) {
+    if (ns && __atomic_sub_fetch(&static_cast<MountTable*>(ns)->refs, 1, __ATOMIC_ACQ_REL) == 0)
+        delete static_cast<MountTable*>(ns);
 }
 
 } // namespace vfs

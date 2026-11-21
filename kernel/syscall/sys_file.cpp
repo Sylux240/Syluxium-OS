@@ -7,6 +7,7 @@
 #include <fs/inotify.hpp>
 #include <fs/fat.hpp>
 #include <fs/pipe.hpp>
+#include <block/loop.hpp>
 #include <fs/cgroupfs.hpp>
 #include <fs/ramfs.hpp>
 #include <fs/poll.hpp>
@@ -1589,6 +1590,8 @@ long sys_mount(SYSCALL_ARGS) {
         Inode* src;
         if (long r = vfs::resolve(src_abs, nullptr, true, &src); r < 0)
             return r;
+        // (MS_REC needs nothing more: mounts hang on directories, so the ones
+        // below src show through the bind as well.)
         return vfs::mount_at(abs, src, src_abs, "bind");
     }
     if (mflags & MS_MOVE) {
@@ -1722,7 +1725,12 @@ long sys_umount2(SYSCALL_ARGS) {
     char abs[512];
     join_path(proc::current()->cwd_path, target.c_str(), abs, sizeof(abs));
     block::sync_all();
-    return vfs::unmount(abs);
+    char source[64];
+    vfs::mount_source(abs, source, sizeof(source));
+    long r = vfs::unmount(abs);
+    if (r == 0)
+        loop::unmounted(source); // mount -o loop's device goes with it
+    return r;
 }
 
 // chroot(path): the caller's "/" (and its children's) becomes `path`.

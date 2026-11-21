@@ -45,6 +45,16 @@ long may_delete(vfs::Inode* dir, vfs::Inode* victim);
 // it's setgid); persisted through Inode::set_owner.
 void init_owner(vfs::Inode* dir, vfs::Inode* n);
 
+// A PID namespace (clone(CLONE_NEWPID), containers): its processes see
+// each other by their own numbers starting at 1, and its first process
+// (pid 1) adopts the orphans. One level: namespaces are made from the
+// system's, not from inside another.
+struct PidNs {
+    Process* init = nullptr; // pid 1 (nullptr once it's gone: the namespace is dying)
+    int next = 1;            // next pid number (table lock)
+    u32 refs = 1;            // one per process in it
+};
+
 // Host and domain name (UTS namespace): shared until unshare(CLONE_NEWUTS).
 struct Uts {
     char nodename[65] = "syluxium";
@@ -75,6 +85,10 @@ struct Process {
     vfs::Inode* cwd = nullptr;
     char cwd_path[512] = "/";
     vfs::Inode* root = nullptr; // chroot / pivot_root: this process's "/" (nullptr: the system's)
+    PidNs* pidns = nullptr;     // nullptr: the system's PID namespace
+    void* mntns = nullptr;      // mount namespace (vfs table); nullptr: the system's
+    int vpid = 0;               // pid inside pidns (= pid in the system's)
+    PidNs* child_pidns = nullptr; // setns(pid): where our children will live
     Uts* uts = nullptr;         // nullptr: the system's
     // ITIMER_REAL / alarm(): absolute deadline (clock ns, 0 = off) and reload interval.
     u64 alarm_deadline = 0, alarm_interval = 0;
@@ -127,6 +141,14 @@ struct Process {
 
 Process* current();
 Process* find(int pid); // caller must hold table_lock()
+// PID namespaces. All take the table lock themselves unless noted.
+int pid_nr(const Process* p, const Process* viewer);  // p's pid as viewer sees it, 0 if invisible
+Process* find_visible(int pid, const Process* viewer); // by a pid viewer uses; caller holds table_lock()
+bool visible(const Process* p, const Process* viewer); // same namespace, or viewer in the system's
+int pgid_nr(int global_pgid, const Process* viewer);   // a process group / session id, translated
+int pgid_global(int pgid, const Process* viewer);      // and back (0 if no such group is visible)
+int tid_nr(const sched::Thread* t, const Process* viewer);
+sched::Thread* find_visible_thread(int tid, const Process* viewer); // caller holds table_lock()
 IrqSpinlock& table_lock();
 // Call fn for every live process, with the table lock held (fn must not sleep).
 void for_each(void (*fn)(Process* p, void* ctx), void* ctx);

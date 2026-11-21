@@ -73,6 +73,17 @@ bool snapshot(int pid, int tid, Snapshot* s, bool want_memory) {
     s->ppid = p->parent ? p->parent->pid : (p->kernel_waited ? 0 : 1);
     s->pgid = p->pgid;
     s->sid = p->sid;
+    // Inside a PID namespace: the numbers it uses.
+    if (Process* viewer = proc::current(); viewer && viewer->pidns) {
+        auto local = [&](int global) {
+            Process* q = proc::find(global);
+            return q && q->pidns == viewer->pidns ? q->vpid : 0;
+        };
+        s->pid = p->vpid;
+        s->ppid = p->parent && p->parent->pidns == viewer->pidns ? p->parent->vpid : 0;
+        s->pgid = local(p->pgid);
+        s->sid = local(p->sid);
+    }
     memcpy(s->name, p->name, sizeof(s->name));
     s->cred = p->cred;
     memcpy(s->exe, p->exe_path, sizeof(s->exe));
@@ -484,7 +495,16 @@ public:
 
     vfs::Inode* lookup(const char* name, usize len) override {
         int tid;
-        if (!parse_number(name, len, &tid) || !exists(m_pid, tid))
+        if (!parse_number(name, len, &tid))
+            return nullptr;
+        if (Process* viewer = proc::current(); viewer && viewer->pidns) {
+            LockGuard guard(proc::table_lock());
+            sched::Thread* t = proc::find_visible_thread(tid, viewer);
+            if (!t || !t->process || t->process->pid != m_pid)
+                return nullptr;
+            tid = t->user_tid;
+        }
+        if (!exists(m_pid, tid))
             return nullptr;
         return pid_dir(m_pid, tid);
     }
@@ -503,7 +523,7 @@ public:
         for (sched::Thread* t : p->threads) {
             if (i++ == index) {
                 char name[16];
-                snprintf(name, sizeof(name), "%d", t->user_tid);
+                snprintf(name, sizeof(name), "%d", proc::tid_nr(t, proc::current()));
                 fill_entry(out, ino + static_cast<u64>(t->user_tid), vfs::DT_DIR, name);
                 return 1;
             }
@@ -613,8 +633,18 @@ public:
     }
     vfs::Inode* lookup(const char* name, usize len) override {
         int pid;
-        if (parse_number(name, len, &pid))
+        if (parse_number(name, len, &pid)) {
+            // A number the caller's PID namespace uses: the process's own directory.
+            Process* viewer = proc::current();
+            if (viewer && viewer->pidns) {
+                LockGuard guard(proc::table_lock());
+                Process* p = proc::find_visible(pid, viewer);
+                if (!p)
+                    return nullptr;
+                pid = p->pid;
+            }
             return exists(pid, 0) ? pid_dir(pid, 0) : nullptr;
+        }
         return Dir::lookup(name, len);
     }
 
@@ -625,11 +655,14 @@ public:
         struct Search {
             u64 want, seen;
             int found;
-        } search{index - statics, 0, -1};
+            Process* viewer;
+        } search{index - statics, 0, -1, proc::current()};
         proc::for_each([](Process* p, void* arg) {
             auto* st = static_cast<Search*>(arg);
+            if (!proc::visible(p, st->viewer))
+                return;
             if (st->seen++ == st->want)
-                st->found = p->pid;
+                st->found = st->viewer && st->viewer->pidns ? p->vpid : p->pid;
         }, &search);
         if (search.found < 0)
             return 0;
@@ -772,7 +805,7 @@ bool link_self(char* out, usize size, const void*) {
     Process* p = proc::current();
     if (!p)
         return false;
-    snprintf(out, size, "%d", p->pid);
+    snprintf(out, size, "%d", p->vpid);
     return true;
 }
 
@@ -780,7 +813,7 @@ bool link_thread_self(char* out, usize size, const void*) {
     Process* p = proc::current();
     if (!p)
         return false;
-    snprintf(out, size, "%d/task/%d", p->pid, sched::current()->user_tid);
+    snprintf(out, size, "%d/task/%d", p->vpid, sched::current()->vtid);
     return true;
 }
 

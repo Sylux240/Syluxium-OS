@@ -70,6 +70,16 @@ static int container(int ready_fd, int go_fd) {
           "file bind mount shows %s", buf);
     CHECK(mount(ROOT "/etc/os-release", ROOT "/etc/os-release", NULL, MS_REMOUNT | MS_BIND | MS_RDONLY, NULL) == 0,
           "remount read-only");
+    // Recursive bind: a tmpfs mounted below the source shows below the target.
+    mkdir(ROOT "/tmp/src", 0755);
+    mkdir(ROOT "/tmp/src/sub", 0755);
+    mkdir(ROOT "/tmp/dst", 0755);
+    CHECK(mount("tmpfs", ROOT "/tmp/src/sub", "tmpfs", 0, NULL) == 0, "tmpfs for the recursive bind");
+    int mk = open(ROOT "/tmp/src/sub/marker", O_CREAT | O_WRONLY, 0644);
+    if (mk >= 0)
+        close(mk);
+    CHECK(mount(ROOT "/tmp/src", ROOT "/tmp/dst", NULL, MS_BIND | MS_REC, NULL) == 0, "recursive bind");
+    CHECK(access(ROOT "/tmp/dst/sub/marker", F_OK) == 0, "the submount came along with MS_REC");
 
     CHECK(chdir(ROOT) == 0, "chdir");
     CHECK(syscall(SYS_pivot_root, ".", "oldroot") == 0, "pivot_root");
@@ -154,6 +164,10 @@ int main(void) {
         waitpid(helper, &st, 0);
         errno = 0;
         CHECK(WIFEXITED(st) && WEXITSTATUS(st) == 0, "setns into the container's root (status %#x)", st);
+        // Mount namespace: the container's mounts aren't the host's.
+        struct stat sb;
+        CHECK(stat(ROOT "/usr/bin", &sb) < 0, "the container's bind mount of /usr is visible on the host");
+        CHECK(stat(ROOT "/tmp/dst/sub/marker", &sb) < 0, "the container's recursive bind is visible on the host");
         if (write(go[1], &c, 1) != 1) { }
     }
     int status = 0;

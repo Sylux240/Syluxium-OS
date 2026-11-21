@@ -421,13 +421,14 @@ void run_userspace_tests() {
     static const char* const credtest[] = {"/opt/syluxium/tests/credtest", nullptr};
     static const char* const bindertest[] = {"/opt/syluxium/tests/bindertest", nullptr}; // Android IPC + binderfs
     static const char* const containertest[] = {"/opt/syluxium/tests/containertest", nullptr}; // chroot, pivot_root, bind mounts, UTS
+    static const char* const pidnstest[] = {"/opt/syluxium/tests/pidnstest", nullptr}; // PID namespaces
     // 32-bit (ia32) programs: static glibc tests, then dynamic Debian i386 binaries.
     static const char* const ia32test[] = {"/opt/syluxium/tests/ia32test", nullptr};
     static const char* const ia32threads[] = {"/opt/syluxium/tests/ia32threads", nullptr};
     static const char* const ia32dynamic[] = {"/bin/sh", "/etc/syluxium/selftest-ia32.sh", nullptr};
     const Test sequential[] = {{hello, 0},       {systest, 0},     {crash, 11 /* SIGSEGV */}, {threads, 0},
                                {nettest, 0},     {unixtest, 0},    {nltest, 0},              {ip6test, 0},
-                               {eventtest, 0},   {shmtest, 0},     {inotifytest, 0},          {ptytest, 0},     {credtest, 0},     {bindertest, 0},  {containertest, 0}, {ia32test, 0},    {ia32threads, 0},          {ia32dynamic, 0}};
+                               {eventtest, 0},   {shmtest, 0},     {inotifytest, 0},          {ptytest, 0},     {credtest, 0},     {bindertest, 0},  {containertest, 0}, {pidnstest, 0}, {ia32test, 0},    {ia32threads, 0},          {ia32dynamic, 0}};
 
     for (const Test& t : sequential) {
         int status = run_program(t.argv);

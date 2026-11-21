@@ -53,7 +53,11 @@ kuid_t lkpi_current_euid(void);
 /* ---- tasks ---- */
 struct pid_namespace { int unused; };
 #define task_active_pid_ns(t) ((struct pid_namespace *)NULL)
-#define task_tgid_nr_ns(t, ns) ((t)->tgid)
+/* PID namespaces: a task's process id as the calling process sees it, and a
+ * pid the caller uses as the system's (binder.cpp). */
+int lkpi_task_vtgid(struct task_struct *t);
+int lkpi_pid_global(int pid);
+#define task_tgid_nr_ns(t, ns) lkpi_task_vtgid(t)
 #ifndef task_pid_nr
 #define task_pid_nr(t) ((t)->pid)
 #endif

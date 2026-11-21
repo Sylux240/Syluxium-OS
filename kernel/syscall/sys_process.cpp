@@ -42,14 +42,17 @@ long sys_exit_group(SYSCALL_ARGS) {
     proc::exit_current(static_cast<int>(a0 & 0xFF) << 8);
 }
 
-long sys_getpid(SYSCALL_ARGS) { SYSCALL_UNUSED; return proc::current()->pid; }
+// Process ids are as the caller's PID namespace numbers them.
+long sys_getpid(SYSCALL_ARGS) { SYSCALL_UNUSED; return proc::current()->vpid; }
 long sys_getppid(SYSCALL_ARGS) {
     SYSCALL_UNUSED;
-    LockGuard guard(proc::table_lock());
-    Process* parent = proc::current()->parent;
-    return parent ? parent->pid : 1; // orphans belong to "init", as on Linux
+    Process* me = proc::current();
+    Process* parent = me->parent;
+    if (!parent)
+        return me->pidns ? 0 : 1; // orphans belong to "init", as on Linux
+    return proc::pid_nr(parent, me); // 0 for a namespace's init (its parent is outside)
 }
-long sys_gettid(SYSCALL_ARGS) { SYSCALL_UNUSED; return sched::current()->user_tid; }
+long sys_gettid(SYSCALL_ARGS) { SYSCALL_UNUSED; return sched::current()->vtid; }
 // ---- user and group ids (POSIX/Linux rules; privileged = effective uid 0) ----
 
 namespace {
@@ -215,39 +218,55 @@ bool may_signal(Process* target, int sig) {
 
 long sys_getpgid(SYSCALL_ARGS) {
     SYSCALL_UNUSED;
+    Process* me = proc::current();
     if (a0 == 0)
-        return proc::current()->pgid;
-    LockGuard guard(proc::table_lock());
-    Process* p = proc::find(static_cast<int>(a0));
-    return p ? p->pgid : -err::SRCH;
+        return proc::pgid_nr(me->pgid, me);
+    int pgid;
+    {
+        LockGuard guard(proc::table_lock());
+        Process* p = proc::find_visible(static_cast<int>(a0), me);
+        if (!p)
+            return -err::SRCH;
+        pgid = p->pgid;
+    }
+    return proc::pgid_nr(pgid, me);
 }
 
-long sys_getpgrp(SYSCALL_ARGS) { SYSCALL_UNUSED; return proc::current()->pgid; }
+long sys_getpgrp(SYSCALL_ARGS) { SYSCALL_UNUSED; return proc::pgid_nr(proc::current()->pgid, proc::current()); }
 
 long sys_setpgid(SYSCALL_ARGS) {
     SYSCALL_UNUSED;
     Process* me = proc::current();
-    int pid = a0 ? static_cast<int>(a0) : me->pid;
+    int pid = a0 ? static_cast<int>(a0) : me->vpid;
     int pgid = a1 ? static_cast<int>(a1) : pid;
     if (pgid < 0)
         return -err::INVAL;
     LockGuard guard(proc::table_lock());
-    Process* p = proc::find(pid);
+    Process* p = proc::find_visible(pid, me);
     if (!p || (p != me && p->parent != me))
         return -err::SRCH;
     if (p->sid != me->sid)
         return -err::PERM;
-    p->pgid = pgid;
+    // The group is named by its leader's pid (global here).
+    Process* leader = pgid == pid ? p : proc::find_visible(pgid, me);
+    p->pgid = leader ? leader->pid : pgid;
     return 0;
 }
 
 long sys_getsid(SYSCALL_ARGS) {
     SYSCALL_UNUSED;
+    Process* me = proc::current();
     if (a0 == 0)
-        return proc::current()->sid;
-    LockGuard guard(proc::table_lock());
-    Process* p = proc::find(static_cast<int>(a0));
-    return p ? p->sid : -err::SRCH;
+        return proc::pgid_nr(me->sid, me);
+    int sid;
+    {
+        LockGuard guard(proc::table_lock());
+        Process* p = proc::find_visible(static_cast<int>(a0), me);
+        if (!p)
+            return -err::SRCH;
+        sid = p->sid;
+    }
+    return proc::pgid_nr(sid, me);
 }
 
 long sys_setsid(SYSCALL_ARGS) {
@@ -257,7 +276,7 @@ long sys_setsid(SYSCALL_ARGS) {
         return -err::PERM; // already a group leader
     me->sid = me->pgid = me->pid;
     me->ctty = nullptr; // a new session has no controlling terminal until it opens one
-    return me->sid;
+    return me->vpid;
 }
 
 // ---- fork / exec / wait ----
@@ -402,19 +421,23 @@ long sys_kill(SYSCALL_ARGS) {
         return -err::INVAL;
     Process* me = proc::current();
     if (pid == 0 || pid < -1) {
-        signal::send_to_group(pid == 0 ? me->pgid : -pid, sig);
+        int pgid = pid == 0 ? me->pgid : proc::pgid_global(-pid, me);
+        if (pgid < 0)
+            return -err::SRCH;
+        signal::send_to_group(pgid, sig);
         return 0;
     }
-    if (pid == -1) { // everyone but init and ourselves (that we may signal)
+    if (pid == -1) { // everyone (we can see) but init and ourselves (that we may signal)
         proc::for_each([](Process* p, void* arg) {
             int s = static_cast<int>(reinterpret_cast<uptr>(arg));
-            if (p != proc::current() && p->pid != 1 && s && may_signal(p, s))
+            Process* self = proc::current();
+            if (p != self && p->vpid != 1 && s && proc::visible(p, self) && may_signal(p, s))
                 signal::send(p, s, signal::SI_USER);
         }, reinterpret_cast<void*>(static_cast<uptr>(sig)));
         return 0;
     }
     LockGuard guard(proc::table_lock());
-    Process* p = proc::find(pid);
+    Process* p = proc::find_visible(pid, me);
     if (!p || p->state == proc::State::Zombie)
         return -err::SRCH;
     if (!may_signal(p, sig))
@@ -426,9 +449,10 @@ long sys_kill(SYSCALL_ARGS) {
 
 long sys_tgkill(SYSCALL_ARGS) {
     SYSCALL_UNUSED;
+    Process* me = proc::current();
     LockGuard guard(proc::table_lock());
-    sched::Thread* t = proc::find_thread(static_cast<int>(a1));
-    if (!t || !t->process || t->process->pid != static_cast<int>(a0))
+    sched::Thread* t = proc::find_visible_thread(static_cast<int>(a1), me);
+    if (!t || !t->process || (me->pidns ? t->process->vpid : t->process->pid) != static_cast<int>(a0))
         return -err::SRCH;
     if (!may_signal(t->process, static_cast<int>(a2)))
         return -err::PERM;
@@ -440,7 +464,7 @@ long sys_tgkill(SYSCALL_ARGS) {
 long sys_tkill(SYSCALL_ARGS) {
     SYSCALL_UNUSED;
     LockGuard guard(proc::table_lock());
-    sched::Thread* t = proc::find_thread(static_cast<int>(a0));
+    sched::Thread* t = proc::find_visible_thread(static_cast<int>(a0), proc::current());
     if (!t)
         return -err::SRCH;
     if (t->process && !may_signal(t->process, static_cast<int>(a1)))
@@ -519,7 +543,7 @@ long sys_arch_prctl(SYSCALL_ARGS) {
 long sys_set_tid_address(SYSCALL_ARGS) {
     SYSCALL_UNUSED;
     sched::current()->clear_child_tid = a0;
-    return sched::current()->user_tid;
+    return sched::current()->vtid;
 }
 
 long sys_set_robust_list(SYSCALL_ARGS) { SYSCALL_UNUSED; return 0; }
@@ -898,7 +922,7 @@ long sys_sched_setaffinity(SYSCALL_ARGS) {
         return -err::INVAL;
     if (a0) {
         LockGuard guard(proc::table_lock());
-        if (!proc::find_thread(static_cast<int>(a0)))
+        if (!proc::find_visible_thread(static_cast<int>(a0), proc::current()))
             return -err::SRCH;
     }
     u32 cpus = percpu::online_count();
@@ -1009,6 +1033,12 @@ long sys_unshare(SYSCALL_ARGS) {
         return -err::INVAL;
     if ((flags & (known & ~(CLONE_FS | CLONE_FILES | CLONE_SYSVSEM | CLONE_NEWUSER))) && !proc::capable())
         return -err::PERM;
+    if (flags & CLONE_NEWNS) { // a private copy of the mount table
+        Process* p = proc::current();
+        void* old = p->mntns;
+        p->mntns = vfs::mount_ns_copy(old);
+        vfs::mount_ns_put(old);
+    }
     if (flags & CLONE_NEWUTS) {
         Process* p = proc::current();
         auto* u = new proc::Uts(*(p->uts ? p->uts : proc::system_uts()));
@@ -1042,9 +1072,21 @@ long sys_setns(SYSCALL_ARGS) {
     if (!target)
         return -err::SRCH;
     if (!strcmp(kind, "mnt")) {
+        vfs::mount_ns_get(target->mntns);
+        vfs::mount_ns_put(me->mntns);
+        me->mntns = target->mntns;
         me->root = target->root;
         me->cwd = target->root ? target->root : vfs::root();
         snprintf(me->cwd_path, sizeof(me->cwd_path), "/");
+    } else if (!strcmp(kind, "pid")) {
+        // Our children (not we) will live in the target's PID namespace.
+        if (me->pidns)
+            return target->pidns == me->pidns ? 0 : -err::INVAL;
+        if (me->child_pidns && __atomic_sub_fetch(&me->child_pidns->refs, 1, __ATOMIC_ACQ_REL) == 0)
+            delete me->child_pidns;
+        me->child_pidns = target->pidns;
+        if (me->child_pidns)
+            __atomic_add_fetch(&me->child_pidns->refs, 1, __ATOMIC_RELAXED);
     } else if (!strcmp(kind, "uts")) {
         proc::Uts* u = target->uts ? target->uts : proc::system_uts();
         proc::uts_get(u);

@@ -71,6 +71,23 @@ unsigned int lkpi_task_euid(task_struct* t) {
     return p ? p->cred.euid : 0;
 }
 
+int lkpi_task_vtgid(task_struct* t) {
+    auto* v = reinterpret_cast<LkpiTaskView*>(t);
+    auto* p = static_cast<proc::Process*>(v->lkpi_process);
+    if (!p && v->lkpi_thread)
+        p = static_cast<sched::Thread*>(v->lkpi_thread)->process;
+    return p ? proc::pid_nr(p, proc::current()) : v->tgid;
+}
+
+int lkpi_pid_global(int pid) {
+    proc::Process* me = proc::current();
+    if (!me || !me->pidns)
+        return pid;
+    LockGuard guard(proc::table_lock());
+    proc::Process* p = proc::find_visible(pid, me);
+    return p ? p->pid : -1;
+}
+
 // The current process's mm (one per process; it holds one reference of each kind).
 mm_struct* lkpi_current_mm(void) {
     proc::Process* p = proc::current();
