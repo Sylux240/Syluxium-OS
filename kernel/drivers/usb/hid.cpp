@@ -16,6 +16,7 @@
 #include <lib/format.hpp>
 #include <lib/string.hpp>
 #include <mm/heap.hpp>
+#include <sched/sched.hpp>
 
 namespace usb::hid {
 
@@ -205,7 +206,20 @@ bool probe(Device* d, const Interface& intf) {
     if (desc_len > 4096)
         desc_len = 4096;
     auto* raw = static_cast<u8*>(kmalloc(desc_len));
-    long n = raw ? d->control(0x81, REQ_GET_DESCRIPTOR, DESC_HID_REPORT << 8, intf.number, raw, desc_len) : -1;
+    // Retried like Linux's usbhid: some wireless receivers (a Dell KM632's
+    // mouse interface) time out on the first request while they set up. A
+    // descriptor we never get means boot protocol, which such receivers
+    // ignore: their 12-bit X/Y read as bytes makes the pointer jump.
+    long n = -1;
+    for (int attempt = 0; raw && attempt < 4; attempt++) {
+        if (attempt)
+            sched::sleep_ms(100u * attempt);
+        n = d->control(0x81, REQ_GET_DESCRIPTOR, DESC_HID_REPORT << 8, intf.number, raw, desc_len);
+        if (n > 0 || d->gone)
+            break;
+        klog::info("usb-hid: %s if%u: report descriptor request failed (%ld), retrying", d->product_name,
+                   intf.number, n);
+    }
 
     auto* r = new ReportDevice;
     int usable = n > 0 ? r->hid.init(raw, static_cast<usize>(n), r) : 0;
