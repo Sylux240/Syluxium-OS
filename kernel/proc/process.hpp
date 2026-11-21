@@ -93,6 +93,7 @@ struct Process {
     // ITIMER_REAL / alarm(): absolute deadline (clock ns, 0 = off) and reload interval.
     u64 alarm_deadline = 0, alarm_interval = 0;
     u32 umask = 022;
+    u32 personality = 0; // personality(2); ADDR_NO_RANDOMIZE turns ASLR off for its execs
     Cred cred;
     int oom_score_adj = 0; // /proc/<pid>/oom_score_adj (kept, not used: no OOM killer yet)
     // LinuxKPI's view of this process (binder): its task_struct (the threads'
