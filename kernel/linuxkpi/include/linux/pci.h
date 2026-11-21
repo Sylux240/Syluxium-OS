@@ -47,6 +47,8 @@ struct pci_dev {
     struct resource resource[DEVICE_COUNT_RESOURCE + 1]; /* BARs + expansion ROM (PCI_ROM_RESOURCE) */
     u64 rom; size_t romlen; /* appended: firmware-provided ROM image (none) */
     unsigned int no_64bit_msi:1;
+    u8 msi_cap, msix_cap; /* appended: capability offsets */
+    u32 saved_config_space[16];
 };
 
 struct pci_driver {
@@ -57,6 +59,8 @@ struct pci_driver {
     void (*shutdown)(struct pci_dev* dev);
     struct device_driver driver;
     void* lkpi; /* Syluxium registration */
+    const struct pci_error_handlers* err_handler; /* appended */
+    const struct attribute_group** dev_groups;
 };
 
 #define to_pci_dev(d) container_of(d, struct pci_dev, dev)

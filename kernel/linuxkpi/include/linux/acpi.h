@@ -13,6 +13,9 @@ typedef char *acpi_string;
 #define AE_OK 0
 #define AE_ERROR 1
 #define AE_NOT_FOUND 5
+#define AE_NOT_EXIST 6
+#define ACPI_VIDEO_NOTIFY_PROBE 0x81
+#define ACPI_ID_LEN 16
 #define ACPI_SUCCESS(s) ((s) == AE_OK)
 #define ACPI_FAILURE(s) ((s) != AE_OK)
 #define ACPI_TYPE_ANY 0x00

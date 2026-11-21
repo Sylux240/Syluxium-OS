@@ -211,12 +211,31 @@ LKPI_LINUX_CFLAGS := -I$(LKPI_INCLUDE) -include linux/kconfig.h -Werror=implicit
     -Wno-initializer-overrides -Wno-unused-const-variable -Wno-implicit-fallthrough -Wno-format-zero-length \
     -Wno-missing-field-initializers -Wno-sign-compare -Wno-address-of-packed-member -Wno-tautological-constant-out-of-range-compare \
     -Wno-default-const-init-field-unsafe -Wno-unknown-warning-option
-lkpi_modname = $(if $(findstring /drm/i915/,$<),i915,$(if $(findstring /drm/radeon/,$<),radeon,$(patsubst virtual,mac80211_hwsim,$(patsubst wireless,cfg80211,$(notdir $(patsubst %/,%,$(dir $<)))))))
+lkpi_modname = $(if $(findstring /drm/i915/,$<),i915,$(if $(findstring /drm/radeon/,$<),radeon,$(if $(findstring /drm/amd/,$<),amdgpu,$(if $(findstring /drm/scheduler/,$<),gpu_sched,$(patsubst virtual,mac80211_hwsim,$(patsubst wireless,cfg80211,$(notdir $(patsubst %/,%,$(dir $<)))))))))
 # GPU drivers: their own include directory and Kconfig (drm/lkpi_<driver>_config.h).
 LKPI_I915 := kernel/linuxkpi/drivers/gpu/drm/i915
 $(OBJDIR)/$(LKPI_I915)/%: LKPI_DRV_CFLAGS = -I$(LKPI_I915) -DI915 -include drm/lkpi_i915_config.h -gline-tables-only
 LKPI_RADEON := kernel/linuxkpi/drivers/gpu/drm/radeon
 $(OBJDIR)/$(LKPI_RADEON)/%: LKPI_DRV_CFLAGS = -I$(LKPI_RADEON) -include drm/lkpi_radeon_config.h -gline-tables-only
+# amdgpu: its register headers (~270 MB, drivers/gpu/drm/amd/include/asic_reg)
+# stay out of the repository and come from a sparse Linux 6.12 checkout.
+LKPI_AMD := kernel/linuxkpi/drivers/gpu/drm/amd
+LINUX_SRC := deps/linux-src
+AMD_ASIC_REG := $(LINUX_SRC)/drivers/gpu/drm/amd/include/asic_reg
+$(OBJDIR)/$(LKPI_AMD)/%: LKPI_DRV_CFLAGS = -I$(AMD_ASIC_REG) -I$(LKPI_AMD)/include -I$(AMD_ASIC_REG)/.. -I$(LKPI_AMD)/amdgpu -I$(LKPI_AMD)/pm/inc \
+    -I$(LKPI_AMD)/acp/include -I$(LKPI_AMD)/pm/swsmu -I$(LKPI_AMD)/pm/swsmu/inc -I$(LKPI_AMD)/pm/swsmu/inc/pmfw_if \
+    -I$(LKPI_AMD)/pm/swsmu/smu11 -I$(LKPI_AMD)/pm/swsmu/smu12 -I$(LKPI_AMD)/pm/swsmu/smu13 -I$(LKPI_AMD)/pm/swsmu/smu14 \
+    -I$(LKPI_AMD)/pm/powerplay/inc -I$(LKPI_AMD)/pm/powerplay/smumgr -I$(LKPI_AMD)/pm/powerplay/hwmgr \
+    -I$(LKPI_AMD)/pm/legacy-dpm -I$(LKPI_AMD)/amdkfd -I$(LKPI_AMD)/display -I$(LKPI_AMD)/display/include \
+    -I$(LKPI_AMD)/display/modules/inc -I$(LKPI_AMD)/display/dc -I$(LKPI_AMD)/display/amdgpu_dm \
+    -include drm/lkpi_amdgpu_config.h -gline-tables-only
+$(filter $(OBJDIR)/$(LKPI_AMD)/%,$(OBJS)): | $(AMD_ASIC_REG)/.fetched
+$(AMD_ASIC_REG)/.fetched:
+	@echo "  GIT   Linux 6.12 amdgpu register headers"
+	@if [ ! -d $(LINUX_SRC)/.git ]; then rm -rf $(LINUX_SRC) && git clone -q --depth 1 --branch v6.12 --filter=blob:none --sparse \
+	    https://github.com/torvalds/linux.git $(LINUX_SRC); fi
+	@cd $(LINUX_SRC) && git sparse-checkout add drivers/gpu/drm/amd/include/asic_reg
+	@touch $@
 $(OBJDIR)/kernel/linuxkpi/%.c.o: kernel/linuxkpi/%.c
 	@mkdir -p $(dir $@)
 	@echo "  CC    $<"

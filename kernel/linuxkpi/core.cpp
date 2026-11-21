@@ -1039,12 +1039,14 @@ struct task_struct* lkpi_current(void) {
     sched::Thread* th = sched::current();
     if (!th) {
         static LkpiTask boot;
+        boot.t.group_leader = &boot.t;
         return &boot.t;
     }
     if (!th->lkpi_task) {
         auto* lt = new LkpiTask{};
         snprintf(lt->t.comm, sizeof(lt->t.comm), "%s", th->name);
         lt->t.lkpi_thread = th;
+        lt->t.group_leader = &lt->t;
         if (th->process)
             lt->t.pid = lt->t.tgid = th->process->pid;
         th->lkpi_task = lt;

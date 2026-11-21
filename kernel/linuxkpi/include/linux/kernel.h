@@ -315,6 +315,9 @@ struct task_struct {
     volatile long __state; /* TASK_RUNNING / TASK_INTERRUPTIBLE / TASK_UNINTERRUPTIBLE */
     void* lkpi_thread;     /* the Syluxium thread */
     struct mm_struct* mm;  /* appended: always NULL (no Linux address spaces) */
+    unsigned int flags;    /* PF_* (none set) */
+    int exit_code;
+    struct task_struct* group_leader; /* the task itself */
 };
 struct task_struct* lkpi_current(void);
 

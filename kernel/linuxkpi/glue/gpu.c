@@ -372,3 +372,18 @@ struct resource *lkpi_request_region(resource_size_t start, resource_size_t n, c
 	r->flags = flags | IORESOURCE_BUSY;
 	return r;
 }
+
+const struct sysfs_ops kobj_sysfs_ops;
+
+int kstrtouint_from_user(const char __user *s, size_t count, unsigned int base, unsigned int *res)
+{
+	char buf[24] = { 0 };
+	unsigned long long v;
+	int r;
+	if (copy_from_user(buf, s, min(count, sizeof(buf) - 1)))
+		return -EFAULT;
+	r = kstrtoull(buf, base, &v);
+	if (!r)
+		*res = (unsigned int)v;
+	return r;
+}

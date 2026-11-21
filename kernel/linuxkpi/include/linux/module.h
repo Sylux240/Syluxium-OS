@@ -87,6 +87,9 @@ struct lkpi_param {
 };
 #define __lkpi_param_type_int 'i'
 #define __lkpi_param_type_uint 'u'
+#define __lkpi_param_type_hexint 'u'
+#define __lkpi_param_type_bint 'i'
+#define __lkpi_param_type_ullong 'L'
 #define __lkpi_param_type_long 'l'
 #define __lkpi_param_type_ulong 'L'
 #define __lkpi_param_type_short 's'

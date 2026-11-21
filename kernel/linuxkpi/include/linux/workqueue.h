@@ -43,6 +43,7 @@ void lkpi_init_delayed_work(struct delayed_work* d, work_func_t fn);
 void lkpi_delayed_work_timer(struct timer_list* t);
 #define DECLARE_DELAYED_WORK(n, f) struct delayed_work n = { .work = { .func = (f) }, .timer = { .function = lkpi_delayed_work_timer } }
 #define DECLARE_DEFERRABLE_WORK(n, f) DECLARE_DELAYED_WORK(n, f)
+#define __DELAYED_WORK_INITIALIZER(n, f, tflags) { .work = { .func = (f) }, .timer = { .function = lkpi_delayed_work_timer } }
 #define work_busy(w) work_pending(w)
 #define current_work() ((struct work_struct*)0)
 #define enable_and_queue_work(wq, w) queue_work(wq, w)

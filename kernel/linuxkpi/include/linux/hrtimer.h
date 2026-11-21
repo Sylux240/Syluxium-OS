@@ -20,6 +20,7 @@ struct hrtimer {
     ktime_t expires;
     struct timer_list lkpi_timer;
     volatile int lkpi_active;
+    struct { ktime_t expires; } node; /* appended: Linux's timerqueue node (expiry read by drivers) */
 };
 void hrtimer_init(struct hrtimer* timer, int clock_id, enum hrtimer_mode mode);
 void hrtimer_setup(struct hrtimer* timer, enum hrtimer_restart (*function)(struct hrtimer*), int clock_id, enum hrtimer_mode mode);

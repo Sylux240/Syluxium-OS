@@ -546,7 +546,135 @@ struct dev_pm_domain { struct dev_pm_ops ops; void (*detach)(struct device *, bo
 #define pin_user_pages_fast(start, n, flags, pages) (-EFAULT)
 #define get_user_pages_fast(start, n, flags, pages) (-EFAULT)
 #define atomic64_xchg(v, n) __atomic_exchange_n(&(v)->counter, (n), __ATOMIC_SEQ_CST)
-#define atomic64_cmpxchg(v, o, n) ({ s64 __o = (o); __atomic_compare_exchange_n(&(v)->counter, &__o, (n), false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST); __o; })
+#define atomic64_cmpxchg(v, o, n) ({ __typeof__((v)->counter + 0) __o = (o); __atomic_compare_exchange_n(&(v)->counter, &__o, (n), false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST); __o; })
+
+/* ---- amdgpu ---- */
+#include <linux/rbtree.h>
+#define atomic_long_cmpxchg(v, o, n) atomic64_cmpxchg(v, o, n)
+#define atomic_long_fetch_add atomic_fetch_add
+#define memalloc_noreclaim_save() 0U
+#define memalloc_noreclaim_restore(f) do { (void)(f); } while (0)
+#define memalloc_nofs_save() 0U
+#define memalloc_nofs_restore(f) do { (void)(f); } while (0)
+#define memalloc_noio_save() 0U
+#define memalloc_noio_restore(f) do { (void)(f); } while (0)
+#define PF_EXITING 0x00000004
+#define PF_KTHREAD 0x00200000
+#ifndef SIGKILL
+#define SIGKILL 9
+#endif
+#define devres_open_group(dev, id, gfp) ((void *)1)
+#define devres_release_group(dev, id) 0
+#define devres_remove_group(dev, id) do { } while (0)
+#define devres_close_group(dev, id) do { } while (0)
+
+/* ---- amdgpu 2 ---- */
+#include <linux/sysfs.h>
+typedef unsigned int pci_ers_result_t;
+typedef unsigned int pci_channel_state_t;
+enum { PCI_ERS_RESULT_NONE = 1, PCI_ERS_RESULT_CAN_RECOVER = 2, PCI_ERS_RESULT_NEED_RESET = 3,
+       PCI_ERS_RESULT_DISCONNECT = 4, PCI_ERS_RESULT_RECOVERED = 5, PCI_ERS_RESULT_NO_AER_DRIVER = 6 };
+enum { pci_channel_io_normal = 1, pci_channel_io_frozen = 2, pci_channel_io_perm_failure = 3 };
+struct pci_error_handlers {
+	pci_ers_result_t (*error_detected)(struct pci_dev *dev, pci_channel_state_t error);
+	pci_ers_result_t (*mmio_enabled)(struct pci_dev *dev);
+	pci_ers_result_t (*slot_reset)(struct pci_dev *dev);
+	void (*reset_prepare)(struct pci_dev *dev);
+	void (*reset_done)(struct pci_dev *dev);
+	void (*resume)(struct pci_dev *dev);
+	void (*cor_error_detected)(struct pci_dev *dev);
+};
+#define rwsem_is_contended(s) 0
+#define rwsem_is_locked(s) mutex_is_locked(&(s)->m)
+#define HW_ERR "[Hardware Error]: "
+#define printk_ratelimit() 1
+#define printk_ratelimited printk
+#ifndef FALSE
+#define FALSE 0
+#define TRUE 1
+#endif
+#define list_for_each_prev_safe(pos, n, head) for (pos = (head)->prev, n = pos->prev; pos != (head); pos = n, n = pos->prev)
+#define dev_WARN(dev, fmt, ...) WARN(1, "%s: " fmt, dev_name(dev), ##__VA_ARGS__)
+#define dev_WARN_ONCE(dev, cond, fmt, ...) WARN_ONCE(cond, "%s: " fmt, dev_name(dev), ##__VA_ARGS__)
+#define xen_initial_domain() 0
+#define xen_domain() 0
+typedef unsigned long irq_hw_number_t;
+/* kobjects / ksets (sysfs directories): accepted, not exposed. */
+struct kobj_type { void (*release)(struct kobject *kobj); const struct sysfs_ops *sysfs_ops; const struct attribute_group **default_groups; };
+struct sysfs_ops { ssize_t (*show)(struct kobject *, struct attribute *, char *); ssize_t (*store)(struct kobject *, struct attribute *, const char *, size_t); };
+struct kset { struct list_head list; spinlock_t list_lock; struct kobject kobj; };
+#define to_kset(k) container_of(k, struct kset, kobj)
+extern const struct sysfs_ops kobj_sysfs_ops;
+#define kobject_init(k, t) do { (void)(t); } while (0)
+#define kobject_init_and_add(k, t, parent, fmt, ...) 0
+#define kobject_add(k, parent, fmt, ...) 0
+#define kobject_put(k) do { (void)(k); } while (0)
+#define kobject_get(k) (k)
+#define kobject_del(k) do { (void)(k); } while (0)
+#define kobject_set_name(k, fmt, ...) 0
+#define kobject_create_and_add(name, parent) ((struct kobject *)NULL)
+#define kset_register(k) 0
+#define kset_unregister(k) do { } while (0)
+#define kset_create_and_add(name, ops, parent) ((struct kset *)NULL)
+#define sysfs_remove_file_from_group(k, a, g) do { } while (0)
+#define sysfs_add_file_to_group(k, a, g) 0
+#define sysfs_create_link(k, t, n) 0
+#define sysfs_remove_link(k, n) do { } while (0)
+
+/* ---- amdgpu 3 ---- */
+#include <linux/sizes.h>
+#define cpu_data(cpu) boot_cpu_data
+#ifndef X86_VENDOR_INTEL
+#define X86_VENDOR_INTEL 0
+#define X86_VENDOR_AMD 2
+#endif
+#define topology_num_cores_per_package() 1
+#define num_possible_nodes() 1
+#define num_online_nodes() 1
+#define pfn_to_nid(pfn) 0
+#define page_is_ram(pfn) 1
+#define dev_is_removable(dev) false
+#define devm_device_add_group(dev, grp) 0
+#define device_add_group(dev, grp) 0
+#define device_remove_group(dev, grp) do { } while (0)
+#define pci_wait_for_pending_transaction(pdev) 1
+#define pci_device_is_present(pdev) true
+#define pci_pr3_present(pdev) false
+#define PCI_POSSIBLE_ERROR(val) ((val) == ((__typeof__(val))~0))
+#define PCI_ERROR_RESPONSE (~0ULL)
+struct pci_saved_state;
+#define pci_store_saved_state(pdev) ((struct pci_saved_state *)NULL)
+#define pci_load_saved_state(pdev, st) 0
+#define pci_load_and_free_saved_state(pdev, st) 0
+#define pci_restore_msi_state(pdev) do { } while (0)
+#define list_rotate_to_front(list, head) list_move_tail(head, list)
+#define radix_tree_tag_set(root, idx, tag) ((void *)NULL)
+#define radix_tree_tag_clear(root, idx, tag) ((void *)NULL)
+#define radix_tree_tagged(root, tag) 0
+#define radix_tree_gang_lookup_tag(root, results, first, max, tag) 0U
+#define pm_runtime_autosuspend_expiration(dev) 0UL
+#define ksys_sync_helper() do { } while (0)
+#define emergency_restart() do { } while (0)
+#define kobject_name(k) ((k)->name)
+#define d_inode(d) ((d)->d_inode)
+#define backlight_device_set_brightness(bd, b) 0
+#define bitmap_complement(dst, src, nbits) ({ for (unsigned int __i = 0; __i < BITS_TO_LONGS(nbits); __i++) (dst)[__i] = ~(src)[__i]; })
+#ifndef MAX
+#define MAX(a, b) ((a) > (b) ? (a) : (b))
+#define MIN(a, b) ((a) < (b) ? (a) : (b))
+#endif
+typedef void *fl_owner_t;
+#define return_ACPI_STATUS(s) return (s)
+#ifndef VM_ACCESS_FLAGS
+#define VM_ACCESS_FLAGS (VM_READ | VM_WRITE | VM_EXEC)
+#endif
+#define sysfs_bin_attr_init(a) do { } while (0)
+#define BIN_ATTR(_name, _mode, _read, _write, _size) struct bin_attribute bin_attr_##_name = { .attr = { .name = __stringify(_name), .mode = _mode }, .read = _read, .write = _write, .size = _size }
+#define BIN_ATTR_RO(_name, _size) BIN_ATTR(_name, 0444, _name##_read, NULL, _size)
+#define BIN_ATTR_RW(_name, _size) BIN_ATTR(_name, 0644, _name##_read, _name##_write, _size)
+#define __BIN_ATTR(_name, _mode, _read, _write, _size) { .attr = { .name = __stringify(_name), .mode = _mode }, .read = _read, .write = _write, .size = _size }
+int kstrtouint_from_user(const char __user *s, size_t count, unsigned int base, unsigned int *res);
+#define kstrtou64(s, base, res) kstrtoull(s, base, (unsigned long long *)(res))
 
 LKPI_EXTERN_C_END
 
