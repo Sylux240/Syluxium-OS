@@ -1,5 +1,6 @@
-/* LinuxKPI: what phylib and r8169 (Linux 6.12) expect from the kernel
- * headers beyond the common LinuxKPI set. Included first (Makefile). */
+/* LinuxKPI: what phylib and the Ethernet drivers (r8169, e1000e; Linux
+ * 6.12) expect from the kernel headers beyond the common LinuxKPI set.
+ * Included first (Makefile). */
 #pragma once
 
 #include <linux/lkpi_all.h>
@@ -9,6 +10,7 @@
 #include <linux/linkmode.h>
 #include <linux/netdevice.h>
 #include <linux/pci.h>
+#include <net/lkpi_netcompat.h>
 #include <linux/clk.h>
 #include <linux/reset.h>
 #include <linux/gpio/consumer.h>
@@ -175,4 +177,13 @@ static inline int pci_select_bars(struct pci_dev *dev, unsigned long flags)
         if (dev->lkpi_res_len[i] && (dev->lkpi_res_flags[i] & flags))
             bars |= 1 << i;
     return bars;
+}
+
+/* Interface statistics through the driver's ndo_get_stats64. */
+static inline struct rtnl_link_stats64 *dev_get_stats(struct net_device *dev, struct rtnl_link_stats64 *storage)
+{
+    memset(storage, 0, sizeof(*storage));
+    if (dev->netdev_ops && dev->netdev_ops->ndo_get_stats64)
+        dev->netdev_ops->ndo_get_stats64(dev, storage);
+    return storage;
 }

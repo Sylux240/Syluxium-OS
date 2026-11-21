@@ -52,6 +52,8 @@ struct pci_dev {
     u8 pm_cap;
     unsigned int multifunction:1; /* appended */
     int cfg_size;                 /* appended: 256, or 4096 for PCI Express */
+    unsigned int pme_poll:1;      /* appended */
+    unsigned int state_saved:1;   /* appended */
 };
 
 struct pci_driver {

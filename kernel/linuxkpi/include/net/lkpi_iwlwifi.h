@@ -10,10 +10,8 @@
 #include <linux/device/bus.h>
 #include <linux/devcoredump.h>
 #include <linux/cleanup.h>
+#include <net/lkpi_netcompat.h>
 
-#ifndef ____cacheline_aligned_in_smp
-#define ____cacheline_aligned_in_smp __attribute__((__aligned__(64)))
-#endif
 
 #include <linux/netdevice.h>
 #include <linux/pci.h>
@@ -33,9 +31,6 @@
         __c;                                                                               \
     })
 
-#ifndef SMP_CACHE_BYTES
-#define SMP_CACHE_BYTES 64
-#endif
 
 struct pci_bus;
 
@@ -45,14 +40,10 @@ struct pci_bus;
 #define device_reprobe(dev) 0
 #define HWEIGHT32(w) __builtin_popcount((u32)(w))
 #define csum_unfold(x) ((__wsum)(x))
-#define netdev_rss_key_fill(buf, len) get_random_bytes(buf, len)
 
 /* A net_device that exists only to own NAPI contexts. */
 static inline void lkpi_dummy_netdev_setup(struct net_device *dev) { }
 #define alloc_netdev_dummy(priv) alloc_netdev(priv, "dummy%d", 0, lkpi_dummy_netdev_setup)
-
-#define ns_to_timespec64(ns) \
-    ({ s64 __ns = (ns); struct timespec64 __t = { __ns / 1000000000LL, __ns % 1000000000LL }; __t; })
 
 static inline u64 mul_u64_u64_div_u64(u64 a, u64 b, u64 c)
 {
@@ -80,14 +71,6 @@ static inline int atomic_dec_if_positive(atomic_t *v)
 
 /* MSI-X (one interrupt per RX queue) isn't offered: iwlwifi falls back to
  * MSI and a single RX queue. CPU masks only matter for MSI-X affinity. */
-struct msix_entry {
-    u32 vector;
-    u16 entry;
-};
-static inline int pci_enable_msix_range(struct pci_dev *dev, struct msix_entry *e, int minvec, int maxvec)
-{
-    return -ENOSYS;
-}
 typedef struct cpumask { unsigned long bits[1]; } cpumask_t;
 #define cpu_online_mask ((const struct cpumask *)0)
 static inline void cpumask_set_cpu(unsigned int cpu, struct cpumask *m) { }
@@ -102,7 +85,6 @@ static inline unsigned int pci_rescan_bus(struct pci_bus *bus) { return 0; }
 static inline bool pci_pme_capable(struct pci_dev *dev, int state) { return false; }
 static inline int pci_assign_resource(struct pci_dev *dev, int res) { return 0; }
 
-static inline void napi_synchronize(struct napi_struct *n) { synchronize_rcu(); }
 
 static inline size_t sg_pcopy_from_buffer(struct scatterlist *sgl, unsigned int nents, const void *buf,
                                           size_t buflen, off_t skip)

@@ -137,10 +137,13 @@ int setup_msi(struct pci_dev* pdev) {
         return -ENOSPC; // legacy INTx only
     u8 vector = interrupts::allocate_vector();
     interrupts::set_handler(vector, irq_trampoline);
-    if (!pci::enable_msi(*f, vector))
+    // One vector per device: plain MSI when the device has it (82574/e1000e
+    // and Intel Wi-Fi route their causes differently once MSI-X is on, and
+    // drivers given a single vector program the MSI scheme).
+    if (!pci::enable_msi(*f, vector, true))
         return -EIO;
     pdev->irq = vector;
-    pdev->msix_enabled = f->msix_cap != 0;
+    pdev->msix_enabled = f->msi_cap == 0;
     pdev->msi_enabled = !pdev->msix_enabled;
     return 0;
 }
@@ -183,7 +186,7 @@ bool cmdline_word(const char* w) {
 
 // Linux drivers with a native Syluxium driver behind them: if the Linux one
 // fails, the native one gets the device ("<name>=native" skips the Linux one).
-bool has_native_fallback(const char* name) { return name && !strcmp(name, "r8169"); }
+bool has_native_fallback(const char* name) { return name && (!strcmp(name, "r8169") || !strcmp(name, "e1000e")); }
 
 bool lkpi_match(const dev::Driver* drv, const dev::Device* d) {
     if (d->bus != dev::Bus::Pci || !find_id(static_cast<const pci_driver*>(drv->ctx), d))

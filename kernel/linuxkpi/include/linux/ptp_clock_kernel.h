@@ -7,6 +7,7 @@
 
 struct ptp_clock;
 struct ptp_system_timestamp;
+struct ptp_clock_request;
 
 struct system_device_crosststamp {
     ktime_t device;
@@ -26,6 +27,9 @@ struct ptp_clock_info {
     int (*gettimex64)(struct ptp_clock_info *ptp, struct timespec64 *ts, struct ptp_system_timestamp *sts);
     int (*getcrosststamp)(struct ptp_clock_info *ptp, struct system_device_crosststamp *cts);
     int (*settime64)(struct ptp_clock_info *p, const struct timespec64 *ts);
+    int (*enable)(struct ptp_clock_info *ptp, struct ptp_clock_request *request, int on);
+    int (*verify)(struct ptp_clock_info *ptp, unsigned int pin, int func, unsigned int chan);
+    long (*do_aux_work)(struct ptp_clock_info *ptp);
 };
 
 static inline struct ptp_clock *ptp_clock_register(struct ptp_clock_info *info, struct device *parent) { return NULL; }

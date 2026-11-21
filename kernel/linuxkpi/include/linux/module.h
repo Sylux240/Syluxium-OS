@@ -111,6 +111,7 @@ struct kernel_param;
 #define symbol_put_addr(p) do { } while (0)
 #define module_param_unsafe(name, type, perm) module_param_named(name, name, type, perm)
 #define module_param_array(name, type, nump, perm)
+#define module_param_array_named(name, array, type, nump, perm)
 #define MODULE_PARM_DESC(p, d)
 #define try_module_get(m) 1
 #define module_put(m) do { } while (0)

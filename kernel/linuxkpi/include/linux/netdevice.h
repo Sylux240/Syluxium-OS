@@ -364,6 +364,7 @@ struct net_device {
     struct phy_device* phydev;
     struct sfp_bus* sfp_bus;
     struct ethtool_netdev_state* ethtool;
+    unsigned long mem_start, mem_end; /* shared memory (old ISA cards; e1000e prints the BAR) */
     unsigned long lkpi_priv[] __aligned(64);
 };
 
