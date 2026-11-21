@@ -11,6 +11,10 @@ namespace futex {
 // deadline, 0 = forever. Returns 0, -EAGAIN, -ETIMEDOUT or -EINTR.
 long wait(u64 uaddr, u32 expected, u64 deadline_ns, u32 bitset, bool is_private);
 
+// Waits that ended because the word changed with nobody waking the sleeper
+// (each wait re-checks its word every second).
+u64 lost_wakeups();
+
 // FUTEX_WAKE: wake up to `count` waiters whose bitset intersects. Returns how many.
 long wake(u64 uaddr, int count, u32 bitset, bool is_private);
 

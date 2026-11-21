@@ -1,3 +1,4 @@
+#include <core/log.hpp>
 #include <lib/errno.hpp>
 #include <lib/spinlock.hpp>
 #include <proc/futex.hpp>
@@ -49,6 +50,9 @@ Bucket& bucket_for(const Key& k) {
     return g_buckets[(h >> 32) % BUCKETS];
 }
 
+constexpr u64 RECHECK_NS = 1'000'000'000;
+u64 g_lost_wakeups = 0;
+
 bool matches(const sched::Thread* t, const Key& k) { return t->futex_key_a == k.a && t->futex_key_b == k.b; }
 
 } // namespace
@@ -77,7 +81,32 @@ long wait(u64 uaddr, u32 expected, u64 deadline_ns, u32 bitset, bool is_private)
     me->futex_key_a = key.a;
     me->futex_key_b = key.b;
     me->futex_bitset = bitset;
-    bool woken = sched::block_on(b.waiters, b.lock, deadline_ns);
+    // Sleep in slices of at most a second and look at the word again each
+    // time: if it changed while nobody woke us, a wakeup got lost somewhere.
+    // Futex waits may return spuriously (every caller re-checks the word),
+    // so returning then is always correct -- and it keeps a lost wakeup from
+    // freezing the program for good.
+    bool woken;
+    for (;;) {
+        u64 slice = clock::now_ns() + RECHECK_NS;
+        bool final = deadline_ns && deadline_ns <= slice;
+        woken = sched::block_on(b.waiters, b.lock, final ? deadline_ns : slice);
+        if (woken || final)
+            break;
+        if (signal::interrupted()) {
+            woken = true; // the caller sees EINTR-like spurious return 0 and re-checks
+            break;
+        }
+        u32 now_val = *reinterpret_cast<volatile u32*>(uaddr);
+        if (now_val != expected) {
+            g_lost_wakeups++;
+            if (g_lost_wakeups <= 20)
+                klog::warn("futex: lost wakeup caught (tid %d, word %#lx: %u -> %u)", me->user_tid, uaddr, expected,
+                           now_val);
+            woken = true;
+            break;
+        }
+    }
     me->futex_key_a = me->futex_key_b = 0;
     b.lock.unlock();
 
@@ -85,6 +114,8 @@ long wait(u64 uaddr, u32 expected, u64 deadline_ns, u32 bitset, bool is_private)
         return -err::TIMEDOUT;
     return 0; // includes spurious wakeups (signals); callers always re-check the word
 }
+
+u64 lost_wakeups() { return g_lost_wakeups; }
 
 long wake(u64 uaddr, int count, u32 bitset, bool is_private) {
     Key key;

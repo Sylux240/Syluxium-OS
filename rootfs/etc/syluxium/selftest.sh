@@ -60,5 +60,11 @@ check "/proc/<pid>/fd lists open files"     sh -c 'exec 7</etc/hostname; [ "$(re
 check "free / uptime work"                  sh -c 'free >/dev/null && uptime >/dev/null'
 check "/sys/devices/system/cpu/online"      sh -c 'grep -q "^0" /sys/devices/system/cpu/online'
 
+# --- threads and pipes under stress (1 s each part): futex handoffs (a
+# lost wakeup hangs it: the program's own watchdog fails it), both pipe ends
+# closed at once, dup storms, fork/exec with inherited pipes ---
+check "futex stress (GIL handoff, condvars, timeouts)" /opt/syluxium/tests/futexstress 1
+check "pipe / fd stress (close races, dup, fork)"     /opt/syluxium/tests/pipestress 1
+
 echo "selftest: $pass passed, $fail failed"
 exit $fail
