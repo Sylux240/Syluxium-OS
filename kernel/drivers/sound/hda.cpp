@@ -201,6 +201,8 @@ public:
     void silence_unused();
     void log_codec();
     bool apple_gpio_amp = false;
+    u8 gpio_speaker = 0x01;   // GPIO bits that power the speaker amplifier
+    u8 gpio_headphone = 0x00; // ... and the headphone amplifier (0: none)
     void read_widget(u8 nid);
     bool find_path(u8 from, bool to_dac, const u8* preferred, u32 npreferred, Path* out);
     void enable_output_path(const Path& p, bool headphone);
@@ -460,6 +462,19 @@ void Controller::apply_quirks() {
         klog::info("hda: Apple CS4208 (board %04x): processing block, %sspeaker amplifier (GPIO0) on", model,
                    (model == 0x7100 || model == 0x7200) ? "MacBook Air pin table, " : "");
     }
+    if ((vendor_id == 0x10134206 || vendor_id == 0x10134207) && (ssid >> 16) == 0x106B) {
+        // Cirrus Logic CS4206/CS4207 in Macs (iMac 12/13, MacBook Pro 8-10,
+        // MacBook Air 4/5): amplifiers on GPIO1 (headphones) and GPIO3
+        // (speakers), as Linux's patch_cirrus "apple" fixup. Off = silence.
+        apple_gpio_amp = true;
+        gpio_speaker = 0x08;
+        gpio_headphone = 0x02;
+        verb(afg, 0x716, 0x0A); // GPIO mask
+        verb(afg, 0x717, 0x0A); // GPIO direction: outputs
+        verb(afg, 0x715, gpio_speaker); // speakers on until headphones are seen
+        klog::info("hda: Apple CS%04x (board %04x): speaker amplifier (GPIO3) on, headphone amplifier on GPIO1",
+                   vendor_id & 0xFFFF, ssid & 0xFFFF);
+    }
 }
 
 u8 pin_device(const Widget& x);
@@ -499,7 +514,7 @@ void jack_thread(void* arg) {
             for (u8 i = 0; i < js->nspk; i++)
                 hc->verb(js->spk[i], 0x707 /* pin control */, any ? 0 : 0x40 /* out */);
             if (hc->apple_gpio_amp)
-                hc->verb(hc->afg, 0x715, any ? 0x00 : 0x01);
+                hc->verb(hc->afg, 0x715, any ? hc->gpio_headphone : hc->gpio_speaker);
             klog::info("hda: headphones %s: speakers %s", any ? "plugged in" : "unplugged", any ? "off" : "on");
         }
         sched::sleep_ms(300);

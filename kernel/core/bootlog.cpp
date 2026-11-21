@@ -77,16 +77,24 @@ void mount_logs_partition() {
         int n = snprintf(info, sizeof(info), "Computer: %s\r\nBoot options: %s\r\n", mlen ? machine : "unknown",
                          boot::cmdline());
         vfs::create_file("/boot/logs/machine.txt", info, static_cast<usize>(n), 0644);
+        block::sync_all(); // the folder is on the stick before anything else can go wrong
         klog::ok("Mounted %s (SYLUXLOGS): this boot's logs go to %s", source, folder);
     }, nullptr);
 }
 
 void writer(void*) {
-    static const u32 at_seconds[] = {10, 20, 30, 45, 60, 90, 120, 180, 300, 600};
+    // Early and often at first: a machine that freezes soon after still
+    // leaves its log (then every few minutes for the rest of the session).
+    static const u32 at_seconds[] = {2, 5, 10, 15, 20, 30, 45, 60, 90, 120, 180, 240, 300, 450, 600, 900, 1200, 1800};
     u32 elapsed = 0;
+    save();
     for (u32 t : at_seconds) {
         sched::sleep_ms(static_cast<u64>(t - elapsed) * 1000);
         elapsed = t;
+        save();
+    }
+    for (;;) { // the rest of the session: every 10 minutes
+        sched::sleep_ms(600'000);
         save();
     }
 }

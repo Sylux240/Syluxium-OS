@@ -8,6 +8,23 @@ chmod 755 /run/user
 
 syluxium-early
 
+# On a Syluxium stick: the X server's, login screen's and session's logs go
+# into this boot's log folder too (every 15 s), next to the kernel log.
+if [ -d /boot/logs ] && grep -q " /boot/logs-stick " /proc/mounts; then
+    (
+        while :; do
+            sleep 15
+            for f in /var/log/Xorg.0.log /var/log/Xorg.0.log.old /var/log/tdm.log /var/log/tdm.out; do
+                [ -f "$f" ] && cp "$f" /boot/logs/ 2>/dev/null
+            done
+            for h in /home/*/.xsession-errors; do
+                [ -f "$h" ] && cp "$h" "/boot/logs/xsession-errors-$(basename "$(dirname "$h")").txt" 2>/dev/null
+            done
+            sync
+        done
+    ) &
+fi
+
 # X display driver for this machine (modesetting on a DRM device, else fbdev).
 syluxium-display-config > /dev/null 2>&1
 
