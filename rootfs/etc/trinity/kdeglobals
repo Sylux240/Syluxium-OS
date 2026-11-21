@@ -28,6 +28,14 @@ taskbarFont=Inter,9,-1,5,50,0,0,0,0,0
 desktopFont=Inter,9,-1,5,50,0,0,0,0,0
 fixed=DejaVu Sans Mono,9,-1,5,50,0,0,0,0,0
 
+# Dusk icons (tools/make-dusk-icons.py) over TDE's crystalsvg.
+[Icons]
+Theme=Syluxium
+
+# Desktop icons as large tiles, as in the Dusk mockup.
+[DesktopIcons]
+Size=48
+
 [KDE]
 widgetStyle=QtCurve
 contrast=7

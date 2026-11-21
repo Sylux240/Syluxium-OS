@@ -329,7 +329,7 @@ def make_menu_top(root):
     left.paste(pic, (14, 10), pic)
     g = ImageDraw.Draw(left)
     g.text((70, 25), "Syluxium", font=font(15), fill=STAR, anchor="lm")
-    g.text((70, 44), "Search, apps and settings", font=font(11, bold=False), fill=(170, 179, 214), anchor="lm")
+    g.text((70, 44), "Apps and settings", font=font(11, bold=False), fill=(170, 179, 214), anchor="lm")
     save(left, os.path.join(pics, "syluxium_menu_top_left.png"))
     save(strip(8), os.path.join(pics, "syluxium_menu_top_right.png"))
 
