@@ -20,6 +20,8 @@ limine_module_response* modules(); // files loaded next to the kernel (initramfs
 // Called once bootloader-reclaimable memory is handed to the page allocator:
 // every response lives there, so all accessors return nullptr afterwards.
 const char* cmdline(); // kernel command line ("" if none); valid after release()
+// SMBIOS entry points (physical; 0 if the firmware has none). Saved by release().
+void smbios_entries(u64* entry32, u64* entry64);
 void release();
 bool released();
 

@@ -1,6 +1,8 @@
 #include <block/block.hpp>
 #include <core/bootlog.hpp>
 #include <core/log.hpp>
+#include <core/smbios.hpp>
+#include <boot/limine_requests.hpp>
 #include <fs/fat.hpp>
 #include <fs/vfs.hpp>
 #include <lib/format.hpp>
@@ -31,13 +33,51 @@ void mount_logs_partition() {
         char head[32] = {};
         if (!readme || readme->read(0, head, 31) < 20 || strncmp(head, "Syluxium writes its boot log", 28) != 0)
             return;
-        vfs::mkdir_p("/boot/logs");
+        // Each boot gets its own folder, "NN-<machine>", so one stick can
+        // collect logs from several computers. /boot/logs points into it
+        // (the kernel log, display.txt, session logs all land there).
+        vfs::mkdir_p("/boot/logs-stick");
         char source[32];
         snprintf(source, sizeof(source), "/dev/%s", d->name);
-        if (vfs::mount_at("/boot/logs", root, source, "vfat") == 0) {
-            g_logs_mounted = true;
-            klog::ok("Mounted %s (SYLUXLOGS) on /boot/logs: the boot log is saved there", source);
-        }
+        if (vfs::mount_at("/boot/logs-stick", root, source, "vfat") != 0)
+            return;
+        unsigned highest = 0;
+        vfs::DirEntry e;
+        for (u64 i = 0; root->readdir(i, &e) == 1; i++)
+            if (e.type == vfs::DT_DIR && e.name[0] >= '0' && e.name[0] <= '9' && e.name[1] >= '0' &&
+                e.name[1] <= '9' && e.name[2] == '-') {
+                unsigned n = static_cast<unsigned>((e.name[0] - '0') * 10 + (e.name[1] - '0'));
+                highest = n > highest ? n : highest;
+            }
+        unsigned number = highest < 99 ? highest + 1 : 99; // 99 boots: the last folder is reused
+        char machine[48];
+        snprintf(machine, sizeof(machine), "%s", smbios::machine_name());
+        for (char* c = machine; *c; c++) // FAT can't store these in names
+            if (*c == '/' || *c == '\\' || *c == ':' || *c == '*' || *c == '?' || *c == '"' || *c == '<' ||
+                *c == '>' || *c == '|')
+                *c = '-';
+        usize mlen = strlen(machine);
+        while (mlen && (machine[mlen - 1] == ' ' || machine[mlen - 1] == '.'))
+            machine[--mlen] = 0;
+        char folder[64];
+        snprintf(folder, sizeof(folder), "%02u-%s", number, mlen ? machine : "Unknown PC");
+        vfs::Inode* dir = root->lookup(folder, strlen(folder));
+        if (!dir && root->create(folder, strlen(folder), vfs::S_IFDIR | 0755, nullptr, &dir) != 0)
+            return;
+        char target[96];
+        snprintf(target, sizeof(target), "/boot/logs-stick/%s", folder);
+        vfs::Inode* bootdir;
+        if (vfs::resolve("/boot", nullptr, true, &bootdir) != 0)
+            return;
+        bootdir->unlink("logs", 4, false);
+        if (bootdir->create("logs", 4, vfs::S_IFLNK | 0777, target, nullptr) != 0)
+            return;
+        g_logs_mounted = true;
+        char info[256];
+        int n = snprintf(info, sizeof(info), "Computer: %s\r\nBoot options: %s\r\n", mlen ? machine : "unknown",
+                         boot::cmdline());
+        vfs::create_file("/boot/logs/machine.txt", info, static_cast<usize>(n), 0644);
+        klog::ok("Mounted %s (SYLUXLOGS): this boot's logs go to %s", source, folder);
     }, nullptr);
 }
 

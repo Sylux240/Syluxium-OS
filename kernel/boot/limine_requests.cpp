@@ -35,6 +35,10 @@ LIMINE_REQUEST limine_module_request module_request = {
     .id = LIMINE_MODULE_REQUEST_ID, .revision = 0, .response = nullptr,
     .internal_module_count = 0, .internal_modules = nullptr};
 
+// SMBIOS entry points (the machine's name for the boot log folders).
+LIMINE_REQUEST limine_smbios_request smbios_request = {
+    .id = LIMINE_SMBIOS_REQUEST_ID, .revision = 0, .response = nullptr};
+
 // The kernel command line from limine.conf ("cmdline:"), e.g. "desktop".
 LIMINE_REQUEST limine_executable_cmdline_request cmdline_request = {
     .id = LIMINE_EXECUTABLE_CMDLINE_REQUEST_ID, .revision = 0, .response = nullptr};
@@ -83,9 +87,25 @@ const char* cmdline() {
     return g_cmdline;
 }
 
+u64 g_smbios32 = 0, g_smbios64 = 0;
+
+// Physical addresses (the response itself goes away with release()).
+void smbios_entries(u64* entry32, u64* entry64) {
+    if (!g_released && smbios_request.response) {
+        u64 hhdm = hhdm_offset();
+        auto phys = [hhdm](u64 a) { return a >= hhdm && hhdm ? a - hhdm : a; };
+        g_smbios32 = smbios_request.response->entry_32 ? phys(reinterpret_cast<u64>(smbios_request.response->entry_32)) : 0;
+        g_smbios64 = smbios_request.response->entry_64 ? phys(reinterpret_cast<u64>(smbios_request.response->entry_64)) : 0;
+    }
+    *entry32 = g_smbios32;
+    *entry64 = g_smbios64;
+}
+
 void release() {
     hhdm_offset();
     cmdline();
+    u64 e32, e64;
+    smbios_entries(&e32, &e64);
     g_released = true;
 }
 bool released() { return g_released; }
