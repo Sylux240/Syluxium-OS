@@ -515,6 +515,49 @@ private:
     int m_pid;
 };
 
+// /proc/<pid>/ns/<kind>: what setns() enters (containers: lxc-attach).
+// Plain readable files here (Linux's are nsfs magic links).
+constexpr u8 KIND_NSFS = 0xB5;
+class NsFile : public vfs::Inode {
+public:
+    NsFile(int pid, const char* kind) : m_pid(pid) {
+        ino = vfs::next_ino();
+        mode = vfs::S_IFREG | 0444;
+        anon_kind = KIND_NSFS;
+        snprintf(m_kind, sizeof(m_kind), "%s", kind);
+    }
+    isize read(u64, void*, usize) override { return -err::INVAL; }
+    int m_pid;
+    char m_kind[16];
+};
+
+class NsDir : public vfs::Inode {
+public:
+    explicit NsDir(int pid) {
+        ino = vfs::next_ino();
+        mode = vfs::S_IFDIR | 0511;
+        for (int i = 0; i < COUNT; i++)
+            m_files[i] = new NsFile(pid, kinds[i]);
+    }
+    vfs::Inode* lookup(const char* name, usize len) override {
+        for (int i = 0; i < COUNT; i++)
+            if (name_is(name, len, kinds[i]))
+                return m_files[i];
+        return nullptr;
+    }
+    long readdir(u64 index, vfs::DirEntry* out) override {
+        if (index >= COUNT)
+            return 0;
+        fill_entry(out, m_files[index]->ino, vfs::DT_REG, kinds[index]);
+        return 1;
+    }
+
+private:
+    static constexpr int COUNT = 7;
+    static constexpr const char* kinds[COUNT] = {"mnt", "uts", "ipc", "net", "pid", "cgroup", "user"};
+    NsFile* m_files[COUNT];
+};
+
 PidDir::PidDir(int p, int t) : pid(p), tid(t) {
     ino = vfs::next_ino();
     mode = vfs::S_IFDIR | 0555;
@@ -532,6 +575,7 @@ PidDir::PidDir(int p, int t) : pid(p), tid(t) {
     add("exe", new GeneratedLink(link_exe, this));
     add("cwd", new GeneratedLink(link_cwd, this));
     add("fd", new FdDir(pid));
+    add("ns", new NsDir(pid));
     if (!tid)
         add("task", new TaskDir(pid));
 }
@@ -841,3 +885,15 @@ void init() {
 }
 
 } // namespace sysfs
+
+namespace proc {
+// setns(): which process and kind a /proc/<pid>/ns/<kind> file names.
+long ns_file_target(vfs::File* f, int* pid, char* kind, usize size) {
+    if (f->inode->anon_kind != procfs::KIND_NSFS)
+        return -err::INVAL;
+    auto* n = static_cast<procfs::NsFile*>(f->inode);
+    *pid = n->m_pid;
+    snprintf(kind, size, "%s", n->m_kind);
+    return 0;
+}
+} // namespace proc

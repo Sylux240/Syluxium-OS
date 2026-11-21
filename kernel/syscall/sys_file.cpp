@@ -7,6 +7,7 @@
 #include <fs/inotify.hpp>
 #include <fs/fat.hpp>
 #include <fs/pipe.hpp>
+#include <fs/cgroupfs.hpp>
 #include <fs/ramfs.hpp>
 #include <fs/poll.hpp>
 #include <fs/procfs.hpp>
@@ -1566,9 +1567,43 @@ long sys_mount(SYSCALL_ARGS) {
         return -err::PERM;
     UserPath source(a0), target(a1), type(a2);
     if (target.error()) return target.error();
-    if (type.error()) return type.error();
     char abs[512];
     join_path(proc::current()->cwd_path, target.c_str(), abs, sizeof(abs));
+
+    // Mount flags (containers): bind mounts, moves, remounts and propagation
+    // changes. Read-only and propagation are accepted, not enforced: there is
+    // one mount table (no mount namespaces yet).
+    constexpr u64 MS_RDONLY = 1, MS_REMOUNT = 32, MS_BIND = 4096, MS_MOVE = 8192, MS_UNBINDABLE = 1 << 17,
+                  MS_PRIVATE = 1 << 18, MS_SLAVE = 1 << 19, MS_SHARED = 1 << 20;
+    u64 mflags = a3;
+    (void)MS_RDONLY;
+    if (mflags & MS_REMOUNT) {
+        Inode* n;
+        return vfs::resolve(abs, nullptr, true, &n);
+    }
+    if (mflags & MS_BIND) {
+        if (source.error())
+            return source.error();
+        char src_abs[512];
+        join_path(proc::current()->cwd_path, source.c_str(), src_abs, sizeof(src_abs));
+        Inode* src;
+        if (long r = vfs::resolve(src_abs, nullptr, true, &src); r < 0)
+            return r;
+        return vfs::mount_at(abs, src, src_abs, "bind");
+    }
+    if (mflags & MS_MOVE) {
+        if (source.error())
+            return source.error();
+        char src_abs[512];
+        join_path(proc::current()->cwd_path, source.c_str(), src_abs, sizeof(src_abs));
+        return vfs::move_mount(src_abs, abs);
+    }
+    if (mflags & (MS_UNBINDABLE | MS_PRIVATE | MS_SLAVE | MS_SHARED)) {
+        Inode* n;
+        return vfs::resolve(abs, nullptr, true, &n);
+    }
+
+    if (type.error()) return type.error(); // the flag-only operations above have no type
 
     // vfat/exfat options: uid=, gid=, umask=, fmask=, dmask= (octal masks).
     fat::MountOptions fat_opts;
@@ -1655,6 +1690,25 @@ long sys_mount(SYSCALL_ARGS) {
     }
     if (strcmp(t, "binder") == 0) // binderfs: Android binder devices (kernel/linuxkpi/binder.cpp)
         return vfs::mount_at(abs, linuxkpi::binderfs_mount(), "binder", "binder");
+    if (strcmp(t, "cgroup2") == 0 || strcmp(t, "cgroup") == 0)
+        return vfs::mount_at(abs, cgroupfs::mount(), "cgroup2", "cgroup2");
+    if (strcmp(t, "mqueue") == 0) { // POSIX message queues: an empty directory for now
+        auto* root = new ramfs::Dir;
+        root->mode = S_IFDIR | 01777;
+        return vfs::mount_at(abs, root, "mqueue", "mqueue");
+    }
+    // The system's own instances, mounted again (inside containers).
+    struct { const char* type; const char* path; } shared[] = {
+        {"proc", "/proc"}, {"sysfs", "/sys"}, {"devtmpfs", "/dev"}, {"devpts", "/dev/pts"},
+    };
+    for (auto& s : shared) {
+        if (strcmp(t, s.type) != 0)
+            continue;
+        Inode* root;
+        if (long r = vfs::resolve_global(s.path, &root); r < 0)
+            return r;
+        return vfs::mount_at(abs, root, s.type, s.type);
+    }
     return -err::NODEV; // unknown file system type
 }
 
@@ -1669,6 +1723,78 @@ long sys_umount2(SYSCALL_ARGS) {
     join_path(proc::current()->cwd_path, target.c_str(), abs, sizeof(abs));
     block::sync_all();
     return vfs::unmount(abs);
+}
+
+// chroot(path): the caller's "/" (and its children's) becomes `path`.
+long sys_chroot(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    if (!proc::capable())
+        return -err::PERM;
+    UserPath path(a0);
+    if (path.error())
+        return path.error();
+    Process* p = proc::current();
+    char abs[512];
+    join_path(p->cwd_path, path.c_str(), abs, sizeof(abs));
+    Inode* dir;
+    if (long r = vfs::resolve(abs, nullptr, true, &dir); r < 0)
+        return r;
+    if (!vfs::is_dir(dir->mode))
+        return -err::NOTDIR;
+    // The working directory keeps its place; its path is now seen from the new root.
+    usize n = strlen(abs);
+    if (strcmp(abs, "/") != 0 && strncmp(p->cwd_path, abs, n) == 0 && (p->cwd_path[n] == '/' || !p->cwd_path[n])) {
+        char rest[512];
+        snprintf(rest, sizeof(rest), "%s", p->cwd_path[n] ? p->cwd_path + n : "/");
+        snprintf(p->cwd_path, sizeof(p->cwd_path), "%s", rest);
+    }
+    p->root = dir;
+    return 0;
+}
+
+// pivot_root(new_root, put_old): the caller's "/" becomes new_root; the old
+// root stays reachable at put_old (under the new root) until it's unmounted.
+// Only the caller and its children move (as after unshare(CLONE_NEWNS)): the
+// rest of the system keeps its root.
+long sys_pivot_root(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    if (!proc::capable())
+        return -err::PERM;
+    UserPath new_root(a0), put_old(a1);
+    if (new_root.error())
+        return new_root.error();
+    if (put_old.error())
+        return put_old.error();
+    Process* p = proc::current();
+    char nr_abs[512], po_abs[512];
+    join_path(p->cwd_path, new_root.c_str(), nr_abs, sizeof(nr_abs));
+    join_path(p->cwd_path, put_old.c_str(), po_abs, sizeof(po_abs));
+    Inode *nr, *po;
+    if (long r = vfs::resolve(nr_abs, nullptr, true, &nr); r < 0)
+        return r;
+    if (long r = vfs::resolve(po_abs, nullptr, true, &po); r < 0)
+        return r;
+    if (!vfs::is_dir(nr->mode) || !vfs::is_dir(po->mode))
+        return -err::NOTDIR;
+    Inode* old_root = p->root ? p->root : vfs::root();
+    if (nr == old_root)
+        return -err::BUSY;
+    // put_old as seen from the new root.
+    usize n = strlen(nr_abs);
+    char po_new[512];
+    if (strncmp(po_abs, nr_abs, n) == 0 && (po_abs[n] == '/' || !po_abs[n] || n == 1))
+        snprintf(po_new, sizeof(po_new), "%s", n == 1 ? po_abs : (po_abs[n] ? po_abs + n : "/"));
+    else
+        return -err::INVAL; // put_old must be under new_root
+    p->root = nr;
+    if (po != nr) // pivot_root(".", ".") stacks the old root on the new one; nothing to show then
+        if (long r = vfs::mount_at(po_new, old_root, "rootfs", "rootfs"); r < 0) {
+            p->root = old_root == vfs::root() ? nullptr : old_root;
+            return r;
+        }
+    if (p->cwd == nr)
+        snprintf(p->cwd_path, sizeof(p->cwd_path), "/");
+    return 0;
 }
 
 // Ownership: accepted (single root user for now).
@@ -1750,6 +1876,8 @@ void register_file() {
     set(75, sys_sync, "fdatasync");
     set(165, sys_mount, "mount");
     set(166, sys_umount2, "umount2");
+    set(155, sys_pivot_root, "pivot_root");
+    set(161, sys_chroot, "chroot");
     set(306, sys_sync, "syncfs");
     set(76, sys_truncate, "truncate");
     set(77, sys_ftruncate, "ftruncate");

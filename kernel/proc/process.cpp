@@ -204,6 +204,10 @@ void on_return_to_user(interrupts::Frame* frame) {
 
 void init() {
     vfs::set_permission_hook([](vfs::Inode* n, int mask) { return permission(n, mask); });
+    vfs::set_process_root_hook([]() -> vfs::Inode* {
+        Process* p = current();
+        return p ? p->root : nullptr;
+    });
     interrupts::set_handler(interrupts::VEC_PAGE_FAULT, page_fault);
     interrupts::set_user_fault_hook(user_fault);
     interrupts::set_return_to_user_hook(on_return_to_user);
@@ -508,6 +512,14 @@ long do_clone(interrupts::Frame* frame, u64 flags, u64 new_sp, u64 parent_tid, u
     memcpy(child->exe_path, parent->exe_path, sizeof(child->exe_path));
     memcpy(child->cwd_path, parent->cwd_path, sizeof(child->cwd_path));
     child->cwd = parent->cwd;
+    child->root = parent->root;
+    if (flags & 0x04000000 /* CLONE_NEWUTS */) {
+        child->uts = new Uts(*(parent->uts ? parent->uts : system_uts()));
+        child->uts->refs = 1;
+    } else if (parent->uts) {
+        child->uts = parent->uts;
+        uts_get(child->uts);
+    }
     child->umask = parent->umask;
     child->cred = parent->cred;
     child->oom_score_adj = parent->oom_score_adj;
@@ -953,4 +965,18 @@ void process_gone(proc::Process* p); // kernel/linuxkpi/binder.cpp
 proc::Process::~Process() {
     if (lkpi_task || lkpi_mm)
         linuxkpi::process_gone(this);
+    if (uts)
+        proc::uts_put(uts);
 }
+
+namespace proc {
+Uts* system_uts() {
+    static Uts u;
+    return &u;
+}
+void uts_get(Uts* u) { __atomic_add_fetch(&u->refs, 1, __ATOMIC_RELAXED); }
+void uts_put(Uts* u) {
+    if (u != system_uts() && __atomic_sub_fetch(&u->refs, 1, __ATOMIC_ACQ_REL) == 0)
+        delete u;
+}
+} // namespace proc

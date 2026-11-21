@@ -20,8 +20,15 @@ u64 g_next_ino = 1;
 constexpr int MAX_SYMLINK_DEPTH = 40;
 constexpr usize MAX_NAME = 255;
 
-long resolve_impl(const char* path, Inode* cwd, bool follow_last, Inode** out, int depth);
+long resolve_impl(const char* path, Inode* cwd, bool follow_last, Inode** out, int depth, Inode* top);
 long (*g_permission)(Inode*, int) = nullptr; // set by the process layer: search (x) permission on directories
+Inode* (*g_process_root)() = nullptr;        // set by the process layer: the caller's "/" (chroot), or null
+
+// Where absolute paths of the current process start (chroot / pivot_root).
+Inode* top_dir() {
+    Inode* r = g_process_root ? g_process_root() : nullptr;
+    return r ? r : g_root;
+}
 
 // ---- Mount table ----
 // A mount covers a directory (any file system) with another file system's
@@ -37,7 +44,7 @@ struct Mount {
     Inode* covered; // the directory it sits on
 };
 
-constexpr usize MAX_MOUNTS = 64;
+constexpr usize MAX_MOUNTS = 256; // containers bring dozens
 Mount g_mounts[MAX_MOUNTS];
 usize g_mount_count = 0;
 IrqSpinlock g_mount_lock;
@@ -76,13 +83,14 @@ long follow(Inode* link, Inode* dir, Inode** out, int depth) {
     if (n < 0)
         return n;
     target[n] = 0;
-    return resolve_impl(target, dir, true, out, depth + 1);
+    return resolve_impl(target, dir, true, out, depth + 1, top_dir());
 }
 
-long resolve_impl(const char* path, Inode* cwd, bool follow_last, Inode** out, int depth) {
+// `top`: the "/" of this walk (absolute paths start there, ".." stops there).
+long resolve_impl(const char* path, Inode* cwd, bool follow_last, Inode** out, int depth, Inode* top) {
     if (!path || !*path)
         return -err::NOENT;
-    Inode* node = (*path == '/' || !cwd) ? g_root : cwd;
+    Inode* node = (*path == '/' || !cwd) ? top : cwd;
 
     const char* p = path;
     while (true) {
@@ -111,11 +119,11 @@ long resolve_impl(const char* path, Inode* cwd, bool follow_last, Inode** out, i
         if (len == 1 && start[0] == '.')
             continue;
         if (len == 2 && start[0] == '.' && start[1] == '.') {
-            if (node == g_root)
+            if (node == g_root || node == top)
                 continue;
-            for (Inode* c; node != g_root && (c = covered_by(node));)
+            for (Inode* c; node != g_root && node != top && (c = covered_by(node));)
                 node = c; // leave mounted file systems
-            if (node != g_root && node->parent)
+            if (node != g_root && node != top && node->parent)
                 node = node->parent;
             continue;
         }
@@ -168,8 +176,12 @@ void init() {
 Inode* root() { return g_root; }
 
 long resolve(const char* path, Inode* cwd, bool follow_last, Inode** out) {
-    return resolve_impl(path, cwd, follow_last, out, 0);
+    return resolve_impl(path, cwd, follow_last, out, 0, top_dir());
 }
+
+long resolve_global(const char* path, Inode** out) { return resolve_impl(path, nullptr, true, out, 0, g_root); }
+
+void set_process_root_hook(Inode* (*fn)()) { g_process_root = fn; }
 
 long resolve_parent(const char* path, Inode* cwd, Inode** parent, const char** name, usize* len) {
     if (!path || !*path)
@@ -190,7 +202,7 @@ long resolve_parent(const char* path, Inode* cwd, Inode** parent, const char** n
 
     Inode* dir;
     if (name_start == 0) {
-        dir = (*path == '/') ? g_root : (cwd ? cwd : g_root);
+        dir = (*path == '/' || !cwd) ? top_dir() : cwd;
     } else {
         char buf[1024];
         if (name_start >= sizeof(buf))
@@ -402,8 +414,10 @@ long mount_at(const char* path, Inode* fs_root, const char* source, const char* 
     Inode* target;
     if (long r = resolve(path, nullptr, true, &target); r < 0)
         return r;
-    if (!is_dir(target->mode))
-        return -err::NOTDIR;
+    // Directories on directories; a file only on a file (bind mounts of
+    // single files and device nodes, as containers do).
+    if (is_dir(target->mode) != is_dir(fs_root->mode))
+        return is_dir(target->mode) ? -err::NOTDIR : -err::ISDIR;
     LockGuard guard(g_mount_lock);
     if (g_mount_count >= MAX_MOUNTS)
         return -err::NOMEM;
@@ -418,12 +432,56 @@ long mount_at(const char* path, Inode* fs_root, const char* source, const char* 
     return 0;
 }
 
-long unmount(const char* path) {
-    LockGuard guard(g_mount_lock);
+// The mount `path` names, as the caller sees it: the newest mount whose root
+// `node` (what path resolves to) is, or that covers it, preferring one
+// recorded under that path. Mount lock held.
+long find_mount(const char* path, Inode* node, usize* index) {
+    long best = -1;
     for (usize i = g_mount_count; i-- > 0;) {
-        if (strcmp(g_mounts[i].path, path) != 0)
+        if (g_mounts[i].root != node && g_mounts[i].covered != node)
             continue;
-        for (usize j = 0; j < g_mount_count; j++) // something mounted inside it?
+        if (strcmp(g_mounts[i].path, path) == 0) {
+            best = static_cast<long>(i);
+            break;
+        }
+        if (best < 0)
+            best = static_cast<long>(i);
+    }
+    if (best < 0)
+        return node == top_dir() ? 1 : -err::INVAL; // pivot_root(".", ".") left nothing to detach
+    *index = static_cast<usize>(best);
+    return 0;
+}
+
+// MS_MOVE: the mount at `from` now sits on `to`.
+long move_mount(const char* from, const char* to) {
+    Inode *target, *node;
+    if (long r = resolve(to, nullptr, true, &target); r < 0)
+        return r;
+    if (long r = resolve(from, nullptr, true, &node); r < 0)
+        return r;
+    LockGuard guard(g_mount_lock);
+    usize i;
+    if (long r = find_mount(from, node, &i); r != 0)
+        return r < 0 ? r : -err::INVAL;
+    g_mounts[i].covered = target;
+    snprintf(g_mounts[i].path, sizeof(g_mounts[i].path), "%s", to);
+    return 0;
+}
+
+long unmount(const char* path) {
+    Inode* node;
+    if (long r = resolve(path, nullptr, true, &node); r < 0)
+        return r;
+    LockGuard guard(g_mount_lock);
+    usize found;
+    if (long r = find_mount(path, node, &found); r != 0)
+        return r < 0 ? r : 0;
+    for (usize i = found + 1; i-- > found;) {
+        // Something mounted inside it? (Bind mounts share their file
+        // system with others; containers detach them freely.)
+        bool shared = strcmp(g_mounts[i].type, "bind") == 0 || strcmp(g_mounts[i].type, "rootfs") == 0;
+        for (usize j = 0; j < g_mount_count && !shared; j++)
             if (j != i && g_mounts[j].covered->dev == g_mounts[i].root->dev && g_mounts[i].root->dev != 1)
                 return -err::BUSY;
         for (usize j = i; j + 1 < g_mount_count; j++)

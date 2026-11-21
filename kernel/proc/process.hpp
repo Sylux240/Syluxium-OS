@@ -45,6 +45,18 @@ long may_delete(vfs::Inode* dir, vfs::Inode* victim);
 // it's setgid); persisted through Inode::set_owner.
 void init_owner(vfs::Inode* dir, vfs::Inode* n);
 
+// Host and domain name (UTS namespace): shared until unshare(CLONE_NEWUTS).
+struct Uts {
+    char nodename[65] = "syluxium";
+    char domainname[65] = "(none)";
+    u32 refs = 1;
+};
+Uts* system_uts();
+// setns(): the process and namespace kind a /proc/<pid>/ns/<kind> file names (procfs).
+long ns_file_target(vfs::File* f, int* pid, char* kind, usize size);
+void uts_get(Uts* u);
+void uts_put(Uts* u);
+
 struct Process {
     int pid = 0;
     int pgid = 0;   // process group (job)
@@ -62,6 +74,8 @@ struct Process {
 
     vfs::Inode* cwd = nullptr;
     char cwd_path[512] = "/";
+    vfs::Inode* root = nullptr; // chroot / pivot_root: this process's "/" (nullptr: the system's)
+    Uts* uts = nullptr;         // nullptr: the system's
     // ITIMER_REAL / alarm(): absolute deadline (clock ns, 0 = off) and reload interval.
     u64 alarm_deadline = 0, alarm_interval = 0;
     u32 umask = 022;

@@ -538,11 +538,12 @@ long sys_uname(SYSCALL_ARGS) {
     // Report "Linux": Linux programs (and libc) branch on this. The release
     // string says what's really underneath.
     snprintf(u.sysname, 65, "Linux");
-    snprintf(u.nodename, 65, "syluxium");
+    const proc::Uts* uts = proc::current()->uts ? proc::current()->uts : proc::system_uts();
+    snprintf(u.nodename, 65, "%s", uts->nodename);
     snprintf(u.release, 65, "6.12.0-syluxium");
     snprintf(u.version, 65, "#1 SMP Syluxium " __DATE__);
     snprintf(u.machine, 65, "x86_64");
-    snprintf(u.domainname, 65, "(none)");
+    snprintf(u.domainname, 65, "%s", uts->domainname);
     return uaccess::put(reinterpret_cast<UtsName*>(a0), u);
 }
 
@@ -962,7 +963,133 @@ long sys_futex(SYSCALL_ARGS) {
 
 } // namespace
 
+// ---- containers: host names, namespaces ----
+
+constexpr u64 CLONE_NEWNS = 0x20000, CLONE_NEWCGROUP = 0x02000000, CLONE_NEWUTS = 0x04000000,
+              CLONE_NEWIPC = 0x08000000, CLONE_NEWUSER = 0x10000000, CLONE_NEWPID = 0x20000000,
+              CLONE_NEWNET = 0x40000000, CLONE_NEWTIME = 0x80, CLONE_FS = 0x200, CLONE_FILES = 0x400,
+              CLONE_SYSVSEM = 0x40000;
+
+// The calling process's own UTS namespace (copied on first write after unshare).
+proc::Uts* own_uts() {
+    Process* p = proc::current();
+    if (!p->uts) {
+        p->uts = proc::system_uts();
+        proc::uts_get(p->uts);
+    }
+    return p->uts;
+}
+
+long set_name(u64 user, u64 len, bool host) {
+    if (!proc::capable())
+        return -err::PERM;
+    if (len > 64)
+        return -err::INVAL;
+    char name[65] = {};
+    if (len && uaccess::copy_from(name, reinterpret_cast<const void*>(user), len) < 0)
+        return -err::FAULT;
+    proc::Uts* u = own_uts();
+    snprintf(host ? u->nodename : u->domainname, 65, "%s", name);
+    return 0;
+}
+
+long sys_sethostname(SYSCALL_ARGS) { SYSCALL_UNUSED; return set_name(a0, a1, true); }
+long sys_setdomainname(SYSCALL_ARGS) { SYSCALL_UNUSED; return set_name(a0, a1, false); }
+
+// unshare(): a private UTS namespace (host name) is real. Mount, IPC,
+// network, PID, cgroup and user namespaces are accepted but stay shared with
+// the rest of the system (containers still get their own "/" through
+// chroot/pivot_root).
+long sys_unshare(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    u64 flags = a0;
+    constexpr u64 known = CLONE_NEWNS | CLONE_NEWCGROUP | CLONE_NEWUTS | CLONE_NEWIPC | CLONE_NEWUSER | CLONE_NEWPID |
+                          CLONE_NEWNET | CLONE_NEWTIME | CLONE_FS | CLONE_FILES | CLONE_SYSVSEM;
+    if (flags & ~known)
+        return -err::INVAL;
+    if ((flags & (known & ~(CLONE_FS | CLONE_FILES | CLONE_SYSVSEM | CLONE_NEWUSER))) && !proc::capable())
+        return -err::PERM;
+    if (flags & CLONE_NEWUTS) {
+        Process* p = proc::current();
+        auto* u = new proc::Uts(*(p->uts ? p->uts : proc::system_uts()));
+        u->refs = 1;
+        if (p->uts)
+            proc::uts_put(p->uts);
+        p->uts = u;
+    }
+    return 0;
+}
+
+// setns(fd, type): fd is /proc/<pid>/ns/<type> (procfs). Entering a
+// process's "mnt" namespace takes its root (containers: their "/"), "uts" its
+// host name; the others are shared anyway.
+long sys_setns(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    if (!proc::capable())
+        return -err::PERM;
+    vfs::File* f = proc::fd_get(proc::current(), static_cast<int>(a0));
+    if (!f)
+        return -err::BADF;
+    int pid = 0;
+    char kind[16] = {};
+    long r = proc::ns_file_target(f, &pid, kind, sizeof(kind));
+    vfs::file_put(f);
+    if (r < 0)
+        return r;
+    Process* me = proc::current();
+    LockGuard guard(proc::table_lock());
+    Process* target = proc::find(pid);
+    if (!target)
+        return -err::SRCH;
+    if (!strcmp(kind, "mnt")) {
+        me->root = target->root;
+        me->cwd = target->root ? target->root : vfs::root();
+        snprintf(me->cwd_path, sizeof(me->cwd_path), "/");
+    } else if (!strcmp(kind, "uts")) {
+        proc::Uts* u = target->uts ? target->uts : proc::system_uts();
+        proc::uts_get(u);
+        if (me->uts)
+            proc::uts_put(me->uts);
+        me->uts = u;
+    }
+    return 0;
+}
+
+long sys_personality(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    // PER_LINUX only; 0xffffffff queries.
+    return (a0 == 0xffffffff || (a0 & 0xff) == 0) ? 0 : -err::INVAL;
+}
+
+// Memory locking: every page stays resident anyway (no swap).
+long sys_mlock_ok(SYSCALL_ARGS) { SYSCALL_UNUSED; return 0; }
+long sys_ioprio_get(SYSCALL_ARGS) { SYSCALL_UNUSED; return (2 << 13) | 4; } // best effort, priority 4
+long sys_membarrier(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    constexpr u64 QUERY = 0, GLOBAL = 1, PRIVATE_EXPEDITED = 8, REGISTER_PRIVATE_EXPEDITED = 16;
+    switch (a0) {
+    case QUERY: return GLOBAL | PRIVATE_EXPEDITED | REGISTER_PRIVATE_EXPEDITED;
+    case GLOBAL: case PRIVATE_EXPEDITED: case REGISTER_PRIVATE_EXPEDITED:
+        __atomic_thread_fence(__ATOMIC_SEQ_CST); // syscall entry/exit serializes the other CPUs' threads
+        return 0;
+    default: return -err::INVAL;
+    }
+}
+
 void register_process() {
+    set(135, sys_personality, "personality");
+    set(149, sys_mlock_ok, "mlock");
+    set(150, sys_mlock_ok, "munlock");
+    set(151, sys_mlock_ok, "mlockall");
+    set(152, sys_mlock_ok, "munlockall");
+    set(325, sys_mlock_ok, "mlock2");
+    set(170, sys_sethostname, "sethostname");
+    set(171, sys_setdomainname, "setdomainname");
+    set(251, sys_mlock_ok, "ioprio_set");
+    set(252, sys_ioprio_get, "ioprio_get");
+    set(272, sys_unshare, "unshare");
+    set(308, sys_setns, "setns");
+    set(324, sys_membarrier, "membarrier");
     set(13, sys_rt_sigaction, "rt_sigaction");
     set(14, sys_rt_sigprocmask, "rt_sigprocmask");
     set(24, sys_sched_yield, "sched_yield");

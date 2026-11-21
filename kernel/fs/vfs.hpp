@@ -241,6 +241,12 @@ u64 next_fs_dev(); // a fresh st_dev for a newly mounted file system
 // system). source/type are what /proc/mounts shows.
 long mount_at(const char* path, Inode* fs_root, const char* source, const char* type);
 long unmount(const char* path);
+long move_mount(const char* from, const char* to); // MS_MOVE
+// chroot/pivot_root: the process layer says where the caller's "/" is.
+void set_process_root_hook(Inode* (*fn)());
+// Resolve from the system's "/" whatever the caller's root (proc, sys, dev
+// for mounts inside containers).
+long resolve_global(const char* path, Inode** out);
 bool is_mountpoint(Inode* dir); // "/", a mount's root, or a directory something is mounted on
 // Make `new_root` the "/" directory (booting from a disk). Mount the RAM
 // file system's /dev, /proc, ... on it afterwards (see ram_root()).
