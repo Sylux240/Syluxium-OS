@@ -1,7 +1,8 @@
 /* LinuxKPI (GPU drivers) */
 #pragma once
 #include <linux/types.h>
-struct ratelimit_state { int interval, burst, printed, missed; unsigned long begin, flags; };
+#include <linux/spinlock.h>
+struct ratelimit_state { int interval, burst, printed, missed; unsigned long begin, flags; spinlock_t lock; };
 #define RATELIMIT_MSG_ON_RELEASE 1
 #define DEFAULT_RATELIMIT_INTERVAL (5 * HZ)
 #define DEFAULT_RATELIMIT_BURST 10

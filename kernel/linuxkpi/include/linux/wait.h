@@ -105,6 +105,10 @@ int lkpi_wait_sleep(wait_queue_head_t* wq, unsigned int seen_seq, unsigned long 
 #define wait_event_interruptible_timeout(wq, cond, t) __lkpi_wait(wq, cond, (long)(t), 1)
 #define wait_event_killable(wq, cond) wait_event_interruptible(wq, cond)
 #define wait_event_freezable(wq, cond) wait_event_interruptible(wq, cond)
+/* The caller holds wq.lock: it is dropped while sleeping. */
+#define wait_event_interruptible_locked(wq, cond) ({ int __wr = 0; \
+    while (!(cond)) { spin_unlock(&(wq).lock); __wr = wait_event_interruptible(wq, cond); spin_lock(&(wq).lock); if (__wr) break; } __wr; })
+#define wait_event_interruptible_locked_irq wait_event_interruptible_locked
 
 LKPI_EXTERN_C_END
 

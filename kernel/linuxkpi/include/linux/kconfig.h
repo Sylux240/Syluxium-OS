@@ -41,6 +41,12 @@
 #define CONFIG_RTL8XXXU 1
 #define CONFIG_BASE_SMALL 0
 #define CONFIG_PAGE_SHIFT 12
+/* DRM fbdev emulation: GPU drivers light the screen up themselves and hand
+ * their console framebuffer to the Syluxium console (glue/fbdev.c). */
+#define CONFIG_DRM_FBDEV_EMULATION 1
+#define CONFIG_DRM_FBDEV_OVERALLOC 100
+#define CONFIG_FB_CORE 1
+#define CONFIG_FB_DEFERRED_IO 1
 
 /* ---- IS_ENABLED() & co. (from Linux's include/linux/kconfig.h) ---- */
 #define __ARG_PLACEHOLDER_1 0,

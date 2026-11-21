@@ -28,6 +28,7 @@ static int drm_cards; /* /dev/dri/cardN nodes */
 
 void lkpi_register_boot_framebuffer(u64 phys, u32 width, u32 height, u32 pitch, u32 red_shift);
 void lkpi_display_released(void); /* core.cpp: the kernel stops drawing on the firmware framebuffer */
+void lkpi_display_restored(void);  /* core.cpp: ... and draws there again */
 
 /* Called by core.cpp before any driver probes. */
 void lkpi_boot_fb_set(u64 base, u32 width, u32 height, u32 pitch, u32 red_shift)
@@ -68,6 +69,7 @@ void lkpi_gpu_probe_failed(const char *driver)
 	printk(KERN_WARNING "aperture: %s failed after taking over the display: back to the firmware framebuffer\n",
 	       driver ? driver : "the GPU driver");
 	lkpi_register_boot_framebuffer(boot_fb.base, boot_fb.width, boot_fb.height, boot_fb.pitch, boot_fb.red_shift);
+	lkpi_display_restored();
 }
 
 int devm_aperture_acquire_for_platform_device(struct platform_device *pdev, resource_size_t base,
@@ -114,8 +116,12 @@ int aperture_remove_conflicting_pci_devices(struct pci_dev *pdev, const char *na
 		if (!(pci_resource_flags(pdev, bar) & IORESOURCE_MEM) || !pci_resource_len(pdev, bar))
 			continue;
 		if (boot_fb.known && pci_resource_start(pdev, bar) < boot_fb.base + boot_fb.size &&
-		    boot_fb.base < pci_resource_start(pdev, bar) + pci_resource_len(pdev, bar))
+		    boot_fb.base < pci_resource_start(pdev, bar) + pci_resource_len(pdev, bar)) {
+			printk(KERN_INFO "aperture: %s: firmware framebuffer %#llx is in BAR %d (%#llx, %llu MiB)\n", name,
+			       (u64)boot_fb.base, bar, (u64)pci_resource_start(pdev, bar),
+			       (u64)pci_resource_len(pdev, bar) >> 20);
 			primary = true;
+		}
 	}
 	/* Linux also kicks the firmware framebuffer out for the primary VGA
 	 * device; with one display controller that is this one. On Intel the
@@ -125,6 +131,9 @@ int aperture_remove_conflicting_pci_devices(struct pci_dev *pdev, const char *na
 		primary = true;
 	if (primary)
 		remove_boot_fb(name);
+	else
+		printk(KERN_INFO "aperture: %s: firmware framebuffer %#llx is not on this device: it stays\n", name,
+		       (u64)boot_fb.base);
 	return 0;
 }
 
@@ -342,6 +351,62 @@ int lkpi_kstrtobool_from_user(const char __user *s, size_t count, bool *res)
 	if (buf[0] == '0' || buf[0] == 'n' || buf[0] == 'N' || (buf[0] == 'o' && buf[1] == 'f')) {
 		*res = false;
 		return 0;
+	}
+	return -EINVAL;
+}
+
+/* glue/fbdev.c: only a GPU driver's console framebuffer takes the console. */
+bool lkpi_boot_fb_taken_by_gpu(void)
+{
+	return boot_fb.taken;
+}
+
+struct resource *lkpi_request_region(resource_size_t start, resource_size_t n, const char *name, unsigned long flags)
+{
+	struct resource *r = kzalloc(sizeof(*r), GFP_KERNEL);
+	if (!r)
+		return NULL;
+	r->start = start;
+	r->end = start + n - 1;
+	r->name = name;
+	r->flags = flags | IORESOURCE_BUSY;
+	return r;
+}
+
+const struct sysfs_ops kobj_sysfs_ops;
+
+int kstrtouint_from_user(const char __user *s, size_t count, unsigned int base, unsigned int *res)
+{
+	char buf[24] = { 0 };
+	unsigned long long v;
+	int r;
+	if (copy_from_user(buf, s, min(count, sizeof(buf) - 1)))
+		return -EFAULT;
+	r = kstrtoull(buf, base, &v);
+	if (!r)
+		*res = (unsigned int)v;
+	return r;
+}
+
+void *vmemdup_user(const void __user *src, size_t len)
+{
+	void *p = kvmalloc(len ? len : 1, GFP_KERNEL);
+	if (!p)
+		return ERR_PTR(-ENOMEM);
+	if (copy_from_user(p, src, len)) {
+		kvfree(p);
+		return ERR_PTR(-EFAULT);
+	}
+	return p;
+}
+
+int match_string(const char * const *array, size_t n, const char *string)
+{
+	for (size_t i = 0; i < n; i++) {
+		if (!array[i])
+			break;
+		if (!strcmp(array[i], string))
+			return i;
 	}
 	return -EINVAL;
 }

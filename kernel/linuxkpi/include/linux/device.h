@@ -23,14 +23,20 @@ struct kobject {
     const char* name;
     struct kobject* parent;
     struct kref kref;
+    struct list_head entry;   /* appended: unused */
+    struct kset* kset;
+    void* sd;
+    const struct kobj_type* ktype;
 };
 struct attribute {
     const char* name;
     unsigned short mode;
 };
+struct bin_attribute;
 struct attribute_group {
     const char* name;
     unsigned short (*is_visible)(struct kobject*, struct attribute*, int);
+    unsigned short (*is_bin_visible)(struct kobject*, struct bin_attribute*, int);
     struct attribute** attrs;
     struct bin_attribute** bin_attrs;
 };

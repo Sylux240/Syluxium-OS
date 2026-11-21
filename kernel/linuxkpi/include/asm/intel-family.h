@@ -1,0 +1,13 @@
+/* LinuxKPI (GPU drivers) */
+#pragma once
+#include <linux/lkpi_all.h>
+#define INTEL_FAM6_ALDERLAKE 0x97
+#define INTEL_FAM6_ALDERLAKE_L 0x9A
+#define INTEL_FAM6_RAPTORLAKE 0xB7
+#define INTEL_FAM6_RAPTORLAKE_P 0xBA
+#define INTEL_FAM6_RAPTORLAKE_S 0xBF
+#define INTEL_ALDERLAKE 0x97
+#define INTEL_ALDERLAKE_L 0x9A
+#define INTEL_RAPTORLAKE 0xB7
+#define INTEL_RAPTORLAKE_P 0xBA
+#define INTEL_RAPTORLAKE_S 0xBF

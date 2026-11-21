@@ -46,7 +46,8 @@ void put_page(struct page *page);
 void *lkpi_page_address(const struct page *page);
 struct page *lkpi_pfn_to_page(unsigned long pfn);
 #define pfn_to_page(pfn) lkpi_pfn_to_page(pfn)
-#define nth_page(p, n) ((p) + (n))
+/* Across separately allocated blocks too (i915 merges contiguous pfns into one sg entry). */
+#define nth_page(p, n) lkpi_pfn_to_page(page_to_pfn(p) + (n))
 #define compound_head(p) ((p)->head)
 #define pfn_valid(pfn) true
 void split_page(struct page *page, unsigned int order);
@@ -81,8 +82,8 @@ void *lkpi_phys_to_direct(u64 phys);
 #define PageHighMem(p) false
 
 /* Always mapped: kmap is the direct-map address. */
-#define kmap(p) lkpi_page_address(p)
-#define kunmap(p) do { (void)(p); } while (0)
+static inline void *kmap(struct page *p) { return lkpi_page_address(p); }
+static inline void kunmap(struct page *p) { (void)p; }
 #define kmap_atomic(p) lkpi_page_address(p)
 #define kunmap_atomic(addr) do { (void)(addr); } while (0)
 #define kmap_local_page(p) lkpi_page_address(p)

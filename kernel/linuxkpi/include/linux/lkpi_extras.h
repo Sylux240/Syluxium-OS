@@ -347,7 +347,6 @@ struct bin_attribute {
 #define MEMREMAP_WT 2
 #define MEMREMAP_WC 4
 extern struct resource iomem_resource;
-#define devm_request_mem_region(dev, start, n, name) ((struct resource *)NULL)
 void *devm_memremap(struct device *dev, resource_size_t offset, size_t size, unsigned long flags);
 void __iomem *devm_ioremap_wc(struct device *dev, resource_size_t offset, resource_size_t size);
 #define devm_add_action_or_reset(dev, action, data) ({ (void)(action); 0; })

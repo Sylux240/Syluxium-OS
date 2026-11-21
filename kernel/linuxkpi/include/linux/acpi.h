@@ -13,6 +13,9 @@ typedef char *acpi_string;
 #define AE_OK 0
 #define AE_ERROR 1
 #define AE_NOT_FOUND 5
+#define AE_NOT_EXIST 6
+#define ACPI_VIDEO_NOTIFY_PROBE 0x81
+#define ACPI_ID_LEN 16
 #define ACPI_SUCCESS(s) ((s) == AE_OK)
 #define ACPI_FAILURE(s) ((s) != AE_OK)
 #define ACPI_TYPE_ANY 0x00
@@ -54,6 +57,7 @@ struct fwnode_handle;
 #define acpi_get_name(h, type, buf) AE_NOT_FOUND
 #define acpi_get_handle(parent, path, ret) AE_NOT_FOUND
 #define acpi_has_method(h, name) false
+#define acpi_get_next_object(type, parent, child, out) AE_NOT_FOUND
 #define acpi_evaluate_object(h, path, args, ret) AE_NOT_FOUND
 #define acpi_evaluate_integer(h, path, args, ret) AE_NOT_FOUND
 #define acpi_evaluate_dsm(h, guid, rev, func, argv4) ((union acpi_object *)NULL)
@@ -74,7 +78,20 @@ struct fwnode_handle;
 #define acpi_device_get_match_data(dev) ((const void *)NULL)
 #define acpi_os_map_memory(p, s) ((void *)NULL)
 #define acpi_os_unmap_memory(v, s) do { } while (0)
-#define acpi_get_table(sig, inst, out) AE_NOT_FOUND
+struct acpi_table_header {
+	char signature[4];
+	u32 length;
+	u8 revision;
+	u8 checksum;
+	char oem_id[6];
+	char oem_table_id[8];
+	u32 oem_revision;
+	char asl_compiler_id[4];
+	u32 asl_compiler_revision;
+} __attribute__((packed));
+void *lkpi_acpi_find_table(const char *sig, unsigned instance);
+#define acpi_get_table(sig, inst, out) \
+	({ void *__t = lkpi_acpi_find_table(sig, inst); *(out) = __t; __t ? AE_OK : AE_NOT_FOUND; })
 #define acpi_put_table(t) do { } while (0)
 #define acpi_bus_get_device(h, adev) (-ENODEV)
 struct acpi_resource_i2c_serialbus { u8 type; u16 slave_address; u32 connection_speed; struct { char *string_ptr; } resource_source; };

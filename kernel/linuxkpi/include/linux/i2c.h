@@ -41,6 +41,14 @@ struct i2c_msg {
 #define I2C_FUNC_SMBUS_EMUL_ALL (I2C_FUNC_SMBUS_EMUL | I2C_FUNC_SMBUS_READ_BLOCK_DATA | I2C_FUNC_SMBUS_BLOCK_PROC_CALL)
 #define I2C_SMBUS_BLOCK_MAX 32
 #define I2C_AQ_NO_CLK_STRETCH (1 << 4)
+#define I2C_AQ_COMB (1 << 0)
+#define I2C_AQ_COMB_WRITE_FIRST (1 << 1)
+#define I2C_AQ_COMB_READ_SECOND (1 << 2)
+#define I2C_AQ_COMB_SAME_ADDR (1 << 3)
+#define I2C_AQ_NO_ZERO_LEN_READ (1 << 5)
+#define I2C_AQ_NO_ZERO_LEN_WRITE (1 << 6)
+#define I2C_AQ_NO_ZERO_LEN (I2C_AQ_NO_ZERO_LEN_READ | I2C_AQ_NO_ZERO_LEN_WRITE)
+#define I2C_AQ_NO_REP_START (1 << 7)
 static inline u8 i2c_8bit_addr_from_msg(const struct i2c_msg *msg) { return (msg->addr << 1) | (msg->flags & I2C_M_RD); }
 #define I2C_NAME_SIZE 20
 #define I2C_CLASS_HWMON (1 << 0)
@@ -73,7 +81,7 @@ struct i2c_lock_operations {
 	int (*trylock_bus)(struct i2c_adapter *adapter, unsigned int flags);
 	void (*unlock_bus)(struct i2c_adapter *adapter, unsigned int flags);
 };
-struct i2c_adapter_quirks { u64 flags; int max_num_msgs; u16 max_write_len, max_read_len; };
+struct i2c_adapter_quirks { u64 flags; int max_num_msgs; u16 max_write_len, max_read_len, max_comb_1st_msg_len, max_comb_2nd_msg_len; };
 #define to_i2c_adapter(d) container_of(d, struct i2c_adapter, dev)
 static inline void *i2c_get_adapdata(const struct i2c_adapter *a) { return dev_get_drvdata(&a->dev); }
 static inline void i2c_set_adapdata(struct i2c_adapter *a, void *data) { dev_set_drvdata(&a->dev, data); }
@@ -91,8 +99,10 @@ static inline int i2c_add_numbered_adapter(struct i2c_adapter *a) { return i2c_a
 struct i2c_device_id { char name[20]; unsigned long driver_data; };
 struct i2c_board_info { char type[20]; unsigned short flags; unsigned short addr; void *platform_data; };
 struct i2c_client { unsigned short flags; unsigned short addr; char name[20]; struct i2c_adapter *adapter; struct device dev; };
+struct i2c_board_info;
 struct i2c_driver {
 	int (*probe)(struct i2c_client *client);
+	int (*detect)(struct i2c_client *client, struct i2c_board_info *info);
 	void (*remove)(struct i2c_client *client);
 	struct device_driver driver;
 	const struct i2c_device_id *id_table;

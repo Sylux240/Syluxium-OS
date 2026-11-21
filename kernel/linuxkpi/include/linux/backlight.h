@@ -1,6 +1,7 @@
 /* LinuxKPI (GPU drivers) */
 #pragma once
 #include <linux/lkpi_all.h>
+#include <linux/fb.h>
 /* LinuxKPI: backlight class devices. Drivers register their backlight
  * and set brightness through it; there's no sysfs to expose it yet. */
 enum backlight_type { BACKLIGHT_RAW = 1, BACKLIGHT_PLATFORM, BACKLIGHT_FIRMWARE, BACKLIGHT_TYPE_MAX };
@@ -8,8 +9,6 @@ enum backlight_scale { BACKLIGHT_SCALE_UNKNOWN = 0, BACKLIGHT_SCALE_LINEAR, BACK
 enum backlight_update_reason { BACKLIGHT_UPDATE_HOTKEY, BACKLIGHT_UPDATE_SYSFS };
 #define BL_CORE_SUSPENDED (1 << 0)
 #define BL_CORE_FBBLANK (1 << 1)
-#define FB_BLANK_UNBLANK 0
-#define FB_BLANK_POWERDOWN 4
 struct backlight_device;
 struct backlight_ops {
 	unsigned int options;

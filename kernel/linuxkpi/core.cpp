@@ -220,18 +220,58 @@ void lkpi_vfree(const void* p) {
         sylux_vfree(const_cast<void*>(p));
 }
 
-struct kmem_cache* kmem_cache_create(const char* name, size_t size, size_t, unsigned long, void (*)(void*)) {
+// Object caches: kmalloc underneath. SLAB_TYPESAFE_BY_RCU caches (i915
+// requests, dma-fences found by lockless lookups) keep freed memory out of
+// reuse until an RCU grace period has passed: an rcu_head trails each object.
+namespace {
+constexpr unsigned long LKPI_SLAB_TYPESAFE_BY_RCU = 0x00080000UL;
+struct SlabTrailer {
+    struct rcu_head head;
+    size_t offset; // of the trailer from the object start
+};
+size_t slab_object_size(const struct kmem_cache* c) { return (c->size + 15) & ~size_t(15); }
+void slab_rcu_free(struct rcu_head* h) {
+    auto* t = reinterpret_cast<SlabTrailer*>(h);
+    lkpi_kfree(reinterpret_cast<char*>(t) - t->offset);
+}
+} // namespace
+
+struct kmem_cache* kmem_cache_create(const char* name, size_t size, size_t, unsigned long flags, void (*ctor)(void*)) {
     auto* c = static_cast<struct kmem_cache*>(lkpi_kzalloc(sizeof(struct kmem_cache), GFP_KERNEL));
     if (c) {
         c->size = size;
         c->name = name;
+        c->flags = flags;
+        c->ctor = ctor;
     }
     return c;
 }
 void kmem_cache_destroy(struct kmem_cache* c) { lkpi_kfree(c); }
-void* kmem_cache_alloc(struct kmem_cache* c, gfp_t flags) { return lkpi_kmalloc(c->size, flags); }
-void* kmem_cache_zalloc(struct kmem_cache* c, gfp_t flags) { return lkpi_kzalloc(c->size, flags); }
-void kmem_cache_free(struct kmem_cache*, void* p) { lkpi_kfree(p); }
+void* kmem_cache_alloc(struct kmem_cache* c, gfp_t flags) {
+    size_t n = c->flags & LKPI_SLAB_TYPESAFE_BY_RCU ? slab_object_size(c) + sizeof(SlabTrailer) : c->size;
+    void* p = lkpi_kmalloc(n, flags);
+    if (p && c->ctor)
+        c->ctor(p);
+    return p;
+}
+void* kmem_cache_zalloc(struct kmem_cache* c, gfp_t flags) {
+    size_t n = c->flags & LKPI_SLAB_TYPESAFE_BY_RCU ? slab_object_size(c) + sizeof(SlabTrailer) : c->size;
+    void* p = lkpi_kzalloc(n, flags);
+    if (p && c->ctor)
+        c->ctor(p);
+    return p;
+}
+void kmem_cache_free(struct kmem_cache* c, void* p) {
+    if (!p)
+        return;
+    if (c && (c->flags & LKPI_SLAB_TYPESAFE_BY_RCU)) {
+        auto* t = reinterpret_cast<SlabTrailer*>(static_cast<char*>(p) + slab_object_size(c));
+        t->offset = slab_object_size(c);
+        call_rcu(&t->head, slab_rcu_free);
+        return;
+    }
+    lkpi_kfree(p);
+}
 
 // ======================= strings =======================
 
@@ -554,6 +594,17 @@ int lkpi_vsnprintf(char* buf, size_t size, const char* fmt, va_list args) {
                         o.put(sep);
                     hex2(o, p[i], false);
                 }
+            } else if (ext == 'V' && p) {
+                // %pV: a nested format + its arguments (struct va_format)
+                fmt++;
+                struct VaFormat { const char* fmt; va_list* va; }; // Linux struct va_format
+                auto* vf = reinterpret_cast<const VaFormat*>(p);
+                char nested[480];
+                va_list copy;
+                va_copy(copy, *vf->va);
+                lkpi_vsnprintf(nested, sizeof(nested), vf->fmt, copy);
+                va_end(copy);
+                o.puts(nested);
             } else if (ext == 'e') {
                 fmt++;
                 sylux_snprintf_long(piece, sizeof(piece), "error %ld", reinterpret_cast<long>(p));
@@ -649,7 +700,13 @@ int vprintk(const char* fmt, va_list args) {
     char level = strip_level(&fmt);
     char buf[512];
     int n = lkpi_vsnprintf(buf, sizeof(buf), fmt, args);
-    log_at(level, buf);
+    // The level can also arrive as an argument (printk("%s...", KERN_DEBUG, ...)).
+    const char* text = buf;
+    if (buf[0] == '\001' && buf[1]) {
+        level = buf[1];
+        text = buf + 2;
+    }
+    log_at(level, const_cast<char*>(text));
     return n;
 }
 
@@ -982,12 +1039,14 @@ struct task_struct* lkpi_current(void) {
     sched::Thread* th = sched::current();
     if (!th) {
         static LkpiTask boot;
+        boot.t.group_leader = &boot.t;
         return &boot.t;
     }
     if (!th->lkpi_task) {
         auto* lt = new LkpiTask{};
         snprintf(lt->t.comm, sizeof(lt->t.comm), "%s", th->name);
         lt->t.lkpi_thread = th;
+        lt->t.group_leader = &lt->t;
         if (th->process)
             lt->t.pid = lt->t.tgid = th->process->pid;
         th->lkpi_task = lt;
@@ -1412,6 +1471,7 @@ void apply_module_params() {
 } // namespace
 
 extern "C" void lkpi_register_boot_framebuffer(u64 phys, u32 width, u32 height, u32 pitch, u32 red_shift);
+extern "C" unsigned long __drm_debug;
 extern "C" void lkpi_boot_fb_set(u64 base, u32 width, u32 height, u32 pitch, u32 red_shift);
 
 // A GPU driver took the display over (glue/gpu.c): the kernel must stop
@@ -1422,6 +1482,37 @@ extern "C" void lkpi_display_released(void) {
     splash::handover();
     splash::finish();
     console::set_graphics(true);
+}
+
+// glue/fbdev.c: the GPU driver's console framebuffer (DRM fbdev emulation)
+// is up: the kernel console moves there and shows again.
+namespace {
+video::Framebuffer g_gpu_console_fb;
+void* g_gpu_console_vaddr = nullptr;
+} // namespace
+extern "C" void lkpi_console_attach(void* vaddr, u32 width, u32 height, u32 pitch, u32 red_shift, u32 green_shift,
+                                    u32 blue_shift) {
+    if (!g_gpu_console_fb.init(vaddr, width, height, pitch, 32, static_cast<u8>(red_shift),
+                               static_cast<u8>(green_shift), static_cast<u8>(blue_shift)))
+        return;
+    g_gpu_console_vaddr = vaddr;
+    console::rebind(g_gpu_console_fb);
+    console::set_graphics(false);
+    klog::info("linuxkpi: kernel console on the GPU driver's framebuffer (%ux%u)", width, height);
+}
+extern "C" void lkpi_console_detach(void* vaddr) {
+    if (vaddr != g_gpu_console_vaddr)
+        return;
+    console::set_graphics(true); // nowhere safe to draw until another framebuffer comes
+    g_gpu_console_vaddr = nullptr;
+}
+extern "C" bool lkpi_console_text_mode(void) { return !console::graphics(); }
+
+// The GPU driver failed and the firmware framebuffer is back: show the
+// console again (it reports what happened).
+extern "C" void lkpi_display_restored(void) {
+    klog::warn("linuxkpi: display back on the firmware framebuffer");
+    console::set_graphics(false);
 }
 extern "C" lkpi_initcall_t __lkpi_initcalls_start[];
 extern "C" lkpi_initcall_t __lkpi_initcalls_end[];
@@ -1435,6 +1526,10 @@ void init() {
     system_wq = make_wq("lkpi-events");
     system_highpri_wq = system_long_wq = system_unbound_wq = system_freezable_wq = system_power_efficient_wq = system_wq;
     init_pci();
+    // GPU acceleration test boots ("gpu"): DRM driver + modesetting debug
+    // messages go to the boot log unless drm.debug= says otherwise.
+    if (strstr(boot::cmdline(), " gpu") || !strncmp(boot::cmdline(), "gpu", 3))
+        __drm_debug = 0x06; // DRM_UT_DRIVER | DRM_UT_KMS
     apply_module_params();
     // GPU drivers (probed later) take the display over from the firmware
     // framebuffer when it lies in their memory (glue/gpu.c).

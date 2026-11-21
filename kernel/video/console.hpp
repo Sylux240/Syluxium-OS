@@ -12,6 +12,8 @@ class Framebuffer;
 namespace console {
 
 void init(video::Framebuffer& fb);
+// Move to another framebuffer (a GPU driver took the display), keeping the text.
+void rebind(video::Framebuffer& fb);
 bool ready();
 // KD_GRAPHICS / KD_TEXT (KDSETMODE): while in graphics mode the console keeps
 // its text in memory but doesn't touch the screen (an X server owns it).
