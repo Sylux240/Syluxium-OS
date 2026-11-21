@@ -31,20 +31,22 @@ ROOTFS  := $(BUILD)/rootfs
 
 # Syluxium's own test programs: ordinary Linux binaries built with the host toolchain.
 USER_CC     := gcc
-# Linked against Debian's static glibc (baseline x86-64, AVX2 chosen at run
-# time), not the build host's: a distribution built for x86-64-v3 (CachyOS)
+# Linked against Debian's static glibc and libgcc (baseline x86-64, AVX2
+# chosen at run time), not the build host's: a distribution built for x86-64-v3 (CachyOS)
 # ships a libc.a whose startup code uses AVX2, so the programs died with
 # SIGILL on pre-Haswell CPUs (iMac13,1).
 LIBC_SYSROOT   := $(CURDIR)/deps/libc-sysroot
 LIBC_SYSROOT32 := $(CURDIR)/deps/libc-sysroot32
 USER_CFLAGS := --sysroot=$(LIBC_SYSROOT) -isystem $(LIBC_SYSROOT)/usr/include/x86_64-linux-gnu \
                -B$(LIBC_SYSROOT)/usr/lib/x86_64-linux-gnu/ -L$(LIBC_SYSROOT)/usr/lib/x86_64-linux-gnu \
+               -B$(LIBC_SYSROOT)/usr/lib/gcc/x86_64-linux-gnu/14/ -L$(LIBC_SYSROOT)/usr/lib/gcc/x86_64-linux-gnu/14 \
                -static -O2 -Wall
 TESTS_DIR   := $(BUILD)/tests
 USER_PROGS  := $(patsubst userspace/%.c,$(TESTS_DIR)/%,$(wildcard userspace/*.c))
 # 32-bit (i386) test programs for the compat layer (host gcc multilib, static).
 USER32_CFLAGS := --sysroot=$(LIBC_SYSROOT32) -isystem $(LIBC_SYSROOT32)/usr/include/i386-linux-gnu \
                  -B$(LIBC_SYSROOT32)/usr/lib/i386-linux-gnu/ -L$(LIBC_SYSROOT32)/usr/lib/i386-linux-gnu \
+                 -B$(LIBC_SYSROOT32)/usr/lib/gcc/i686-linux-gnu/14/ -L$(LIBC_SYSROOT32)/usr/lib/gcc/i686-linux-gnu/14 \
                  -m32 -static -O2 -Wall -pthread
 USER32_PROGS  := $(patsubst userspace/ia32/%.c,$(TESTS_DIR)/%,$(wildcard userspace/ia32/*.c))
 # Windows test programs for Wine (x86-64 and i386 PE), built with clang +
@@ -334,12 +336,12 @@ $(KERNEL): $(OBJS) kernel/linker.ld
 # ---------------------------------------------------------------------------
 $(LIBC_SYSROOT)/.done:
 	@echo "  FETCH Debian libc6-dev (amd64) for the test programs"
-	@python3 tools/debian-fetch.py --out $(LIBC_SYSROOT) --cache deps/debian --no-deps libc6-dev libc6 linux-libc-dev >/dev/null
+	@python3 tools/debian-fetch.py --out $(LIBC_SYSROOT) --cache deps/debian --no-deps libc6-dev libc6 linux-libc-dev libgcc-14-dev >/dev/null
 	@touch $@
 
 $(LIBC_SYSROOT32)/.done:
 	@echo "  FETCH Debian libc6-dev (i386) for the 32-bit test programs"
-	@python3 tools/debian-fetch.py --out $(LIBC_SYSROOT32) --cache deps/debian --arch i386 --no-deps libc6-dev libc6 linux-libc-dev >/dev/null
+	@python3 tools/debian-fetch.py --out $(LIBC_SYSROOT32) --cache deps/debian --arch i386 --no-deps libc6-dev libc6 linux-libc-dev libgcc-14-dev >/dev/null
 	@touch $@
 
 $(TESTS_DIR)/%: userspace/%.c | $(LIBC_SYSROOT)/.done
