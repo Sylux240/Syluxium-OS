@@ -28,6 +28,7 @@ struct device_driver {
     const char* mod_name;
     const struct attribute_group** groups;
     const struct attribute_group** dev_groups;
+    void (*coredump)(struct device* dev); /* appended */
 };
 
 /* sysfs: attributes are accepted and ignored (no sysfs yet). */
@@ -160,6 +161,7 @@ static inline int device_bind_driver(struct device* dev) { return 0; }
 void device_release_driver(struct device* dev); /* glue/devmodel.c */
 int driver_register(struct device_driver* drv);
 void driver_unregister(struct device_driver* drv);
+int driver_for_each_device(struct device_driver* drv, struct device* start, void* data, int (*fn)(struct device*, void*));
 struct dev_ext_attribute {
     struct device_attribute attr;
     void* var;

@@ -951,8 +951,23 @@ extern "C" void lkpi_apply_fakeid() {
     };
     u32 fv, fd, tv, td;
     if (!hex(&fv) || *p++ != ':' || !hex(&fd) || *p++ != '=' || !hex(&tv) || *p++ != ':' || !hex(&td)) {
-        klog::warn("linuxkpi: pci_fakeid= not understood (VVVV:DDDD=vvvv:dddd)");
+        klog::warn("linuxkpi: pci_fakeid= not understood (VVVV:DDDD=vvvv:dddd[/cccccc])");
         return;
+    }
+    // Optional "/cccccc": the class code too (drivers matching by class,
+    // e.g. brcmfmac's PCI_CLASS_NETWORK_OTHER).
+    u32 cls = 0;
+    bool fake_class = false;
+    if (*p == '/') {
+        int n = 0;
+        for (p++; n < 6; n++, p++) {
+            char c = *p;
+            if (c >= '0' && c <= '9') cls = cls * 16 + (c - '0');
+            else if (c >= 'a' && c <= 'f') cls = cls * 16 + (c - 'a' + 10);
+            else if (c >= 'A' && c <= 'F') cls = cls * 16 + (c - 'A' + 10);
+            else break;
+        }
+        fake_class = n == 6;
     }
     for (u32 i = 0; i < pci::count(); i++) {
         pci::Function* f = pci::function_at(i);
@@ -964,7 +979,15 @@ extern "C" void lkpi_apply_fakeid() {
             f->entry->vendor = static_cast<u16>(tv);
             f->entry->device = static_cast<u16>(td);
         }
-        klog::warn("linuxkpi: test mode: PCI device %04x:%04x presented to drivers as %04x:%04x", fv, fd, tv, td);
+        if (fake_class) {
+            f->class_code = static_cast<u8>(cls >> 16);
+            f->subclass = static_cast<u8>(cls >> 8);
+            f->prog_if = static_cast<u8>(cls);
+            if (f->entry)
+                f->entry->class_code = cls;
+        }
+        klog::warn("linuxkpi: test mode: PCI device %04x:%04x presented to drivers as %04x:%04x%s", fv, fd, tv, td,
+                   fake_class ? " (class changed too)" : "");
     }
 }
 

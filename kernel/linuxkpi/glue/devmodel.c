@@ -205,6 +205,26 @@ int bus_for_each_dev(const struct bus_type *bus, struct device *start, void *dat
     return r;
 }
 
+/* The devices bound to a driver on a registered bus (none for PCI/USB
+ * drivers, which bind outside the driver model). */
+int driver_for_each_device(struct device_driver *drv, struct device *start, void *data,
+                           int (*fn)(struct device *, void *))
+{
+    mutex_lock(&g_bus_lock);
+    struct lkpi_bus *b = find_bus(drv->bus);
+    int n = 0, r = 0;
+    struct device **copy = b && b->ndevs ? kmalloc_array(b->ndevs, sizeof(*copy), GFP_KERNEL) : NULL;
+    if (copy)
+        for (int i = 0; i < b->ndevs; i++)
+            if (b->devs[i]->driver == drv)
+                copy[n++] = b->devs[i];
+    mutex_unlock(&g_bus_lock);
+    for (int i = 0; i < n && !r; i++)
+        r = fn(copy[i], data);
+    kfree(copy);
+    return r;
+}
+
 struct find_ctx {
     const void *data;
     int (*match)(struct device *dev, const void *data);

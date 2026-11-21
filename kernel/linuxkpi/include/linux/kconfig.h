@@ -51,6 +51,13 @@
 #define CONFIG_B43_PHY_N 1
 #define CONFIG_B43_PHY_HT 1
 #define CONFIG_B43_PHY_G 1
+/* Broadcom FullMAC (brcmfmac): PCIe and USB, msgbuf and BCDC protocols */
+#define CONFIG_BRCMUTIL 1
+#define CONFIG_BRCMFMAC 1
+#define CONFIG_BRCMFMAC_PCIE 1
+#define CONFIG_BRCMFMAC_USB 1
+#define CONFIG_BRCMFMAC_PROTO_BCDC 1
+#define CONFIG_BRCMFMAC_PROTO_MSGBUF 1
 /* Ethernet: r8169 with phylib and the Realtek PHY driver */
 #define CONFIG_PHYLIB 1
 #define CONFIG_MDIO_DEVICE 1

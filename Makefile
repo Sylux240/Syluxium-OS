@@ -228,7 +228,8 @@ LKPI_LINUX_CFLAGS := -I$(LKPI_INCLUDE) -include linux/kconfig.h -Werror=implicit
     -Wno-initializer-overrides -Wno-unused-const-variable -Wno-implicit-fallthrough -Wno-format-zero-length \
     -Wno-missing-field-initializers -Wno-sign-compare -Wno-address-of-packed-member -Wno-tautological-constant-out-of-range-compare \
     -Wno-default-const-init-field-unsafe -Wno-unknown-warning-option
-lkpi_modname = $(if $(findstring /iwlwifi/mvm/,$<),iwlmvm,$(if $(findstring /iwlwifi/,$<),iwlwifi,$(if $(findstring /ethernet/realtek/r8169,$<),r8169,$(if $(findstring /ethernet/intel/e1000e/,$<),e1000e,$(if $(findstring /ethernet/intel/igc/,$<),igc,$(if $(findstring /drivers/net/phy/realtek,$<),realtek,$(if $(findstring /drivers/net/phy/,$<),libphy,$(lkpi_modname_rest))))))))
+lkpi_modname = $(if $(findstring /brcm80211/,$<),brcmfmac,$(lkpi_modname_net))
+lkpi_modname_net = $(if $(findstring /iwlwifi/mvm/,$<),iwlmvm,$(if $(findstring /iwlwifi/,$<),iwlwifi,$(if $(findstring /ethernet/realtek/r8169,$<),r8169,$(if $(findstring /ethernet/intel/e1000e/,$<),e1000e,$(if $(findstring /ethernet/intel/igc/,$<),igc,$(if $(findstring /drivers/net/phy/realtek,$<),realtek,$(if $(findstring /drivers/net/phy/,$<),libphy,$(lkpi_modname_rest))))))))
 lkpi_modname_rest = $(if $(findstring /drm/i915/,$<),i915,$(if $(findstring /drm/radeon/,$<),radeon,$(if $(findstring /drm/amd/,$<),amdgpu,$(if $(findstring /drm/nouveau/,$<),nouveau,$(if $(findstring /drm/scheduler/,$<),gpu_sched,$(patsubst virtual,mac80211_hwsim,$(patsubst wireless,cfg80211,$(notdir $(patsubst %/,%,$(dir $<))))))))))
 # Intel Wi-Fi (iwlwifi + iwlmvm): headers relative to the driver's root.
 LKPI_IWL := kernel/linuxkpi/drivers/net/wireless/intel/iwlwifi
@@ -236,6 +237,8 @@ $(OBJDIR)/$(LKPI_IWL)/%: LKPI_DRV_CFLAGS = -I$(LKPI_IWL) -DCONFIG_IWLWIFI=1 -DCO
 # Broadcom Wi-Fi (bcma bus, b43).
 $(OBJDIR)/kernel/linuxkpi/drivers/bcma/%: LKPI_DRV_CFLAGS = -include net/lkpi_bcma.h
 $(OBJDIR)/kernel/linuxkpi/drivers/net/wireless/broadcom/%: LKPI_DRV_CFLAGS = -include net/lkpi_bcma.h
+LKPI_BRCM := kernel/linuxkpi/drivers/net/wireless/broadcom/brcm80211
+$(OBJDIR)/$(LKPI_BRCM)/%: LKPI_DRV_CFLAGS = -include net/lkpi_bcma.h -I$(LKPI_BRCM)/brcmfmac -I$(LKPI_BRCM)/include
 # Realtek Ethernet (r8169) and phylib.
 LKPI_NETDRV := kernel/linuxkpi/drivers/net
 $(OBJDIR)/$(LKPI_NETDRV)/ethernet/realtek/%: LKPI_DRV_CFLAGS = -include net/lkpi_phy.h
@@ -375,7 +378,7 @@ $(DEBIAN_CONFIGURED): $(DEBIAN_STAMP) tools/configure-packages.sh
 # Device firmware from Debian's non-free-firmware section: the packages are
 # huge (GPU firmware), so only the files our drivers load are kept.
 FIRMWARE_REPO  := http://deb.debian.org/debian|$(DEBIAN_SUITE)|non-free-firmware
-FIRMWARE_PKGS  := firmware-mediatek firmware-realtek firmware-intel-graphics firmware-amd-graphics firmware-nvidia-graphics firmware-iwlwifi
+FIRMWARE_PKGS  := firmware-mediatek firmware-realtek firmware-intel-graphics firmware-amd-graphics firmware-nvidia-graphics firmware-iwlwifi firmware-brcm80211
 FIRMWARE_FILES = mediatek/mt7601u.bin rtlwifi/rtl8188eufw.bin rtlwifi/rtl8723bu_nic.bin rtl_bt/rtl8723b_fw.bin \
                   $(I915_FIRMWARE)
 # i915: display microcontroller (DMC) firmware for Skylake..Alder Lake, GuC/HuC
@@ -401,8 +404,12 @@ GPU_FIRMWARE   += amdgpu/vega10_* amdgpu/vega12_* amdgpu/vega20_* amdgpu/raven* 
 # Network adapters (shell patterns, like GPU_FIRMWARE). Intel Wi-Fi: for each
 # family iwlmvm drives, the newest firmware API Linux 6.12 supports (7260 ..
 # AX211/BE200; ~30 MB of Debian's ~96 MB), plus the PNVM files.
-# Realtek Ethernet (r8169): the chip patch files.
-NET_FIRMWARE   := iwlwifi-7260-17.ucode iwlwifi-3160-17.ucode iwlwifi-7265-17.ucode iwlwifi-7265D-29.ucode \
+# Realtek Ethernet (r8169): the chip patch files. Broadcom FullMAC (brcmfmac):
+# the PCIe chips (BCM43602 of 2015-17 MacBook Pros, 4350/4356/4358/43570/4371
+# ...) and the USB ones (~6.5 MB); Apple's 4355/4364 (T2 Macs) aren't in it.
+NET_FIRMWARE   := brcm/brcmfmac*-pcie.* brcm/brcmfmac43143.bin brcm/brcmfmac43236b.bin brcm/brcmfmac43242a.bin \
+                  brcm/brcmfmac43569.bin brcm/brcmfmac4373.bin \
+                  iwlwifi-7260-17.ucode iwlwifi-3160-17.ucode iwlwifi-7265-17.ucode iwlwifi-7265D-29.ucode \
                   iwlwifi-3168-29.ucode iwlwifi-8000C-36.ucode iwlwifi-8265-36.ucode iwlwifi-9000-pu-b0-jf-b0-46.ucode \
                   iwlwifi-9260-th-b0-jf-b0-46.ucode iwlwifi-cc-a0-77.ucode iwlwifi-Qu-?0-??-b0-77.ucode \
                   iwlwifi-QuZ-a0-??-b0-77.ucode iwlwifi-so-a0-hr-b0-89.ucode iwlwifi-so-a0-jf-b0-77.ucode \

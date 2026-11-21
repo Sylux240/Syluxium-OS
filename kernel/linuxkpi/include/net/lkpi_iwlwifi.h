@@ -51,7 +51,6 @@ static inline void lkpi_dummy_netdev_setup(struct net_device *dev) { }
 /* The op mode (iwlmvm) is built in and registers itself at init. */
 #define request_module_nowait(fmt, ...) 0
 
-#define devm_kasprintf(dev, gfp, fmt, ...) kasprintf(gfp, fmt, ##__VA_ARGS__)
 #define __le32_to_cpup(p) le32_to_cpu(*(const __le32 *)(p))
 #define __le16_to_cpup(p) le16_to_cpu(*(const __le16 *)(p))
 
@@ -78,7 +77,6 @@ static inline void pci_lock_rescan_remove(void) { }
 static inline void pci_unlock_rescan_remove(void) { }
 static inline void pci_stop_and_remove_bus_device(struct pci_dev *dev) { }
 static inline unsigned int pci_rescan_bus(struct pci_bus *bus) { return 0; }
-static inline bool pci_pme_capable(struct pci_dev *dev, int state) { return false; }
 static inline int pci_assign_resource(struct pci_dev *dev, int res) { return 0; }
 
 
