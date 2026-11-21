@@ -503,7 +503,7 @@ void napi_disable(struct napi_struct* napi);
 bool napi_schedule_prep(struct napi_struct* napi);
 void __napi_schedule(struct napi_struct* napi);
 #define __napi_schedule_irqoff __napi_schedule
-static inline void napi_schedule(struct napi_struct* n) { if (napi_schedule_prep(n)) __napi_schedule(n); }
+static inline bool napi_schedule(struct napi_struct* n) { if (napi_schedule_prep(n)) { __napi_schedule(n); return true; } return false; }
 #define napi_schedule_irqoff napi_schedule
 bool napi_complete_done(struct napi_struct* napi, int work_done);
 #define napi_complete(n) napi_complete_done(n, 0)

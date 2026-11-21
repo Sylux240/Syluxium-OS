@@ -159,7 +159,10 @@ bool is_terminator(const pci_device_id* id) {
     return !id->vendor && !id->device && !id->subvendor && !id->subdevice && !id->lkpi_class && !id->class_mask;
 }
 
+extern "C" void lkpi_apply_fakeid();
+
 const pci_device_id* find_id(const pci_driver* drv, const dev::Device* d) {
+    lkpi_apply_fakeid();
     for (const pci_device_id* id = drv->id_table; id && !is_terminator(id); id++)
         if (id_matches(id, d))
             return id;
@@ -897,7 +900,53 @@ int request_firmware_nowait(void*, bool, const char* name, struct device* dev, g
 
 namespace linuxkpi {
 
+// Test aid: "pci_fakeid=VVVV:DDDD=vvvv:dddd" makes the device VVVV:DDDD look
+// like vvvv:dddd to Linux drivers, so a driver's probe and its failure
+// paths can run in a VM that has no such hardware (QEMU's edu device as an
+// Intel Wi-Fi card: pci_fakeid=1234:11e8=8086:2723). Applied when drivers
+// are first matched (PCI is enumerated after the drivers register).
 void init_pci() {}
+
+extern "C" void lkpi_apply_fakeid() {
+    static bool done = false;
+    if (done)
+        return;
+    done = true;
+    const char* p = strstr(boot::cmdline(), "pci_fakeid=");
+    if (!p)
+        return;
+    p += 11;
+    auto hex = [&](u32* out) {
+        u32 v = 0;
+        int n = 0;
+        for (; n < 4; n++, p++) {
+            char c = *p;
+            if (c >= '0' && c <= '9') v = v * 16 + (c - '0');
+            else if (c >= 'a' && c <= 'f') v = v * 16 + (c - 'a' + 10);
+            else if (c >= 'A' && c <= 'F') v = v * 16 + (c - 'A' + 10);
+            else break;
+        }
+        *out = v;
+        return n == 4;
+    };
+    u32 fv, fd, tv, td;
+    if (!hex(&fv) || *p++ != ':' || !hex(&fd) || *p++ != '=' || !hex(&tv) || *p++ != ':' || !hex(&td)) {
+        klog::warn("linuxkpi: pci_fakeid= not understood (VVVV:DDDD=vvvv:dddd)");
+        return;
+    }
+    for (u32 i = 0; i < pci::count(); i++) {
+        pci::Function* f = pci::function_at(i);
+        if (f->vendor_id != fv || f->device_id != fd)
+            continue;
+        f->vendor_id = static_cast<u16>(tv);
+        f->device_id = static_cast<u16>(td);
+        if (f->entry) {
+            f->entry->vendor = static_cast<u16>(tv);
+            f->entry->device = static_cast<u16>(td);
+        }
+        klog::warn("linuxkpi: test mode: PCI device %04x:%04x presented to drivers as %04x:%04x", fv, fd, tv, td);
+    }
+}
 
 } // namespace linuxkpi
 
