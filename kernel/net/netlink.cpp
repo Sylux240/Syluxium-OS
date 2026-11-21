@@ -492,6 +492,7 @@ public:
     u32 portid = 0, groups = 0;
     u64 mc_groups[2] = {}; // multicast memberships, group n = bit n - 1 (bind bitmask + NETLINK_ADD_MEMBERSHIP)
     bool registered = false;
+    bool passcred = false; // SO_PASSCRED: every message comes with the kernel's credentials
     sched::Mutex qlock;
     Datagram* head = nullptr;
     Datagram** tail = &head;
@@ -703,7 +704,7 @@ public:
                 from->len = 12;
                 memcpy(from->data + 8, &d->src_group, 4);
             }
-            if (ctl && d->cred) {
+            if (ctl && (d->cred || passcred)) { // from the kernel: pid 0, uid 0, gid 0
                 ctl->has_cred = true;
                 ctl->cred = Ucred{};
             }
@@ -727,6 +728,12 @@ public:
     }
 
     long set_option(int level, int name, const u8* val, u32 len) override {
+        if (level == 1 && name == 16 && len >= 4) { // SOL_SOCKET, SO_PASSCRED
+            i32 on;
+            memcpy(&on, val, 4);
+            passcred = on != 0;
+            return 0;
+        }
         if (level != 270)
             return OPT_UNHANDLED;
         // SOL_NETLINK: NETLINK_ADD_MEMBERSHIP (1) / DROP (2); extended acks,
@@ -749,7 +756,13 @@ public:
     bool member_of(u32 group) const {
         return group >= 1 && group <= 128 && (mc_groups[(group - 1) / 64] & (1ull << ((group - 1) % 64)));
     }
-    long get_option(int level, int, u8* val, u32* len) override {
+    long get_option(int level, int name, u8* val, u32* len) override {
+        if (level == 1 && name == 16) { // SO_PASSCRED
+            i32 on = passcred;
+            memcpy(val, &on, 4);
+            *len = 4;
+            return 0;
+        }
         if (level != 270)
             return OPT_UNHANDLED;
         memset(val, 0, 4);
@@ -782,6 +795,92 @@ public:
 } // namespace
 
 Socket* create_netlink(int type, int protocol) { return new NetlinkSocket(type, protocol); }
+
+// ---- rtnetlink events ----
+
+namespace {
+
+constexpr u32 RTNLGRP_LINK = 1, RTNLGRP_IPV4_IFADDR = 5, RTNLGRP_IPV6_IFADDR = 9;
+Datagram* make_datagram(const void* data, usize len); // below
+
+// Send what `b` built to the NETLINK_ROUTE sockets in `group`.
+void rtnl_multicast(Builder* b, u32 group) {
+    Datagram* list = b->take();
+    {
+        LockGuard guard(g_nl);
+        for (NetlinkSocket* s = g_sockets; s; s = s->next) {
+            if (s->protocol != NETLINK_ROUTE || !s->member_of(group))
+                continue;
+            for (Datagram* d = list; d; d = d->next)
+                if (Datagram* copy = make_datagram(d->data, d->len)) {
+                    copy->src_group = group;
+                    copy->cred = true;
+                    s->queue(copy);
+                }
+        }
+    }
+    while (list) {
+        Datagram* d = list;
+        list = d->next;
+        kfree(d);
+    }
+}
+
+bool rtnl_listeners(u32 group) {
+    LockGuard guard(g_nl);
+    for (NetlinkSocket* s = g_sockets; s; s = s->next)
+        if (s->protocol == NETLINK_ROUTE && s->member_of(group))
+            return true;
+    return false;
+}
+
+} // namespace
+
+void rtnl_link_event(Interface* f) {
+    if (!f || !rtnl_listeners(RTNLGRP_LINK))
+        return;
+    auto* b = new Builder(0, 0);
+    put_link(*b, f, 0);
+    rtnl_multicast(b, RTNLGRP_LINK);
+    delete b;
+}
+
+void rtnl_addr4_event(Interface* f, bool added, u32 addr, u32 netmask) {
+    if (!f || !addr || !rtnl_listeners(RTNLGRP_IPV4_IFADDR))
+        return;
+    auto* b = new Builder(0, 0);
+    bool lo = f->flags & IFF_LOOPBACK;
+    struct {
+        u8 family, prefixlen, flags, scope;
+        u32 index;
+    } ifa{AF_INET, prefix_len(netmask), IFA_F_PERMANENT, lo ? RT_SCOPE_HOST : RT_SCOPE_UNIVERSE, f->index};
+    b->begin(added ? RTM_NEWADDR : RTM_DELADDR, 0, &ifa, sizeof(ifa));
+    b->attr_be32(IFA_ADDRESS, addr);
+    b->attr_be32(IFA_LOCAL, addr);
+    if (!lo)
+        b->attr_be32(IFA_BROADCAST, addr | ~netmask);
+    b->attr_str(IFA_LABEL, f->name);
+    b->attr_u32(IFA_FLAGS, IFA_F_PERMANENT);
+    b->end();
+    rtnl_multicast(b, RTNLGRP_IPV4_IFADDR);
+    delete b;
+}
+
+void rtnl_addr6_event(const Addr6& a, bool added) {
+    if (!rtnl_listeners(RTNLGRP_IPV6_IFADDR))
+        return;
+    auto* b = new Builder(0, 0);
+    struct {
+        u8 family, prefixlen, flags, scope;
+        u32 index;
+    } ifa{AF_INET6, a.prefix_len, a.flags, a.scope, a.ifindex};
+    b->begin(added ? RTM_NEWADDR : RTM_DELADDR, 0, &ifa, sizeof(ifa));
+    b->attr(IFA_ADDRESS, a.addr, 16);
+    b->attr_u32(IFA_FLAGS, a.flags);
+    b->end();
+    rtnl_multicast(b, RTNLGRP_IPV6_IFADDR);
+    delete b;
+}
 
 namespace {
 

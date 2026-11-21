@@ -106,7 +106,9 @@ bool local_accepts(const Socket* s, const Endpoint& dst) {
     return s->local.same_addr(dst);
 }
 
-bool bindings_overlap(const Endpoint& a, const Endpoint& b) {
+bool bindings_overlap(const Endpoint& a, const Endpoint& b, bool a_v6only, bool b_v6only) {
+    if (a.v6 != b.v6 && ((a.v6 && a_v6only) || (b.v6 && b_v6only)))
+        return false; // IPv6-only and IPv4: separate (ippeveprinter, cupsd, avahi listen on both)
     if (a.any() || b.any())
         return true;
     return a.same_addr(b);
@@ -176,6 +178,20 @@ void release_control(Control& c) {
     kfree(c.files);
     c.files = nullptr;
     c.nfiles = 0;
+}
+
+// ---- IP-level control messages (IP_PKTINFO & co.) ----
+// Kept apart from the Unix/netlink code above: recvmsg gets them from the
+// IP sockets through control_add_ip(); sendmsg's IP_PKTINFO/IPV6_PKTINFO
+// pick the outgoing interface and source (parse_ip_control()).
+
+void control_add_ip(Control& c, int level, int type, const void* data, u32 len) {
+    if (c.ip_len + 12 + len > sizeof(c.ip))
+        return;
+    i32 hdr[3] = {level, type, static_cast<i32>(len)};
+    memcpy(c.ip + c.ip_len, hdr, 12);
+    memcpy(c.ip + c.ip_len + 12, data, len);
+    c.ip_len += 12 + len;
 }
 
 Ucred current_cred() {
@@ -250,6 +266,70 @@ void put_addr(SockAddrIn* sa, u32 ip) {
     sa->addr = be32(ip);
 }
 
+// SIOCETHTOOL: link speed, duplex, carrier and driver name (ethtool,
+// NetworkManager-like tools). Runs without the stack lock: drivers may sleep.
+long ethtool_ioctl(Interface* f, u64 udata) {
+    u32 cmd;
+    if (long r = uaccess::get(&cmd, reinterpret_cast<u32*>(udata)); r < 0)
+        return r;
+    u32 mbps = 0;
+    bool full = false;
+    bool known = f->link_up && f->link_settings(&mbps, &full);
+    switch (cmd) {
+    case 0x01: { // ETHTOOL_GSET: struct ethtool_cmd (44 bytes)
+        u8 c[44] = {};
+        memcpy(c, &cmd, 4);
+        u16 lo = known ? static_cast<u16>(mbps) : 0xFFFF, hi = known ? static_cast<u16>(mbps >> 16) : 0xFFFF;
+        memcpy(c + 12, &lo, 2);
+        c[14] = known ? (full ? 1 : 0) : 0xFF; // duplex
+        c[15] = 0;                              // port: twisted pair
+        c[18] = 1;                              // autoneg
+        memcpy(c + 28, &hi, 2);
+        return uaccess::copy_to(reinterpret_cast<void*>(udata), c, sizeof(c));
+    }
+    case 0x4C: { // ETHTOOL_GLINKSETTINGS: header (48 bytes) + 3 masks of n words
+        u8 c[48];
+        if (long r = uaccess::copy_from(c, reinterpret_cast<void*>(udata), sizeof(c)); r < 0)
+            return r;
+        i8 nwords = static_cast<i8>(c[11]);
+        if (nwords <= 0) { // the handshake: tell the caller how many words we use
+            memset(c, 0, sizeof(c));
+            memcpy(c, &cmd, 4);
+            c[11] = static_cast<u8>(-1);
+            return uaccess::copy_to(reinterpret_cast<void*>(udata), c, sizeof(c));
+        }
+        memset(c + 4, 0, sizeof(c) - 4);
+        u32 speed = known ? mbps : 0xFFFFFFFF;
+        memcpy(c + 4, &speed, 4);
+        c[8] = known ? (full ? 1 : 0) : 0xFF;
+        c[11] = static_cast<u8>(nwords);
+        c[12] = 1; // autoneg (byte order as in struct ethtool_link_settings)
+        if (long r = uaccess::copy_to(reinterpret_cast<void*>(udata), c, sizeof(c)); r < 0)
+            return r;
+        u32 zero = 0;
+        for (int i = 0; i < 3 * nwords; i++)
+            uaccess::put(reinterpret_cast<u32*>(udata + 48) + i, zero);
+        return 0;
+    }
+    case 0x0A: { // ETHTOOL_GLINK: struct ethtool_value
+        u32 v[2] = {cmd, (f->flags & IFF_UP) && f->link_up ? 1u : 0u};
+        return uaccess::copy_to(reinterpret_cast<void*>(udata), v, sizeof(v));
+    }
+    case 0x03: { // ETHTOOL_GDRVINFO: struct ethtool_drvinfo (196 bytes)
+        u8 c[196] = {};
+        memcpy(c, &cmd, 4);
+        snprintf(reinterpret_cast<char*>(c + 4), 32, "%s",
+                 f->hw && f->hw->driver_name ? f->hw->driver_name : (f->flags & IFF_LOOPBACK) ? "loopback" : "syluxium");
+        snprintf(reinterpret_cast<char*>(c + 36), 32, "%s", "1.0");
+        if (f->hw)
+            snprintf(reinterpret_cast<char*>(c + 100), 32, "%s", f->hw->bus_id);
+        return uaccess::copy_to(reinterpret_cast<void*>(udata), c, sizeof(c));
+    }
+    default:
+        return -EOPNOTSUPP;
+    }
+}
+
 } // namespace
 
 long Socket::ioctl(u64 request, u64 arg) {
@@ -312,6 +392,14 @@ long Socket::ioctl(u64 request, u64 arg) {
     if (long r = uaccess::get(&req, static_cast<IfReq*>(uarg)); r < 0)
         return r;
     req.name[15] = 0;
+    if (request == 0x8946) { // SIOCETHTOOL: ifr_data points at the command
+        Interface* e = interface_by_name(req.name);
+        if (!e)
+            return -err::NODEV;
+        u64 udata;
+        memcpy(&udata, reinterpret_cast<u8*>(&req) + 16, 8);
+        return ethtool_ioctl(e, udata);
+    }
     LockGuard guard(g_lock);
     Interface* f = nullptr;
     if (request == 0x8910) { // SIOCGIFNAME: by index
@@ -325,7 +413,9 @@ long Socket::ioctl(u64 request, u64 arg) {
     if (!f)
         return -err::NODEV;
     switch (request) {
-    case 0x8913: req.flags = static_cast<u16>(f->flags | (f->link_up ? IFF_RUNNING : 0)); break; // SIOCGIFFLAGS
+    case 0x8913: // SIOCGIFFLAGS: RUNNING follows the carrier (up with a link), as on Linux
+        req.flags = static_cast<u16>((f->flags & ~IFF_RUNNING) | ((f->flags & IFF_UP) && f->link_up ? IFF_RUNNING : 0));
+        break;
     case 0x8914: {                                                                                 // SIOCSIFFLAGS
         if ((req.flags ^ f->flags) & IFF_UP)
             if (long r = f->set_up(req.flags & IFF_UP); r < 0)
@@ -469,7 +559,11 @@ long sys_socket(SYSCALL_ARGS) {
             s = create_udp(type, PROTO_UDP);
         else if ((type == SOCK_DGRAM || type == SOCK_RAW) && protocol == PROTO_ICMP)
             s = create_icmp(type);
-        else
+        else if (type == SOCK_RAW && protocol > 0 && protocol <= 255) {
+            if (!proc::capable())
+                return -err::PERM;
+            s = create_raw(protocol); // IPPROTO_RAW (udhcpc), IPPROTO_UDP, ...
+        } else
             return -EPROTONOSUPPORT;
         break;
     case AF_INET6:
@@ -740,6 +834,8 @@ long scatter(const MsgHdr& m, const u8* data, usize len) {
 // Parse sendmsg control messages: SCM_RIGHTS (take a reference on every
 // file) and SCM_CREDENTIALS. Unknown messages are ignored, as Linux does
 // for levels it doesn't know.
+bool parse_ip_control(i32 level, i32 type, u64 data, u64 dlen, Control* ctl); // below
+
 long parse_control(const MsgHdr& m, Control* ctl) {
     if (!m.control || m.controllen < sizeof(CmsgHdr))
         return 0;
@@ -780,10 +876,63 @@ long parse_control(const MsgHdr& m, Control* ctl) {
             if (long r = uaccess::copy_from(&ctl->cred, reinterpret_cast<void*>(data), sizeof(Ucred)); r < 0)
                 return r;
             ctl->has_cred = true;
+        } else {
+            parse_ip_control(h.level, h.type, data, dlen, ctl);
         }
         pos += cmsg_align(h.len);
     }
     return 0;
+}
+
+// sendmsg's IP-level messages: IP_PKTINFO {ifindex, spec_dst, addr} and
+// IPV6_PKTINFO {addr, ifindex} choose the interface and source address.
+// Returns true when it was one of them.
+bool parse_ip_control(i32 level, i32 type, u64 data, u64 dlen, Control* ctl) {
+    if (level == 0 && type == 8 && dlen >= 12) { // IPPROTO_IP, IP_PKTINFO
+        u8 pi[12];
+        if (uaccess::copy_from(pi, reinterpret_cast<void*>(data), 12) < 0)
+            return true;
+        u32 idx, spec;
+        memcpy(&idx, pi, 4);
+        memcpy(&spec, pi + 4, 4);
+        ctl->has_pktinfo = true;
+        ctl->pkt_ifindex = idx;
+        ctl->pkt_src = ep4(be32(spec));
+        return true;
+    }
+    if (level == 41 && type == 50 && dlen >= 20) { // IPPROTO_IPV6, IPV6_PKTINFO
+        u8 pi[20];
+        if (uaccess::copy_from(pi, reinterpret_cast<void*>(data), 20) < 0)
+            return true;
+        u32 idx;
+        memcpy(&idx, pi + 16, 4);
+        ctl->has_pktinfo = true;
+        ctl->pkt_ifindex = idx;
+        ctl->pkt_src = ep6(pi, 0, idx);
+        return true;
+    }
+    return false;
+}
+
+// recvmsg's IP-level messages, collected by control_add_ip().
+void emit_ip_control(const MsgHdr& m, Control& ctl, u64* used, int* msg_flags) {
+    u64 room = m.control ? m.controllen : 0;
+    for (u32 pos = 0; pos + 12 <= ctl.ip_len;) {
+        i32 hdr[3];
+        memcpy(hdr, ctl.ip + pos, 12);
+        u64 need = sizeof(CmsgHdr) + static_cast<u64>(hdr[2]);
+        if (*used + need > room) {
+            *msg_flags |= MSG_CTRUNC;
+            break;
+        }
+        CmsgHdr h{need, hdr[0], hdr[1]};
+        uaccess::put(reinterpret_cast<CmsgHdr*>(m.control + *used), h);
+        uaccess::copy_to(reinterpret_cast<void*>(m.control + *used + sizeof(h)), ctl.ip + pos + 12,
+                         static_cast<usize>(hdr[2]));
+        *used += cmsg_align(need);
+        pos += 12 + static_cast<u32>(hdr[2]);
+    }
+    ctl.ip_len = 0;
 }
 
 // Write received control messages into the caller's buffer: credentials
@@ -792,6 +941,7 @@ long parse_control(const MsgHdr& m, Control* ctl) {
 long emit_control(const MsgHdr& m, Control& ctl, int flags, u64* used_out, int* msg_flags) {
     u64 used = 0;
     u64 room = m.control ? m.controllen : 0;
+    emit_ip_control(m, ctl, &used, msg_flags);
     if (ctl.has_cred) {
         u64 need = sizeof(CmsgHdr) + sizeof(Ucred);
         if (used + need <= room) {

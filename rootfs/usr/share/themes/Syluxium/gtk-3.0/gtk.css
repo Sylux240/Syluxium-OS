@@ -91,8 +91,20 @@ tooltip, tooltip.background {
   border-radius: 8px;
 }
 
-selection, *:selected, row:selected {
+selection, *:selected, row:selected,
+treeview.view:selected, treeview.view:selected:focus, .view:selected, .view:selected:focus,
+.view text selection, textview text selection, entry selection, entry selection:focus, label selection,
+list row:selected, list row:selected:focus, row:selected:focus, row:selected:hover,
+flowbox flowboxchild:selected, iconview:selected, iconview:selected:focus {
   background-color: #6fe3f0;
+  background-image: none;
+  color: #141a3a;
+}
+
+/* A selection in a window that isn't active: the same cyan, dimmed. */
+treeview.view:selected:backdrop, row:selected:backdrop, .view:selected:backdrop,
+flowbox flowboxchild:selected:backdrop {
+  background-color: rgba(111, 227, 240, 0.55);
   color: #141a3a;
 }
 

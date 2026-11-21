@@ -1031,3 +1031,24 @@ static int __init netdev_glue_init(void)
 	return 0;
 }
 core_initcall(netdev_glue_init);
+
+/* Called by the Syluxium stack (ethtool ioctl, /sys/class/net/<if>/speed):
+ * the driver's link speed in Mbit/s and duplex. */
+int lkpi_netdev_link_settings(struct net_device* dev, u32* speed, int* full_duplex)
+{
+	struct ethtool_link_ksettings ks;
+	int ret;
+	if (!dev->ethtool_ops || !dev->ethtool_ops->get_link_ksettings)
+		return -EOPNOTSUPP;
+	memset(&ks, 0, sizeof(ks));
+	rtnl_lock();
+	ret = dev->ethtool_ops->get_link_ksettings(dev, &ks);
+	rtnl_unlock();
+	if (ret)
+		return ret;
+	if (ks.base.speed == 0 || ks.base.speed == (u32)SPEED_UNKNOWN)
+		return -ENODATA;
+	*speed = ks.base.speed;
+	*full_duplex = ks.base.duplex == DUPLEX_FULL;
+	return 0;
+}
