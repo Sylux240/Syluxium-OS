@@ -295,6 +295,7 @@ void discover_hardware() {
     bootlog::start();
     splash::stage(50, "Mounting file systems");
     mount_disk_root(); // root= on the command line: an installed system on disk
+    linuxkpi::usb_retry_deferred(); // Linux USB drivers that found no firmware before it
     dev::probe_all();
     sysfs::populate_devices();
     fbdev::init(); // /dev/fb0 (after the PCI devices are in /sys: fb0 may belong to one)
