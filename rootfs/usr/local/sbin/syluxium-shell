@@ -22,6 +22,8 @@ SET=$HOME_/.config/syluxium-shell/settings.ini
 cp /etc/syluxium-shell/wayfire.ini "$CONF"
 if grep -qs "simple-framebuffer" /sys/class/drm/card0/device/uevent; then
     SYLUXIUM_WAYFIRE_ARGS="--damage-rerender $SYLUXIUM_WAYFIRE_ARGS"
+    # Drawn on the processor: window shadows cost more than they're worth.
+    sed -i 's/^\(plugins = .*\) winshadows/\1/' "$CONF"
 elif ! grep -qs "^blur *= *false" "$SET"; then
     sed -i 's/^plugins = autostart /plugins = autostart blur /' "$CONF"
 fi
