@@ -62,6 +62,13 @@
 #define CONFIG_ATH10K 1
 #define CONFIG_ATH10K_PCI 1
 #define CONFIG_ATH10K_CE 1
+/* Qualcomm Atheros ath9k (PCI/PCIe: AR5008 .. AR9580, QCA9565) */
+#define CONFIG_ATH9K 1
+#define CONFIG_ATH9K_HW 1
+#define CONFIG_ATH9K_COMMON 1
+#define CONFIG_ATH9K_PCI 1
+#define CONFIG_ATH9K_BTCOEX_SUPPORT 1
+#define CONFIG_ATH9K_PCOEM 1
 /* Broadcom: bcma (PCI host) and b43 (N/HT/G/LP PHYs: BCM4321 .. BCM4331) */
 #define CONFIG_BCMA 1
 #define CONFIG_BCMA_HOST_PCI 1

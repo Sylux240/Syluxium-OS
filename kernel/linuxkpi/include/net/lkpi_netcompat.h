@@ -239,3 +239,13 @@ static inline void __ioread32_copy(void *to, const void __iomem *from, size_t co
     while (count--)
         *dst++ = *src++;
 }
+
+#ifndef ktime_get_raw_ts64
+#define ktime_get_raw_ts64(ts) ktime_get_ts64(ts)
+#endif
+#ifndef NR_CPUS
+#define NR_CPUS 256
+#endif
+#ifndef L1_CACHE_BYTES
+#define L1_CACHE_BYTES 64
+#endif
