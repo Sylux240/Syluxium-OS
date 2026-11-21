@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Wireless firmware check
+Comment=Offers to install the firmware a Broadcom b43 wireless card needs
+Exec=sh -c 'syluxium-b43-firmware --check && syluxium-b43-firmware'
+NoDisplay=true
+X-TDE-autostart-phase=2

@@ -64,6 +64,10 @@ DEBIAN_PKGS  := bash busybox hello ncurses-base pciutils pci.ids netbase alsa-ut
                 libgl1-mesa-dri libglx-mesa0 libegl-mesa0 mesa-utils
 # Right-click "Extract Here" for .7z (zip and tar are handled without it).
 DEBIAN_PKGS  += 7zip
+# Broadcom b43 Wi-Fi (iMacs, older MacBooks): its firmware may not be shipped;
+# syluxium-b43-firmware fetches Broadcom's driver and cuts it out with this.
+DEBIAN_CONTRIB_REPO := http://deb.debian.org/debian|$(DEBIAN_SUITE)|contrib
+DEBIAN_PKGS  += b43-fwcutter
 DEBIAN_ROOT  := $(BUILD)/rootfs-debian
 DEBIAN_STAMP := $(DEBIAN_ROOT)/.fetched
 DEBIAN_CONFIGURED := $(DEBIAN_ROOT)/.configured
@@ -229,6 +233,9 @@ lkpi_modname_rest = $(if $(findstring /drm/i915/,$<),i915,$(if $(findstring /drm
 # Intel Wi-Fi (iwlwifi + iwlmvm): headers relative to the driver's root.
 LKPI_IWL := kernel/linuxkpi/drivers/net/wireless/intel/iwlwifi
 $(OBJDIR)/$(LKPI_IWL)/%: LKPI_DRV_CFLAGS = -I$(LKPI_IWL) -DCONFIG_IWLWIFI=1 -DCONFIG_IWLMVM=1 -include net/lkpi_iwlwifi.h
+# Broadcom Wi-Fi (bcma bus, b43).
+$(OBJDIR)/kernel/linuxkpi/drivers/bcma/%: LKPI_DRV_CFLAGS = -include net/lkpi_bcma.h
+$(OBJDIR)/kernel/linuxkpi/drivers/net/wireless/broadcom/%: LKPI_DRV_CFLAGS = -include net/lkpi_bcma.h
 # Realtek Ethernet (r8169) and phylib.
 LKPI_NETDRV := kernel/linuxkpi/drivers/net
 $(OBJDIR)/$(LKPI_NETDRV)/ethernet/realtek/%: LKPI_DRV_CFLAGS = -include net/lkpi_phy.h
@@ -356,7 +363,7 @@ $(TESTS_DIR)/winbox32.exe: $(TESTS_DIR)/winhello32.exe
 
 $(DEBIAN_STAMP): tools/debian-fetch.py Makefile
 	@echo "  DEB   $(DEBIAN_PKGS) (+ dependencies, Debian $(DEBIAN_SUITE))"
-	@python3 tools/debian-fetch.py --suite $(DEBIAN_SUITE) --out $(DEBIAN_ROOT) --cache deps/debian --dpkg-db --exclude $(DEBIAN_EXCLUDE) --repo "$(TRINITY_REPO)" $(DEBIAN_PKGS) $(TRINITY_PKGS)
+	@python3 tools/debian-fetch.py --suite $(DEBIAN_SUITE) --out $(DEBIAN_ROOT) --cache deps/debian --dpkg-db --exclude $(DEBIAN_EXCLUDE) --repo "$(TRINITY_REPO)" --repo "$(DEBIAN_CONTRIB_REPO)" $(DEBIAN_PKGS) $(TRINITY_PKGS)
 	@touch $@
 
 # Debian's install scripts, run once per package set (fake root, no sudo).
