@@ -927,6 +927,7 @@ int device_rename(struct device* dev, const char* new_name)
 }
 
 void lkpi_drm_card_added(int delta);
+void lkpi_sysfs_char_device(unsigned int major, unsigned int minor, const char *devname, const char *pci_bus_id);
 int device_add(struct device* dev)
 {
 	if (dev->init_name) {
@@ -946,6 +947,12 @@ int device_add(struct device* dev)
 		snprintf(path, sizeof(path), "/dev/%s", name ? name : dev_name(dev));
 		kfree(name);
 		lkpi_chrdev_node(path, MAJOR(dev->devt), MINOR(dev->devt), mode ? mode : 0666);
+		for (struct device *p = dev->parent; p; p = p->parent) {
+			if (dev_is_pci(p)) { /* libdrm/Mesa find the GPU through /sys/dev/char */
+				lkpi_sysfs_char_device(MAJOR(dev->devt), MINOR(dev->devt), path + 5, dev_name(p));
+				break;
+			}
+		}
 		if (!strncmp(path, "/dev/dri/card", 13))
 			lkpi_drm_card_added(1);
 	}

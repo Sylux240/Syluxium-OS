@@ -15,4 +15,6 @@ namespace sysfs {
 void init(); // build /sys (call once all CPUs are online)
 void populate_devices(); // /sys/bus/pci + /sys/kernel/syluxium/devices (after drivers probed)
 
+// A character device node (/sys/dev/char/<major>:<minor>) belonging to a PCI device.
+void add_char_device(u32 major, u32 minor, const char* devname, const char* pci_bus_id);
 } // namespace sysfs

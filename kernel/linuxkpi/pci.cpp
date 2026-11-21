@@ -231,6 +231,7 @@ void fill_pdev(pci_dev* pdev, pci::Function* f, dev::Device* d) {
     else
         snprintf(pdev->dev.lkpi_name, sizeof(pdev->dev.lkpi_name), "%04x:%02x:%02x.%u", f->segment, f->bus, f->device,
                  f->function);
+    pdev->dev.bus = &lkpi_pci_bus_type; // dev_is_pci()
     pdev->dev.dma_mask_storage = DMA_BIT_MASK(32); // Linux's default until the driver sets one
     pdev->dev.dma_mask = &pdev->dev.dma_mask_storage;
     pdev->dev.coherent_dma_mask = DMA_BIT_MASK(32);

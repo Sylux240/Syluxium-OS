@@ -222,3 +222,10 @@ void lkpi_chrdev_node_remove(const char* path) { vfs::remove_node(path); }
 
 // glue/file.c: drivers revoke user mappings (unmap_mapping_range).
 extern "C" void lkpi_zap_user_range(u64 offset, u64 len) { proc::zap_device_range(offset, len); }
+
+// glue/lib.c: a Linux character device (DRM card/render node) of a PCI device.
+#include <fs/procfs.hpp>
+extern "C" void lkpi_sysfs_char_device(unsigned int major, unsigned int minor, const char* devname,
+                                       const char* pci_bus_id) {
+    sysfs::add_char_device(major, minor, devname, pci_bus_id);
+}

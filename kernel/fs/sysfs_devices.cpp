@@ -69,6 +69,21 @@ bool link_driver(char* out, usize size, const void* c) {
     return true;
 }
 
+// Linux "uevent": what udev / libdrm read to identify a PCI device.
+bool gen_uevent(TextBuffer& o, const void* c) {
+    auto* d = static_cast<const dev::Device*>(c);
+    if (d->driver_name)
+        o.printf("DRIVER=%s\n", d->driver_name);
+    o.printf("PCI_CLASS=%X\nPCI_ID=%04X:%04X\nPCI_SUBSYS_ID=%04X:%04X\nPCI_SLOT_NAME=%s\n", d->class_code, d->vendor,
+             d->device, d->subsystem_vendor, d->subsystem_device, d->bus_id);
+    return true;
+}
+
+bool link_subsystem(char* out, usize size, const void*) {
+    snprintf(out, size, "../../../bus/pci");
+    return true;
+}
+
 const char* status_name(dev::Status s) {
     switch (s) {
     case dev::Status::Ok:    return "ok";
@@ -117,6 +132,8 @@ void populate_devices() {
         add(dir, "irq", new GeneratedFile(gen_irq, d));
         add(dir, "resource", new GeneratedFile(gen_resource, d));
         add(dir, "config", new GeneratedFile(gen_config, d, 0644));
+        add(dir, "uevent", new GeneratedFile(gen_uevent, d));
+        add(dir, "subsystem", new GeneratedLink(link_subsystem, d));
         if (d->driver_name) {
             add(dir, "driver", new GeneratedLink(link_driver, d));
             char drv[96];
@@ -124,6 +141,39 @@ void populate_devices() {
             vfs::mkdir_p(drv, 0755);
         }
     }, nullptr);
+}
+
+// /sys/dev/char/<major>:<minor> for a character device of a PCI device
+// (DRM's card and render nodes): "device" leads to the PCI device and
+// "uevent" names the node, as libdrm's drmGetDevice2() (Mesa) expects.
+namespace {
+struct CharDev {
+    char pci[32];
+    char uevent[96];
+};
+bool link_chardev_device(char* out, usize size, const void* c) {
+    snprintf(out, size, "/sys/bus/pci/devices/%s", static_cast<const CharDev*>(c)->pci);
+    return true;
+}
+bool gen_chardev_uevent(TextBuffer& o, const void* c) {
+    o.append(static_cast<const CharDev*>(c)->uevent);
+    return true;
+}
+} // namespace
+
+void add_char_device(u32 major, u32 minor, const char* devname, const char* pci_bus_id) {
+    char dir[64];
+    snprintf(dir, sizeof(dir), "/sys/dev/char/%u:%u", major, minor);
+    vfs::mkdir_p(dir, 0755);
+    auto* cd = new CharDev;
+    snprintf(cd->pci, sizeof(cd->pci), "%s", pci_bus_id);
+    snprintf(cd->uevent, sizeof(cd->uevent), "MAJOR=%u\nMINOR=%u\nDEVNAME=%s\n", major, minor, devname);
+    add(dir, "device", new GeneratedLink(link_chardev_device, cd));
+    add(dir, "uevent", new GeneratedFile(gen_chardev_uevent, cd));
+    add(dir, "subsystem", new GeneratedLink([](char* out, usize size, const void*) {
+        snprintf(out, size, "../../../class/drm");
+        return true;
+    }, cd));
 }
 
 } // namespace sysfs

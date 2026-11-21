@@ -130,7 +130,10 @@ static inline void* dev_get_platdata(const struct device* d) { return d->platfor
 #define device_enable_async_suspend(d) do { (void)(d); } while (0)
 #define dev_set_uevent_suppress(d, v) do { (void)(d); } while (0)
 #define dev_to_node(d) 0
-#define dev_is_pci(d) 0
+struct bus_type;
+extern const struct bus_type lkpi_pci_bus_type; /* glue/gpu.c */
+#define pci_bus_type lkpi_pci_bus_type
+#define dev_is_pci(d) ((d) && (d)->bus == &lkpi_pci_bus_type)
 void put_device(struct device* dev);
 void device_initialize(struct device* dev);
 int device_add(struct device* dev);

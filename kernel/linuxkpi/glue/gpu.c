@@ -421,3 +421,21 @@ int match_string(const char * const *array, size_t n, const char *string)
 	}
 	return -EINVAL;
 }
+
+/* PCI devices of Linux drivers point here (dev->bus), so dev_is_pci() works. */
+#include <linux/device/bus.h>
+const struct bus_type lkpi_pci_bus_type = { .name = "pci" };
+
+/* drm_pci.c: the bus id DRM_IOCTL_SET_VERSION hands to old clients. */
+#include <drm/drm_device.h>
+#include <drm/drm_auth.h>
+int drm_pci_set_busid(struct drm_device *dev, struct drm_master *master)
+{
+	struct pci_dev *pdev = to_pci_dev(dev->dev);
+	master->unique = kasprintf(GFP_KERNEL, "pci:%04x:%02x:%02x.%d", 0, pdev->bus->number,
+				   PCI_SLOT(pdev->devfn), PCI_FUNC(pdev->devfn));
+	if (!master->unique)
+		return -ENOMEM;
+	master->unique_len = strlen(master->unique);
+	return 0;
+}
