@@ -9,5 +9,6 @@ namespace bootlog {
 
 void start(); // saves at intervals during the first 10 minutes
 void save();  // now (also at shutdown/restart)
+void root_changed(); // "/" moved to a disk (root=): attach the log folder there too
 
 } // namespace bootlog

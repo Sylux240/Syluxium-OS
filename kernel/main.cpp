@@ -199,7 +199,7 @@ void mount_disk_root() {
         const char* spec;
         block::Device* dev;
     } find{spec, nullptr};
-    for (int tries = 0; tries < 100 && !find.dev; tries++) { // up to 10 s for slow (USB) disks
+    for (int tries = 0; tries < 300 && !find.dev; tries++) { // up to 30 s for slow (USB) disks and hubs
         block::for_each([](block::Device* d, void* ctx) {
             auto* f = static_cast<Find*>(ctx);
             if (!f->dev && matches_root_spec(d, f->spec))
@@ -248,6 +248,8 @@ void mount_disk_root() {
             etc->create("mtab", 4, vfs::S_IFLNK | 0777, "/proc/mounts", nullptr);
     }
     klog::ok("Root file system: %s (%s%s)", source, kind, ro ? ", read-only" : "");
+    if (!ro)
+        bootlog::root_changed();
 }
 
 // Phase 5: find the hardware, bind drivers, publish it all in /sys.
@@ -322,6 +324,8 @@ void discover_hardware() {
         auto* done = static_cast<bool*>(ctx);
         if (*done || d == g_root_dev || (g_root_dev && d == g_root_dev->parent) || !ext2::probe(d))
             return;
+        if (matches_root_spec(d, "LABEL=SYLUXLIVE"))
+            return; // a Syluxium stick's system partition, not storage
         vfs::Inode* root;
         bool ro;
         const char* kind;

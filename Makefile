@@ -446,8 +446,14 @@ $(INITRAMFS): $(KERNEL) $(PICKER) $(DEBIAN_CONFIGURED) tools/merge-accounts.py t
 	@cd $(ROOTFS) && find . | LC_ALL=C sort | cpio -o -H newc --quiet --owner=0:0 | gzip -n -6 > ../initramfs.cpio
 
 # ---------------------------------------------------------------------------
-# Bootable MBR disk image: one FAT32 EFI system partition, BIOS + UEFI boot.
-# Built entirely without root using sfdisk + mtools.
+# Bootable MBR disk image, BIOS + UEFI boot, built without root (sfdisk,
+# mtools, mke2fs -d):
+#   1. FAT32 EFI system partition: picker, Limine, kernel, and the initramfs
+#      for the "whole system in memory" fallback entry
+#   2. SYLUXLOGS (FAT32): boot logs, one folder per boot
+#   3. SYLUXLIVE (ext4): the system itself. The default entries boot with
+#      root=LABEL=SYLUXLIVE: files are read from the stick when needed, so
+#      boots don't wait for the firmware to load ~600 MiB and RAM stays free.
 # ---------------------------------------------------------------------------
 $(IMAGE): $(KERNEL) $(INITRAMFS) $(PICKER) limine.conf limine-splash.png $(LIMINE_DIR)/limine
 	@echo "  IMG   $@"
@@ -460,14 +466,19 @@ $(IMAGE): $(KERNEL) $(INITRAMFS) $(PICKER) limine.conf limine-splash.png $(LIMIN
 	 dd if=/dev/zero of=$$tmp bs=1M count=$$mb status=none; \
 	 dd if=/dev/zero bs=1M count=40 status=none >> $$tmp; \
 	 p1=$$(( (mb - 1) * 2048 )); \
+	 p3=$$(( 2048 + p1 + 40 * 2048 )); \
+	 livemb=$$(( $$(du -sm $(ROOTFS) | cut -f1) * 6 / 5 + 400 )); \
+	 truncate -s $$(( (p3 / 2048 + livemb + 1) ))M $$tmp; \
 	 echo 'label: dos' | sfdisk --quiet $$tmp; \
 	 echo "start=2048, size=$$p1, type=ef, bootable" | sfdisk --quiet --append $$tmp; \
-	 echo "start=$$(( 2048 + p1 )), type=c" | sfdisk --quiet --append $$tmp; \
+	 echo "start=$$(( 2048 + p1 )), size=$$(( 40 * 2048 )), type=c" | sfdisk --quiet --append $$tmp; \
+	 echo "start=$$p3, size=$$(( livemb * 2048 )), type=83" | sfdisk --quiet --append $$tmp; \
+	 fakeroot mke2fs -q -t ext4 -b 4096 -L SYLUXLIVE -d $(ROOTFS) -E offset=$$(( p3 * 512 )) $$tmp $$(( livemb * 256 )); \
 	 logs=$$tmp@@$$(( (2048 + p1) * 512 )); \
-	 mformat -i $$logs -F -c 1 -v SYLUXLOGS ::; \
+	 mformat -i $$logs -T $$(( 40 * 2048 )) -F -c 1 -v SYLUXLOGS ::; \
 	 printf 'Syluxium writes its boot log here (syluxium-log.txt).\r\nSend that file when reporting a problem.\r\n' > $$tmp.txt; \
 	 mcopy -i $$logs $$tmp.txt ::/README.TXT; rm -f $$tmp.txt; \
-	 mformat -i $$tmp@@1M -F -v SYLUXIUM ::; \
+	 mformat -i $$tmp@@1M -T $$p1 -F -v SYLUXIUM ::; \
 	 mmd   -i $$tmp@@1M ::/EFI ::/EFI/BOOT ::/boot ::/boot/limine; \
 	 mcopy -i $$tmp@@1M $(KERNEL) ::/boot/syluxium.elf; \
 	 mcopy -i $$tmp@@1M $(INITRAMFS) ::/boot/initramfs.cpio; \

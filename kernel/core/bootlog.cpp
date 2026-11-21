@@ -20,6 +20,23 @@ bool g_logs_mounted = false;
 
 // The SYLUXLOGS partition of a Syluxium stick: plain FAT (type 0x0c, so
 // other computers mount it automatically) with our README.TXT.
+vfs::Inode* g_logs_root = nullptr; // the SYLUXLOGS volume
+vfs::Inode* g_logs_dir = nullptr;  // this boot's folder on it
+char g_logs_source[32];
+char g_logs_target[96];
+
+// /boot/logs-stick and the /boot/logs link on the current "/".
+bool attach_logs(vfs::Inode* root, const char* source, const char* target) {
+    vfs::mkdir_p("/boot/logs-stick");
+    if (vfs::mount_at("/boot/logs-stick", root, source, "vfat") != 0)
+        return false;
+    vfs::Inode* bootdir;
+    if (vfs::resolve("/boot", nullptr, true, &bootdir) != 0)
+        return false;
+    bootdir->unlink("logs", 4, false);
+    return bootdir->create("logs", 4, vfs::S_IFLNK | 0777, target, nullptr) == 0;
+}
+
 void mount_logs_partition() {
     block::for_each([](block::Device* d, void*) {
         if (g_logs_mounted || !fat::probe(d))
@@ -73,6 +90,10 @@ void mount_logs_partition() {
         if (bootdir->create("logs", 4, vfs::S_IFLNK | 0777, target, nullptr) != 0)
             return;
         g_logs_mounted = true;
+        g_logs_root = root;
+        g_logs_dir = dir;
+        snprintf(g_logs_source, sizeof(g_logs_source), "%s", source);
+        snprintf(g_logs_target, sizeof(g_logs_target), "%s", target);
         char info[256];
         int n = snprintf(info, sizeof(info), "Computer: %s\r\nBoot options: %s\r\n", mlen ? machine : "unknown",
                          boot::cmdline());
@@ -117,7 +138,18 @@ void save() {
         return;
     len = klog::read_buffer(text, len);
     vfs::Inode* file;
-    if (vfs::resolve(path, nullptr, true, &file) == 0) {
+    if (g_logs_dir) {
+        // Through the folder itself, not the path: "/" can change under us
+        // (root= on a disk), the stick's folder doesn't.
+        static const char name[] = "syluxium-log.txt";
+        file = g_logs_dir->lookup(name, sizeof(name) - 1);
+        if (!file && g_logs_dir->create(name, sizeof(name) - 1, vfs::S_IFREG | 0644, nullptr, &file) != 0)
+            file = nullptr;
+        if (file) {
+            file->truncate(0);
+            file->write(0, text, len);
+        }
+    } else if (vfs::resolve(path, nullptr, true, &file) == 0) {
         file->truncate(0);
         file->write(0, text, len);
     } else {
@@ -125,6 +157,11 @@ void save() {
     }
     kfree(text);
     block::sync_all();
+}
+
+void root_changed() {
+    if (g_logs_root && attach_logs(g_logs_root, g_logs_source, g_logs_target))
+        klog::info("Boot logs: %s mounted at /boot/logs-stick on the new root", g_logs_source);
 }
 
 void start() {

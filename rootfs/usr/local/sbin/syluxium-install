@@ -55,7 +55,7 @@ mount -t ext4 "$ROOT" "$TARGET"
 for entry in /*; do
     name=${entry#/}
     case "$name" in proc|sys|dev|run|tmp|mnt|media|lost+found) continue ;; esac
-    cp -a "$entry" "$TARGET/"
+    cp -ax "$entry" "$TARGET/"  # -x: not the stick's log/EFI partitions mounted under /boot
 done
 mkdir -p "$TARGET"/{proc,sys,dev,run,mnt,media,tmp,boot/efi}
 chmod 1777 "$TARGET/tmp"
