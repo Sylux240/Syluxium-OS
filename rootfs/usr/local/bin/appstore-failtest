@@ -5,6 +5,7 @@
 # harness to do it through the QEMU monitor), (2) installs a .deb whose
 # install script fails. After each: dpkg --audit must be empty.
 # Results go to the console ("APPSTORE ...").
+#   appstore-failtest [net]    net: only the network part
 say() { echo "APPSTORE $*" > /dev/console; }
 startdesktop > /dev/null 2>&1 &
 export DISPLAY=:0
@@ -55,7 +56,23 @@ d=$(win "Administrator Permission" 10); [ -n "$d" ] && { xdotool windowactivate 
 sleep 4
 for nic in e1000e.0 e1000.0 virtio-net-pci.0 net0; do echo "QMON set_link $nic off" > /dev/console; done
 say "network cable pulled"
-aptidle 600
+sleep 50
+for p in /proc/[0-9]*; do
+    case "$(cat $p/comm 2>/dev/null)" in http|https) say "after 50 s: $(cat $p/comm) in syscall $(cat $p/syscall 2>/dev/null | cut -d' ' -f1)";; esac
+    if grep -q syluxium-appstore $p/cmdline 2>/dev/null; then
+        for t in $p/task/*; do say "store thread ${t##*/}: $(cat $t/syscall 2>/dev/null)"; done
+    fi
+done
+sleep 25
+for p in /proc/[0-9]*; do
+    if grep -q syluxium-appstore $p/cmdline 2>/dev/null; then
+        for t in $p/task/*; do say "store thread ${t##*/} later: $(cat $t/syscall 2>/dev/null)"; done
+    fi
+done
+say "stage fail-stalled"
+sleep 3
+xdotool windowactivate --sync "$w"; xdotool mousemove 925 643 click 1     # Stop
+aptidle 180
 sleep 3
 say "stage fail-network"
 sleep 4
@@ -64,6 +81,7 @@ dpkg -s libreoffice-writer 2>/dev/null | grep -q "install ok installed" && say "
 say "audit after network drop: $(dpkg --audit | wc -l) lines"
 xdotool key Return   # close the error box
 pkill -f syluxium-appstore
+[ "$1" = net ] && { say "TEST DONE"; exit 0; }
 
 # (2) A package whose install script fails.
 mkdir -p /tmp/bad/DEBIAN /tmp/bad/usr/share/doc/syluxium-badpkg

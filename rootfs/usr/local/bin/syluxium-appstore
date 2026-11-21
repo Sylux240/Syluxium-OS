@@ -15,6 +15,7 @@ import re
 import subprocess
 import sys
 import threading
+import time
 sys.path.insert(0, "/usr/local/lib/syluxium/python")
 from syluxium_sys import *  # noqa: F401,F403
 from gi.repository import Gdk, GdkPixbuf  # noqa: E402
@@ -26,7 +27,10 @@ LOGFILE = os.path.expanduser("~/.local/state/syluxium-appstore.log")
 os.makedirs(os.path.dirname(LOGFILE), exist_ok=True)
 ENV = dict(os.environ, DEBIAN_FRONTEND="noninteractive", LC_ALL="C.UTF-8")
 APT_OPTS = ["-y", "-o", "APT::Status-Fd=1", "-o", "Dpkg::Options::=--force-confdef",
-            "-o", "Dpkg::Options::=--force-confold"]
+            "-o", "Dpkg::Options::=--force-confold",
+            # A connection that goes quiet gives up after a minute (not two).
+            "-o", "Acquire::http::Timeout=60", "-o", "Acquire::https::Timeout=60"]
+STALL_SECONDS = 60
 
 # ---- what the store shows ----
 CATEGORIES = [  # (title, icon, Debian sections)
@@ -102,6 +106,17 @@ def display_name(pkg):
         return NAMES[pkg]
     name = pkg[:-8] if pkg.endswith("-trinity") else pkg
     return name[:1].upper() + name[1:]
+
+
+def net_bytes():
+    """{interface: (received, sent)} from /proc/net/dev, without the loopback."""
+    out = {}
+    for line in read("/proc/net/dev").splitlines()[2:]:
+        name, _, rest = line.partition(":")
+        v = rest.split()
+        if len(v) >= 9 and name.strip() != "lo":
+            out[name.strip()] = (int(v[0]), int(v[8]))
+    return out
 
 
 def human_kb(k):
@@ -323,14 +338,45 @@ def confirm_plan(parent, name, pkg, res, catalog=None):
 
 # ---- running apt with a progress bar ----
 class Runner:
-    """apt in a worker thread; progress, status and the log on the window."""
+    """apt as a child process read from the GTK main loop (no worker thread):
+    progress, status and the log on the window."""
 
     def __init__(self, admin, progress, status, details):
         self.admin, self.progress, self.status, self.details = admin, progress, status, details
         self.busy = False
+        self.downloading = False
+        self.stopped = False
+        # Stopping is offered only while downloading: nothing on the computer
+        # has changed yet then (stopping dpkg halfway would break packages).
+        self.stop_btn = Gtk.Button.new_with_mnemonic("_Stop")
+        self.stop_btn.set_no_show_all(True)
+        self.stop_btn.connect("clicked", lambda *_: self.stop())
+        GLib.timeout_add_seconds(5, self._watch)
 
-    def ui(self, fn, *a):
-        GLib.idle_add(lambda: fn(*a) and False)
+    def _watch(self):
+        # Stalled: hardly a byte received for a minute (apt itself goes on
+        # trying file after file for a long time when the connection is gone).
+        rx = sum(r for r, _t in net_bytes().values())
+        now = time.monotonic()
+        if not (self.busy and self.downloading) or rx - getattr(self, "watch_rx", 0) > 16384:
+            self.watch_rx, self.watch_time = rx, now
+        elif now - self.watch_time > STALL_SECONDS and not self.stopped:
+            self.status.set_text("The download has not moved for a minute. Is the computer still connected "
+                                 "to the Internet? You can stop it and try again later.")
+        return True
+
+    def stop(self):
+        if not (self.busy and self.downloading):
+            return
+        self.stopped = True
+        self.stop_btn.set_sensitive(False)
+        self.status.set_text("Stopping the download...")
+        try:
+            # apt-get and the download helpers it started.
+            k = self.admin.popen(["sh", "-c", "pkill -TERM -x apt-get; pkill -TERM -f /usr/lib/apt/methods/"])
+            GLib.child_watch_add(GLib.PRIORITY_DEFAULT, k.pid, lambda *_: None)
+        except OSError:
+            pass
 
     def log(self, text):
         # Also kept in a file, for when something goes wrong.
@@ -345,7 +391,7 @@ class Runner:
         buf.place_cursor(buf.get_end_iter())
 
     def start(self, cmd, what, done, recover=False, new=()):
-        """Run cmd as root; done(ok, output) on the main thread afterwards.
+        """Run cmd as root; done(ok, output) afterwards.
         recover: if it fails, finish what dpkg left half done (dpkg --configure -a,
         apt-get -f install) so no package stays half installed; packages in `new`
         (not installed before) that still can't be set up are taken off again.
@@ -354,73 +400,141 @@ class Runner:
         if self.busy or not self.admin.ready():
             return False
         self.busy = True
+        self.stopped = False
         self.progress.set_fraction(0)
         self.progress.set_text(what)
         self.status.set_text(what)
-        threading.Thread(target=self._run, args=(cmd, what, done, recover, set(new)), daemon=True).start()
+        self._drive(self._steps(cmd, done, recover, set(new)))
         return True
 
-    def _audit(self):
-        out = self._exec(["dpkg", "--audit"])[1]
-        return [m.group(1) for m in re.finditer(r"(?m)^ (\S+)\s", out)]
+    # The steps run as a generator: each `yield cmd` runs a command and
+    # resumes with (exit code, output) when it has finished.
+    def _drive(self, gen, result=None):
+        try:
+            cmd = gen.send(result)
+        except StopIteration:
+            return
+        self._exec(cmd, lambda rc, out: self._drive(gen, (rc, out)))
 
-    def _run(self, cmd, what, done, recover, new):
-        rc, out = self._exec(cmd)
+    def _steps(self, cmd, done, recover, new):
+        rc, out = yield cmd
+        if rc != 0 and self.stopped:
+            out += "STOPPED\n"
         if rc != 0 and recover:
-            self.ui(self.status.set_text, "That did not work. Making sure nothing is left half installed...")
-            self.ui(self.progress.set_text, "Repairing...")
-            r1, o1 = self._exec(["dpkg", "--configure", "-a"])
-            r2, o2 = self._exec(["apt-get"] + APT_OPTS + ["-f", "install"])
-            broken = self._audit()
+            self.status.set_text("That did not work. Making sure nothing is left half installed...")
+            self.progress.set_text("Repairing...")
+            r1, o1 = yield ["dpkg", "--configure", "-a"]
+            r2, o2 = yield ["apt-get"] + APT_OPTS + ["-f", "install"]
+            broken = audit_names((yield ["dpkg", "--audit"])[1])
             fine = r1 == 0 and r2 == 0 and not broken
             result = "ok" if fine else "failed"
             gone = [b for b in broken if b.split(":")[0] in new]
             if not fine and gone:
                 # New software whose setup keeps failing: take it off again.
-                self._exec(["dpkg", "--remove", "--force-remove-reinstreq"] + gone)
-                self._exec(["apt-get"] + APT_OPTS + ["-f", "install"])
-                if not self._audit():
+                yield ["dpkg", "--remove", "--force-remove-reinstreq"] + gone
+                yield ["apt-get"] + APT_OPTS + ["-f", "install"]
+                if not audit_names((yield ["dpkg", "--audit"])[1]):
                     result = "rolled back"
             out += o1 + o2 + f"RECOVERY: {result}\n"
-            self.ui(self.log, {"ok": "Repair finished: every package is fully installed.\n",
-                               "rolled back": "The new software could not be set up and was removed again; "
-                                              "everything else is as it was.\n",
-                               "failed": "Repair did not finish: some packages are still broken.\n"}[result])
-        self.ui(self._finish, done, rc == 0, out)
+            self.log({"ok": "Repair finished: every package is fully installed.\n",
+                      "rolled back": "The new software could not be set up and was removed again; "
+                                     "everything else is as it was.\n",
+                      "failed": "Repair did not finish: some packages are still broken.\n"}[result])
+        self._finish(done, rc == 0, out)
 
-    def _exec(self, cmd):
-        self.ui(self.log, "$ " + " ".join(cmd) + "\n")
-        lines = []
+    def _exec(self, cmd, then):
+        self.log("$ " + " ".join(cmd) + "\n")
         try:
             p = self.admin.popen(cmd)
         except OSError as e:
-            self.ui(self.log, f"{e}\n")
-            return 1, str(e)
-        pulsing = True
-        for line in p.stdout:
-            lines.append(line)
-            # APT::Status-Fd lines: dlstatus:<n>:<percent>:<text>, pmstatus:<pkg>:<percent>:<text>
-            m = re.match(r"(dl|pm)status:[^:]*:([\d.]+):(.*)", line)
-            if m:
-                pulsing = False
-                pct = float(m.group(2)) / 100
-                frac = pct * 0.4 if m.group(1) == "dl" else 0.4 + pct * 0.6
-                text = debrand(m.group(3).strip())
-                self.ui(self.progress.set_fraction, frac)
-                self.ui(self.progress.set_text, f"{text} ({frac * 100:.0f}%)")
-                continue
-            if line.startswith(("pmconffile", "dlstatus", "pmerror", "media-change")):
-                continue
-            self.ui(self.log, line)
-            if pulsing:
-                self.ui(self.progress.pulse)
-        return p.wait(), "".join(lines)
+            self.log(f"{e}\n")
+            GLib.idle_add(lambda: then(1, str(e)) and False)
+            return
+        fd = p.stdout.fileno()
+        os.set_blocking(fd, False)
+        state = {"lines": [], "partial": b"", "pulsing": True, "eof": False, "status": None, "done": False}
+
+        def feed(chunk):
+            data = state["partial"] + chunk
+            *complete, state["partial"] = data.split(b"\n")
+            for raw in complete:
+                self._line(raw.decode("utf-8", "replace") + "\n", state)
+
+        def drain():
+            while not state["eof"]:
+                try:
+                    chunk = os.read(fd, 65536)
+                except BlockingIOError:
+                    return
+                except OSError:
+                    chunk = b""
+                if not chunk:
+                    state["eof"] = True
+                else:
+                    feed(chunk)
+
+        def finish():
+            # Done when the command has exited -- even if a helper it left
+            # behind (an apt download method) still holds the pipe open.
+            if state["done"] or state["status"] is None:
+                return
+            state["done"] = True
+            drain()
+            if state["partial"]:
+                self._line(state["partial"].decode("utf-8", "replace") + "\n", state)
+            GLib.source_remove(state["watch"]) if not state["eof"] else None
+            p.stdout.close()
+            then(p.returncode, "".join(state["lines"]))
+
+        def on_data(_fd, _cond):
+            drain()
+            if state["eof"]:
+                finish()
+                return False
+            return True
+
+        def exited(_pid, status):
+            # GLib reaped the child: the exit code comes from its status.
+            p.returncode = os.waitstatus_to_exitcode(status)
+            state["status"] = status
+            finish()
+        state["watch"] = GLib.io_add_watch(fd, GLib.PRIORITY_DEFAULT, GLib.IOCondition.IN | GLib.IOCondition.HUP |
+                                           GLib.IOCondition.ERR, on_data)
+        GLib.child_watch_add(GLib.PRIORITY_DEFAULT, p.pid, exited)
+
+    def _line(self, line, state):
+        state["lines"].append(line)
+        # APT::Status-Fd lines: dlstatus:<n>:<percent>:<text>, pmstatus:<pkg>:<percent>:<text>
+        m = re.match(r"(dl|pm)status:[^:]*:([\d.]+):(.*)", line)
+        if m:
+            state["pulsing"] = False
+            if self.downloading != (m.group(1) == "dl"):
+                self.downloading = m.group(1) == "dl"
+                self.stop_btn.set_visible(self.downloading)
+            pct = float(m.group(2)) / 100
+            frac = pct * 0.4 if m.group(1) == "dl" else 0.4 + pct * 0.6
+            self.progress.set_fraction(frac)
+            self.progress.set_text(f"{debrand(m.group(3).strip())} ({frac * 100:.0f}%)")
+            return
+        if line.startswith(("pmconffile", "dlstatus", "pmerror", "media-change")):
+            return
+        self.log(line)
+        if state["pulsing"]:
+            self.progress.pulse()
 
     def _finish(self, done, ok, out):
         self.busy = False
+        self.downloading = False
+        self.stop_btn.hide()
+        self.stop_btn.set_sensitive(True)
         self.progress.set_fraction(1.0 if ok else 0.0)
         self.progress.set_text("Done" if ok else "Failed")
         done(ok, out)
+
+
+def audit_names(out):
+    """The packages `dpkg --audit` lists as not fully installed."""
+    return [m.group(1) for m in re.finditer(r"(?m)^ (\S+)\s", out)]
 
 
 # ---- what apt would do: simulated first, so the user sees it ----
@@ -475,6 +589,8 @@ def repair_note(out):
 
 
 def error_text(out):
+    if "STOPPED" in out:
+        return "The download was stopped. Nothing on the computer was changed."
     errs = [debrand(l[3:].strip()) for l in out.splitlines() if l.startswith("E: ")]
     if any("Could not get lock" in e or "Unable to acquire" in e for e in errs):
         return "Another program is installing software right now. Try again when it has finished."
@@ -581,6 +697,7 @@ class Store:
         bottom.pack_start(exp, False, False, 0)
         outer.pack_start(bottom, False, False, 0)
         self.runner = Runner(self.admin, self.progress, self.status, self.details)
+        row.pack_start(self.runner.stop_btn, False, False, 0)
 
         self.win.show_all()
         self.show_details(None)
@@ -1140,6 +1257,7 @@ class DebInstaller:
         row.pack_end(self.install_btn, False, False, 0)
         box.pack_end(row, False, False, 0)
         self.runner = Runner(self.admin, self.progress, self.status, self.details)
+        row.pack_end(self.runner.stop_btn, False, False, 0)
         self.win.show_all()
         self.progress.set_text("")
         self.check()
