@@ -14,7 +14,7 @@
 
 namespace net {
 
-bool port_in_use_udp(const Endpoint& addr, u16 port);
+bool port_in_use_udp(const Endpoint& addr, u16 port, bool v6only);
 
 namespace {
 
@@ -365,7 +365,7 @@ public:
         for (TcpSocket* s = g_tcp; s; s = s->next) {
             if (s == this || !s->bound || s->local.port != port || s->state == State::Closed)
                 continue;
-            if (!bindings_overlap(s->local, addr))
+            if (!bindings_overlap(s->local, addr, s->v6only, v6only))
                 continue;
             if (reuse_addr && s->state != State::Listen)
                 continue; // SO_REUSEADDR: TIME_WAIT/old connections don't block a new listener
@@ -1072,11 +1072,12 @@ Socket* create_tcp(u16 domain) {
     return s;
 }
 
-bool port_in_use(u8 proto, const Endpoint& addr, u16 port) {
+bool port_in_use(u8 proto, const Endpoint& addr, u16 port, bool v6only) {
     if (proto == PROTO_UDP)
-        return port_in_use_udp(addr, port);
+        return port_in_use_udp(addr, port, v6only);
     for (TcpSocket* s = g_tcp; s; s = s->next)
-        if (s->bound && s->local.port == port && s->state != State::Closed && bindings_overlap(s->local, addr))
+        if (s->bound && s->local.port == port && s->state != State::Closed &&
+            bindings_overlap(s->local, addr, s->v6only, v6only))
             return true;
     return false;
 }

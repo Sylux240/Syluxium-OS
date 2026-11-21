@@ -23,6 +23,7 @@ struct Client {
     usize reply_len = 0;
     bool waiting = false;
     volatile bool kick = false; // link (re)gained: start over now
+    volatile bool disabled = false; // syluxium_dhcp = 0: the address is set by hand
     u32 tries = 0;              // DISCOVERs without an offer (for the log)
 };
 
@@ -56,7 +57,6 @@ void send_packet(Client* c, u8 type, u32 requested, u32 server) {
     put16(udp + 4, sizeof(udp));
     put16(udp + 6, 0);
     memcpy(udp + 8, pkt, sizeof(pkt));
-    put16(udp + 6, pseudo_checksum(0, 0xFFFFFFFF, PROTO_UDP, udp, sizeof(udp)));
     // Diagnostics: report who holds the network lock if it takes long.
     for (int waited = 0; !g_lock.try_lock(); waited++) {
         if (waited == 200) {
@@ -65,6 +65,9 @@ void send_packet(Client* c, u8 type, u32 requested, u32 server) {
         }
         sched::sleep_ms(10);
     }
+    // The source is the interface's address if it has one (a restarted
+    // client keeps it until the new lease): the checksum must match it.
+    put16(udp + 6, pseudo_checksum(c->iface->addr, 0xFFFFFFFF, PROTO_UDP, udp, sizeof(udp)));
     ip_send(0, 0xFFFFFFFF, PROTO_UDP, udp, sizeof(udp), 64, c->iface);
     g_lock.unlock();
 }
@@ -130,6 +133,11 @@ void client_thread(void* arg) {
             c->kick = false;
             backoff = 1000;
         }
+        if (c->disabled) {
+            // Turned off for this interface (static address): idle until turned on.
+            c->reply_ready.wait_timeout(2000ull * 1'000'000);
+            continue;
+        }
         if (!c->iface->link_up || !(c->iface->flags & IFF_UP)) {
             // No link yet (Wi-Fi not associated, cable out): wait for link_up().
             c->reply_ready.wait_timeout(2000ull * 1'000'000);
@@ -176,10 +184,10 @@ void client_thread(void* arg) {
         u64 lease = ack.lease ? ack.lease : 3600;
         for (;;) {
             u64 renew_at = clock::now_ms() + lease * 500;
-            while (!c->kick && clock::now_ms() < renew_at)
+            while (!c->kick && !c->disabled && clock::now_ms() < renew_at)
                 c->reply_ready.wait_timeout((renew_at - clock::now_ms()) * 1'000'000);
-            if (c->kick)
-                break; // new link (maybe another network): start over
+            if (c->kick || c->disabled)
+                break; // new link (maybe another network), or turned off: start over
             c->xid++;
             send_packet(c, REQUEST, ack.yiaddr, ack.server);
             Reply renew;
@@ -220,6 +228,38 @@ void dhcp_kick(Interface* iface) {
             c->kick = true;
             c->reply_ready.signal();
         }
+    }
+}
+
+static Client* client_of(Interface* iface) {
+    for (usize i = 0; i < g_client_count; i++)
+        if (g_clients[i].iface == iface)
+            return &g_clients[i];
+    return nullptr;
+}
+
+bool dhcp_enabled(Interface* iface) {
+    Client* c = client_of(iface);
+    return c && !c->disabled;
+}
+
+void dhcp_set_enabled(Interface* iface, bool on) {
+    Client* c = client_of(iface);
+    if (!c)
+        return;
+    c->disabled = !on;
+    if (on)
+        dhcp_restart(iface);
+    else
+        c->reply_ready.signal();
+    klog::info("DHCP: %s: %s", iface->name, on ? "on" : "off (address set by hand)");
+}
+
+void dhcp_restart(Interface* iface) {
+    if (Client* c = client_of(iface)) {
+        c->tries = 0;
+        c->kick = true;
+        c->reply_ready.signal();
     }
 }
 

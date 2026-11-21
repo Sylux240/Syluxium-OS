@@ -5,14 +5,13 @@
     syluxium-netconfig dhcp IFACE             address from the network (DHCP)
     syluxium-netconfig static IFACE ADDR/PREFIX [GATEWAY] [DNS...]
     syluxium-netconfig enable|disable IFACE
-    syluxium-netconfig watch                  keep static addresses (runs in the background)
 
 Settings live in /etc/syluxium/network/IFACE.conf. The kernel runs a DHCP
-client on every Ethernet adapter by itself (kernel/net/dhcp.cpp); a static
-address is set over it with `ip`, and `watch` puts it back if the kernel's
-client replaces it after a link change. DNS: DHCP's servers are in the
-kernel's /run/resolv.conf, which /etc/resolv.conf links to; static DNS
-servers replace that link with a file of their own."""
+client on every Ethernet adapter (kernel/net/dhcp.cpp), switched per
+adapter in /proc/sys/net/ipv4/conf/IFACE/syluxium_dhcp: a static address
+turns it off, DHCP turns it on again (it then asks the network right away).
+DNS: DHCP's servers are in the kernel's /run/resolv.conf, which
+/etc/resolv.conf links to; static DNS servers replace that link with a file."""
 import fcntl
 import os
 import socket
@@ -24,11 +23,36 @@ import time
 CONF_DIR = "/etc/syluxium/network"
 RESOLV = "/etc/resolv.conf"
 KERNEL_RESOLV = "/run/resolv.conf"
-UDHCPC_SCRIPT = "/usr/local/lib/syluxium/udhcpc.script"
 
 
 def ip(*args):
     return subprocess.run(["ip", *args], capture_output=True, text=True)
+
+
+def sysfs(name, attr, default=""):
+    try:
+        with open(f"/sys/class/net/{name}/{attr}") as f:
+            return f.read().strip()
+    except OSError:
+        return default
+
+
+def kernel_dhcp(name, value):
+    """Switch the kernel's DHCP client for this adapter: "0", "1" or "restart"."""
+    try:
+        with open(f"/proc/sys/net/ipv4/conf/{name}/syluxium_dhcp", "w") as f:
+            f.write(value)
+        return True
+    except OSError:
+        return False
+
+
+def dhcp_state(name):
+    try:
+        with open(f"/proc/sys/net/ipv4/conf/{name}/syluxium_dhcp") as f:
+            return f.read().strip()
+    except OSError:
+        return ""
 
 
 def ifaddr(name):
@@ -48,10 +72,15 @@ def ifaddr(name):
 
 
 def carrier(name):
-    """Up with a link (netlink's flags: the ioctl's IFF_RUNNING is always set)."""
-    out = ip("-o", "link", "show", "dev", name).stdout
-    flags = out[out.find("<") + 1:out.find(">")].split(",") if "<" in out else []
-    return "UP" in flags and "NO-CARRIER" not in flags
+    return sysfs(name, "carrier") == "1"
+
+
+def wait(cond, seconds):
+    for _ in range(int(seconds * 4)):
+        if cond():
+            return True
+        time.sleep(0.25)
+    return cond()
 
 
 def load(name):
@@ -109,6 +138,7 @@ def apply_static(name, conf):
     addr, prefix = conf.get("ADDRESS"), conf.get("PREFIX", "24")
     if not addr:
         return 1
+    kernel_dhcp(name, "0")
     cur = ifaddr(name)
     if cur != (addr, int(prefix)):
         if cur[0]:
@@ -133,44 +163,21 @@ def apply(name, renew=False):
     was_up = carrier(name)
     ip("link", "set", "dev", name, "up")
     if not was_up:
-        # Drivers bring the link up again a few seconds after "up" (the cable's
-        # autonegotiation); the kernel's DHCP client starts over then by itself.
-        for _ in range(40):
-            if carrier(name):
-                break
-            time.sleep(0.25)
-        if conf["METHOD"] != "static":
-            for _ in range(40):
-                if ifaddr(name)[0]:
-                    break
-                time.sleep(0.25)
+        wait(lambda: carrier(name), 10)  # drivers need a few seconds for the link
     if conf["METHOD"] == "static":
         return apply_static(name, conf)
     set_dns(static_dns_anywhere(skip=name))
-    if renew and carrier(name):
-        # The kernel's DHCP client only starts over when the link comes back:
-        # ask the network for an address now (busybox udhcpc, raw socket).
-        static = ifaddr(name)
-        r = subprocess.run(["udhcpc", "-i", name, "-n", "-q", "-f", "-t", "4", "-T", "2", "-s", UDHCPC_SCRIPT],
-                           capture_output=True, text=True, timeout=40)
-        if r.returncode == 0:
-            return 0
-        with open("/var/log/syluxium-netconfig.log", "a") as log:
-            log.write(f"udhcpc on {name} failed ({r.returncode}):\n{r.stdout}{r.stderr}\n")
-        # Otherwise: take the link down and up again, which makes the
-        # kernel's DHCP client start over (drivers that report the link).
-        if static[0]:
-            ip("addr", "del", f"{static[0]}/{static[1]}", "dev", name)
-        ip("link", "set", "dev", name, "down")
-        time.sleep(1)
-        ip("link", "set", "dev", name, "up")
-        for _ in range(60):
-            if ifaddr(name)[0]:
-                return 0
-            time.sleep(0.25)
-        if r.returncode:
-            print(f"{name}: no answer from a DHCP server", file=sys.stderr)
-            return 2
+    if renew:
+        # The static address goes; the kernel's DHCP client asks the network now.
+        old = ifaddr(name)
+        if old[0]:
+            ip("addr", "del", f"{old[0]}/{old[1]}", "dev", name)
+        kernel_dhcp(name, "1")
+    elif dhcp_state(name) == "0":
+        kernel_dhcp(name, "1")
+    if carrier(name) and not wait(lambda: ifaddr(name)[0], 15):
+        print(f"{name}: no answer from a DHCP server", file=sys.stderr)
+        return 2
     return 0
 
 
@@ -224,15 +231,9 @@ def main(argv):
         conf = load(args[0])
         conf["ENABLED"] = "yes" if cmd == "enable" else "no"
         save(args[0], conf)
-        return apply(args[0], renew=cmd == "enable" and not ifaddr(args[0])[0])
-    if cmd == "watch":
-        while True:
-            time.sleep(10)
-            for name in adapters():
-                conf = load(name)
-                if conf["METHOD"] == "static" and conf.get("ENABLED") != "no" and \
-                        ifaddr(name) != (conf.get("ADDRESS"), int(conf.get("PREFIX", "24"))):
-                    apply_static(name, conf)
+        return apply(args[0])
+    if cmd == "watch":  # older images ran this; the kernel keeps static addresses now
+        return 0
     print(__doc__)
     return 1
 
