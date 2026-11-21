@@ -229,9 +229,10 @@ public:
                 DirEntry e;
                 block::read(vol->dev, base + off, &e, 32);
                 u8 first = static_cast<u8>(e.name[0]);
-                if (first == 0x00)
-                    return false; // end of directory
-                if (first == 0xE5) {
+                // 0x00 marks the end of the directory, but older Syluxium
+                // versions (and other writers) can leave entries after a
+                // 0x00 hole when the directory grew; like Linux, keep looking.
+                if (first == 0x00 || first == 0xE5) {
                     lfn_slots = 0;
                     continue;
                 }
@@ -491,6 +492,20 @@ public:
         }
         if (static_cast<u32>(slots) * 32 > vol->cluster_size)
             return 0; // name too long for this volume's cluster size
+        // The entries go into a new cluster: unused end-of-directory slots
+        // (0x00) before it become "deleted" (0xE5), or readers that stop at
+        // 0x00 (Windows, macOS) would never see the new entries.
+        for (u32 c = first_cluster; c >= 2 && c < FAT_EOC; c = vol->fat_get(c)) {
+            u64 base = vol->cluster_offset(c);
+            for (u32 off = 0; off < vol->cluster_size; off += 32) {
+                u8 first;
+                block::read(vol->dev, base + off, &first, 1);
+                if (first == 0x00) {
+                    const u8 deleted = 0xE5;
+                    block::write(vol->dev, base + off, &deleted, 1);
+                }
+            }
+        }
         u32 c = vol->alloc_cluster(last); // directory full: add a (zeroed) cluster
         if (!c)
             return 0;
