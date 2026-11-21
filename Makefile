@@ -279,9 +279,19 @@ $(OBJDIR)/%.S.o: %.S
 	@echo "  AS    $<"
 	@$(CXX) $(ASFLAGS) -MJ $@.json -c $< -o $@
 
+# Every kernel names its build in the boot log (commit, "+changes" when built
+# from uncommitted code, build time), and a copy of each is kept in
+# kernel-builds/ (git-ignored): call chains from a tester's log (lockups,
+# Alt+SysRq+W) only resolve with that exact syluxium.elf.
+BUILD_ID = $(shell git describe --always --dirty=+changes 2>/dev/null || echo unknown)
+BUILD_TIME = $(shell date -u '+%Y%m%d-%H%M')
 $(KERNEL): $(OBJS) kernel/linker.ld
 	@echo "  LD    $@"
-	@$(LD) $(LDFLAGS) $(OBJS) -o $@
+	@printf 'const char syluxium_build_id[] = "%s, built %s UTC";\n' "$(BUILD_ID)" "$(BUILD_TIME)" > $(OBJDIR)/version.c
+	@$(CC) $(CFLAGS) -c $(OBJDIR)/version.c -o $(OBJDIR)/version.o
+	@$(LD) $(LDFLAGS) $(OBJS) $(OBJDIR)/version.o -o $@
+	@mkdir -p kernel-builds && cp $@ "kernel-builds/syluxium-$(BUILD_ID)-$(BUILD_TIME).elf"
+	@ls -t kernel-builds/*.elf | tail -n +31 | xargs -r rm -f  # the newest 30
 	@# compile_commands.json for CLion / clangd
 	@{ echo '['; find $(OBJDIR) -name '*.o.json' -exec cat {} + | sed '$$ s/,$$//'; echo ']'; } > compile_commands.json
 

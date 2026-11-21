@@ -54,6 +54,8 @@
 #include <video/framebuffer.hpp>
 #include <video/splash.hpp>
 
+extern "C" const char syluxium_build_id[]; // generated at link time (Makefile)
+
 namespace {
 
 void init_display() {
@@ -107,6 +109,7 @@ void print_cpu_info() {
         name++;
 
     u64 cpus = boot::mp() ? boot::mp()->cpu_count : 1;
+    klog::info("Syluxium build %s", syluxium_build_id);
     klog::info("CPU: %s (%s), %lu logical processor(s)", *name ? name : "unknown", vendor, cpus);
 }
 
