@@ -169,6 +169,30 @@ void alarm_thread(void*) {
                 p->alarm_deadline = p->alarm_interval ? t + p->alarm_interval : 0;
                 signal::send(p, signal::SIGALRM);
             }
+            for (auto& pt : p->posix_timers) {
+                if (!pt.used || !pt.deadline || t < pt.deadline)
+                    continue;
+                if (pt.interval) {
+                    u64 missed = (t - pt.deadline) / pt.interval;
+                    pt.overrun += missed;
+                    pt.deadline += (missed + 1) * pt.interval;
+                } else {
+                    pt.deadline = 0;
+                }
+                if (!pt.sig)
+                    continue;
+                sched::Thread* target = nullptr;
+                if (pt.thread_tid) {
+                    LockGuard guard(p->thread_lock);
+                    for (sched::Thread* th : p->threads)
+                        if (th->vtid == pt.thread_tid)
+                            target = th;
+                }
+                if (target)
+                    signal::send_thread(target, pt.sig, -2 /* SI_TIMER */);
+                else
+                    signal::send(p, pt.sig, -2 /* SI_TIMER */);
+            }
         }, &now);
     }
 }
@@ -218,6 +242,113 @@ long sys_getitimer(SYSCALL_ARGS) {
     if (a0 != 0)
         return -err::INVAL;
     return uaccess::put(reinterpret_cast<ITimerVal*>(a1), current_itimer(proc::current()));
+}
+
+// ---- POSIX timers ----
+
+struct SigEvent {
+    u64 value;
+    i32 signo, notify;
+    i32 tid;
+    i32 pad[11];
+};
+struct ITimerSpec {
+    i64 interval_sec, interval_nsec, value_sec, value_nsec;
+};
+constexpr int SIGEV_SIGNAL = 0, SIGEV_NONE = 1, SIGEV_THREAD = 2, SIGEV_THREAD_ID = 4;
+
+long sys_timer_create(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    if (a0 > 11)
+        return -err::INVAL; // clocks: realtime, monotonic, boottime (... all run on one clock here)
+    SigEvent ev{};
+    ev.signo = signal::SIGALRM;
+    ev.notify = SIGEV_SIGNAL;
+    if (a1 && uaccess::get(&ev, reinterpret_cast<SigEvent*>(a1)) < 0)
+        return -err::FAULT;
+    if (ev.notify == SIGEV_THREAD) // glibc makes these SIGEV_THREAD_ID itself
+        return -err::INVAL;
+    if (ev.notify != SIGEV_NONE && (ev.signo < 1 || ev.signo > proc::MAX_SIGNALS))
+        return -err::INVAL;
+    proc::Process* p = proc::current();
+    for (int i = 0; i < proc::Process::MAX_POSIX_TIMERS; i++) {
+        auto& pt = p->posix_timers[i];
+        if (pt.used)
+            continue;
+        pt = {true, ev.notify == SIGEV_NONE ? 0 : ev.signo, ev.notify == SIGEV_THREAD_ID ? ev.tid : 0, 0, 0, 0};
+        i32 id = i;
+        if (uaccess::put(reinterpret_cast<i32*>(a2), id) < 0) {
+            pt.used = false;
+            return -err::FAULT;
+        }
+        return 0;
+    }
+    return -err::AGAIN;
+}
+
+proc::Process::PosixTimer* timer_of(u64 id) {
+    proc::Process* p = proc::current();
+    return id < proc::Process::MAX_POSIX_TIMERS && p->posix_timers[id].used ? &p->posix_timers[id] : nullptr;
+}
+
+ITimerSpec timer_left(const proc::Process::PosixTimer* pt) {
+    ITimerSpec s{};
+    u64 now = clock::now_ns();
+    u64 left = pt->deadline > now ? pt->deadline - now : (pt->deadline ? 1 : 0);
+    s.value_sec = static_cast<i64>(left / 1'000'000'000);
+    s.value_nsec = static_cast<i64>(left % 1'000'000'000);
+    s.interval_sec = static_cast<i64>(pt->interval / 1'000'000'000);
+    s.interval_nsec = static_cast<i64>(pt->interval % 1'000'000'000);
+    return s;
+}
+
+long sys_timer_settime(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    constexpr u64 TIMER_ABSTIME = 1;
+    auto* pt = timer_of(a0);
+    if (!pt)
+        return -err::INVAL;
+    ITimerSpec nv;
+    if (uaccess::get(&nv, reinterpret_cast<ITimerSpec*>(a2)) < 0)
+        return -err::FAULT;
+    if (a3 && uaccess::put(reinterpret_cast<ITimerSpec*>(a3), timer_left(pt)) < 0)
+        return -err::FAULT;
+    u64 value = static_cast<u64>(nv.value_sec) * 1'000'000'000ull + static_cast<u64>(nv.value_nsec);
+    pt->interval = static_cast<u64>(nv.interval_sec) * 1'000'000'000ull + static_cast<u64>(nv.interval_nsec);
+    pt->overrun = 0;
+    if (!value)
+        pt->deadline = 0;
+    else if (a1 & TIMER_ABSTIME) // absolute: on the clock it was created for (CLOCK_REALTIME differs)
+        pt->deadline = value > clock::now_ns() ? value : clock::now_ns();
+    else
+        pt->deadline = clock::now_ns() + value;
+    if (value)
+        ensure_alarm_thread();
+    return 0;
+}
+
+long sys_timer_gettime(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    auto* pt = timer_of(a0);
+    if (!pt)
+        return -err::INVAL;
+    return uaccess::put(reinterpret_cast<ITimerSpec*>(a1), timer_left(pt));
+}
+
+long sys_timer_getoverrun(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    auto* pt = timer_of(a0);
+    return pt ? static_cast<long>(pt->overrun) : -err::INVAL;
+}
+
+long sys_timer_delete(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    auto* pt = timer_of(a0);
+    if (!pt)
+        return -err::INVAL;
+    pt->used = false;
+    pt->deadline = 0;
+    return 0;
 }
 
 long sys_alarm(SYSCALL_ARGS) {
@@ -281,6 +412,11 @@ void register_time() {
     set(36, sys_getitimer, "getitimer");
     set(37, sys_alarm, "alarm");
     set(38, sys_setitimer, "setitimer");
+    set(222, sys_timer_create, "timer_create");
+    set(223, sys_timer_settime, "timer_settime");
+    set(224, sys_timer_gettime, "timer_gettime");
+    set(225, sys_timer_getoverrun, "timer_getoverrun");
+    set(226, sys_timer_delete, "timer_delete");
     set(35, sys_nanosleep, "nanosleep");
     set(96, sys_gettimeofday, "gettimeofday");
     set(201, sys_time, "time");

@@ -802,6 +802,16 @@ long sys_reboot(SYSCALL_ARGS) {
         return 0;
     if (cmd != RESTART && cmd != RESTART2 && cmd != HALT && cmd != POWER_OFF)
         return -err::INVAL;
+    // Inside a PID namespace (a container: Android's init) a reboot ends the
+    // namespace, not the machine: its init dies (and with it everything in it).
+    if (Process* me = proc::current(); me->pidns) {
+        klog::info("%s[%d]: %s inside a PID namespace: ending the namespace", me->name, me->pid,
+                   cmd == POWER_OFF || cmd == HALT ? "power off" : "restart");
+        LockGuard guard(proc::table_lock());
+        if (Process* init = me->pidns->init)
+            signal::send(init, 9 /* SIGKILL */);
+        return 0;
+    }
     klog::info("System %s: flushing disks...", cmd == POWER_OFF ? "power off" : cmd == HALT ? "halt" : "restart");
     bootlog::save();
     block::sync_all();

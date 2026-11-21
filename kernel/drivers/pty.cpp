@@ -661,6 +661,7 @@ public:
 void init() {
     vfs::mkdir_p("/dev/pts", 0755);
     vfs::add_node("/dev/ptmx", new PtmxNode);
+    vfs::add_node("/dev/pts/ptmx", new PtmxNode); // devpts has its own (containers bind it onto their /dev/ptmx)
 }
 
 } // namespace pty

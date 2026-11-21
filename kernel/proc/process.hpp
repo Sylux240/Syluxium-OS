@@ -89,6 +89,15 @@ struct Process {
     void* mntns = nullptr;      // mount namespace (vfs table); nullptr: the system's
     int vpid = 0;               // pid inside pidns (= pid in the system's)
     PidNs* child_pidns = nullptr; // setns(pid): where our children will live
+    // POSIX timers (timer_create): polled by the itimer thread (sys_time.cpp).
+    struct PosixTimer {
+        bool used;
+        int sig;        // 0: SIGEV_NONE
+        int thread_tid; // SIGEV_THREAD_ID: that thread (vtid), else the process
+        u64 deadline, interval, overrun;
+    };
+    static constexpr int MAX_POSIX_TIMERS = 8;
+    PosixTimer posix_timers[MAX_POSIX_TIMERS] = {};
     Uts* uts = nullptr;         // nullptr: the system's
     // ITIMER_REAL / alarm(): absolute deadline (clock ns, 0 = off) and reload interval.
     u64 alarm_deadline = 0, alarm_interval = 0;

@@ -29,6 +29,9 @@ Inode* top_dir() {
     Inode* r = g_process_root ? g_process_root() : nullptr;
     return r ? r : g_root;
 }
+Inode* cross_down(Inode* dir);
+// The same, with whatever the caller has mounted on it.
+Inode* process_top() { return cross_down(top_dir()); }
 
 // ---- Mount table ----
 // A mount covers a directory (any file system) with another file system's
@@ -99,13 +102,16 @@ long follow(Inode* link, Inode* dir, Inode** out, int depth) {
     if (n < 0)
         return n;
     target[n] = 0;
-    return resolve_impl(target, dir, true, out, depth + 1, top_dir());
+    return resolve_impl(target, dir, true, out, depth + 1, process_top());
 }
 
 // `top`: the "/" of this walk (absolute paths start there, ".." stops there).
 long resolve_impl(const char* path, Inode* cwd, bool follow_last, Inode** out, int depth, Inode* top) {
     if (!path || !*path)
         return -err::NOENT;
+    // (`top` is already crossed: something mounted on "/" itself - a
+    // container's root bound over it, as LXC does when it can't pivot_root -
+    // is what "/" shows; see process_top().)
     Inode* node = (*path == '/' || !cwd) ? top : cwd;
 
     const char* p = path;
@@ -192,9 +198,10 @@ void init() {
 Inode* root() { return g_root; }
 
 long resolve(const char* path, Inode* cwd, bool follow_last, Inode** out) {
-    return resolve_impl(path, cwd, follow_last, out, 0, top_dir());
+    return resolve_impl(path, cwd, follow_last, out, 0, process_top());
 }
 
+// (The global walk ignores what the caller has mounted on "/": a container's root.)
 long resolve_global(const char* path, Inode** out) { return resolve_impl(path, nullptr, true, out, 0, g_root); }
 
 void set_process_root_hook(Inode* (*fn)()) { g_process_root = fn; }
@@ -218,7 +225,7 @@ long resolve_parent(const char* path, Inode* cwd, Inode** parent, const char** n
 
     Inode* dir;
     if (name_start == 0) {
-        dir = (*path == '/' || !cwd) ? top_dir() : cwd;
+        dir = (*path == '/' || !cwd) ? cross_down(top_dir()) : cwd;
     } else {
         char buf[1024];
         if (name_start >= sizeof(buf))
@@ -453,7 +460,7 @@ long mount_at(const char* path, Inode* fs_root, const char* source, const char* 
 // The mount `path` names, as the caller sees it: the newest mount whose root
 // `node` (what path resolves to) is, or that covers it, preferring one
 // recorded under that path. Mount lock held.
-long find_mount(const char* path, Inode* node, usize* index) {
+long find_mount(const char* path, Inode* node, Inode* top, usize* index) {
     long best = -1;
     for (usize i = g_mount_count; i-- > 0;) {
         if (g_mounts[i].root != node && g_mounts[i].covered != node)
@@ -466,7 +473,7 @@ long find_mount(const char* path, Inode* node, usize* index) {
             best = static_cast<long>(i);
     }
     if (best < 0)
-        return node == top_dir() ? 1 : -err::INVAL; // pivot_root(".", ".") left nothing to detach
+        return node == top_dir() || node == top ? 1 : -err::INVAL; // pivot_root(".", ".") left nothing to detach
     *index = static_cast<usize>(best);
     return 0;
 }
@@ -478,9 +485,10 @@ long move_mount(const char* from, const char* to) {
         return r;
     if (long r = resolve(from, nullptr, true, &node); r < 0)
         return r;
+    Inode* top = process_top();
     LockGuard guard(g_mount_lock);
     usize i;
-    if (long r = find_mount(from, node, &i); r != 0)
+    if (long r = find_mount(from, node, top, &i); r != 0)
         return r < 0 ? r : -err::INVAL;
     g_mounts[i].covered = target;
     snprintf(g_mounts[i].path, sizeof(g_mounts[i].path), "%s", to);
@@ -502,9 +510,10 @@ long unmount(const char* path) {
     Inode* node;
     if (long r = resolve(path, nullptr, true, &node); r < 0)
         return r;
+    Inode* top = process_top();
     LockGuard guard(g_mount_lock);
     usize found;
-    if (long r = find_mount(path, node, &found); r != 0)
+    if (long r = find_mount(path, node, top, &found); r != 0)
         return r < 0 ? r : 0;
     for (usize i = found + 1; i-- > found;) {
         // Something mounted inside it? (Bind mounts share their file

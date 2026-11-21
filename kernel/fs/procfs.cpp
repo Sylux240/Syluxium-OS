@@ -223,7 +223,7 @@ private:
         const char* name;
         vfs::Inode* inode;
     };
-    Entry m_entries[16];
+    Entry m_entries[24];
 
 public:
     void set_entry_owner(u32 u, u32 g) {
@@ -535,6 +535,9 @@ private:
     int m_pid;
 };
 
+bool gen_mountinfo(TextBuffer& out, const void*);
+bool gen_cgroup(TextBuffer& out, const void*);
+
 // /proc/<pid>/ns/<kind>: what setns() enters (containers: lxc-attach).
 // Plain readable files here (Linux's are nsfs magic links).
 constexpr u8 KIND_NSFS = 0xB5;
@@ -596,6 +599,8 @@ PidDir::PidDir(int p, int t) : pid(p), tid(t) {
     add("cwd", new GeneratedLink(link_cwd, this));
     add("fd", new FdDir(pid));
     add("ns", new NsDir(pid));
+    add("mountinfo", new GeneratedFile(gen_mountinfo, this));
+    add("cgroup", new GeneratedFile(gen_cgroup, this));
     if (!tid)
         add("task", new TaskDir(pid));
 }
@@ -801,6 +806,33 @@ bool gen_mounts(TextBuffer& out, const void*) {
     return true;
 }
 
+// /proc/<pid>/mountinfo: the caller's mount table (its mount namespace) in
+// Linux's format (LXC and others find mounts, e.g. the cgroup2 hierarchy, there).
+bool gen_mountinfo(TextBuffer& out, const void*) {
+    struct Ctx {
+        TextBuffer* o;
+        int id;
+    } ctx{&out, 2};
+    out.append("1 0 0:1 / / rw,relatime shared:1 - rootfs rootfs rw\n");
+    vfs::for_each_mount([](const char* source, const char* path, const char* type, void* arg) {
+        auto* c = static_cast<Ctx*>(arg);
+        c->o->printf("%d 1 0:%d / %s rw,relatime shared:%d - %s %s rw\n", c->id, c->id, path, c->id, type, source);
+        c->id++;
+    }, &ctx);
+    if (vfs::root() == vfs::ram_root())
+        out.printf("%d 1 0:%d / /proc rw,nosuid,nodev,noexec,relatime - proc proc rw\n"
+                   "%d 1 0:%d / /sys rw,nosuid,nodev,noexec,relatime - sysfs sysfs rw\n"
+                   "%d 1 0:%d / /dev rw,relatime - devtmpfs devtmpfs rw\n",
+                   ctx.id, ctx.id, ctx.id + 1, ctx.id + 1, ctx.id + 2, ctx.id + 2);
+    return true;
+}
+
+// /proc/<pid>/cgroup: everyone is in the root of the one (cgroup2) hierarchy.
+bool gen_cgroup(TextBuffer& out, const void*) {
+    out.append("0::/\n");
+    return true;
+}
+
 bool link_self(char* out, usize size, const void*) {
     Process* p = proc::current();
     if (!p)
@@ -844,7 +876,7 @@ void init() {
         snprintf(cmdline, sizeof(cmdline), "%s\n", boot::cmdline());
         genfs::static_file("/proc/cmdline", cmdline);
     }
-    genfs::static_file("/proc/filesystems", "nodev\tramfs\nnodev\tproc\nnodev\tsysfs\nnodev\tdevtmpfs\nnodev\ttmpfs\n\tvfat\n\texfat\n\text4\n\text3\n\text2\n");
+    genfs::static_file("/proc/filesystems", "nodev\tramfs\nnodev\tproc\nnodev\tsysfs\nnodev\tdevtmpfs\nnodev\ttmpfs\nnodev\tdevpts\nnodev\tcgroup\nnodev\tcgroup2\nnodev\tmqueue\nnodev\tbinder\n\tvfat\n\texfat\n\text4\n\text3\n\text2\n");
     add("mounts", new GeneratedFile(gen_mounts, nullptr));
     vfs::mkdir_p("/proc/sys/kernel");
     genfs::static_file("/proc/sys/kernel/hostname", "syluxium\n");

@@ -691,11 +691,67 @@ long do_mkdirat(long dirfd, u64 user_path, u32 mode) {
 // mknod/mknodat: named pipes (FIFOs) and plain files. Device nodes are made
 // by the kernel itself (devtmpfs-style), so only root may ask, and gets
 // EPERM like an unprivileged container would.
-long do_mknodat(long dirfd, u64 user_path, u32 mode) {
+// The device node in the system's /dev (any depth) with this type and number.
+Inode* find_device_node(Inode* dir, u32 type, u64 rdev, int depth) {
+    vfs::DirEntry e;
+    for (u64 i = 0; dir->readdir(i, &e) > 0; i++) {
+        usize len = strlen(e.name);
+        if ((len == 1 && e.name[0] == '.') || (len == 2 && e.name[0] == '.' && e.name[1] == '.'))
+            continue;
+        Inode* n = dir->lookup(e.name, len);
+        if (!n)
+            continue;
+        if ((n->mode & S_IFMT) == type && n->rdev == rdev)
+            return n;
+        if (depth < 3 && vfs::is_dir(n->mode))
+            if (Inode* f = find_device_node(n, type, rdev, depth + 1))
+                return f;
+    }
+    return nullptr;
+}
+
+// A device node made by mknod (root; containers build their own /dev): the
+// same device as the system's node with that number, under the new name.
+long mknod_device(Inode* parent, const char* name, usize len, u32 type, u64 linux_dev) {
+    if (!proc::capable())
+        return -err::PERM;
+    // Linux's dev_t: major in bits 8-19 (and 32+), minor in bits 0-7 and 20-31.
+    u32 major = static_cast<u32>(((linux_dev >> 8) & 0xFFF) | ((linux_dev >> 32) & ~0xFFFu));
+    u32 minor = static_cast<u32>((linux_dev & 0xFF) | ((linux_dev >> 12) & ~0xFFu));
+    u64 rdev = (major << 8) | (minor & 0xFF) | (static_cast<u64>(minor & ~0xFFu) << 12);
+    Inode* dev;
+    if (vfs::resolve_global("/dev", &dev) < 0)
+        return -err::NODEV;
+    Inode* node = find_device_node(dev, type, rdev, 0);
+    if (!node)
+        return -err::NODEV; // no such device here
+    if (!parent->is_ramfs_dir())
+        return -err::PERM; // tmpfs (where containers make their /dev) only
+    if (long r = static_cast<ramfs::Dir*>(parent)->attach(name, len, node); r < 0)
+        return r;
+    node->nlink++;
+    return 0;
+}
+
+long do_mknodat(long dirfd, u64 user_path, u32 mode, u64 linux_dev) {
     Process* p = proc::current();
     u32 type = mode & S_IFMT;
-    if (type == S_IFCHR || type == S_IFBLK)
-        return -err::PERM;
+    if (type == S_IFCHR || type == S_IFBLK) {
+        UserPath path(user_path);
+        if (path.error())
+            return path.error();
+        Inode* base;
+        if (long r = dir_for(p, dirfd, path.c_str(), &base); r < 0)
+            return r;
+        Inode* parent;
+        const char* name;
+        usize len;
+        if (long r = resolve_parent(path.c_str(), base, &parent, &name, &len); r < 0)
+            return r;
+        if (parent->lookup(name, len))
+            return -err::EXIST;
+        return mknod_device(parent, name, len, type, linux_dev);
+    }
     if (type != 0 && type != S_IFREG && type != S_IFIFO)
         return -err::INVAL; // sockets are made by bind()
     UserPath path(user_path);
@@ -725,8 +781,8 @@ long do_mknodat(long dirfd, u64 user_path, u32 mode) {
     return r;
 }
 
-long sys_mknod(SYSCALL_ARGS) { SYSCALL_UNUSED; return do_mknodat(AT_FDCWD, a0, static_cast<u32>(a1)); }
-long sys_mknodat(SYSCALL_ARGS) { SYSCALL_UNUSED; return do_mknodat(static_cast<i32>(a0), a1, static_cast<u32>(a2)); }
+long sys_mknod(SYSCALL_ARGS) { SYSCALL_UNUSED; return do_mknodat(AT_FDCWD, a0, static_cast<u32>(a1), a2); }
+long sys_mknodat(SYSCALL_ARGS) { SYSCALL_UNUSED; return do_mknodat(static_cast<i32>(a0), a1, static_cast<u32>(a2), a3); }
 
 long sys_mkdir(SYSCALL_ARGS) { SYSCALL_UNUSED; return do_mkdirat(AT_FDCWD, a0, static_cast<u32>(a1)); }
 long sys_mkdirat(SYSCALL_ARGS) { SYSCALL_UNUSED; return do_mkdirat(static_cast<i32>(a0), a1, static_cast<u32>(a2)); }
