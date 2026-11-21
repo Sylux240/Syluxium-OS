@@ -1025,6 +1025,10 @@ long sys_getsockopt(SYSCALL_ARGS) {
             case 7: case 8: value = 212992; break;          // SO_SNDBUF / SO_RCVBUF
             case 38: value = s->protocol; break;            // SO_PROTOCOL
             case 39: value = s->domain; break;              // SO_DOMAIN
+            // SO_PEERPIDFD: no pidfds here. "Not supported", as on Linux
+            // without them, so dbus-daemon falls back to SO_PEERCRED's pid
+            // (a 0 here was taken as pidfd 0 and the peer's pid was lost).
+            case 77: return -ENOPROTOOPT;
             default: value = 0; break;
             }
         } else if (level == IPPROTO_TCP && name == 2) {     // TCP_MAXSEG
