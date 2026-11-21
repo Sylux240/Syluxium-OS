@@ -1,3 +1,4 @@
+#include <arch/x86_64/protect.hpp>
 #include <core/watchdog.hpp>
 #include <video/splash.hpp>
 #include <drivers/input/input.hpp>
@@ -109,6 +110,7 @@ public:
             if (c->count) {
                 usize n = min(count / sizeof(LinuxEvent), c->count);
                 auto* out = static_cast<LinuxEvent*>(buf);
+                protect::UserAccess window; // out: the reader's (user) buffer
                 for (usize i = 0; i < n; i++) {
                     out[i] = c->queue[c->head];
                     c->head = (c->head + 1) % CLIENT_QUEUE;

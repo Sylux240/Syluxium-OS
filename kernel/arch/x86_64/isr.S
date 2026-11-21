@@ -35,6 +35,11 @@ isr_common:
     swapgs
 1:
     cld
+    /* AC off (user mode may have set it): SMAP stays in force in the
+     * kernel. pushf/popf rather than clac, which older CPUs don't have. */
+    pushfq
+    andq $~0x40000, (%rsp)
+    popfq
     pushq %rax
     pushq %rbx
     pushq %rcx

@@ -1,3 +1,4 @@
+#include <arch/x86_64/protect.hpp>
 #include <power/cpupower.hpp>
 #include <arch/x86_64/apic.hpp>
 #include <arch/x86_64/fpu.hpp>
@@ -26,6 +27,7 @@ namespace {
     gdt::load(cpu->tables, cpu->ist_tops);
     interrupts::load_idt();
     fpu::init_ap();
+    protect::init_this_cpu();
     syscall::init_cpu();
     apic::init_ap();
     cpupower::init_cpu();

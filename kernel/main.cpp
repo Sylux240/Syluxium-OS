@@ -50,6 +50,8 @@
 #include <sched/sched.hpp>
 #include <syscall/syscall.hpp>
 #include <tests/selftest.hpp>
+#include <arch/x86_64/protect.hpp>
+#include <core/stack_protector.hpp>
 #include <time/clock.hpp>
 #include <time/rtc.hpp>
 #include <video/console.hpp>
@@ -548,7 +550,8 @@ void kernel_main_thread(void*) {
 
 } // namespace
 
-extern "C" [[noreturn]] void kmain() {
+extern "C" [[noreturn]] __attribute__((no_stack_protector)) void kmain() {
+    stack_protector::init(); // first: everything after this may use canaries
     serial::init();
     percpu::init_bsp(); // GS -> boot CPU's Cpu: required before any lock is taken
 
@@ -598,6 +601,7 @@ extern "C" [[noreturn]] void kmain() {
     selftest::run_memory_tests();
 
     fpu::init_bsp();
+    protect::init_this_cpu(); // SMEP / SMAP
     syscall::init_cpu();
     syscall::register_all();
     klog::ok("User mode support: %s state, SYSCALL entry, Linux syscall table", fpu::mode_name());

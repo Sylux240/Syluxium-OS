@@ -1,0 +1,80 @@
+#!/usr/bin/python3
+"""Test aid: the thread pattern that froze the App Store's window -- a GLib
+main loop in the main thread, a worker thread reading a child's output line
+by line and handing each line to the main loop (GLib.idle_add), plus a timer.
+A watchdog thread reports when the main loop stops turning and shows where
+each thread is (/proc/self/task/*/syscall).
+
+    gilstress [seconds] [workers]
+"""
+import os
+import subprocess
+import sys
+import threading
+import time
+
+from gi.repository import GLib
+
+seconds = int(sys.argv[1]) if len(sys.argv) > 1 else 30
+workers = int(sys.argv[2]) if len(sys.argv) > 2 else 2
+last_tick = time.monotonic()
+handled = [0]
+stalls = [0]
+CHILD = r"""
+i=0
+while :; do
+    n=$(( (i % 7) * 30 + 1 ))
+    j=0; while [ $j -lt $n ]; do echo "Ign:$i https://deb.debian.org/debian trixie/main amd64 pkg $j"; j=$((j+1)); done
+    i=$((i+1))
+    case $((i % 5)) in 0) sleep 1;; 1) sleep 0.05;; *) : ;; esac
+done
+"""
+
+
+def on_line(line):
+    handled[0] += 1
+    return False
+
+
+def tick():
+    global last_tick
+    last_tick = time.monotonic()
+    return True
+
+
+def reader():
+    p = subprocess.Popen(["sh", "-c", CHILD], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    for line in p.stdout:
+        GLib.idle_add(on_line, line)
+        if time.monotonic() > end:
+            break
+    p.kill()
+    p.wait()
+
+
+def watchdog():
+    while time.monotonic() < end + 2:
+        time.sleep(0.5)
+        if time.monotonic() - last_tick > 5:
+            stalls[0] += 1
+            print(f"GILSTRESS STALL: main loop has not turned for {time.monotonic() - last_tick:.1f} s", flush=True)
+            for t in sorted(os.listdir("/proc/self/task")):
+                try:
+                    sc = open(f"/proc/self/task/{t}/syscall").read().strip()
+                except OSError:
+                    sc = "?"
+                print(f"GILSTRESS   thread {t}: {sc}", flush=True)
+            if stalls[0] > 3:
+                os._exit(1)
+
+
+end = time.monotonic() + seconds
+loop = GLib.MainLoop()
+GLib.timeout_add(100, tick)
+GLib.timeout_add(int(seconds * 1000) + 500, loop.quit)
+for _ in range(workers):
+    threading.Thread(target=reader, daemon=True).start()
+threading.Thread(target=watchdog, daemon=True).start()
+loop.run()
+print(f"GILSTRESS {'FAIL' if stalls[0] else 'PASS'}: {handled[0]} lines handled, {stalls[0]} stalls", flush=True)
+sys.exit(1 if stalls[0] else 0)

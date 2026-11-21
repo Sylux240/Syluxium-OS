@@ -1,3 +1,4 @@
+#include <arch/x86_64/protect.hpp>
 #include <arch/x86_64/compat_segments.hpp>
 #include <core/bootlog.hpp>
 #include <fs/ext2.hpp>
@@ -291,6 +292,33 @@ long sys_vfork(SYSCALL_ARGS) {
 // clone(flags, new_sp, parent_tid, child_tid, tls) -- x86_64 argument order
 long sys_clone(SYSCALL_ARGS) { SYSCALL_UNUSED; return proc::do_clone(frame, a0, a1, a2, a3, a4); }
 
+// clone3(args, size): clone with its arguments in a struct (glibc's
+// pthread_create tries it first). What clone() can do is supported; the
+// clone3-only features (pidfd, set_tid, cgroups, clearing handlers) answer
+// ENOSYS, which makes the C library fall back to clone().
+long sys_clone3(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    struct CloneArgs {
+        u64 flags, pidfd, child_tid, parent_tid, exit_signal, stack, stack_size, tls, set_tid, set_tid_size, cgroup;
+    } ca{};
+    constexpr u64 SIZE_VER0 = 64;
+    if (a1 < SIZE_VER0 || a1 > 4096)
+        return -err::INVAL;
+    usize n = a1 < sizeof(ca) ? a1 : sizeof(ca);
+    if (long r = uaccess::copy_from(&ca, reinterpret_cast<const void*>(a0), n); r < 0)
+        return r;
+    constexpr u64 CSIGNAL = 0xff, CLONE_PIDFD = 0x1000, CLONE_CLEAR_SIGHAND = 0x100000000ull,
+                  CLONE_INTO_CGROUP = 0x200000000ull;
+    if ((ca.flags & CSIGNAL) || ca.exit_signal > 64)
+        return -err::INVAL;
+    if ((ca.flags & (CLONE_PIDFD | CLONE_CLEAR_SIGHAND | CLONE_INTO_CGROUP)) || ca.set_tid_size || ca.cgroup)
+        return -err::NOSYS;
+    if ((ca.stack == 0) != (ca.stack_size == 0))
+        return -err::INVAL;
+    u64 sp = ca.stack ? ca.stack + ca.stack_size : 0;
+    return proc::do_clone(frame, (ca.flags & 0xFFFFFFFFull) | ca.exit_signal, sp, ca.parent_tid, ca.child_tid, ca.tls);
+}
+
 // Copies a NULL-terminated array of user strings into one kernel block.
 class StringVector {
 public:
@@ -500,6 +528,78 @@ long sys_rt_sigsuspend(SYSCALL_ARGS) {
     return -err::INTR;
 }
 
+// rt_sigtimedwait(set, info, timeout, sigsetsize): take one of the signals in
+// `set` (normally blocked by the caller) off the pending set, waiting for one
+// if needed (sigwait, sigwaitinfo, sigtimedwait; dbus and xcape use it).
+// Other, unblocked signals interrupt the wait (EINTR); a timeout gives EAGAIN.
+long sys_rt_sigtimedwait(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    if (a3 != sizeof(u64))
+        return -err::INVAL;
+    u64 set;
+    if (long r = uaccess::get(&set, reinterpret_cast<const u64*>(a0)); r < 0)
+        return r;
+    set &= ~((1ull << 8) | (1ull << 18)); // SIGKILL / SIGSTOP can't be waited for
+    u64 deadline = 0;
+    if (a2) {
+        struct { i64 sec, nsec; } ts;
+        if (long r = uaccess::copy_from(&ts, reinterpret_cast<void*>(a2), sizeof(ts)); r < 0)
+            return r;
+        if (ts.sec < 0 || ts.nsec < 0 || ts.nsec >= 1'000'000'000)
+            return -err::INVAL;
+        deadline = clock::now_ns() + static_cast<u64>(ts.sec) * 1'000'000'000 + static_cast<u64>(ts.nsec);
+    }
+    sched::Thread* self = sched::current();
+    u64 mine = __atomic_load_n(&self->sig_pending, __ATOMIC_ACQUIRE) & set;
+    int sig = signal::dequeue(set);
+    if (!sig) {
+        sched::WaitQueue wq; // woken by the sender (it wakes every sleeping thread)
+        auto ready = [&] { return (signal::pending_set() & set) != 0 || signal::interrupted(); };
+        for (;;) {
+            if (a2) {
+                u64 now = clock::now_ns();
+                if (now >= deadline || !wq.wait_until_timeout(ready, deadline - now))
+                    break;
+            } else {
+                wq.wait_until(ready);
+            }
+            mine = __atomic_load_n(&self->sig_pending, __ATOMIC_ACQUIRE) & set;
+            if ((sig = signal::dequeue(set)) != 0)
+                break;
+            if (signal::interrupted())
+                return -err::INTR;
+        }
+        if (!sig)
+            sig = signal::dequeue(set);
+    }
+    if (!sig)
+        return -err::AGAIN;
+    if (a1) {
+        // siginfo_t (128 bytes): signo, errno, code, then pid and uid for a kill.
+        struct SigInfo {
+            i32 signo, err, code, pad;
+            i32 pid;
+            u32 uid;
+            u8 rest[104];
+        } info{};
+        Process* p = proc::current();
+        bool from_thread = mine & (1ull << (sig - 1));
+        info.signo = sig;
+        info.code = from_thread ? self->sig_code[sig] : p->sig_code[sig];
+        info.pid = from_thread ? self->sig_pid[sig] : p->sig_pid[sig];
+        info.uid = from_thread ? self->sig_uid[sig] : p->sig_uid[sig];
+        if (info.code == signal::SI_TIMER) { // si_timerid, si_overrun, si_value
+            info.pid = p->sig_timer[sig];
+            info.uid = 0;
+            u64 value = p->sig_value[sig];
+            memcpy(info.rest, &value, 8);
+        }
+        if (long r = uaccess::put(reinterpret_cast<SigInfo*>(a1), info); r < 0)
+            return r;
+    }
+    return sig;
+}
+
 long sys_sched_yield(SYSCALL_ARGS) {
     SYSCALL_UNUSED;
     sched::yield();
@@ -681,6 +781,7 @@ long sys_getrandom(SYSCALL_ARGS) {
     usize len = min<u64>(a1, 32 * MiB);
     if (long r = uaccess::check(reinterpret_cast<void*>(a0), len, true); r < 0)
         return r;
+    protect::UserAccess window;
     random::fill(reinterpret_cast<void*>(a0), len);
     return static_cast<long>(len);
 }
@@ -1113,8 +1214,15 @@ long sys_setns(SYSCALL_ARGS) {
 
 long sys_personality(SYSCALL_ARGS) {
     SYSCALL_UNUSED;
-    // PER_LINUX only; 0xffffffff queries.
-    return (a0 == 0xffffffff || (a0 & 0xff) == 0) ? 0 : -err::INVAL;
+    // PER_LINUX (with flags such as ADDR_NO_RANDOMIZE) only; 0xffffffff queries.
+    Process* me = proc::current();
+    u32 old = me->personality;
+    if (a0 == 0xffffffff)
+        return old;
+    if ((a0 & 0xff) != 0)
+        return -err::INVAL;
+    me->personality = static_cast<u32>(a0);
+    return old;
 }
 
 // Memory locking: every page stays resident anyway (no swap).
@@ -1131,6 +1239,128 @@ long sys_membarrier(SYSCALL_ARGS) {
     default: return -err::INVAL;
     }
 }
+
+// futex_waitv(waiters, nr, flags, timeout, clockid): wait on up to 128
+// futexes (32-bit ones) at once; returns the index of the one woken.
+long sys_futex_waitv(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    constexpr u32 FUTEX2_SIZE_U32 = 0x02, FUTEX2_SIZE_MASK = 0x03, FUTEX2_PRIVATE = 128;
+    struct UserWaitv {
+        u64 val, uaddr;
+        u32 flags, reserved;
+    };
+    u32 n = static_cast<u32>(a1);
+    if (a2 != 0 || n == 0 || n > 128)
+        return -err::INVAL;
+    UserWaitv uw[128];
+    if (long r = uaccess::copy_from(uw, reinterpret_cast<const void*>(a0), n * sizeof(UserWaitv)); r < 0)
+        return r;
+    futex::WaitvRequest req[128];
+    for (u32 i = 0; i < n; i++) {
+        if ((uw[i].flags & FUTEX2_SIZE_MASK) != FUTEX2_SIZE_U32 || (uw[i].flags & ~(FUTEX2_SIZE_MASK | FUTEX2_PRIVATE)) ||
+            uw[i].reserved || uw[i].val > 0xFFFFFFFFull)
+            return -err::INVAL;
+        req[i] = futex::WaitvRequest{uw[i].uaddr, static_cast<u32>(uw[i].val), (uw[i].flags & FUTEX2_PRIVATE) != 0};
+    }
+    u64 deadline = 0;
+    if (a3) {
+        struct { i64 sec, nsec; } ts;
+        if (long r = uaccess::copy_from(&ts, reinterpret_cast<void*>(a3), sizeof(ts)); r < 0)
+            return r;
+        if (ts.sec < 0 || ts.nsec < 0 || ts.nsec >= 1'000'000'000)
+            return -err::INVAL;
+        u64 t = static_cast<u64>(ts.sec) * 1'000'000'000 + static_cast<u64>(ts.nsec);
+        constexpr u64 CLOCK_REALTIME = 0, CLOCK_MONOTONIC = 1;
+        if (a4 == CLOCK_REALTIME) {
+            u64 real_now = rtc::realtime_ns(), mono_now = clock::now_ns();
+            deadline = t > real_now ? mono_now + (t - real_now) : mono_now;
+        } else if (a4 == CLOCK_MONOTONIC) {
+            deadline = t;
+        } else {
+            return -err::INVAL;
+        }
+        if (deadline == 0)
+            deadline = 1;
+    }
+    return futex::waitv(req, n, deadline);
+}
+
+// process_vm_readv / process_vm_writev(pid, local_iov, liovcnt, remote_iov,
+// riovcnt, flags): copy between this process and another one's memory
+// (Wine's ReadProcessMemory / WriteProcessMemory, debuggers). Allowed for
+// root and for processes of the same user.
+long process_vm_rw(u64 pid_arg, u64 local_iov, u64 liovcnt, u64 remote_iov, u64 riovcnt, u64 flags, bool write) {
+    struct IoVec {
+        u64 base, len;
+    };
+    if (flags || liovcnt > 1024 || riovcnt > 1024)
+        return -err::INVAL;
+    if (!liovcnt || !riovcnt)
+        return 0;
+    auto* liov = static_cast<IoVec*>(kmalloc(liovcnt * sizeof(IoVec)));
+    auto* riov = static_cast<IoVec*>(kmalloc(riovcnt * sizeof(IoVec)));
+    auto* bounce = static_cast<u8*>(kmalloc(64 * KiB));
+    long result = 0;
+    proc::Memory* mem = nullptr;
+    if (!liov || !riov || !bounce) {
+        result = -err::NOMEM;
+    } else if (uaccess::copy_from(liov, reinterpret_cast<const void*>(local_iov), liovcnt * sizeof(IoVec)) < 0 ||
+               uaccess::copy_from(riov, reinterpret_cast<const void*>(remote_iov), riovcnt * sizeof(IoVec)) < 0) {
+        result = -err::FAULT;
+    } else {
+        LockGuard guard(proc::table_lock());
+        Process* target = proc::find_visible(static_cast<int>(pid_arg), proc::current());
+        const proc::Cred& c = proc::cred();
+        if (!target || target->state == proc::State::Zombie || !target->mem)
+            result = -err::SRCH;
+        else if (c.euid != 0 && (c.ruid != target->cred.ruid || c.ruid != target->cred.euid))
+            result = -err::PERM;
+        else {
+            mem = target->mem;
+            mem->get();
+        }
+    }
+    u64 total = 0;
+    if (mem) {
+        u64 li = 0, loff = 0, ri = 0, roff = 0;
+        while (li < liovcnt && ri < riovcnt) {
+            u64 lleft = liov[li].len - loff, rleft = riov[ri].len - roff;
+            if (!lleft) { li++; loff = 0; continue; }
+            if (!rleft) { ri++; roff = 0; continue; }
+            usize n = static_cast<usize>(min<u64>(min<u64>(lleft, rleft), 64 * KiB));
+            u64 laddr = liov[li].base + loff, raddr = riov[ri].base + roff;
+            usize done;
+            if (write) {
+                if (uaccess::copy_from(bounce, reinterpret_cast<const void*>(laddr), n) < 0) {
+                    result = -err::FAULT;
+                    break;
+                }
+                done = mem->write_remote(raddr, bounce, n) == 0 ? n : 0;
+            } else {
+                done = mem->read_remote(raddr, bounce, n);
+                if (done && uaccess::copy_to(reinterpret_cast<void*>(laddr), bounce, done) < 0) {
+                    result = -err::FAULT;
+                    break;
+                }
+            }
+            total += done;
+            if (done < n)
+                break; // the remote range ends (unmapped): a partial transfer
+            loff += n;
+            roff += n;
+        }
+        mem->put();
+    }
+    kfree(liov);
+    kfree(riov);
+    kfree(bounce);
+    if (total)
+        return static_cast<long>(total);
+    return result ? result : (mem ? -err::FAULT : result);
+}
+
+long sys_process_vm_readv(SYSCALL_ARGS) { SYSCALL_UNUSED; return process_vm_rw(a0, a1, a2, a3, a4, a5, false); }
+long sys_process_vm_writev(SYSCALL_ARGS) { SYSCALL_UNUSED; return process_vm_rw(a0, a1, a2, a3, a4, a5, true); }
 
 void register_process() {
     set(135, sys_personality, "personality");
@@ -1201,13 +1431,17 @@ void register_process() {
     set(61, sys_wait4, "wait4");
     set(62, sys_kill, "kill");
     set(130, sys_rt_sigsuspend, "rt_sigsuspend");
+    set(128, sys_rt_sigtimedwait, "rt_sigtimedwait");
     set(200, sys_tkill, "tkill");
     set(234, sys_tgkill, "tgkill");
-    set(435, sys_quiet_nosys, "clone3");
+    set(435, sys_clone3, "clone3");
     set(131, sys_sigaltstack, "sigaltstack");
     set(158, sys_arch_prctl, "arch_prctl");
     set(186, sys_gettid, "gettid");
     set(202, sys_futex, "futex");
+    set(449, sys_futex_waitv, "futex_waitv");
+    set(310, sys_process_vm_readv, "process_vm_readv");
+    set(311, sys_process_vm_writev, "process_vm_writev");
     set(203, sys_sched_setaffinity, "sched_setaffinity");
     set(204, sys_sched_getaffinity, "sched_getaffinity");
     set(218, sys_set_tid_address, "set_tid_address");
