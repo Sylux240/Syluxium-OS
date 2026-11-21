@@ -279,6 +279,9 @@ void discover_hardware() {
     ehci::enumerate_all();
     uhci::enumerate_all();
     ohci::enumerate_all();
+    // The log onto the boot stick from here on, before the other drivers
+    // (GPU drivers) bind: if one blanks the screen, its log still lands there.
+    bootlog::start();
     mount_disk_root(); // root= on the command line: an installed system on disk
     dev::probe_all();
     sysfs::populate_devices();
@@ -499,7 +502,6 @@ void kernel_main_thread(void*) {
     discover_hardware();
     acpi::start_interpreter(); // AML: power button, battery, lid (after PCI)
     ps2kbd::late_init(); // after the USB handoff (firmware PS/2 emulation off)
-    bootlog::start(); // the log onto the boot USB stick (machines without working input)
     u64 reclaimed = pmm::reclaim_bootloader_memory();
     klog::ok("Reclaimed %lu KiB of bootloader memory", reclaimed / KiB);
 
