@@ -1,5 +1,6 @@
 // File and filesystem system calls.
 
+#include <arch/x86_64/protect.hpp>
 #include <block/block.hpp>
 #include <fs/ext2.hpp>
 #include <core/log.hpp>
@@ -142,6 +143,9 @@ long do_read(File* f, u64 user_buf, u64 count, i64 offset = -1) {
         return -err::ISDIR;
     if (long r = uaccess::check(reinterpret_cast<void*>(user_buf), count, true); r < 0)
         return r;
+    // File systems and drivers fill the user buffer directly: a SMAP window
+    // for the duration of the read (and of the write below).
+    protect::UserAccess window;
     if (offset >= 0)
         return f->inode->read_file(f, static_cast<u64>(offset), reinterpret_cast<void*>(user_buf), count);
     LockGuard guard(f->lock);
@@ -156,6 +160,7 @@ long do_write(File* f, u64 user_buf, u64 count, i64 offset = -1) {
         return -err::BADF;
     if (long r = uaccess::check(reinterpret_cast<void*>(user_buf), count, false); r < 0)
         return r;
+    protect::UserAccess window;
     if (offset >= 0) {
         isize n = f->inode->write_file(f, static_cast<u64>(offset), reinterpret_cast<const void*>(user_buf), count);
         if (n > 0 && is_reg(f->inode->mode))
@@ -950,6 +955,7 @@ long sys_getdents64(SYSCALL_ARGS) {
         u8* rec = out + used;
         u64 next_off = f->offset + 1;
         u16 rl = static_cast<u16>(reclen);
+        protect::UserAccess window; // rec: in the caller's (user) buffer
         memcpy(rec, &e.ino, 8);
         memcpy(rec + 8, &next_off, 8);
         memcpy(rec + 16, &rl, 2);

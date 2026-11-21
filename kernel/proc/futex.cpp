@@ -1,3 +1,4 @@
+#include <arch/x86_64/protect.hpp>
 #include <core/log.hpp>
 #include <lib/errno.hpp>
 #include <lib/spinlock.hpp>
@@ -53,6 +54,12 @@ Bucket& bucket_for(const Key& k) {
 constexpr u64 RECHECK_NS = 1'000'000'000;
 u64 g_lost_wakeups = 0;
 
+// Read the futex word (already checked and faulted in by make_key).
+u32 user_word(u64 uaddr) {
+    protect::UserAccess window;
+    return *reinterpret_cast<volatile u32*>(uaddr);
+}
+
 bool matches(const sched::Thread* t, const Key& k) { return t->futex_key_a == k.a && t->futex_key_b == k.b; }
 
 } // namespace
@@ -69,7 +76,7 @@ long wait(u64 uaddr, u32 expected, u64 deadline_ns, u32 bitset, bool is_private)
     b.lock.lock();
     // The word is checked under the bucket lock, so a waker that changes it
     // and then calls wake() can't slip in between the check and the sleep.
-    u32 current = *reinterpret_cast<volatile u32*>(uaddr);
+    u32 current = user_word(uaddr);
     if (current != expected) {
         b.lock.unlock();
         return -err::AGAIN;
@@ -98,7 +105,7 @@ long wait(u64 uaddr, u32 expected, u64 deadline_ns, u32 bitset, bool is_private)
             woken = true; // the caller sees EINTR-like spurious return 0 and re-checks
             break;
         }
-        u32 now_val = *reinterpret_cast<volatile u32*>(uaddr);
+        u32 now_val = user_word(uaddr);
         if (now_val != expected) {
             g_lost_wakeups++;
             if (g_lost_wakeups <= 20)
@@ -149,7 +156,7 @@ long requeue(u64 uaddr, u64 uaddr2, int wake_count, int requeue_count, bool comp
     if (compare) {
         if (long r = uaccess::check(reinterpret_cast<void*>(uaddr), 4, false); r < 0)
             return r;
-        if (*reinterpret_cast<volatile u32*>(uaddr) != expected)
+        if (user_word(uaddr) != expected)
             return -err::AGAIN;
     }
     long total = static_cast<long>(wake_count) + static_cast<long>(requeue_count);

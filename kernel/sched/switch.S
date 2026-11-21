@@ -7,11 +7,14 @@
  * context_switch, or, for a brand-new thread, at thread_start().
  *
  * Caller-saved registers don't need saving: the C++ caller already assumes
- * they're clobbered by the call.
+ * they're clobbered by the call. RFLAGS is saved too: a thread switched
+ * away inside a SMAP user-access window (AC set) must get it back, and no
+ * other thread may inherit it.
  */
 .section .text
 .global context_switch
 context_switch:
+    pushfq
     pushq %rbp
     pushq %rbx
     pushq %r12
@@ -26,6 +29,7 @@ context_switch:
     popq %r12
     popq %rbx
     popq %rbp
+    popfq
     ret
 
 .section .note.GNU-stack, "", @progbits

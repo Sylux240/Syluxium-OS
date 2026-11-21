@@ -1,3 +1,4 @@
+#include <arch/x86_64/protect.hpp>
 #include <fs/inotify.hpp>
 #include <fs/ramfs.hpp>
 #include <mm/layout.hpp>
@@ -258,6 +259,7 @@ isize RegularFile::read(u64 offset, void* buf, usize count) {
         return 0;
     usize n = min<u64>(count, size - offset);
     auto* out = static_cast<u8*>(buf);
+    protect::UserAccess window; // buf is often the reader's (user) buffer
     for (usize done = 0; done < n;) {
         u64 pos = offset + done;
         usize in_page = pos % PAGE_SIZE;
@@ -279,6 +281,7 @@ isize RegularFile::write(u64 offset, const void* buf, usize count) {
     if ((m_seals & F_SEAL_GROW) && offset + count > size)
         return -err::PERM;
     auto* in = static_cast<const u8*>(buf);
+    protect::UserAccess window; // buf is often the writer's (user) buffer
     for (usize done = 0; done < count;) {
         u64 pos = offset + done;
         usize in_page = pos % PAGE_SIZE;

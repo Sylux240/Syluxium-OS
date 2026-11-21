@@ -1,3 +1,4 @@
+#include <arch/x86_64/protect.hpp>
 #include <arch/x86_64/compat_segments.hpp>
 #include <core/bootlog.hpp>
 #include <fs/ext2.hpp>
@@ -743,6 +744,7 @@ long sys_getrandom(SYSCALL_ARGS) {
     usize len = min<u64>(a1, 32 * MiB);
     if (long r = uaccess::check(reinterpret_cast<void*>(a0), len, true); r < 0)
         return r;
+    protect::UserAccess window;
     random::fill(reinterpret_cast<void*>(a0), len);
     return static_cast<long>(len);
 }
@@ -1175,8 +1177,15 @@ long sys_setns(SYSCALL_ARGS) {
 
 long sys_personality(SYSCALL_ARGS) {
     SYSCALL_UNUSED;
-    // PER_LINUX only; 0xffffffff queries.
-    return (a0 == 0xffffffff || (a0 & 0xff) == 0) ? 0 : -err::INVAL;
+    // PER_LINUX (with flags such as ADDR_NO_RANDOMIZE) only; 0xffffffff queries.
+    Process* me = proc::current();
+    u32 old = me->personality;
+    if (a0 == 0xffffffff)
+        return old;
+    if ((a0 & 0xff) != 0)
+        return -err::INVAL;
+    me->personality = static_cast<u32>(a0);
+    return old;
 }
 
 // Memory locking: every page stays resident anyway (no swap).

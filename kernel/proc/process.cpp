@@ -4,6 +4,7 @@
 #include <arch/x86_64/gdt.hpp>
 #include <arch/x86_64/interrupts.hpp>
 #include <arch/x86_64/percpu.hpp>
+#include <arch/x86_64/protect.hpp>
 #include <core/log.hpp>
 #include <fs/poll.hpp>
 #include <core/panic.hpp>
@@ -160,6 +161,18 @@ void user_fault(interrupts::Frame* frame) {
                  fi.sig, fi.code, fi.addr_is_ip ? frame->rip : 0);
 }
 
+// Who called the code that touched user memory: a leaf function (memcpy)
+// has its return address on top of the stack, others at rbp + 8.
+u64 smap_caller(const interrupts::Frame* frame) {
+    constexpr u64 TEXT = 0xffffffff80000000ull;
+    u64 top = *reinterpret_cast<const u64*>(frame->rsp);
+    if (top >= TEXT)
+        return top;
+    if (frame->rbp >= mm::KERNEL_HALF && !(frame->rbp & 7))
+        return reinterpret_cast<const u64*>(frame->rbp)[1];
+    return 0;
+}
+
 void page_fault(interrupts::Frame* frame) {
     constexpr i32 SEGV_MAPERR = 1, SEGV_ACCERR = 2;
     u64 addr = arch::read_cr2();
@@ -170,6 +183,11 @@ void page_fault(interrupts::Frame* frame) {
     if (from_user)
         sched::current()->fault_cr2 = addr;
 
+    // SMAP: kernel code reading or writing a present user page outside a
+    // uaccess window (reported, then allowed; panics with smap=strict).
+    if (!from_user && addr < mm::USER_END && (frame->error_code & 1) && !(frame->error_code & 16) &&
+        protect::smap_violation(addr, frame->rip, &frame->rflags, smap_caller(frame)))
+        return;
     if (p && p->mem && addr < mm::USER_END) {
         // Resolving may sleep on the memory lock; fine with interrupts on.
         if (frame->rflags & arch::RFLAGS_IF)
@@ -546,6 +564,7 @@ long do_clone(interrupts::Frame* frame, u64 flags, u64 new_sp, u64 parent_tid, u
         uts_get(child->uts);
     }
     child->umask = parent->umask;
+    child->personality = parent->personality;
     child->cred = parent->cred;
     child->oom_score_adj = parent->oom_score_adj;
     child->ctty = parent->ctty;
