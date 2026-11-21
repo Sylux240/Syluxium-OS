@@ -191,8 +191,13 @@ void add_char_device(u32 major, u32 minor, const char* devname, const char* pare
         char pdev[128];
         snprintf(pdev, sizeof(pdev), "%s/uevent", cd->parent);
         vfs::mkdir_p(cd->parent, 0755);
-        char text[160];
-        snprintf(text, sizeof(text), "DRIVER=%s\nMODALIAS=platform:%s\n", parent_name, parent_name);
+        char text[256];
+        // libdrm's drmGetDevice2() describes platform devices by their
+        // device-tree node (OF_FULLNAME / OF_COMPATIBLE_N): give it one.
+        snprintf(text, sizeof(text),
+                 "DRIVER=%s\nOF_NAME=framebuffer\nOF_FULLNAME=/%s\nOF_COMPATIBLE_0=%s\nOF_COMPATIBLE_N=1\n"
+                 "MODALIAS=platform:%s\n",
+                 parent_name, parent_name, parent_name, parent_name);
         for (char* c = text; *c; c++) // the driver name without the instance (".0")
             if (*c == '.' && c[1] >= '0' && c[1] <= '9') {
                 char* nl = c;
@@ -201,6 +206,11 @@ void add_char_device(u32 major, u32 minor, const char* devname, const char* pare
                 memmove(c, nl, strlen(nl) + 1);
             }
         genfs::static_file(pdev, text);
+        vfs::mkdir_p("/sys/bus/platform/devices", 0755);
+        add(cd->parent, "subsystem", new GeneratedLink([](char* out, usize size, const void*) {
+            snprintf(out, size, "/sys/bus/platform");
+            return true;
+        }, cd));
     }
     snprintf(cd->uevent, sizeof(cd->uevent), "MAJOR=%u\nMINOR=%u\nDEVNAME=%s\nDEVTYPE=drm_minor\n", major, minor,
              devname);
