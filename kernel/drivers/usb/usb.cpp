@@ -91,6 +91,8 @@ void queue_work(void (*fn)(void*), void* arg) {
     g_work_wait.wake_all();
 }
 
+bool hotplug_started() { return __atomic_load_n(&g_worker_started, __ATOMIC_ACQUIRE); }
+
 void start_hotplug() {
     if (!__atomic_exchange_n(&g_worker_started, true, __ATOMIC_ACQ_REL))
         sched::spawn("usb-hub", worker_thread, nullptr, -1, true);

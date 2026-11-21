@@ -49,7 +49,10 @@ struct Hub {
     u32 pending = 0;      // change bitmap from the status-change endpoint
     bool queued = false;  // a hub_work item is waiting
     bool gone = false;    // unplugged: the struct is never freed (work items may still name it)
+    Hub* next = nullptr;  // every hub ever probed (for the safety-net poll)
 };
+
+Hub* g_hubs = nullptr;
 
 bool port_status(Hub* h, u8 port, u16* status, u16* change) {
     u8 buf[4];
@@ -170,6 +173,33 @@ void status_change(void* ctx, const u8* data, u32 length) {
         queue_work(hub_work, h);
 }
 
+// Safety net every 2 s: ports whose state disagrees with what we know, or
+// that show change bits, are handled as if the status-change endpoint had
+// said so (some hubs' endpoints miss changes on real hardware).
+void poll_thread(void*) {
+    for (;;) {
+        sched::sleep_ms(2000);
+        for (Hub* h = __atomic_load_n(&g_hubs, __ATOMIC_ACQUIRE); h; h = h->next) {
+            if (h->gone)
+                continue;
+            u32 bits = 0;
+            for (u8 p = 1; p <= h->ports; p++) {
+                u16 status, change;
+                if (!port_status(h, p, &status, &change))
+                    continue;
+                bool connected = status & STATUS_CONNECTION;
+                if (change || connected != (h->children[p] != nullptr))
+                    bits |= 1u << p;
+            }
+            if (bits && !h->gone) {
+                __atomic_or_fetch(&h->pending, bits, __ATOMIC_RELEASE);
+                if (!__atomic_exchange_n(&h->queued, true, __ATOMIC_ACQ_REL))
+                    queue_work(hub_work, h);
+            }
+        }
+    }
+}
+
 // The hub was unplugged: everything behind it goes too. Topology lock held.
 void disconnect(void* ctx) {
     auto* h = static_cast<Hub*>(ctx);
@@ -215,6 +245,10 @@ bool probe(Device* d, const Interface& intf) {
     h->ports = ports;
     h->superspeed = superspeed;
     d->add_binding(disconnect, h);
+    h->next = __atomic_load_n(&g_hubs, __ATOMIC_ACQUIRE);
+    if (!h->next)
+        sched::spawn("usb-hub-poll", poll_thread, nullptr, -1, true);
+    __atomic_store_n(&g_hubs, h, __ATOMIC_RELEASE);
 
     for (u8 p = 1; p <= ports; p++)
         d->control(0x23, REQ_SET_FEATURE, PORT_POWER, p, nullptr, 0);

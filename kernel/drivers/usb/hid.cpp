@@ -249,9 +249,11 @@ bool probe(Device* d, const Interface& intf) {
         return probe_boot(d, intf, ep);
     }
 
-    if (intf.subclass == 1)
-        d->control(0x21, REQ_SET_PROTOCOL, PROTOCOL_REPORT, intf.number, nullptr, 0); // boot devices: be explicit
-    d->control(0x21, REQ_SET_IDLE, 0, intf.number, nullptr, 0); // report only on change
+    // As Linux's usbhid: no SET_PROTOCOL (devices start in report protocol)
+    // and SET_IDLE only for boot keyboards. Extra class requests confused a
+    // Dell KM632 receiver: its mouse interface stopped answering.
+    if (intf.subclass == 1 && intf.protocol == 1)
+        d->control(0x21, REQ_SET_IDLE, 0, intf.number, nullptr, 0); // report only on change
     if (d->open_endpoint(*ep) != 0) {
         delete r;
         return false;

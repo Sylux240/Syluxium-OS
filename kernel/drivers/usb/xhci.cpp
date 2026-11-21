@@ -825,9 +825,22 @@ void UsbDevice::disable() {
 
 void event_thread(void* arg) {
     auto* hc = static_cast<Controller*>(arg);
+    u64 next_check = clock::now_ms() + 1000;
     for (;;) {
         hc->process_events();
         __atomic_add_fetch(&hc->event_passes, 1, __ATOMIC_RELEASE);
+        // Safety net once a second (once hot-plug runs): a port whose state
+        // disagrees with what we know is looked at as if it had reported a
+        // change. A port only reports again after its old change bits are
+        // cleared, so one missed event used to hide a new device until reboot.
+        if (usb::hotplug_started() && clock::now_ms() >= next_check) {
+            next_check = clock::now_ms() + 1000;
+            for (u32 port = 1; port <= hc->max_ports; port++) {
+                bool connected = *hc->portsc(port) & PORTSC_CCS;
+                if (connected != (hc->root_devices[port] != nullptr))
+                    hc->port_changed(port);
+            }
+        }
         sched::sleep_ms(1);
     }
 }

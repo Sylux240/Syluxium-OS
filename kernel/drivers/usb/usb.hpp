@@ -128,6 +128,8 @@ void queue_work(void (*fn)(void*), void* arg);
 
 // Start the worker (after the boot-time scan of all ports).
 void start_hotplug();
+// Whether start_hotplug() ran (boot enumeration is over).
+bool hotplug_started();
 
 // Class drivers.
 namespace hid {
