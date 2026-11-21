@@ -54,4 +54,8 @@ void timer_tick(bool from_user);             // called from the APIC timer inter
 bool running();
 u64 thread_count();
 
+// Every thread's name, state and (if not running) kernel call chain into the
+// kernel log: Alt+SysRq+W, for systems that froze but still take keys.
+void dump_threads();
+
 } // namespace sched

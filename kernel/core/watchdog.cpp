@@ -7,6 +7,7 @@
 #include <arch/x86_64/apic.hpp>
 #include <arch/x86_64/interrupts.hpp>
 #include <arch/x86_64/percpu.hpp>
+#include <core/bootlog.hpp>
 #include <core/log.hpp>
 #include <core/watchdog.hpp>
 #include <sched/sched.hpp>
@@ -20,6 +21,7 @@ u64 g_last[MAX];
 u32 g_stale[MAX];
 bool g_reported[MAX];
 volatile bool g_dump_request[MAX];
+volatile bool g_thread_dump_request = false;
 
 void nmi(interrupts::Frame* f) {
     Cpu* cpu = this_cpu();
@@ -46,8 +48,18 @@ void nmi(interrupts::Frame* f) {
 }
 
 void thread(void*) {
+    bool save_pending = false;
     for (;;) {
         sched::sleep_ms(1000);
+        if (g_thread_dump_request) {
+            g_thread_dump_request = false;
+            sched::dump_threads();
+            bootlog::save(); // onto the stick now: the next step may be the power button
+        }
+        if (save_pending) { // a lockup was reported a second ago (from the NMI)
+            save_pending = false;
+            bootlog::save();
+        }
         u32 n = percpu::count();
         for (u32 i = 0; i < n && i < MAX; i++) {
             Cpu* c = percpu::get(i);
@@ -66,12 +78,17 @@ void thread(void*) {
                 g_reported[i] = true;
                 g_dump_request[i] = true;
                 apic::send_nmi(c->lapic_id);
+                save_pending = true;
             }
         }
     }
 }
 
 } // namespace
+
+void request_thread_dump() {
+    g_thread_dump_request = true;
+}
 
 void start() {
     interrupts::set_handler(interrupts::VEC_NMI, nmi);

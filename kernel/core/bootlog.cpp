@@ -106,7 +106,9 @@ void mount_logs_partition() {
 void writer(void*) {
     // Early and often at first: a machine that freezes soon after still
     // leaves its log (then every few minutes for the rest of the session).
-    static const u32 at_seconds[] = {2, 5, 10, 15, 20, 30, 45, 60, 90, 120, 180, 240, 300, 450, 600, 900, 1200, 1800};
+    // Machines under test freeze at any moment (often when a program starts
+    // using the GPU): the first 15 minutes are saved every 20 seconds.
+    static const u32 at_seconds[] = {2, 5, 10, 15, 20};
     u32 elapsed = 0;
     save();
     for (u32 t : at_seconds) {
@@ -114,8 +116,12 @@ void writer(void*) {
         elapsed = t;
         save();
     }
-    for (;;) { // the rest of the session: every 10 minutes
-        sched::sleep_ms(600'000);
+    for (; elapsed < 900; elapsed += 20) {
+        sched::sleep_ms(20'000);
+        save();
+    }
+    for (;;) { // the rest of the session: every 2 minutes
+        sched::sleep_ms(120'000);
         save();
     }
 }

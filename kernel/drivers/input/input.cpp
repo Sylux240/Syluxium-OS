@@ -1,3 +1,4 @@
+#include <core/watchdog.hpp>
 #include <video/splash.hpp>
 #include <drivers/input/input.hpp>
 #include <fs/poll.hpp>
@@ -237,6 +238,13 @@ void mirror(Device* d, u16 type, u16 code, i32 value) {
 void Device::report(u16 type, u16 code, i32 value) {
     if (type == EV_KEY && code == 1 /* KEY_ESC */ && value == 1)
         splash::request_verbose();
+    // Alt+SysRq(PrintScreen)+W, as on Linux: dump every thread's state into
+    // the boot log and save it, for a desktop that froze but whose kernel
+    // still runs.
+    if (type == EV_KEY && code == 17 /* KEY_W */ && value == 1 &&
+        (key_down[99 / 64] & (1ull << (99 % 64))) /* KEY_SYSRQ */ &&
+        (key_down[0] & ((1ull << 56) /* KEY_LEFTALT */)) | (key_down[100 / 64] & (1ull << (100 % 64))))
+        watchdog::request_thread_dump();
     mirror(this, type, code, value);
     if (type == EV_KEY && code <= KEY_MAX) {
         bool was_down = key_down[code / 64] & (1ull << (code % 64));

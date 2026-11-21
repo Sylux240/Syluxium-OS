@@ -8,6 +8,7 @@
 #include <core/panic.hpp>
 #include <lib/format.hpp>
 #include <lib/string.hpp>
+#include <mm/heap.hpp>
 #include <mm/vmalloc.hpp>
 #include <mm/vmm.hpp>
 #include <power/cpupower.hpp>
@@ -602,3 +603,57 @@ extern "C" void sched_preempt_point() {
     if (sched::running() && arch::interrupts_enabled() && cpu_local::preempt_count() == 0 && cpu_local::need_resched())
         sched::schedule();
 }
+
+namespace sched {
+
+void dump_threads() {
+    constexpr usize CAP = 256 * 1024;
+    char* buf = static_cast<char*>(kmalloc(CAP));
+    if (!buf)
+        return;
+    usize len = 0;
+    static const char* const names[] = {"ready", "running", "blocked", "dead"};
+    g_threads_lock.lock();
+    u64 now = clock::now_ns();
+    for (Thread* t = g_all_threads.front(); t && len + 400 < CAP; t = g_all_threads.next_of(t)) {
+        u8 st = static_cast<u8>(t->state);
+        len += snprintf(buf + len, CAP - len, "  %-24s tid %-5lu %-7s", t->name, t->tid, st < 4 ? names[st] : "?");
+        if (t->state == ThreadState::Blocked && t->wake_deadline)
+            len += snprintf(buf + len, CAP - len, " (timeout in %lu ms)",
+                            t->wake_deadline > now ? (t->wake_deadline - now) / 1'000'000 : 0);
+        if (t->state == ThreadState::Blocked || t->state == ThreadState::Ready) {
+            // context_switch() saved r15 r14 r13 r12 rbx rbp, then the return address.
+            u64 lo = reinterpret_cast<u64>(t->stack), hi = t->kernel_stack_top();
+            const u64* s = reinterpret_cast<const u64*>(t->saved_rsp);
+            if (t->saved_rsp >= lo && t->saved_rsp + 56 <= hi) {
+                len += snprintf(buf + len, CAP - len, " at %lx", s[6]);
+                u64 fp = s[5];
+                for (int i = 0; i < 12 && fp >= lo && fp + 16 <= hi && (fp & 7) == 0; i++) {
+                    const u64* f = reinterpret_cast<const u64*>(fp);
+                    if (f[1] < 0xFFFF800000000000ull)
+                        break;
+                    len += snprintf(buf + len, CAP - len, " %lx", f[1]);
+                    if (f[0] <= fp)
+                        break;
+                    fp = f[0];
+                }
+            }
+        }
+        buf[len++] = '\n';
+    }
+    g_threads_lock.unlock();
+    buf[len] = 0;
+    klog::warn("Thread dump (Alt+SysRq+W; resolve addresses with addr2line -e syluxium.elf):");
+    for (char* line = buf; *line;) {
+        char* end = line;
+        while (*end && *end != '\n')
+            end++;
+        bool more = *end;
+        *end = 0;
+        klog::info("%s", line);
+        line = more ? end + 1 : end;
+    }
+    kfree(buf);
+}
+
+} // namespace sched

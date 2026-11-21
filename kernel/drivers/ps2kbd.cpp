@@ -50,6 +50,7 @@ u16 extended_keycode(u8 code) {
     case 0x1C: return 96;  // KEY_KPENTER
     case 0x1D: return 97;  // KEY_RIGHTCTRL
     case 0x35: return 98;  // KEY_KPSLASH
+    case 0x37: return 99;  // KEY_SYSRQ (PrintScreen)
     case 0x38: return 100; // KEY_RIGHTALT
     case 0x47: return 102; // KEY_HOME
     case 0x48: return 103; // KEY_UP
@@ -125,7 +126,7 @@ void keyboard_byte(u8 sc) {
     bool release = sc & 0x80;
     u8 code = sc & 0x7F;
     // Set-1 scancodes 1..88 are the Linux key codes themselves; E0 ones need a table.
-    u16 keycode = g_extended ? extended_keycode(code) : code;
+    u16 keycode = g_extended ? extended_keycode(code) : code == 0x54 ? 99 /* Alt+PrintScreen: KEY_SYSRQ */ : code;
     g_extended = false;
     if (!keycode)
         return;
