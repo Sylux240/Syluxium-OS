@@ -34,6 +34,7 @@ static const EFI_GUID APTR_GUID = {0x8d59d32b, 0xc655, 0x4ae9, {0x9b, 0x15, 0xf2
 static const EFI_GUID LIMG_GUID = {0x5b1b31a1, 0x9562, 0x11d2, {0x8e, 0x3f, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b}};
 static const EFI_GUID SFS_GUID = {0x964e5b22, 0x6459, 0x11d2, {0x8e, 0x39, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b}};
 static const EFI_GUID DP_GUID = {0x09576e91, 0x6d3f, 0x11d2, {0x8e, 0x39, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b}};
+static const EFI_GUID STIN_GUID = {0x387477c1, 0x69c7, 0x11d2, {0x8e, 0x39, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b}};
 static const EFI_GUID LOADER_GUID = {0x4a67b082, 0x0a4c, 0x41cf, {0xb6, 0xc7, 0x44, 0x0b, 0x29, 0xbb, 0x8c, 0x4f}};
 
 static void *alloc(UINTN n)
@@ -525,6 +526,24 @@ static void connect_all(void)
     BS->FreePool(h);
 }
 
+/* Every keyboard the firmware drives, not only the console's: on some
+ * boards (a Gigabyte H97) USB keyboards never reach ConIn once all drivers
+ * are connected. */
+static EFI_SIMPLE_TEXT_INPUT *KBD[8];
+static int NKBD;
+static void find_keyboards(void)
+{
+    EFI_HANDLE *h;
+    UINTN n, i;
+    if (BS->LocateHandleBuffer(ByProtocol, &STIN_GUID, 0, &n, &h)) return;
+    for (i = 0; i < n && NKBD < 8; i++) {
+        EFI_SIMPLE_TEXT_INPUT *in;
+        if (BS->HandleProtocol(h[i], &STIN_GUID, (void **)&in) || in == ST->ConIn) continue;
+        KBD[NKBD++] = in;
+    }
+    BS->FreePool(h);
+}
+
 static void find_pointers(void)
 {
     EFI_HANDLE *h;
@@ -562,6 +581,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     st->ConOut->EnableCursor(st->ConOut, 0);
     scale_background();
     find_pointers();
+    find_keyboards();
     layout();
     COUNTDOWN = TIMEOUT > 0 ? TIMEOUT : -1;
     CX = W / 2, CY = H / 2 + 160;
@@ -581,7 +601,8 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
         int dirty = 0, activity = 0, click = 0;
 
         EFI_INPUT_KEY key;
-        while (st->ConIn->ReadKeyStroke(st->ConIn, &key) == EFI_SUCCESS) {
+        for (int k = -1; k < NKBD; k++)
+        while ((k < 0 ? st->ConIn : KBD[k])->ReadKeyStroke(k < 0 ? st->ConIn : KBD[k], &key) == EFI_SUCCESS) {
             activity = 1;
             if (key.ScanCode == 4 || key.ScanCode == 1) SEL = (SEL + NENTRIES - 1) % NENTRIES, dirty = 1; /* left/up */
             else if (key.ScanCode == 3 || key.ScanCode == 2) SEL = (SEL + 1) % NENTRIES, dirty = 1;     /* right/down */
