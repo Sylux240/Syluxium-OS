@@ -5,6 +5,7 @@
 // to f_op->read/write/unlocked_ioctl/poll/release (glue/file.c).
 
 #include <video/splash.hpp>
+#include <video/console.hpp>
 #include <fs/poll.hpp>
 #include <fs/vfs.hpp>
 #include <lib/errno.hpp>
@@ -119,15 +120,25 @@ public:
     u32 mmap_cache_flags(u64 offset) override { return cache_flags(offset); }
     void on_open(vfs::File* f) override {
         int err = 0;
-        if (m_major == 226) // DRM: a display server takes the screen
+        if (is_display()) {
+            // A display server takes the screen: the text console stops
+            // drawing over it until the last handle is closed (as for /dev/fb0).
             splash::handover();
+            if (__atomic_add_fetch(&m_display_owners, 1, __ATOMIC_ACQ_REL) == 1)
+                console::set_graphics(true);
+        }
         f->private_data = lkpi_chrdev_open(m_major, m_minor, f->flags, &err);
     }
     void on_release(vfs::File* f) override {
         if (f->private_data)
             fput(static_cast<file*>(f->private_data));
         f->private_data = nullptr;
+        if (is_display() && __atomic_sub_fetch(&m_display_owners, 1, __ATOMIC_ACQ_REL) == 0 && !splash::active())
+            console::set_graphics(false);
     }
+    // DRM primary nodes (card0..): not render nodes (minor 128+), which can't scan out.
+    bool is_display() const { return m_major == 226 && m_minor < 64; }
+    u32 m_display_owners = 0;
     isize read_file(vfs::File* f, u64, void* buf, usize n) override {
         return do_read(static_cast<file*>(f->private_data), f, buf, n);
     }

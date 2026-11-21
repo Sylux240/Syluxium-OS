@@ -47,9 +47,10 @@ DEBIAN_SUITE := trixie
 TRINITY_REPO := https://mirror.ppa.trinitydesktop.org/trinity/deb/trinity-r14.1.x|trixie|main,deps
 TRINITY_PKGS := dbus tdebase-trinity-bin twin-trinity kicker-trinity kdesktop-trinity konsole-trinity tdm-trinity kuser-trinity tdepasswd-trinity tdesudo-trinity tdepowersave-trinity \
                 konqueror-trinity kcontrol-trinity ksmserver-trinity tdebase-data-trinity kmix-trinity kmail-trinity kaffeine-trinity \
-                tde-style-qtcurve-trinity twin-style-dekorator-trinity ksplash-trinity ksysguard-trinity
+                tde-style-qtcurve-trinity twin-style-dekorator-trinity ksplash-trinity ksysguard-trinity \
+                kmag-trinity kvkbd-trinity ksystemlog-trinity kate-trinity
 DEBIAN_PKGS  := bash busybox hello ncurses-base pciutils pci.ids netbase alsa-utils xserver-xorg-core xserver-xorg-video-fbdev xserver-xorg-input-evdev xinit x11-xserver-utils x11-xkb-utils xterm twm xfonts-base sudo libpam-runtime libpam-modules login fdisk e2fsprogs dosfstools xdotool firefox-esr \
-                wine wine64 iw wpasupplicant wireless-regdb hostapd fonts-wine xcape
+                wine wine64 iw wpasupplicant wireless-regdb hostapd fonts-wine xcape gparted python3 python3-gi gir1.2-gtk-3.0 librsvg2-common
 DEBIAN_ROOT  := $(BUILD)/rootfs-debian
 DEBIAN_STAMP := $(DEBIAN_ROOT)/.fetched
 # A few i386 packages for testing 32-bit dynamic linking (Steam is 32-bit).
@@ -295,7 +296,7 @@ $(WINE_I386_STAMP): tools/debian-fetch.py Makefile
 	@python3 tools/debian-fetch.py --arch i386 --suite $(DEBIAN_SUITE) --out $(WINE_I386_ROOT) --cache deps/debian --no-deps libwine
 	@touch $@
 
-$(INITRAMFS): $(KERNEL) $(PICKER) tools/mkfontdir.py tools/debrand-tde.py tools/syluxium_names.py tools/wine-setup.sh tools/wine-prefix-links.py $(DEBIAN_STAMP) $(DEBIAN_I386_STAMP) $(WINE_I386_STAMP) $(FIRMWARE_STAMP) $(USER_PROGS) $(USER32_PROGS) $(WIN_PROGS) $(shell find rootfs -type f 2>/dev/null) $(shell find rootfs -type d 2>/dev/null) Makefile
+$(INITRAMFS): $(KERNEL) $(PICKER) tools/mkfontdir.py tools/debrand-tde.py tools/syluxium_names.py tools/run-triggers.sh tools/wine-setup.sh tools/wine-prefix-links.py $(DEBIAN_STAMP) $(DEBIAN_I386_STAMP) $(WINE_I386_STAMP) $(FIRMWARE_STAMP) $(USER_PROGS) $(USER32_PROGS) $(WIN_PROGS) $(shell find rootfs -type f 2>/dev/null) $(shell find rootfs -type d 2>/dev/null) Makefile
 	@echo "  ROOT  $(ROOTFS)"
 	@rm -rf $(ROOTFS)
 	@cp -a $(DEBIAN_ROOT) $(ROOTFS)
@@ -317,6 +318,8 @@ $(INITRAMFS): $(KERNEL) $(PICKER) tools/mkfontdir.py tools/debrand-tde.py tools/
 	@cp -r rootfs/. $(ROOTFS)/
 	@# Menu entries read "Control Panel", "Start Menu", ... rather than TDE's names.
 	@python3 tools/debrand-tde.py $(ROOTFS)
+	@# What Debian's install scripts and triggers would build (MIME types, image loaders, schemas, icons).
+	@tools/run-triggers.sh $(ROOTFS)
 	@# /var/run and /var/lock point into /run, as on Debian (programs look for
 	@# their sockets and pid files there: wpa_cli, dbus, ...).
 	@rm -rf $(ROOTFS)/var/run $(ROOTFS)/var/lock && ln -s /run $(ROOTFS)/var/run && ln -s /run/lock $(ROOTFS)/var/lock

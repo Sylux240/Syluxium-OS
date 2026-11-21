@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Device Manager
+GenericName=Device Manager
+Comment=See and manage the hardware in this computer
+Exec=syluxium-devmgr
+Icon=computer
+Categories=System;Settings;HardwareSettings;

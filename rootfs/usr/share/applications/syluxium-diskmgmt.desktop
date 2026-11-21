@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Disk Management
+GenericName=Disk Management
+Comment=Partition, format and check disks
+Exec=gparted
+Icon=gparted
+X-TDE-SubstituteUID=true
+Categories=System;Settings;

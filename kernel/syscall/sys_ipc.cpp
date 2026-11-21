@@ -167,7 +167,10 @@ long sys_shmat(SYSCALL_ARGS) {
     {
         LockGuard guard(g_ipc_lock);
         Segment* s = shm_by_id(static_cast<long>(a0));
-        if (!s || s->removed)
+        // Linux lets a segment marked for removal (IPC_RMID) still be attached
+        // while it exists: X11 clients (GTK, cairo) create a segment, mark it
+        // removed at once and then have the X server attach it (MIT-SHM).
+        if (!s)
             return -err::INVAL;
         file = s->file;
         size = s->size;

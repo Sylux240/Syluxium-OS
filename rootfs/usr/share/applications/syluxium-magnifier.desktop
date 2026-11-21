@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Magnifier
+GenericName=Magnifier
+Comment=Enlarges part of the screen
+Exec=kmag
+Icon=kmag
+Categories=Qt;TDE;Utility;Accessibility;

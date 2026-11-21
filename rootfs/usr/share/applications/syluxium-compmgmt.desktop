@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Computer Management
+GenericName=Computer Management
+Comment=Event Viewer, Services, Users, Device Manager and Disk Management
+Exec=syluxium-compmgmt
+Icon=computer
+X-TDE-SubstituteUID=true
+Categories=System;Settings;

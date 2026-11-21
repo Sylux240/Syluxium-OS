@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Event Viewer
+GenericName=Event Viewer
+Comment=Read the system's event logs
+Exec=ksystemlog
+Icon=ksystemlog
+Categories=Qt;TDE;System;

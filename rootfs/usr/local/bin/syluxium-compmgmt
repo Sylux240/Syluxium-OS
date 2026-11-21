@@ -1,0 +1,97 @@
+#!/usr/bin/python3
+"""Computer Management: one console for the system tools (like XP's compmgmt.msc)."""
+import os
+import subprocess
+import sys
+sys.path.insert(0, "/usr/local/lib/syluxium/python")
+from syluxium_sys import *  # noqa: F401,F403
+
+win = window("Computer Management", 860, 560, "computer")
+paned = Gtk.Paned()
+store = Gtk.TreeStore(str, str, str)  # icon, title, key
+root = store.append(None, ["computer", "Computer Management (Local)", "root"])
+tools = store.append(root, ["applications-system", "System Tools", "tools"])
+for icon, title, key in (("text-x-generic", "Event Viewer", "events"), ("system-run", "Services", "services"),
+                         ("system-users", "Local Users", "users"), ("computer", "Device Manager", "devices")):
+    store.append(tools, [icon, title, key])
+storage = store.append(root, ["drive-harddisk", "Storage", "storage"])
+store.append(storage, ["drive-harddisk", "Disk Management", "disks"])
+nav = Gtk.TreeView(model=store, headers_visible=False)
+col = Gtk.TreeViewColumn()
+ic, tx = Gtk.CellRendererPixbuf(), Gtk.CellRendererText()
+col.pack_start(ic, False), col.pack_start(tx, True)
+col.add_attribute(ic, "icon-name", 0), col.add_attribute(tx, "text", 1)
+nav.append_column(col)
+nav.expand_all()
+sw = Gtk.ScrolledWindow()
+sw.add(nav)
+sw.set_size_request(220, -1)
+paned.pack1(sw, False, False)
+right = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, margin=8)
+paned.pack2(right, True, False)
+
+
+def table(columns, rows):
+    st = Gtk.ListStore(*([str] * len(columns)))
+    for r in rows:
+        st.append([str(x) for x in r])
+    v = Gtk.TreeView(model=st)
+    for i, c in enumerate(columns):
+        tc = Gtk.TreeViewColumn(c, Gtk.CellRendererText(), text=i)
+        tc.set_resizable(True), tc.set_sort_column_id(i)
+        v.append_column(tc)
+    s = Gtk.ScrolledWindow()
+    s.add(v)
+    return s
+
+
+def services():
+    """Background programs (no terminal), like the Services list."""
+    out = subprocess.run(["ps", "-eo", "pid,user,tty,comm"], capture_output=True, text=True).stdout.splitlines()[1:]
+    rows = []
+    for line in out:
+        p = line.split(None, 3)
+        if len(p) == 4 and p[2] == "?" and not p[3].startswith("["):
+            rows.append((p[3], "Running", p[1], p[0]))
+    return sorted(set(rows))
+
+
+def page(key):
+    for c in right.get_children():
+        right.remove(c)
+    if key == "events":
+        log = read("/var/log/syslog") or subprocess.run(["dmesg"], capture_output=True, text=True).stdout
+        lines = [(l[:200],) for l in log.splitlines()[-400:]][::-1]
+        right.pack_start(label("System events (newest first)", bold=True), False, False, 4)
+        right.pack_start(table(["Event"], lines), True, True, 0)
+        b = Gtk.Button(label="Open Event Viewer")
+        b.connect("clicked", lambda *_: launch("ksystemlog"))
+        right.pack_start(b, False, False, 4)
+    elif key == "services":
+        right.pack_start(label("Services", bold=True), False, False, 4)
+        right.pack_start(table(["Name", "Status", "Runs as", "Process"], services()), True, True, 0)
+    elif key == "users":
+        users = []
+        for line in read("/etc/passwd").splitlines():
+            f = line.split(":")
+            if len(f) > 6 and 1000 <= int(f[2] or 0) < 60000:
+                users.append((f[0], f[4].split(",")[0], f[5]))
+        right.pack_start(label("Local Users", bold=True), False, False, 4)
+        right.pack_start(table(["Name", "Full name", "Home folder"], users), True, True, 0)
+        b = Gtk.Button(label="Manage User Accounts...")
+        b.connect("clicked", lambda *_: launch("kuser"))
+        right.pack_start(b, False, False, 4)
+    elif key == "devices":
+        right.pack_start(DeviceTree(win), True, True, 0)
+    elif key == "disks":
+        right.pack_start(DiskView(win), True, True, 0)
+    else:
+        right.pack_start(label("Choose a tool on the left.", xalign=0.5), True, True, 0)
+    right.show_all()
+
+
+nav.get_selection().connect("changed", lambda sel: (lambda m_it: page(m_it[0][m_it[1]][2]) if m_it[1] else None)(sel.get_selected()))
+win.add(paned)
+win.show_all()
+page(sys.argv[1] if len(sys.argv) > 1 else "root")
+Gtk.main()

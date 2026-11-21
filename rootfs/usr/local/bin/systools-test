@@ -1,0 +1,20 @@
+#!/bin/sh
+# Test aid: start the desktop (the caller presses Enter to log in), then show
+# the system tools two at a time: System + Device Manager, then Computer
+# Management (Disk Management) + Image Writer. Errors go to the console.
+startdesktop &
+sleep "${1:-70}"
+export DISPLAY=:0 XAUTHORITY="$(ls /var/run/xauth/A:0-* | head -1)"
+place() { for i in $(seq 1 20); do w=$(xdotool search --name "$1" 2>/dev/null | head -1); [ -n "$w" ] && xdotool windowmove "$w" "$2" "$3" && return; sleep 0.5; done; }
+syluxium-system >> /tmp/systools.log 2>&1 &
+syluxium-devmgr >> /tmp/systools.log 2>&1 &
+place "System Properties" 20 30; place "Device Manager" 600 30
+echo "SYSTOOLS phase 1" >> /tmp/systools.log
+sleep 30
+pkill -f syluxium-system; pkill -f syluxium-devmgr
+syluxium-compmgmt disks >> /tmp/systools.log 2>&1 &
+syluxium-imagewriter >> /tmp/systools.log 2>&1 &
+place "Computer Management" 10 20; place "Image Writer" 740 420
+echo "SYSTOOLS phase 2" >> /tmp/systools.log
+sleep 25
+cat /tmp/systools.log > /dev/console

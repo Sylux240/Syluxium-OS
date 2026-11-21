@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=On-Screen Keyboard
+GenericName=On-Screen Keyboard
+Comment=Type with the mouse or a touch screen
+Exec=kvkbd
+Icon=kvkbd
+Categories=Qt;TDE;Utility;Accessibility;

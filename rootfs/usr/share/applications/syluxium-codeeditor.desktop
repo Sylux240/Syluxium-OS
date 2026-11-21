@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Code Editor
+GenericName=Code Editor
+Comment=Edit source code and text files with syntax highlighting
+Exec=kate %U
+Icon=kate
+MimeType=text/plain;text/x-c++src;text/x-csrc;text/x-python;text/x-shellscript;
+Categories=Qt;TDE;Development;TextEditor;

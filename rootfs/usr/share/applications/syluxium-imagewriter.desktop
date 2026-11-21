@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Image Writer
+GenericName=Image Writer
+Comment=Write an .iso or .img file to a USB stick or SD card
+Exec=syluxium-imagewriter
+Icon=media-flash
+X-TDE-SubstituteUID=true
+Categories=System;Utility;

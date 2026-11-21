@@ -1,0 +1,122 @@
+#!/usr/bin/python3
+"""Image Writer: put an .iso / .img onto a USB stick or SD card, then check the copy."""
+import hashlib
+import os
+import sys
+import threading
+sys.path.insert(0, "/usr/local/lib/syluxium/python")
+from syluxium_sys import *  # noqa: F401,F403
+
+CHUNK = 4 * 1024 * 1024
+win = window("Image Writer", 520, 300, "media-flash")
+grid = Gtk.Grid(column_spacing=10, row_spacing=10, margin=16)
+grid.attach(label("Image file:"), 0, 0, 1, 1)
+chooser = Gtk.FileChooserButton(title="Choose an image", action=Gtk.FileChooserAction.OPEN)
+flt = Gtk.FileFilter()
+flt.set_name("Disk images (*.iso, *.img)")
+for pat in ("*.iso", "*.img", "*.ISO", "*.IMG", "*.raw"):
+    flt.add_pattern(pat)
+chooser.add_filter(flt)
+chooser.set_hexpand(True)
+grid.attach(chooser, 1, 0, 2, 1)
+grid.attach(label("Write to:"), 0, 1, 1, 1)
+targets = Gtk.ComboBoxText()
+grid.attach(targets, 1, 1, 1, 1)
+refresh = Gtk.Button(label="Refresh")
+grid.attach(refresh, 2, 1, 1, 1)
+verify = Gtk.CheckButton(label="Check the copy after writing")
+verify.set_active(True)
+grid.attach(verify, 1, 2, 2, 1)
+progress = Gtk.ProgressBar(show_text=True)
+grid.attach(progress, 0, 3, 3, 1)
+write = Gtk.Button(label="Write")
+grid.attach(write, 2, 4, 1, 1)
+win.add(grid)
+devs = []
+
+
+def fill_targets(*_):
+    global devs
+    targets.remove_all()
+    # Removable disks only, never the one the system runs from.
+    devs = [d for d in disks() if d["removable"] and not d["system"] and d["size"] > 0]
+    for d in devs:
+        targets.append_text(f"{d['model']} - {human(d['size'])} (/dev/{d['name']})")
+    if devs:
+        targets.set_active(0)
+    else:
+        targets.append_text("No USB stick or SD card found")
+        targets.set_active(0)
+
+
+def set_progress(frac, text):
+    GLib.idle_add(lambda: (progress.set_fraction(frac), progress.set_text(text)) and False)
+
+
+def work(src, dev, check):
+    try:
+        total = os.path.getsize(src)
+        h = hashlib.sha256()
+        done = 0
+        with open(src, "rb") as fi, open(dev, "r+b", buffering=0) as fo:
+            while True:
+                b = fi.read(CHUNK)
+                if not b:
+                    break
+                fo.write(b)
+                h.update(b)
+                done += len(b)
+                set_progress(done / total * (0.5 if check else 1), f"Writing... {human(done)} of {human(total)}")
+            os.fsync(fo.fileno())
+        if check:
+            v = hashlib.sha256()
+            done = 0
+            with open(dev, "rb") as fd:
+                while done < total:
+                    b = fd.read(min(CHUNK, total - done))
+                    if not b:
+                        break
+                    v.update(b)
+                    done += len(b)
+                    set_progress(0.5 + done / total * 0.5, f"Checking... {human(done)} of {human(total)}")
+            if v.digest() != h.digest():
+                raise IOError("The copy on the disk does not match the image. Try another stick.")
+        set_progress(1, "Done")
+        GLib.idle_add(lambda: message(win, "The image was written successfully.",
+                                      "You can now remove the disk.") and False)
+    except Exception as e:  # noqa: BLE001
+        err = str(e)
+        set_progress(0, "Failed")
+        GLib.idle_add(lambda: message(win, "Writing failed.", err, Gtk.MessageType.ERROR) and False)
+    finally:
+        GLib.idle_add(lambda: write.set_sensitive(True) and False)
+
+
+def on_write(*_):
+    src = chooser.get_filename()
+    i = targets.get_active()
+    if not src or not devs or i < 0:
+        message(win, "Choose an image file and a disk first.")
+        return
+    d = devs[i]
+    if os.path.getsize(src) > d["size"]:
+        message(win, "The image is larger than the disk.", kind=Gtk.MessageType.ERROR)
+        return
+    if message(win, f"Everything on {d['model']} ({human(d['size'])}) will be erased.",
+               "Do you want to continue?", Gtk.MessageType.WARNING, Gtk.ButtonsType.OK_CANCEL) != Gtk.ResponseType.OK:
+        return
+    for name, _, _, _, mnt in d["parts"]:  # unmount it first
+        if mnt:
+            os.system(f"umount '{mnt}' 2>/dev/null")
+    write.set_sensitive(False)
+    threading.Thread(target=work, args=(src, f"/dev/{d['name']}", verify.get_active()), daemon=True).start()
+
+
+refresh.connect("clicked", fill_targets)
+write.connect("clicked", on_write)
+fill_targets()
+win.show_all()
+if not is_admin():
+    message(win, "Image Writer needs administrator rights.", "Start it from the Start menu (it asks for the password).",
+            Gtk.MessageType.WARNING)
+Gtk.main()

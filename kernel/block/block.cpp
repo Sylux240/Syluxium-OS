@@ -262,6 +262,9 @@ private:
     Device* m_dev;
 };
 
+void publish_partition(Device* part);
+void unpublish_partition(Device* part);
+
 void add_device(Device* d) {
     if (g_device_count >= MAX_DEVICES)
         return;
@@ -270,6 +273,8 @@ void add_device(Device* d) {
     snprintf(path, sizeof(path), "/dev/%s", d->name);
     vfs::add_node(path, new BlockNode(d, static_cast<u32>(g_device_count)));
     g_device_count++;
+    if (d->parent)
+        publish_partition(d);
 }
 
 struct PACKED MbrEntry {
@@ -348,10 +353,62 @@ void publish_sysfs(Device* disk) {
     snprintf(path, sizeof(path), "%s/size", dir);
     snprintf(text, sizeof(text), "%lu\n", disk->size_bytes() / 512);
     genfs::static_file(path, text);
+    // device/model: the disk's name for Disk Management and the System page.
+    snprintf(path, sizeof(path), "%s/device", dir);
+    vfs::mkdir_p(path, 0755);
+    snprintf(path, sizeof(path), "%s/device/model", dir);
+    char model[64];
+    snprintf(model, sizeof(model), "%s\n", disk->model);
+    genfs::static_file(path, model);
 }
+
+namespace {
+
+// /sys/block/<disk>/<partition>/{size,partition}, as on Linux.
+void publish_partition(Device* part) {
+    char dir[64], path[96], text[32];
+    snprintf(dir, sizeof(dir), "/sys/block/%s/%s", part->parent->name, part->name);
+    if (vfs::mkdir_p(dir, 0755) < 0)
+        return;
+    snprintf(path, sizeof(path), "%s/size", dir);
+    snprintf(text, sizeof(text), "%lu\n", part->size_bytes() / 512);
+    genfs::static_file(path, text);
+    const char* digits = part->name + strlen(part->name);
+    while (digits > part->name && digits[-1] >= '0' && digits[-1] <= '9')
+        digits--;
+    snprintf(path, sizeof(path), "%s/partition", dir);
+    snprintf(text, sizeof(text), "%s\n", digits);
+    genfs::static_file(path, text);
+}
+
+void unpublish_partition(Device* part) {
+    char dir[64], path[96];
+    snprintf(dir, sizeof(dir), "/sys/block/%s/%s", part->parent->name, part->name);
+    snprintf(path, sizeof(path), "%s/size", dir);
+    vfs::remove_node(path);
+    snprintf(path, sizeof(path), "%s/partition", dir);
+    vfs::remove_node(path);
+    snprintf(path, sizeof(path), "/sys/block/%s", part->parent->name);
+    if (vfs::Inode* d; vfs::resolve(path, nullptr, true, &d) == 0)
+        d->unlink(part->name, strlen(part->name), true);
+}
+
+} // namespace
 
 void unpublish_sysfs(Device* disk) {
     char path[80];
+    for (usize i = 0; i < g_device_count; i++)
+        if (g_devices[i]->parent == disk)
+            unpublish_partition(g_devices[i]);
+    snprintf(path, sizeof(path), "/sys/block/%s/device/model", disk->name);
+    vfs::remove_node(path);
+    snprintf(path, sizeof(path), "/sys/block/%s/device", disk->name);
+    if (vfs::Inode* dd; vfs::resolve(path, nullptr, true, &dd) == 0) {
+        char diskdir[48];
+        snprintf(diskdir, sizeof(diskdir), "/sys/block/%s", disk->name);
+        if (vfs::Inode* parent; vfs::resolve(diskdir, nullptr, true, &parent) == 0)
+            parent->unlink("device", 6, true);
+    }
     snprintf(path, sizeof(path), "/sys/block/%s/removable", disk->name);
     vfs::remove_node(path);
     snprintf(path, sizeof(path), "/sys/block/%s/size", disk->name);
@@ -429,6 +486,7 @@ long rescan_partitions(Device* disk) {
                 char path[32];
                 snprintf(path, sizeof(path), "/dev/%s", d->name);
                 vfs::remove_node(path);
+                unpublish_partition(d);
                 continue;
             }
             g_devices[kept++] = d;

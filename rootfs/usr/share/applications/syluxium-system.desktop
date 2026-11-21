@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=System
+GenericName=System
+Comment=Your computer: Syluxium version, processor, memory, graphics and storage
+Exec=syluxium-system
+Icon=computer
+Categories=System;Settings;

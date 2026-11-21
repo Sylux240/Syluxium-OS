@@ -1,0 +1,42 @@
+#!/usr/bin/python3
+"""System: what this computer is (like XP's System Properties, General tab)."""
+import os
+import sys
+sys.path.insert(0, "/usr/local/lib/syluxium/python")
+from syluxium_sys import *  # noqa: F401,F403
+
+win = window("System Properties", 520, 420, "computer")
+box = Gtk.Box(spacing=18, margin=18)
+logo = Gtk.Image.new_from_file("/usr/share/syluxium/logo.png")
+logo.set_valign(Gtk.Align.START)
+box.pack_start(logo, False, False, 0)
+info = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+cpu, cores = cpu_info()
+sections = [
+    ("System:", [os_version(), f"Kernel {os.uname().release}"]),
+    ("Registered to:", [os.uname().nodename]),
+    ("Computer:", [cpu, f"{cores} processor{'s' if cores != 1 else ''}", f"{human(memory_total())} of RAM"]),
+    ("Graphics:", graphics()),
+    ("Storage:", [f"{d['model']} ({human(d['size'])})" for d in disks() if not d["removable"]] or ["None found"]),
+    ("Running for:", [uptime()]),
+]
+for title, lines in sections:
+    info.pack_start(label(title, bold=True), False, False, 2)
+    for line in lines:
+        l = label("      " + line, wrap=True)
+        info.pack_start(l, False, False, 0)
+box.pack_start(info, True, True, 0)
+outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+outer.pack_start(box, True, True, 0)
+buttons = Gtk.Box(spacing=6, margin=10)
+for text, cmd in (("Device Manager", "syluxium-devmgr"), ("Computer Management", "syluxium-compmgmt")):
+    b = Gtk.Button(label=text)
+    b.connect("clicked", lambda _b, c=cmd: launch(c))
+    buttons.pack_start(b, False, False, 0)
+ok = Gtk.Button(label="OK")
+ok.connect("clicked", Gtk.main_quit)
+buttons.pack_end(ok, False, False, 0)
+outer.pack_end(buttons, False, False, 0)
+win.add(outer)
+win.show_all()
+Gtk.main()
