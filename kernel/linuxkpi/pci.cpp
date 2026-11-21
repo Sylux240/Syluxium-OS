@@ -140,10 +140,16 @@ int setup_msi(struct pci_dev* pdev) {
     // One vector per device: plain MSI when the device has it (82574/e1000e
     // and Intel Wi-Fi route their causes differently once MSI-X is on, and
     // drivers given a single vector program the MSI scheme).
-    if (!pci::enable_msi(*f, vector, true))
+    // Display devices (class 03) keep MSI-X when they have it: GPUs ran
+    // with it on real hardware (nouveau on a GTX 1650), and with plain MSI
+    // the GTX 1650 took 45 s to initialize glamor - interrupts apparently
+    // lost, the driver only moving on when its waits timed out.
+    bool display = (pdev->lkpi_class >> 16) == 0x03;
+    bool prefer_msi = !display;
+    if (!pci::enable_msi(*f, vector, prefer_msi))
         return -EIO;
     pdev->irq = vector;
-    pdev->msix_enabled = f->msi_cap == 0;
+    pdev->msix_enabled = f->msix_cap && !(prefer_msi && f->msi_cap);
     pdev->msi_enabled = !pdev->msix_enabled;
     return 0;
 }
