@@ -527,6 +527,29 @@ long rescan_partitions(Device* disk) {
     return 0;
 }
 
+// Devices that bring their own /dev node (loop devices): known by name
+// (mount finds them), cached, no node of ours, no partition scan.
+void attach_nodeless(Device* d) {
+    LockGuard guard(g_cache_lock);
+    if (g_device_count < MAX_DEVICES)
+        g_devices[g_device_count++] = d;
+}
+
+void detach_nodeless(Device* d) {
+    LockGuard guard(g_cache_lock);
+    for (CacheBlock* b = g_lru.front(); b;) {
+        CacheBlock* next = g_lru.next_of(b);
+        if (b->dev == d)
+            drop_block(b);
+        b = next;
+    }
+    usize kept = 0;
+    for (usize i = 0; i < g_device_count; i++)
+        if (g_devices[i] != d)
+            g_devices[kept++] = g_devices[i];
+    g_device_count = kept;
+}
+
 Device* find(const char* name) {
     for (usize i = 0; i < g_device_count; i++)
         if (strcmp(g_devices[i]->name, name) == 0)

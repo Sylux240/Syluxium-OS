@@ -1,3 +1,4 @@
+#include <block/loop.hpp>
 #include <video/splash.hpp>
 #include <core/log.hpp>
 #include <drivers/pty.hpp>
@@ -95,6 +96,7 @@ void init() {
     splash::create_device(); // /dev/splash: the login screen ends the boot splash
     vfs::add_node("/dev/zero", new Zero);
     vfs::add_node("/dev/full", new Full);
+    loop::create_nodes(); // /dev/loop-control, /dev/loopN (mount -o loop)
     vfs::add_node("/dev/random", new Random(8));
     vfs::add_node("/dev/urandom", new Random(9));
     vfs::add_node("/dev/kmsg", new Kmsg);

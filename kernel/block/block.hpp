@@ -34,6 +34,10 @@ public:
 // (which become devices of their own: sda1, sda2, ...).
 void register_disk(Device* disk);
 Device* find(const char* name);
+// Devices with a /dev node of their own (loop): in the table, nothing else.
+// detach also drops their cached blocks (unwritten data is lost).
+void attach_nodeless(Device* d);
+void detach_nodeless(Device* d);
 // The disk was unplugged: drop its cached blocks (unwritten data is lost, as
 // on Linux), remove /dev/<name> and its partitions. The objects stay
 // allocated - a mounted file system may still point at them - and the
