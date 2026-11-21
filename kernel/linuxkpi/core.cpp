@@ -1566,6 +1566,7 @@ extern "C" void lkpi_console_detach(void* vaddr) {
     g_gpu_console_vaddr = nullptr;
 }
 extern "C" bool lkpi_console_text_mode(void) { return !console::graphics(); }
+extern "C" unsigned long long lkpi_console_changes(void) { return console::changes(); }
 
 // The GPU driver failed and the firmware framebuffer is back: show the
 // console again (it reports what happened).

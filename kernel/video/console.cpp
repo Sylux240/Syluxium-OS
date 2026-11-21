@@ -60,6 +60,7 @@ bool g_private = false; // CSI ? ...
 
 // KD_GRAPHICS (an X server owns the screen): keep the text in memory, draw nothing.
 bool g_graphics = false;
+u64 g_changes = 0;
 
 void draw_cell_colors(u32 col, u32 row, u32 fg, u32 bg, bool underline_cursor) {
     if (g_graphics)
@@ -415,6 +416,7 @@ void rebind(video::Framebuffer& fb) {
         g_cursor_drawn = false;
         redraw_rows(0, g_rows - 1);
         show_cursor();
+        __atomic_fetch_add(&g_changes, 1, __ATOMIC_RELAXED);
     }
 }
 
@@ -429,10 +431,12 @@ void set_graphics(bool graphics) {
         g_cursor_drawn = false;
         redraw_rows(0, g_rows - 1);
         show_cursor();
+        __atomic_fetch_add(&g_changes, 1, __ATOMIC_RELAXED);
     }
 }
 
 bool graphics() { return g_graphics; }
+u64 changes() { return __atomic_load_n(&g_changes, __ATOMIC_RELAXED); }
 u32 rows() { return g_rows; }
 u32 cols() { return g_cols; }
 
@@ -453,6 +457,7 @@ void clear() {
     g_bottom = g_rows - 1;
     g_wrap_pending = false;
     g_cursor_drawn = false;
+    __atomic_fetch_add(&g_changes, 1, __ATOMIC_RELAXED);
 }
 
 void putc(char ch) {
@@ -461,6 +466,7 @@ void putc(char ch) {
     hide_cursor();
     process(static_cast<u8>(ch));
     show_cursor();
+    __atomic_fetch_add(&g_changes, 1, __ATOMIC_RELAXED);
 }
 
 void write(const char* s, usize len) {
@@ -470,6 +476,7 @@ void write(const char* s, usize len) {
     for (usize i = 0; i < len; i++)
         process(static_cast<u8>(s[i]));
     show_cursor();
+    __atomic_fetch_add(&g_changes, 1, __ATOMIC_RELAXED);
 }
 
 } // namespace console
