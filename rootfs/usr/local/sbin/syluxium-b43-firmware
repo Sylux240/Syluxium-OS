@@ -1,0 +1,87 @@
+#!/bin/bash
+# Firmware for Broadcom b43 Wi-Fi (BCM4331 in iMacs and MacBook Pros of
+# 2011-2012, BCM4321/4322/43224/43225/43227/43228 in older Macs and PCs).
+#
+# Broadcom doesn't allow the firmware to be passed on, so like Debian's
+# firmware-b43-installer it is taken from Broadcom's own driver on the
+# computer: Broadcom's wl 6.30.163.46 is downloaded (checked against its
+# known SHA-512) and b43-fwcutter extracts the firmware into
+# /usr/lib/firmware/b43. Needs a working connection (Ethernet, USB Wi-Fi or
+# a phone shared over USB).
+#   syluxium-b43-firmware          install if missing (asks first on the desktop)
+#   syluxium-b43-firmware --check  exit 0 if a b43 card is present and its firmware missing
+#   syluxium-b43-firmware --yes    install without asking
+export PATH=/opt/trinity/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+TITLE="Wireless Network Firmware"
+VERSION="6.30.163.46"
+DOWNLOAD="broadcom-wl-${VERSION}.tar.bz2"
+WL_APSTA="broadcom-wl-${VERSION}.wl_apsta.o"
+URL="https://github.com/minios-linux/b43-firmware/releases/download/b43-firmware/${DOWNLOAD}"
+SHA512="0144894fbbb5e8ebab6c423d9bd0f3249be94f2f468a50b8bf721a3b17f1f6e57467c79e87abc8d136bfc92e701ed046885fead892e9a73efa5217d710311ae9"
+FW_DIR=/usr/lib/firmware
+
+have_card() {
+    # The kernel's device list (id, bus, bus id, category, vendor:device,
+    # status, driver, ...): a Broadcom function the bcma bridge took (b43
+    # drives the wireless core behind it).
+    # (Not the 802.11ac BCM4352/4360: b43 has no driver for their PHY.)
+    awk -F'\t' '$5 ~ /^14e4:/ && $5 !~ /^14e4:43(a0|a2|b1)$/ && $7 == "bcma-pci-bridge" { found = 1 } END { exit !found }' \
+        /sys/kernel/syluxium/devices 2>/dev/null
+}
+have_firmware() { ls "$FW_DIR"/b43/ucode*.fw >/dev/null 2>&1; }
+
+say() {
+    if [ -n "$DISPLAY" ] && command -v kdialog >/dev/null; then
+        kdialog --title "$TITLE" "$1" "$2"
+    else
+        echo "$2" >&2
+    fi
+}
+
+case "$1" in
+--check) have_card && ! have_firmware; exit $? ;;
+esac
+
+if have_firmware; then
+    echo "b43 firmware is already installed."
+    exit 0
+fi
+if [ "$(id -u)" != 0 ]; then
+    exec tdesudo -c "$0 $*"
+fi
+if [ "$1" != "--yes" ] && [ -n "$DISPLAY" ]; then
+    kdialog --title "$TITLE" --yesno "This computer's Broadcom wireless card needs firmware that Broadcom does not allow to be included.
+
+Download Broadcom's driver (about 6 MB) and extract the firmware from it now?
+An internet connection is needed (cable, USB Wi-Fi or a phone shared over USB)." || exit 0
+fi
+
+tmp=$(mktemp -d) || exit 1
+trap 'rm -rf "$tmp"' EXIT
+cd "$tmp" || exit 1
+echo "Downloading $URL"
+if ! python3 -c 'import sys, urllib.request; urllib.request.urlretrieve(sys.argv[1], sys.argv[2])' "$URL" "$DOWNLOAD"; then
+    say --error "The download failed. Please check the internet connection and try again."
+    exit 1
+fi
+if ! echo "${SHA512}  ${DOWNLOAD}" | sha512sum -c - >/dev/null 2>&1; then
+    say --error "The downloaded file is not the expected one (checksum mismatch); nothing was installed."
+    exit 1
+fi
+if ! tar xjf "$DOWNLOAD" "$WL_APSTA"; then
+    say --error "Unpacking the driver failed."
+    exit 1
+fi
+mkdir -p "$FW_DIR/b43"
+if ! b43-fwcutter -w "$FW_DIR" "$WL_APSTA"; then
+    say --error "Extracting the firmware failed."
+    exit 1
+fi
+# The card loads its firmware when its interface comes up: take it down and up.
+for dev in /sys/class/net/wlan*; do
+    [ -e "$dev" ] || continue
+    ip link set "$(basename "$dev")" down 2>/dev/null
+    ip link set "$(basename "$dev")" up 2>/dev/null
+done
+say --msgbox "The wireless firmware is installed. Wireless networks can now be chosen from the network icon."
+exit 0

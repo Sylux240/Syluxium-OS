@@ -1,0 +1,73 @@
+#!/bin/sh
+# Test aid: start the desktop, log in, then try the Task Manager: open it
+# with Ctrl+Alt+Del, End Task a window, End Process a process, show the
+# Performance and Networking tabs. Results go to the console ("TASKMGR ...").
+# "PRESS ctrl-alt-delete" on the console asks the test harness to press the
+# keys (QEMU sendkey); without an answer in 15 s xdotool presses them.
+say() { echo "TASKMGR $*" > /dev/console; }
+startdesktop > /dev/null 2>&1 &
+export DISPLAY=:0
+for i in $(seq 1 120); do
+    XAUTHORITY="$(ls /var/run/xauth/A:0-* 2>/dev/null | head -1)"
+    [ -n "$XAUTHORITY" ] && [ -S /tmp/.X11-unix/X0 ] && break
+    sleep 1
+done
+export XAUTHORITY
+sleep 10
+xdotool key Return    # log in (the login screen's user has no password)
+for i in $(seq 1 120); do pidof kicker > /dev/null && break; sleep 1; done
+sleep 15
+say "desktop up"
+xterm -title "Test Window 1" &
+xterm -title "Test Window 2" &
+cp /usr/bin/sleep /tmp/testproc
+python3 -c "import os; os.setgid(1000); os.setuid(1000); os.execv('/tmp/testproc', ['testproc', '1000'])" &
+sleep 4
+echo "PRESS ctrl-alt-delete" > /dev/console
+tm= how=keyboard
+for i in $(seq 1 45); do
+    tm=$(xdotool search --name "Syluxium Task Manager" 2>/dev/null | head -1); [ -n "$tm" ] && break
+    [ "$i" = 15 ] && how=xdotool && xdotool key ctrl+alt+Delete
+    sleep 1
+done
+[ -n "$tm" ] && say "($how)" "opened by Ctrl+Alt+Del: yes (owner $(ps -o user= -p "$(xdotool getwindowpid "$tm")"))" || say "opened by Ctrl+Alt+Del: NO"
+[ -n "$tm" ] || { syluxium-taskmgr > /dev/console 2>&1 & sleep 8; tm=$(xdotool search --name "Syluxium Task Manager" | head -1); }
+xdotool windowmove "$tm" 140 40 windowsize "$tm" 560 520 windowactivate "$tm"
+sleep 1
+say "stage applications"
+sleep 10
+# End Task: the list is sorted by title; select "Test Window 1" and press Delete.
+xdotool windowactivate --sync "$tm"; sleep 1
+xdotool key Home
+sleep 1
+xdotool key Delete
+sleep 4
+n=$(xdotool search --name "Test Window" 2>/dev/null | wc -l)
+say "end task: $n test window(s) left (of 2)"
+say "stage processes"
+xdotool key ctrl+Page_Down
+sleep 2
+xdotool type testproc
+sleep 1
+xdotool key Return
+sleep 1
+xdotool key Delete
+sleep 3
+say "stage confirm"
+sleep 8
+xdotool key alt+y
+sleep 3
+pidof testproc > /dev/null && say "end process: testproc still running" || say "end process: testproc ended"
+sleep 6
+say "stage performance"
+xdotool windowactivate --sync "$tm"
+xdotool key ctrl+Page_Down
+( timeout 12 sh -c 'while :; do :; done' & timeout 12 sh -c 'while :; do :; done' ) &
+sleep 16
+say "stage networking"
+xdotool key ctrl+Page_Down
+python3 -c "import urllib.request; urllib.request.urlopen('http://deb.debian.org/debian/dists/trixie/main/binary-amd64/Packages.gz', timeout=30).read()" &
+sleep 14
+say "stage done"
+sleep 3
+say "TEST DONE"

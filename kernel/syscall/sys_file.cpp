@@ -462,9 +462,29 @@ long sys_lseek(SYSCALL_ARGS) {
 
 long sys_ioctl(SYSCALL_ARGS) {
     SYSCALL_UNUSED;
-    FileRef f(proc::current(), static_cast<long>(a0));
+    Process* p = proc::current();
+    FileRef f(p, static_cast<long>(a0));
     if (!f)
         return -err::BADF;
+    // Pipes: FIONBIO (Python sets non-blocking mode with it, not fcntl).
+    // Sockets and terminals keep their own FIONBIO handling for now: making
+    // it take effect everywhere stalled the desktop session's start.
+    bool pipe = (f->inode->mode & vfs::S_IFMT) == vfs::S_IFIFO;
+    switch (static_cast<u32>(a1)) {
+    case 0x5421: { // FIONBIO
+        if (!pipe)
+            break;
+        i32 on;
+        if (long r = uaccess::get(&on, reinterpret_cast<const i32*>(a2)); r < 0)
+            return r;
+        f->flags = on ? (f->flags | O_NONBLOCK) : (f->flags & ~static_cast<u32>(O_NONBLOCK));
+        return 0;
+    }
+    case 0x5451: // FIOCLEX
+    case 0x5450: // FIONCLEX
+        p->cloexec[static_cast<int>(a0)] = static_cast<u32>(a1) == 0x5451;
+        return 0;
+    }
     return f->inode->ioctl_file(f.get(), a1, a2); // checks the argument buffer (see vfs::Inode)
 }
 
@@ -1618,6 +1638,16 @@ long sys_sync(SYSCALL_ARGS) {
     return 0;
 }
 
+// sync_file_range(fd, offset, nbytes, flags): only a hint to start writing a
+// range back early (dpkg gives it for every file it unpacks); the data reaches
+// the disk with the next fsync/sync, so nothing needs doing here.
+long sys_sync_file_range(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    if (a3 & ~7ul || static_cast<i64>(a1) < 0 || static_cast<i64>(a2) < 0)
+        return -err::INVAL;
+    return 0;
+}
+
 long sys_mount(SYSCALL_ARGS) {
     SYSCALL_UNUSED;
     if (!proc::capable())
@@ -1943,6 +1973,7 @@ void register_file() {
     set(155, sys_pivot_root, "pivot_root");
     set(161, sys_chroot, "chroot");
     set(306, sys_sync, "syncfs");
+    set(277, sys_sync_file_range, "sync_file_range");
     set(76, sys_truncate, "truncate");
     set(77, sys_ftruncate, "ftruncate");
     set(79, sys_getcwd, "getcwd");

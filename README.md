@@ -185,9 +185,10 @@ Legend: ✅ done · 🟡 partly done · ⬜ to do
 - ✅ Right-click menus: Extract Here / Extract All, Send To compressed folder, Change Icon
 - ✅ File manager: Konqueror with the Address bar, archives extracted and created
 - 🟡 Display settings: resolution and refresh rate change live (with a 15 s undo); multi-monitor to do
-- 🟡 Personalize: themes, colors, wallpapers, icons (TDE Appearance & Themes); Dusk icon set to do
+- 🟡 Personalize: themes, colors, wallpapers, icons (TDE Appearance & Themes), Dusk icon set
 - 🟡 Control Panel: TDE Control Center with plain category names; restyle with the new shell
-- 🟡 Task Manager with End Task (Ctrl+Alt+Del / Ctrl+Shift+Esc); Syluxium's own front end in progress
+- ✅ Task Manager (Ctrl+Alt+Del / Ctrl+Shift+Esc): Applications (End Task, Switch To), Processes
+     (End Process, priority), Performance and Networking graphs
 - ✅ System page: Syluxium version, processor, memory, graphics, storage
 - ✅ Device Manager: every device by category, driver and status, problem devices flagged
 - ✅ Computer Management (Event Viewer, Services, Local Users, Device Manager, Disk Management)
@@ -208,7 +209,8 @@ Legend: ✅ done · 🟡 partly done · ⬜ to do
 - ✅ Installer: step-by-step wizard (language, keyboard, network, software and updates, installation
      type with a partition view: erase / alongside Windows / manual, time-zone map, account) → GPT +
      ext4 + Limine (UEFI/BIOS)
-- 🟡 Package installer: build-time Debian fetcher done; App Store + double-click .deb on the device to do
+- ✅ App Store: Debian and desktop packages by category, search, featured programs, install/remove
+     with dependencies (apt), updates; double-click a .deb to install it
 - ✅ Packages' install scripts run (real dpkg database; apt works)
 - ✅ Accounts: graphical login, User Accounts (add/remove users, passwords), administrator prompts
 - 🟡 Security: NX, kernel W^X, guard pages, per-user permissions done; ASLR, SMEP/SMAP to do
@@ -217,4 +219,4 @@ Legend: ✅ done · 🟡 partly done · ⬜ to do
 - ✅ Updates (Syluxium Update: Debian and Trinity through apt) and a Recovery boot entry
      (repair disks and packages, reset settings or passwords, root prompt)
 
-Tally: 43 done · 17 partly done · 2 to do.
+Tally: 45 done · 15 partly done · 2 to do.

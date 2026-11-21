@@ -246,10 +246,10 @@ volatile void* map_bar(const Function& f, int bar) {
     return static_cast<volatile void*>(vmalloc::map_physical(b.address, b.size));
 }
 
-bool enable_msi(Function& f, u8 vector) {
+bool enable_msi(Function& f, u8 vector, bool prefer_msi) {
     u32 dest = percpu::get(0)->lapic_id;
     u64 address = 0xFEE00000ull | (static_cast<u64>(dest) << 12);
-    if (f.msix_cap) {
+    if (f.msix_cap && !(prefer_msi && f.msi_cap)) {
         u16 control = read16(f, f.msix_cap + 2);
         u32 table = read32(f, f.msix_cap + 4);
         int bir = table & 7;

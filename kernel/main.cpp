@@ -2,6 +2,7 @@
 #include <core/bootlog.hpp>
 #include <power/cpupower.hpp>
 #include <drivers/i2c/i2c_hid.hpp>
+#include <drivers/input/applespi.hpp>
 #include <acpi/acpi.hpp>
 #include <acpi/power.hpp>
 #include <acpi/devices.hpp>
@@ -266,13 +267,15 @@ void discover_hardware() {
     uhci::register_driver();
     ohci::register_driver();
     net::init(); // loopback first: it becomes ifindex 1, like Linux
-    e1000::register_driver();
     virtio_net::register_driver();
-    r8169::register_driver();
     sound::init(); // phase 8: ALSA-compatible sound core
     hda::register_driver();
     virtio_snd::register_driver();
     linuxkpi::init(); // Linux drivers register themselves (module_init) here
+    // Native drivers behind Linux's r8169 and e1000e (tried in registration order):
+    // they take the device if the Linux driver fails, and the chips Linux's don't cover.
+    e1000::register_driver();
+    r8169::register_driver();
     pci::init();
     dev::register_platform_devices(g_keyboard);
     // Disks and USB first, so the root file system (root=) is mounted before
@@ -517,6 +520,8 @@ void kernel_main_thread(void*) {
     acpi::start_interpreter(); // AML: power button, battery, lid (after PCI)
     linuxkpi::acpi_ready();    // GPU probes that needed ACPI methods (_ROM)
     i2c_hid::init();           // I2C touchpads (ACPI-described, after the interpreter)
+    applespi::run_selftest();  // Apple SPI keyboard protocol decoding
+    applespi::init();          // Apple SPI keyboard/trackpad (MacBook 2015+, MacBook Pro 2016-17)
     ps2kbd::late_init(); // after the USB handoff (firmware PS/2 emulation off)
     u64 reclaimed = pmm::reclaim_bootloader_memory();
     klog::ok("Reclaimed %lu KiB of bootloader memory", reclaimed / KiB);

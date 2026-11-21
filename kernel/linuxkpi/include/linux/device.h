@@ -10,12 +10,25 @@ LKPI_EXTERN_C_BEGIN
 struct device;
 struct module;
 
+struct bus_type;
+enum probe_type { PROBE_DEFAULT_STRATEGY, PROBE_PREFER_ASYNCHRONOUS, PROBE_FORCE_SYNCHRONOUS };
 struct device_driver {
     const char* name;
     void* owner;
     const struct dev_pm_ops* pm;
     const struct of_device_id* of_match_table; /* always NULL here */
     const void* acpi_match_table;
+    /* appended: drivers on a registered bus (glue/devmodel.c) */
+    const struct bus_type* bus;
+    int (*probe)(struct device* dev);
+    int (*remove)(struct device* dev);
+    void (*shutdown)(struct device* dev);
+    enum probe_type probe_type;
+    bool suppress_bind_attrs;
+    const char* mod_name;
+    const struct attribute_group** groups;
+    const struct attribute_group** dev_groups;
+    void (*coredump)(struct device* dev); /* appended */
 };
 
 /* sysfs: attributes are accepted and ignored (no sysfs yet). */
@@ -87,6 +100,8 @@ struct device_type {
     const char* name;
     const struct attribute_group** groups;
     void (*release)(struct device* dev);
+    const struct dev_pm_ops* pm; /* appended */
+    int (*uevent)(const struct device* dev, struct kobj_uevent_env* env); /* appended */
 };
 
 /* The common part of every device (struct pci_dev embeds one). */
@@ -143,7 +158,14 @@ void device_unregister(struct device* dev);
 int dev_set_name(struct device* dev, const char* fmt, ...) __printf(2, 3);
 int device_rename(struct device* dev, const char* new_name);
 static inline int device_bind_driver(struct device* dev) { return 0; }
-static inline void device_release_driver(struct device* dev) {}
+void device_release_driver(struct device* dev); /* glue/devmodel.c */
+int driver_register(struct device_driver* drv);
+void driver_unregister(struct device_driver* drv);
+int driver_for_each_device(struct device_driver* drv, struct device* start, void* data, int (*fn)(struct device*, void*));
+struct dev_ext_attribute {
+    struct device_attribute attr;
+    void* var;
+};
 static inline int device_is_registered(struct device* dev) { return dev->lkpi_added; }
 #ifndef __cplusplus
 struct device* device_create(const struct class* cls, struct device* parent, u32 devt, void* drvdata, const char* fmt, ...);

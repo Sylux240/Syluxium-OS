@@ -308,6 +308,12 @@ def main() -> None:
                 entry += [f"Version: {fields['Version']}",
                           "Description: left out of Syluxium (placeholder, held)"]
                 f.write("\n".join(entry) + "\n\n")
+                # Empty file lists and checksums: without them dpkg --audit
+                # reports the package as needing reinstallation.
+                arch = fields.get("Architecture", "all")
+                base = f"{name}:{arch}" if fields.get("Multi-Arch") == "same" else name
+                for ext in (".list", ".md5sums"):
+                    open(os.path.join(args.out, "var/lib/dpkg/info", base + ext), "a").close()
     print(f"  debian: {len(order)} packages, {total} files: {' '.join(order)}", file=sys.stderr)
 
 

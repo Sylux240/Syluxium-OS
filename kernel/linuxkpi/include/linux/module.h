@@ -11,7 +11,7 @@ typedef int (*lkpi_initcall_t)(void);
 /* Levels as in Linux (section names sort in that order): subsystems
  * (cfg80211, mac80211) initialize before the drivers that use them. */
 #define __lkpi_define_initcall(fn, level)                                                  \
-    static lkpi_initcall_t __lkpi_initcall_##fn __attribute__((used, section(".lkpi_initcalls." #level))) = fn
+    static lkpi_initcall_t __lkpi_initcall_##fn __attribute__((used, section(".lkpi_initcalls." #level))) = fn;
 #define core_initcall(fn) __lkpi_define_initcall(fn, 1)
 #define postcore_initcall(fn) __lkpi_define_initcall(fn, 2)
 #define arch_initcall(fn) __lkpi_define_initcall(fn, 3)
@@ -24,7 +24,7 @@ typedef int (*lkpi_initcall_t)(void);
 #define module_init(fn) __lkpi_define_initcall(fn, 6)
 #define late_initcall(fn) __lkpi_define_initcall(fn, 7)
 #define late_initcall_sync(fn) __lkpi_define_initcall(fn, 7)
-#define module_exit(fn) static void (*__lkpi_exitcall_##fn)(void) __attribute__((unused)) = fn
+#define module_exit(fn) static void (*__lkpi_exitcall_##fn)(void) __attribute__((unused)) = fn;
 #define module_driver(__driver, __register, __unregister, ...) \
     static int __init __driver##_lkpi_init(void) { return __register(&(__driver), ##__VA_ARGS__); } \
     module_init(__driver##_lkpi_init)
@@ -111,6 +111,7 @@ struct kernel_param;
 #define symbol_put_addr(p) do { } while (0)
 #define module_param_unsafe(name, type, perm) module_param_named(name, name, type, perm)
 #define module_param_array(name, type, nump, perm)
+#define module_param_array_named(name, array, type, nump, perm)
 #define MODULE_PARM_DESC(p, d)
 #define try_module_get(m) 1
 #define module_put(m) do { } while (0)

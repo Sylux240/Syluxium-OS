@@ -1,0 +1,46 @@
+[Data]
+DataCount=1
+
+[Data_1]
+Comment=Windows-style keys of Syluxium.
+DataCount=1
+Enabled=true
+Name=Syluxium Keys
+SystemGroup=0
+Type=ACTION_DATA_GROUP
+AllowMerge=true
+
+[Data_1Conditions]
+ConditionsCount=0
+
+[Data_1_1]
+Comment=Ctrl+Alt+Del and Ctrl+Shift+Esc open the Task Manager.
+Enabled=true
+Name=Task Manager
+Type=GENERIC_ACTION_DATA
+
+[Data_1_1Actions]
+ActionsCount=1
+
+[Data_1_1Actions0]
+CommandURL=syluxium-taskmgr
+Type=COMMAND_URL
+
+[Data_1_1Conditions]
+ConditionsCount=0
+
+[Data_1_1Triggers]
+Comment=Task Manager keys
+TriggersCount=2
+
+[Data_1_1Triggers0]
+Key=Ctrl+Alt+Delete
+Type=SHORTCUT
+
+[Data_1_1Triggers1]
+Key=Ctrl+Shift+Escape
+Type=SHORTCUT
+
+[Main]
+Version=2
+ImportId=syluxium_taskmgr

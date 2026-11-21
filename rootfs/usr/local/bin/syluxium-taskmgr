@@ -1,0 +1,920 @@
+#!/usr/bin/python3
+"""Task Manager: the open programs (End Task,
+Switch To), the processes (End Process), CPU and memory graphs and the
+network adapters' traffic. Ctrl+Alt+Del and Ctrl+Shift+Esc open it
+(apps/khotkeys/syluxium_taskmgr.khotkeys).
+
+    syluxium-taskmgr [applications|processes|performance|networking]
+"""
+import ctypes
+import os
+import pwd
+import shlex
+import shutil
+import signal
+import subprocess
+import sys
+import time
+sys.path.insert(0, "/usr/local/lib/syluxium/python")
+from syluxium_sys import *  # noqa: F401,F403
+from gi.repository import Gdk  # noqa: E402
+
+HZ = os.sysconf("SC_CLK_TCK") or 100
+PAGE_KB = os.sysconf("SC_PAGE_SIZE") // 1024
+HISTORY = 120
+SPEEDS = {"High": 500, "Normal": 1000, "Low": 4000, "Paused": 0}
+
+
+# ---------------------------------------------------------------------------
+# The X server: the open windows (EWMH, through libX11 directly)
+# ---------------------------------------------------------------------------
+class XClientMessage(ctypes.Structure):
+    _fields_ = [("type", ctypes.c_int), ("serial", ctypes.c_ulong), ("send_event", ctypes.c_int),
+                ("display", ctypes.c_void_p), ("window", ctypes.c_ulong), ("message_type", ctypes.c_ulong),
+                ("format", ctypes.c_int), ("data", ctypes.c_long * 5)]
+
+
+class XEvent(ctypes.Union):
+    _fields_ = [("xclient", XClientMessage), ("pad", ctypes.c_long * 24)]
+
+
+class X11:
+    def __init__(self):
+        self.dpy = None
+        try:
+            x = ctypes.CDLL("libX11.so.6")
+        except OSError:
+            return
+        x.XOpenDisplay.restype = ctypes.c_void_p
+        x.XOpenDisplay.argtypes = [ctypes.c_char_p]
+        x.XDefaultRootWindow.restype = ctypes.c_ulong
+        x.XDefaultRootWindow.argtypes = [ctypes.c_void_p]
+        x.XInternAtom.restype = ctypes.c_ulong
+        x.XInternAtom.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int]
+        x.XGetWindowProperty.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_long,
+                                         ctypes.c_long, ctypes.c_int, ctypes.c_ulong,
+                                         ctypes.POINTER(ctypes.c_ulong), ctypes.POINTER(ctypes.c_int),
+                                         ctypes.POINTER(ctypes.c_ulong), ctypes.POINTER(ctypes.c_ulong),
+                                         ctypes.POINTER(ctypes.c_void_p)]
+        x.XFree.argtypes = [ctypes.c_void_p]
+        x.XSendEvent.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_int, ctypes.c_long,
+                                 ctypes.POINTER(XEvent)]
+        x.XFlush.argtypes = [ctypes.c_void_p]
+        # A window that disappears between listing and reading it gives
+        # BadWindow: ignore X errors instead of letting Xlib exit.
+        self._handler = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p)(lambda d, e: 0)
+        x.XSetErrorHandler.argtypes = [ctypes.c_void_p]
+        x.XSetErrorHandler(ctypes.cast(self._handler, ctypes.c_void_p))
+        self.x = x
+        self.dpy = x.XOpenDisplay(None)
+        if self.dpy:
+            self.root = x.XDefaultRootWindow(self.dpy)
+        self.atoms = {}
+
+    def atom(self, name):
+        if name not in self.atoms:
+            self.atoms[name] = self.x.XInternAtom(self.dpy, name.encode(), 0)
+        return self.atoms[name]
+
+    def prop(self, win, name, kind=0):
+        """A window property: a list of numbers (format 32) or bytes."""
+        t, fmt, n, after, data = ctypes.c_ulong(), ctypes.c_int(), ctypes.c_ulong(), ctypes.c_ulong(), ctypes.c_void_p()
+        if self.x.XGetWindowProperty(self.dpy, win, self.atom(name), 0, 65536, 0, kind, ctypes.byref(t),
+                                     ctypes.byref(fmt), ctypes.byref(n), ctypes.byref(after),
+                                     ctypes.byref(data)) != 0 or not data.value:
+            return None
+        try:
+            if fmt.value == 32:
+                return list(ctypes.cast(data, ctypes.POINTER(ctypes.c_ulong))[:n.value])
+            if fmt.value == 8:
+                return ctypes.string_at(data, n.value)
+            return None
+        finally:
+            self.x.XFree(data)
+
+    def text(self, win, name):
+        b = self.prop(win, name)
+        return b.decode("utf-8", "replace") if isinstance(b, bytes) else ""
+
+    def windows(self):
+        """The task bar's windows: [(id, title, pid, class)]."""
+        if not self.dpy:
+            return []
+        out = []
+        skip_types = {self.atom(f"_NET_WM_WINDOW_TYPE_{t}") for t in ("DOCK", "DESKTOP", "SPLASH", "MENU", "TOOLBAR")}
+        skip_task = self.atom("_NET_WM_STATE_SKIP_TASKBAR")
+        for w in self.prop(self.root, "_NET_CLIENT_LIST") or []:
+            if set(self.prop(w, "_NET_WM_WINDOW_TYPE") or []) & skip_types:
+                continue
+            if skip_task in (self.prop(w, "_NET_WM_STATE") or []):
+                continue
+            title = self.text(w, "_NET_WM_NAME") or self.text(w, "WM_NAME")
+            pid = (self.prop(w, "_NET_WM_PID") or [0])[0]
+            cls = self.text(w, "WM_CLASS").split("\0")
+            out.append((w, title, pid, cls[1] if len(cls) > 1 else cls[0]))
+        return out
+
+    def exists(self, win):
+        return win in (self.prop(self.root, "_NET_CLIENT_LIST") or [])
+
+    def message(self, win, name, *data):
+        ev = XEvent()
+        ev.xclient.type = 33  # ClientMessage
+        ev.xclient.window = win
+        ev.xclient.message_type = self.atom(name)
+        ev.xclient.format = 32
+        for i, v in enumerate(data):
+            ev.xclient.data[i] = v
+        mask = (1 << 19) | (1 << 20)  # SubstructureRedirect | SubstructureNotify
+        self.x.XSendEvent(self.dpy, self.root, 0, mask, ctypes.byref(ev))
+        self.x.XFlush(self.dpy)
+
+    def close(self, win):
+        self.message(win, "_NET_CLOSE_WINDOW", 0, 2)
+
+    def activate(self, win):
+        desk = self.prop(win, "_NET_WM_DESKTOP")
+        if desk and desk[0] != 0xFFFFFFFF:
+            self.message(self.root, "_NET_CURRENT_DESKTOP", desk[0], 0)
+        self.message(win, "_NET_ACTIVE_WINDOW", 2, 0, 0)
+
+
+# ---------------------------------------------------------------------------
+# The machine: /proc
+# ---------------------------------------------------------------------------
+_users = {}
+
+
+def user_name(uid):
+    if uid not in _users:
+        try:
+            _users[uid] = pwd.getpwuid(uid).pw_name
+        except KeyError:
+            _users[uid] = str(uid)
+    return _users[uid]
+
+
+def cpu_times():
+    """[(busy, kernel, total)] for the whole machine, then each CPU (clock ticks)."""
+    out = []
+    for line in read("/proc/stat").splitlines():
+        if not line.startswith("cpu"):
+            break
+        v = [int(x) for x in line.split()[1:]]
+        v += [0] * (8 - len(v))
+        idle = v[3] + v[4]
+        total = sum(v[:8])
+        out.append((total - idle, v[2] + v[5] + v[6], total))
+    return out or [(0, 0, 1)]
+
+
+def memory():
+    m = {}
+    for line in read("/proc/meminfo").splitlines():
+        k, _, v = line.partition(":")
+        try:
+            m[k] = int(v.split()[0])
+        except (ValueError, IndexError):
+            pass
+    return m
+
+
+def processes():
+    """{pid: dict(name, user, uid, ppid, ticks, rss_kb, threads)}."""
+    out = {}
+    for d in os.listdir("/proc"):
+        if not d.isdigit():
+            continue
+        st = read(f"/proc/{d}/stat")
+        if not st or ")" not in st:
+            continue
+        name = st[st.index("(") + 1:st.rindex(")")]
+        f = st[st.rindex(")") + 2:].split()
+        if len(f) < 22:
+            continue
+        uid = 0
+        for line in read(f"/proc/{d}/status").splitlines():
+            if line.startswith("Uid:"):
+                uid = int(line.split()[1])
+                break
+        out[int(d)] = {"name": name, "uid": uid, "user": user_name(uid), "ppid": int(f[1]),
+                       "state": f[0], "ticks": int(f[11]) + int(f[12]), "threads": int(f[17]),
+                       "rss_kb": int(f[21]) * PAGE_KB}
+    return out
+
+
+def net_devices():
+    """{name: (rx_bytes, tx_bytes)} without the loopback."""
+    out = {}
+    for line in read("/proc/net/dev").splitlines()[2:]:
+        name, _, rest = line.partition(":")
+        v = rest.split()
+        if len(v) >= 9 and name.strip() != "lo":
+            out[name.strip()] = (int(v[0]), int(v[8]))
+    return out
+
+
+def link_speed(name):
+    try:
+        s = int(read(f"/sys/class/net/{name}/speed", "0"))
+    except ValueError:
+        s = 0
+    if s <= 0:
+        s = 54 if name.startswith(("wl", "wlan")) else 1000
+    return s * 1_000_000  # bits per second
+
+
+def kb(n):
+    return f"{n:,} K"
+
+
+# ---------------------------------------------------------------------------
+# Drawing: the meters and graphs, in the Dusk colours (cyan on night blue)
+# ---------------------------------------------------------------------------
+NIGHT = (0.078, 0.102, 0.227)
+GRID = (0.16, 0.25, 0.38)
+GREEN = (0.435, 0.890, 0.941)   # the logo's cyan (name kept: the main series)
+YELLOW = (0.965, 0.788, 0.420)  # sun gold
+RED = (0.949, 0.604, 0.714)     # cloud pink
+UNLIT = (0.14, 0.24, 0.32)
+
+
+class Meter(Gtk.DrawingArea):
+    """The LED bar with the percentage under it."""
+
+    def __init__(self):
+        super().__init__()
+        self.value, self.text = 0.0, "0 %"
+        self.set_size_request(70, 90)
+        self.connect("draw", self.draw)
+
+    def set(self, value, text):
+        self.value, self.text = max(0.0, min(1.0, value)), text
+        self.queue_draw()
+
+    def draw(self, _w, cr):
+        w, h = self.get_allocated_width(), self.get_allocated_height()
+        cr.set_source_rgb(*NIGHT)
+        cr.paint()
+        bar_h = h - 22
+        rows = max(1, (bar_h - 6) // 3)
+        lit = round(self.value * rows)
+        x0 = w / 2 - 17
+        for i in range(rows):
+            y = 4 + bar_h - 6 - (i + 1) * 3
+            cr.set_source_rgb(*(GREEN if i < lit else UNLIT))
+            cr.rectangle(x0, y, 16, 2)
+            cr.rectangle(x0 + 18, y, 16, 2)
+            cr.fill()
+        cr.set_source_rgb(*GREEN)
+        cr.select_font_face("Tahoma")
+        cr.set_font_size(11)
+        ext = cr.text_extents(self.text)
+        cr.move_to((w - ext.width) / 2 - ext.x_bearing, h - 7)
+        cr.show_text(self.text)
+
+
+class Graph(Gtk.DrawingArea):
+    """A scrolling history: lines of values 0..1 on a moving grid."""
+
+    def __init__(self, colors, height=90):
+        super().__init__()
+        self.colors = colors
+        self.series = [[] for _ in colors]
+        self.shift = 0
+        self.scale_text = ""
+        self.set_size_request(200, height)
+        self.connect("draw", self.draw)
+
+    def push(self, *values):
+        for s, v in zip(self.series, values):
+            s.append(max(0.0, min(1.0, v)))
+            del s[:-HISTORY]
+        self.shift = (self.shift + 1) % 4
+        self.queue_draw()
+
+    def draw(self, _w, cr):
+        w, h = self.get_allocated_width(), self.get_allocated_height()
+        cr.set_source_rgb(*NIGHT)
+        cr.paint()
+        cr.set_line_width(1)
+        cr.set_source_rgb(*GRID)
+        step = 12
+        x = w - (self.shift * step / 4) % step
+        while x > 0:
+            cr.move_to(int(x) + 0.5, 0)
+            cr.line_to(int(x) + 0.5, h)
+            x -= step
+        y = h
+        while y > 0:
+            cr.move_to(0, int(y) + 0.5)
+            cr.line_to(w, int(y) + 0.5)
+            y -= step
+        cr.stroke()
+        dx = w / (HISTORY - 1)
+        for color, s in zip(self.colors, self.series):
+            if len(s) < 2:
+                continue
+            cr.set_source_rgb(*color)
+            n = len(s)
+            for i, v in enumerate(s):
+                px, py = w - (n - 1 - i) * dx, h - 1 - v * (h - 2)
+                cr.line_to(px, py) if i else cr.move_to(px, py)
+            cr.stroke()
+        if self.scale_text:
+            cr.set_source_rgb(*GREEN)
+            cr.set_font_size(9)
+            cr.move_to(3, 10)
+            cr.show_text(self.scale_text)
+
+
+def ask(parent, title, text):
+    """A warning with Yes (Alt+Y) and No (Alt+N); True for Yes."""
+    d = Gtk.MessageDialog(transient_for=parent, modal=True, message_type=Gtk.MessageType.WARNING, text=title)
+    d.format_secondary_text(text)
+    d.add_button("_Yes", Gtk.ResponseType.YES)
+    d.add_button("_No", Gtk.ResponseType.NO)
+    d.set_default_response(Gtk.ResponseType.NO)
+    r = d.run()
+    d.destroy()
+    return r == Gtk.ResponseType.YES
+
+
+def framed(title, child):
+    f = Gtk.Frame(label=title)
+    child.set_margin_start(6), child.set_margin_end(6), child.set_margin_top(2), child.set_margin_bottom(6)
+    f.add(child)
+    return f
+
+
+# ---------------------------------------------------------------------------
+# The window
+# ---------------------------------------------------------------------------
+class TaskManager:
+    def __init__(self, start_tab):
+        self.x = X11()
+        self.win = window("Syluxium Task Manager", 470, 500, "utilities-system-monitor")
+        self.win.connect("key-press-event", self.on_key)
+        self.speed = "Normal"
+        self.timer = None
+        self.prev_cpu = cpu_times()
+        self.prev_procs = {}
+        self.prev_net, self.prev_net_time = net_devices(), time.monotonic()
+        self.commit_peak = 0
+        self.closing = {}  # window id -> time End Task asked it to close
+
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        self.win.add(outer)
+        outer.pack_start(self.menubar(), False, False, 0)
+        self.book = Gtk.Notebook()
+        self.book.set_margin_start(6), self.book.set_margin_end(6), self.book.set_margin_top(4)
+        outer.pack_start(self.book, True, True, 0)
+        self.book.append_page(self.applications_tab(), Gtk.Label(label="Applications"))
+        self.book.append_page(self.processes_tab(), Gtk.Label(label="Processes"))
+        self.book.append_page(self.performance_tab(), Gtk.Label(label="Performance"))
+        self.book.append_page(self.networking_tab(), Gtk.Label(label="Networking"))
+
+        status = Gtk.Box(spacing=0)
+        status.set_margin_top(4)
+        self.st_procs, self.st_cpu, self.st_mem = (Gtk.Label(xalign=0) for _ in range(3))
+        for lab, expand in ((self.st_procs, False), (self.st_cpu, False), (self.st_mem, True)):
+            f = Gtk.Frame()
+            f.set_shadow_type(Gtk.ShadowType.IN)
+            lab.set_margin_start(4), lab.set_margin_end(12)
+            f.add(lab)
+            status.pack_start(f, expand, True, 0)
+        outer.pack_start(status, False, False, 0)
+
+        tabs = ["applications", "processes", "performance", "networking"]
+        self.win.show_all()
+        self.book.connect("switch-page", lambda _b, _p, n: GLib.idle_add(self.focus_page, n))
+        self.book.set_current_page(tabs.index(start_tab) if start_tab in tabs else 0)
+        self.focus_page(self.book.get_current_page())
+        self.refresh()
+        self.set_speed("Normal")
+
+    def focus_page(self, n):
+        # The list of the tab has the keyboard (Delete = End Task / End Process).
+        if n in (0, 1):
+            (self.app_view, self.proc_view)[n].grab_focus()
+        return False
+
+    # ---- menus ----
+    def menubar(self):
+        bar = Gtk.MenuBar()
+
+        def menu(title, items):
+            top = Gtk.MenuItem.new_with_mnemonic(title)
+            m = Gtk.Menu()
+            group = None
+            for it in items:
+                if it is None:
+                    m.append(Gtk.SeparatorMenuItem())
+                    continue
+                text, cb, *kind = it
+                if kind and kind[0] == "check":
+                    mi = Gtk.CheckMenuItem.new_with_mnemonic(text)
+                    mi.set_active(kind[1])
+                    mi.connect("toggled", cb)
+                elif kind and kind[0] == "radio":
+                    mi = Gtk.RadioMenuItem.new_with_mnemonic_from_widget(group, text)
+                    group = mi
+                    mi.set_active(kind[1])
+                    mi.connect("toggled", cb)
+                else:
+                    mi = Gtk.MenuItem.new_with_mnemonic(text)
+                    mi.connect("activate", cb)
+                m.append(mi)
+            top.set_submenu(m)
+            bar.append(top)
+
+        menu("_File", [("_New Task (Run...)", lambda *_: self.new_task()), None,
+                       ("E_xit Task Manager", lambda *_: self.win.destroy())])
+        menu("_Options", [("_Always On Top", lambda mi: self.win.set_keep_above(mi.get_active()), "check", False)])
+        speed_items = [(f"_{name}", (lambda mi, n=name: mi.get_active() and self.set_speed(n)), "radio",
+                        name == "Normal") for name in SPEEDS]
+        menu("_View", [("_Refresh Now", lambda *_: self.refresh()), None] + speed_items + [
+            None, ("Show _Kernel Times", lambda mi: setattr(self, "kernel_times", mi.get_active()), "check", False)])
+        menu("Sh_ut Down", [("_Log Off", lambda *_: self.shutdown(0)),
+                            ("_Restart", lambda *_: self.shutdown(1)),
+                            ("Turn _Off", lambda *_: self.shutdown(2))])
+        menu("_Help", [("_About Task Manager", lambda *_: message(
+            self.win, "Syluxium Task Manager", os_version() + "\n\nShows the programs and processes running on "
+            "this computer and how busy it is."))])
+        self.kernel_times = False
+        return bar
+
+    def set_speed(self, name):
+        self.speed = name
+        if self.timer:
+            GLib.source_remove(self.timer)
+            self.timer = None
+        if SPEEDS[name]:
+            self.timer = GLib.timeout_add(SPEEDS[name], lambda: self.refresh() or True)
+
+    def shutdown(self, kind):
+        # ksmserver: logout(confirm, type 0 = log off / 1 = restart / 2 = turn off, mode 2 = now)
+        launch("dcop", "ksmserver", "ksmserver", "logout", "1", str(kind), "2")
+
+    def on_key(self, _w, ev):
+        ctrl = ev.state & Gdk.ModifierType.CONTROL_MASK
+        if ctrl and ev.keyval in (Gdk.KEY_Tab, Gdk.KEY_ISO_Left_Tab, Gdk.KEY_Page_Down, Gdk.KEY_Page_Up):
+            back = ev.keyval in (Gdk.KEY_ISO_Left_Tab, Gdk.KEY_Page_Up) or ev.state & Gdk.ModifierType.SHIFT_MASK
+            self.book.set_current_page((self.book.get_current_page() + (-1 if back else 1)) % 4)
+            return True
+        if ev.keyval == Gdk.KEY_Delete:
+            page = self.book.get_current_page()
+            if page == 0:
+                self.end_task()
+            elif page == 1:
+                self.end_process()
+            return True
+        if ev.keyval == Gdk.KEY_F5:
+            self.refresh()
+            return True
+        return False
+
+    # ---- Applications ----
+    def applications_tab(self):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, margin=8)
+        self.apps = Gtk.ListStore(str, str, str, object, int)  # icon, task, status, window id, pid
+        self.apps.set_sort_column_id(1, Gtk.SortType.ASCENDING)
+        self.app_view = Gtk.TreeView(model=self.apps)
+        col = Gtk.TreeViewColumn("Task")
+        icon, text = Gtk.CellRendererPixbuf(), Gtk.CellRendererText(ellipsize=Pango.EllipsizeMode.END)
+        col.pack_start(icon, False), col.pack_start(text, True)
+        col.add_attribute(icon, "icon-name", 0), col.add_attribute(text, "text", 1)
+        col.set_expand(True), col.set_resizable(True), col.set_sort_column_id(1)
+        self.app_view.append_column(col)
+        c = Gtk.TreeViewColumn("Status", Gtk.CellRendererText(), text=2)
+        c.set_sort_column_id(2)
+        self.app_view.append_column(c)
+        self.app_view.connect("row-activated", lambda *_: self.switch_to())
+        self.app_view.connect("button-press-event", self.app_menu)
+        sw = Gtk.ScrolledWindow(shadow_type=Gtk.ShadowType.IN)
+        sw.add(self.app_view)
+        box.pack_start(sw, True, True, 0)
+        buttons = Gtk.Box(spacing=6)
+        for text, cb in (("New Task...", self.new_task), ("Switch To", self.switch_to), ("End Task", self.end_task)):
+            b = Gtk.Button(label=text)
+            b.connect("clicked", lambda _b, f=cb: f())
+            buttons.pack_end(b, False, False, 0)
+        box.pack_start(buttons, False, False, 0)
+        return box
+
+    def icon_for(self, cls):
+        theme = Gtk.IconTheme.get_default()
+        for name in (cls.lower(), cls.lower().replace(" ", "-")):
+            if name and theme.has_icon(name):
+                return name
+        return "application-x-executable"
+
+    def refresh_apps(self):
+        wins = [w for w in self.x.windows() if w[0] != self.own_window()]
+        now = time.monotonic()
+        seen = {}
+        for w, title, pid, cls in wins:
+            hung = w in self.closing and now - self.closing[w] > 5
+            seen[w] = (self.icon_for(cls), title or cls, "Not Responding" if hung else "Running", w, pid)
+        it = self.apps.get_iter_first()
+        while it:
+            w = self.apps[it][3]
+            if w in seen:
+                row = seen.pop(w)
+                if tuple(self.apps[it]) != row:
+                    self.apps.set(it, list(range(5)), list(row))
+                it = self.apps.iter_next(it)
+            else:
+                self.closing.pop(w, None)
+                if not self.apps.remove(it):
+                    it = None
+        for row in seen.values():
+            self.apps.append(list(row))
+        # End Task on a program that hasn't closed after 5 seconds: offer to end it now.
+        for w, t in list(self.closing.items()):
+            if now - t > 5 and w in [r[3] for r in self.apps]:
+                self.closing[w] = now + 3600  # ask once
+                row = next(r for r in self.apps if r[3] == w)
+                GLib.idle_add(self.end_now, w, row[1], row[4])
+
+    def own_window(self):
+        gw = self.win.get_window()
+        try:
+            return gw.get_xid() if gw else 0
+        except AttributeError:
+            return 0
+
+    def selected_app(self):
+        model, it = self.app_view.get_selection().get_selected()
+        return model[it] if it else None
+
+    def switch_to(self):
+        r = self.selected_app()
+        if r:
+            self.x.activate(r[3])
+
+    def end_task(self):
+        r = self.selected_app()
+        if not r:
+            return
+        self.closing[r[3]] = time.monotonic()
+        self.x.close(r[3])
+
+    def end_now(self, w, title, pid):
+        if not self.x.exists(w):
+            return False
+        d = Gtk.MessageDialog(transient_for=self.win, modal=True, message_type=Gtk.MessageType.WARNING,
+                              text=f"End Program - {title}")
+        d.format_secondary_text("This program is not responding.\n\nTo return to Syluxium and check the status "
+                                "of the program, click Cancel.\n\nIf you choose to end the program immediately, "
+                                "you will lose any unsaved data. To end the program now, click End Now.")
+        d.add_buttons("End Now", Gtk.ResponseType.OK, "Cancel", Gtk.ResponseType.CANCEL)
+        if d.run() == Gtk.ResponseType.OK and pid:
+            self.kill(pid, signal.SIGKILL)
+        d.destroy()
+        self.closing.pop(w, None)
+        return False
+
+    def app_menu(self, view, ev):
+        if ev.button != 3:
+            return False
+        path = view.get_path_at_pos(int(ev.x), int(ev.y))
+        if not path:
+            return False
+        view.get_selection().select_path(path[0])
+        m = Gtk.Menu()
+        r = self.selected_app()
+        for text, cb in (("_Switch To", self.switch_to), ("_End Task", self.end_task),
+                         ("_Go To Process", lambda: self.go_to_process(r[4]))):
+            mi = Gtk.MenuItem.new_with_mnemonic(text)
+            mi.connect("activate", lambda _m, f=cb: f())
+            m.append(mi)
+        m.show_all()
+        m.popup_at_pointer(ev)
+        return True
+
+    def go_to_process(self, pid):
+        self.book.set_current_page(1)
+        for r in self.procs:
+            if r[1] == pid:
+                self.proc_view.get_selection().select_iter(r.iter)
+                self.proc_view.scroll_to_cell(r.path, None, False, 0, 0)
+                break
+
+    def new_task(self):
+        d = Gtk.Dialog(title="Create New Task", transient_for=self.win, modal=True)
+        d.add_buttons("OK", Gtk.ResponseType.OK, "Cancel", Gtk.ResponseType.CANCEL)
+        d.set_default_response(Gtk.ResponseType.OK)
+        area = d.get_content_area()
+        area.set_spacing(8), area.set_margin_start(10), area.set_margin_end(10), area.set_margin_top(10)
+        area.add(label("Type the name of a program, folder, document, or Internet resource, and Syluxium "
+                       "will open it for you.", wrap=True))
+        row = Gtk.Box(spacing=6)
+        row.pack_start(Gtk.Label(label="Open:"), False, False, 0)
+        entry = Gtk.Entry(activates_default=True)
+        row.pack_start(entry, True, True, 0)
+        area.add(row)
+        d.show_all()
+        if d.run() == Gtk.ResponseType.OK and entry.get_text().strip():
+            text = entry.get_text().strip()
+            try:
+                cmd = shlex.split(text)
+            except ValueError:
+                cmd = [text]
+            if shutil.which(cmd[0]):
+                launch(*cmd)
+            else:
+                launch("kfmclient", "exec", text)
+        d.destroy()
+
+    # ---- Processes ----
+    def processes_tab(self):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, margin=8)
+        # image name, PID, user, CPU %, memory (K), CPU text, memory text, threads
+        self.procs = Gtk.ListStore(str, int, str, int, int, str, str, int)
+        self.procs.set_sort_column_id(0, Gtk.SortType.ASCENDING)
+        self.proc_view = Gtk.TreeView(model=self.procs)
+        self.proc_view.set_search_column(0)
+        for title, col, sort, xalign in (("Image Name", 0, 0, 0.0), ("PID", 1, 1, 1.0), ("User Name", 2, 2, 0.0),
+                                         ("CPU", 5, 3, 1.0), ("Mem Usage", 6, 4, 1.0), ("Threads", 7, 7, 1.0)):
+            c = Gtk.TreeViewColumn(title, Gtk.CellRendererText(xalign=xalign), text=col)
+            c.set_sort_column_id(sort)
+            c.set_resizable(True)
+            if col == 0:
+                c.set_expand(True)
+            self.proc_view.append_column(c)
+        self.proc_view.connect("button-press-event", self.proc_menu)
+        sw = Gtk.ScrolledWindow(shadow_type=Gtk.ShadowType.IN)
+        sw.add(self.proc_view)
+        box.pack_start(sw, True, True, 0)
+        row = Gtk.Box(spacing=6)
+        self.all_users = Gtk.CheckButton(label="Show processes from all users", active=True)
+        self.all_users.connect("toggled", lambda *_: self.refresh())
+        row.pack_start(self.all_users, False, False, 0)
+        b = Gtk.Button(label="End Process")
+        b.connect("clicked", lambda *_: self.end_process())
+        row.pack_end(b, False, False, 0)
+        box.pack_start(row, False, False, 0)
+        return box
+
+    def refresh_procs(self, procs, dtotal, idle_pct):
+        me = os.getuid()
+        rows = {}
+        for pid, p in procs.items():
+            if not self.all_users.get_active() and p["uid"] != me:
+                continue
+            prev = self.prev_procs.get(pid)
+            used = p["ticks"] - prev["ticks"] if prev else 0
+            pct = min(99, round(100 * used / dtotal)) if dtotal else 0
+            rows[pid] = [p["name"], pid, p["user"], pct, p["rss_kb"], f"{pct:02d}", kb(p["rss_kb"]), p["threads"]]
+        rows[0] = ["System Idle Process", 0, "SYSTEM", idle_pct, 0, f"{idle_pct:02d}", kb(0), len(self.prev_cpu) - 1]
+        it = self.procs.get_iter_first()
+        while it:
+            pid = self.procs[it][1]
+            if pid in rows:
+                row = rows.pop(pid)
+                if list(self.procs[it]) != row:
+                    self.procs.set(it, list(range(8)), row)
+                it = self.procs.iter_next(it)
+            elif not self.procs.remove(it):
+                it = None
+        for row in rows.values():
+            self.procs.append(row)
+
+    def selected_proc(self):
+        model, it = self.proc_view.get_selection().get_selected()
+        return (model[it][1], model[it][0]) if it else (None, None)
+
+    def proc_menu(self, view, ev):
+        if ev.button != 3:
+            return False
+        path = view.get_path_at_pos(int(ev.x), int(ev.y))
+        if not path:
+            return False
+        view.get_selection().select_path(path[0])
+        m = Gtk.Menu()
+        for text, cb in (("_End Process", self.end_process), ("End Process _Tree", lambda: self.end_process(True))):
+            mi = Gtk.MenuItem.new_with_mnemonic(text)
+            mi.connect("activate", lambda _m, f=cb: f())
+            m.append(mi)
+        prio = Gtk.MenuItem.new_with_mnemonic("Set _Priority")
+        pm = Gtk.Menu()
+        pid = self.selected_proc()[0]
+        try:
+            cur = os.getpriority(os.PRIO_PROCESS, pid) if pid else 0
+        except OSError:
+            cur = 0
+        group = None
+        for name, nice in (("Realtime", -20), ("High", -10), ("AboveNormal", -5), ("Normal", 0),
+                           ("BelowNormal", 5), ("Low", 19)):
+            mi = Gtk.RadioMenuItem.new_with_label_from_widget(group, name)
+            group = mi
+            mi.set_active(nice == cur)
+            mi.connect("activate", lambda mi, n=nice: mi.get_active() and self.set_priority(n))
+            pm.append(mi)
+        prio.set_submenu(pm)
+        m.append(Gtk.SeparatorMenuItem())
+        m.append(prio)
+        m.show_all()
+        m.popup_at_pointer(ev)
+        return True
+
+    def set_priority(self, nice):
+        pid, name = self.selected_proc()
+        if not pid:
+            return
+        try:
+            os.setpriority(os.PRIO_PROCESS, pid, nice)
+        except OSError as e:
+            message(self.win, "Unable to Change Priority", f"The operation could not be completed.\n\n"
+                    f"{e.strerror or e}", Gtk.MessageType.ERROR)
+
+    def end_process(self, tree=False):
+        pid, name = self.selected_proc()
+        if pid is None:
+            return
+        if pid == 0 or pid == 1 or pid == os.getpid():
+            message(self.win, "Unable to Terminate Process", "This is a critical system process. Task Manager "
+                    "cannot end this process.", Gtk.MessageType.WARNING)
+            return
+        if not ask(self.win, "Task Manager Warning",
+                   "WARNING: Terminating a process can cause undesired results including loss of data and "
+                   "system instability. The process will not be given the chance to save its state or data "
+                   f"before it is terminated. Are you sure you want to terminate {'the process tree of ' if tree else ''}"
+                   f"\"{name}\" (PID {pid})?"):
+            return
+        targets = [pid]
+        if tree:
+            procs = processes()
+            i = 0
+            while i < len(targets):
+                targets += [p for p, v in procs.items() if v["ppid"] == targets[i] and p not in targets]
+                i += 1
+        for p in reversed(targets):
+            if not self.kill(p, signal.SIGTERM):
+                return
+        # Give them a moment to go, then make sure they're gone.
+        GLib.timeout_add(1500, lambda: [self.kill(p, signal.SIGKILL, quiet=True) for p in targets] and False)
+        GLib.timeout_add(300, lambda: self.refresh() or False)
+
+    def kill(self, pid, sig, quiet=False):
+        try:
+            os.kill(pid, sig)
+            return True
+        except ProcessLookupError:
+            return True
+        except PermissionError:
+            if not quiet:
+                r = message(self.win, "Unable to Terminate Process", "The operation could not be completed.\n\n"
+                            "Access is denied: the process belongs to another user. End it as administrator?",
+                            Gtk.MessageType.WARNING, Gtk.ButtonsType.YES_NO)
+                if r == Gtk.ResponseType.YES:
+                    launch("tdesudo", "kill", "-KILL", str(pid))
+            return False
+
+    # ---- Performance ----
+    def performance_tab(self):
+        grid = Gtk.Grid(column_spacing=8, row_spacing=6, margin=8)
+        self.cpu_meter, self.mem_meter = Meter(), Meter()
+        self.cpu_graph = Graph([GREEN, RED])
+        self.mem_graph = Graph([YELLOW])
+        grid.attach(framed("CPU Usage", self.cpu_meter), 0, 0, 1, 1)
+        grid.attach(framed("CPU Usage History", self.cpu_graph), 1, 0, 2, 1)
+        grid.attach(framed("Memory Usage", self.mem_meter), 0, 1, 1, 1)
+        grid.attach(framed("Memory Usage History", self.mem_graph), 1, 1, 2, 1)
+        self.cpu_graph.set_hexpand(True), self.cpu_graph.set_vexpand(True)
+        self.mem_graph.set_hexpand(True), self.mem_graph.set_vexpand(True)
+        self.values = {}
+
+        def table(title, names):
+            g = Gtk.Grid(column_spacing=12, row_spacing=1)
+            for i, n in enumerate(names):
+                g.attach(Gtk.Label(label=n, xalign=0), 0, i, 1, 1)
+                v = Gtk.Label(label="0", xalign=1, hexpand=True)
+                g.attach(v, 1, i, 1, 1)
+                self.values[(title, n)] = v
+            return framed(title, g)
+        grid.attach(table("Totals", ["Processes", "Threads", "Up Time"]), 0, 2, 2, 1)
+        grid.attach(table("Physical Memory (K)", ["Total", "Available", "System Cache"]), 2, 2, 1, 1)
+        grid.attach(table("Commit Charge (K)", ["Total", "Limit", "Peak"]), 0, 3, 2, 1)
+        grid.attach(table("Processor", ["Processors", "Speed"]), 2, 3, 1, 1)
+        model, cores = cpu_info()
+        self.values[("Processor", "Processors")].set_text(str(cores))
+        mhz = "?"
+        for line in read("/proc/cpuinfo").splitlines():
+            if line.startswith("cpu MHz"):
+                mhz = f"{float(line.split(':')[1]):.0f} MHz"
+                break
+        self.values[("Processor", "Speed")].set_text(mhz)
+        self.values[("Processor", "Processors")].set_tooltip_text(model)
+        return grid
+
+    # ---- Networking ----
+    def networking_tab(self):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, margin=8)
+        self.net_graphs_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        box.pack_start(self.net_graphs_box, True, True, 0)
+        self.net_graphs = {}
+        self.no_net = label("No network adapters are installed.", xalign=0.5)
+        self.net_graphs_box.pack_start(self.no_net, True, True, 0)
+        # adapter, utilization, link speed, state, sent/s, received/s, sent total, received total
+        self.nets = Gtk.ListStore(str, str, str, str, str, str, str, str)
+        view = Gtk.TreeView(model=self.nets)
+        for i, t in enumerate(("Adapter Name", "Network Utilization", "Link Speed", "State", "Bytes Sent/s",
+                               "Bytes Received/s", "Bytes Sent", "Bytes Received")):
+            c = Gtk.TreeViewColumn(t, Gtk.CellRendererText(xalign=0.0 if i in (0, 3) else 1.0), text=i)
+            c.set_resizable(True)
+            view.append_column(c)
+        sw = Gtk.ScrolledWindow(shadow_type=Gtk.ShadowType.IN)
+        sw.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.NEVER)
+        sw.set_size_request(-1, 90)
+        sw.add(view)
+        box.pack_start(sw, False, False, 0)
+        box.pack_start(label("Green: total   Red: sent   Yellow: received", xalign=0), False, False, 0)
+        return box
+
+    def refresh_net(self):
+        now = time.monotonic()
+        cur = net_devices()
+        dt = max(0.001, now - self.prev_net_time)
+        self.nets.clear()
+        for name, (rx, tx) in sorted(cur.items()):
+            prx, ptx = self.prev_net.get(name, (rx, tx))
+            rxs, txs = max(0, rx - prx) / dt, max(0, tx - ptx) / dt
+            speed = link_speed(name)
+            util = (rxs + txs) * 8 / speed
+            if name not in self.net_graphs:
+                g = Graph([GREEN, RED, YELLOW], 70)
+                g.peak = 0.01
+                self.net_graphs[name] = g
+                self.net_graphs_box.pack_start(framed(name, g), True, True, 0)
+                self.no_net.hide()
+                self.net_graphs_box.show_all()
+                self.no_net.set_visible(False)
+            g = self.net_graphs[name]
+            # The scale grows with the traffic (1 % / 10 % / 100 % steps).
+            peak = max([util] + [v * g.peak for v in g.series[0]])
+            scale = next((s for s in (0.01, 0.05, 0.1, 0.25, 0.5, 1.0) if peak <= s), 1.0)
+            if scale != g.peak:
+                g.series = [[v * g.peak / scale for v in s] for s in g.series]
+                g.peak = scale
+            g.scale_text = f"{scale * 100:g} %"
+            g.push(util / scale, txs * 8 / speed / scale, rxs * 8 / speed / scale)
+            mbps = speed // 1_000_000
+            self.nets.append([name, f"{util * 100:.2f} %", f"{mbps:g} Mbps" if mbps < 1000 else f"{mbps / 1000:g} Gbps",
+                              "Connected" if rx or tx else "Disconnected", f"{txs:,.0f}", f"{rxs:,.0f}",
+                              f"{tx:,}", f"{rx:,}"])
+        self.prev_net, self.prev_net_time = cur, now
+
+    # ---- every tick ----
+    def refresh(self):
+        cpu = cpu_times()
+        busy, kern, total = (a - b for a, b in zip(cpu[0], self.prev_cpu[0]))
+        self.prev_cpu = cpu
+        usage = busy / total if total > 0 else 0.0
+        pct = round(usage * 100)
+        procs = processes()
+        self.refresh_procs(procs, total, max(0, 100 - pct))
+        self.prev_procs = procs
+        self.refresh_apps()
+
+        mem = memory()
+        mtotal = mem.get("MemTotal", 0)
+        avail = mem.get("MemAvailable", mem.get("MemFree", 0))
+        swap = mem.get("SwapTotal", 0)
+        commit = max(0, mtotal - avail) + swap - mem.get("SwapFree", swap)
+        limit = mtotal + swap
+        self.commit_peak = max(self.commit_peak, commit)
+        self.cpu_meter.set(usage, f"{pct} %")
+        self.cpu_graph.push(usage, (kern / total if total > 0 else 0) if self.kernel_times else 0)
+        self.mem_meter.set(commit / limit if limit else 0, f"{commit / 1024:.0f} MB" if commit < 10240 * 1024
+                           else f"{commit / 1048576:.1f} GB")
+        self.mem_graph.push(commit / limit if limit else 0)
+        v = self.values
+        v[("Totals", "Processes")].set_text(str(len(procs)))
+        v[("Totals", "Threads")].set_text(str(sum(p["threads"] for p in procs.values())))
+        v[("Totals", "Up Time")].set_text(uptime())
+        v[("Physical Memory (K)", "Total")].set_text(f"{mtotal:,}")
+        v[("Physical Memory (K)", "Available")].set_text(f"{avail:,}")
+        v[("Physical Memory (K)", "System Cache")].set_text(f"{mem.get('Cached', 0) + mem.get('Buffers', 0):,}")
+        v[("Commit Charge (K)", "Total")].set_text(f"{commit:,}")
+        v[("Commit Charge (K)", "Limit")].set_text(f"{limit:,}")
+        v[("Commit Charge (K)", "Peak")].set_text(f"{self.commit_peak:,}")
+        self.refresh_net()
+
+        self.st_procs.set_text(f"Processes: {len(procs)}")
+        self.st_cpu.set_text(f"CPU Usage: {pct}%")
+        self.st_mem.set_text(f"Commit Charge: {commit // 1024}M / {limit // 1024}M")
+        return True
+
+
+if __name__ == "__main__":
+    # One Task Manager: a second Ctrl+Alt+Del brings the open one forward.
+    me = os.getpid()
+    x = X11()
+    for w, title, pid, _cls in x.windows():
+        if title == "Syluxium Task Manager" and pid != me:
+            x.activate(w)
+            sys.exit(0)
+    TaskManager(sys.argv[1] if len(sys.argv) > 1 else "applications")
+    Gtk.main()

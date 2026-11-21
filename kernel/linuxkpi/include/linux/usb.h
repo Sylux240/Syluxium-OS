@@ -326,6 +326,7 @@ struct usb_driver {
     unsigned int disable_hub_initiated_lpm : 1;
     unsigned int soft_unbind : 1;
     struct usb_driver* lkpi_next;
+    struct device_driver driver; /* appended: Linux 6.8+ name of drvwrap.driver */
 };
 #define to_usb_driver(d) container_of(d, struct usb_driver, drvwrap.driver)
 

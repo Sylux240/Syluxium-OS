@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Syluxium App Store
+GenericName=App Store
+Comment=Find, install and remove programs
+Exec=syluxium-appstore
+Icon=system-software-install
+Categories=System;PackageManager;
+Keywords=software;install;programs;packages;store;

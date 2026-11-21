@@ -39,6 +39,32 @@
 #define CONFIG_MT7601U 1
 #define CONFIG_MAC80211_HWSIM 1
 #define CONFIG_RTL8XXXU 1
+/* Broadcom: bcma (PCI host) and b43 (N/HT/G/LP PHYs: BCM4321 .. BCM4331) */
+#define CONFIG_BCMA 1
+#define CONFIG_BCMA_HOST_PCI 1
+#define CONFIG_BCMA_HOST_PCI_POSSIBLE 1
+#define CONFIG_BCMA_DRIVER_PCI 1
+#define CONFIG_BCMA_BLOCKIO 1
+#define CONFIG_B43 1
+#define CONFIG_B43_BCMA 1
+#define CONFIG_B43_BUSES_BCMA 1
+#define CONFIG_B43_PHY_N 1
+#define CONFIG_B43_PHY_HT 1
+#define CONFIG_B43_PHY_G 1
+/* Broadcom FullMAC (brcmfmac): PCIe and USB, msgbuf and BCDC protocols */
+#define CONFIG_BRCMUTIL 1
+#define CONFIG_BRCMFMAC 1
+#define CONFIG_BRCMFMAC_PCIE 1
+#define CONFIG_BRCMFMAC_USB 1
+#define CONFIG_BRCMFMAC_PROTO_BCDC 1
+#define CONFIG_BRCMFMAC_PROTO_MSGBUF 1
+/* Ethernet: r8169 with phylib and the Realtek PHY driver */
+#define CONFIG_PHYLIB 1
+#define CONFIG_MDIO_DEVICE 1
+#define CONFIG_MDIO_BUS 1
+#define CONFIG_MDIO_DEVRES 1
+#define CONFIG_R8169 1
+#define CONFIG_REALTEK_PHY 1
 #define CONFIG_BASE_SMALL 0
 #define CONFIG_PAGE_SHIFT 12
 /* DRM fbdev emulation: GPU drivers light the screen up themselves and hand

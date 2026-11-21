@@ -35,7 +35,6 @@ void platform_driver_unregister(struct platform_driver* drv);
 static inline void* platform_get_drvdata(const struct platform_device* pdev) { return dev_get_drvdata(&pdev->dev); }
 static inline void platform_set_drvdata(struct platform_device* pdev, void* data) { dev_set_drvdata(&pdev->dev, data); }
 LKPI_EXTERN_C_END
-#endif
 
 /* Registration with resources and platform data (copied). */
 struct resource;
@@ -56,3 +55,4 @@ struct platform_device* platform_device_register_resndata(struct device* parent,
 #define platform_device_register_data(parent, name, id, data, size) \
     platform_device_register_resndata(parent, name, id, NULL, 0, data, size)
 struct resource* lkpi_platform_get_resource(struct platform_device* pdev, unsigned int type, unsigned int num);
+#endif /* _LKPI_LINUX_PLATFORM_DEVICE_H */

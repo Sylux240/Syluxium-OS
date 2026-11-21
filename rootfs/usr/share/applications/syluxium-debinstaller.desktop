@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Software Installer
+GenericName=Software Installer
+Comment=Install a downloaded software package (.deb)
+Exec=syluxium-appstore --deb %f
+Icon=system-software-install
+MimeType=application/vnd.debian.binary-package;application/x-debian-package;application/x-deb;
+InitialPreference=12
+NoDisplay=true
+Categories=System;PackageManager;
