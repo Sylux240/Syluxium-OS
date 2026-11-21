@@ -1222,12 +1222,18 @@ int timer_pending(const struct timer_list* t) { return t->lkpi_pending; }
 
 // ======================= workqueues =======================
 
+// A workqueue: one worker thread (ordered queues, system_wq) or a few
+// (unbound queues: a work item that sleeps waiting for another one on the
+// same queue must not deadlock it, as Linux guarantees). A work item never
+// runs on two workers at once.
+constexpr int WQ_MAX_WORKERS = 4;
 struct workqueue_struct {
     char name[32];
     IrqSpinlock lock;
     struct work_struct* head = nullptr;
     struct work_struct* tail = nullptr;
-    struct work_struct* running = nullptr;
+    struct work_struct* running[WQ_MAX_WORKERS] = {};
+    int workers = 1;
     sched::Semaphore pending;
     sched::WaitQueue idle;
     bool stopping = false;
@@ -1237,43 +1243,83 @@ namespace {
 
 constexpr int WORK_QUEUED = 1;
 
+bool is_running(workqueue_struct* wq, const struct work_struct* w) {
+    for (int i = 0; i < wq->workers; i++)
+        if (wq->running[i] == w)
+            return true;
+    return false;
+}
+
+bool any_running(workqueue_struct* wq) {
+    for (int i = 0; i < wq->workers; i++)
+        if (wq->running[i])
+            return true;
+    return false;
+}
+
+struct WorkerArg {
+    workqueue_struct* wq;
+    int slot;
+};
+
 void worker(void* arg) {
-    auto* wq = static_cast<workqueue_struct*>(arg);
+    auto* wa = static_cast<WorkerArg*>(arg);
+    workqueue_struct* wq = wa->wq;
+    int slot = wa->slot;
+    delete wa;
     for (;;) {
         wq->pending.wait();
-        struct work_struct* w;
+        struct work_struct* w = nullptr;
         {
             LockGuard guard(wq->lock);
-            w = wq->head;
-            if (!w) {
-                if (wq->stopping)
-                    break;
-                continue;
+            // The first queued item not already running on another worker.
+            struct work_struct* prev = nullptr;
+            for (struct work_struct* c = wq->head; c; prev = c, c = c->lkpi_next) {
+                if (is_running(wq, c))
+                    continue;
+                w = c;
+                if (prev)
+                    prev->lkpi_next = c->lkpi_next;
+                else
+                    wq->head = c->lkpi_next;
+                if (wq->tail == c)
+                    wq->tail = prev;
+                break;
             }
-            wq->head = w->lkpi_next;
-            if (!wq->head)
-                wq->tail = nullptr;
+            if (!w) {
+                if (wq->stopping && !wq->head)
+                    break;
+                continue; // nothing runnable: the worker running it re-signals when done
+            }
             w->lkpi_next = nullptr;
-            wq->running = w;
+            wq->running[slot] = w;
             __atomic_fetch_and(&w->lkpi_state, ~WORK_QUEUED, __ATOMIC_SEQ_CST);
         }
         // The function may free or requeue w: it is not touched afterwards
-        // ("running" is tracked by address in wq->running, as in Linux).
+        // ("running" is tracked by address, as in Linux).
         w->func(w);
+        bool more;
         {
             LockGuard guard(wq->lock);
-            wq->running = nullptr;
+            wq->running[slot] = nullptr;
+            more = wq->head != nullptr;
         }
+        if (more && wq->workers > 1)
+            wq->pending.signal(); // an item skipped because it was running here may run now
         wq->idle.wake_all();
     }
 }
 
-workqueue_struct* make_wq(const char* name) {
+workqueue_struct* make_wq_workers(const char* name, int workers) {
     auto* wq = new workqueue_struct;
     snprintf(wq->name, sizeof(wq->name), "%s", name);
-    sched::spawn(wq->name, worker, wq, -1, true);
+    wq->workers = workers < 1 ? 1 : workers > WQ_MAX_WORKERS ? WQ_MAX_WORKERS : workers;
+    for (int i = 0; i < wq->workers; i++)
+        sched::spawn(wq->name, worker, new WorkerArg{wq, i}, -1, true);
     return wq;
 }
+
+workqueue_struct* make_wq(const char* name) { return make_wq_workers(name, 1); }
 
 extern "C" void lkpi_delayed_work_timer(struct timer_list* t);
 void delayed_work_timer(struct timer_list* t) { lkpi_delayed_work_timer(t); }
@@ -1307,17 +1353,18 @@ void lkpi_init_delayed_work(struct delayed_work* d, work_func_t fn) {
 }
 
 struct workqueue_struct* alloc_workqueue(const char* fmt, unsigned int flags, int max_active, ...) {
-    (void)flags;
     char name[32];
     va_list a;
     va_start(a, max_active);
     sylux_vsnprintf(name, sizeof(name), fmt, a);
     va_end(a);
-    return make_wq(name);
+    // Ordered queues (max_active 1) keep one worker; WQ_UNBOUND (0x2) queues
+    // get several, like Linux's unbound pools.
+    return make_wq_workers(name, (flags & 0x2) && max_active != 1 ? WQ_MAX_WORKERS : 1);
 }
 
 void flush_workqueue(struct workqueue_struct* wq) {
-    wq->idle.wait_until([&] { return wq->head == nullptr && wq->running == nullptr; });
+    wq->idle.wait_until([&] { return wq->head == nullptr && !any_running(wq); });
 }
 
 void destroy_workqueue(struct workqueue_struct* wq) {
@@ -1397,8 +1444,8 @@ bool flush_work(struct work_struct* w) {
     workqueue_struct* wq = w->lkpi_wq;
     if (!wq)
         return false;
-    bool busy = w->lkpi_state != 0 || wq->running == w;
-    wq->idle.wait_until([&] { return !(__atomic_load_n(&w->lkpi_state, __ATOMIC_SEQ_CST) & WORK_QUEUED) && wq->running != w; });
+    bool busy = w->lkpi_state != 0 || is_running(wq, w);
+    wq->idle.wait_until([&] { return !(__atomic_load_n(&w->lkpi_state, __ATOMIC_SEQ_CST) & WORK_QUEUED) && !is_running(wq, w); });
     return busy;
 }
 
@@ -1408,7 +1455,7 @@ bool cancel_work_sync(struct work_struct* w) {
     bool was = dequeue(w);
     workqueue_struct* wq = w->lkpi_wq;
     if (wq)
-        wq->idle.wait_until([&] { return wq->running != w; });
+        wq->idle.wait_until([&] { return !is_running(wq, w); });
     return was;
 }
 
@@ -1524,7 +1571,10 @@ void init() {
     sched::spawn("lkpi-timers", timer_thread, nullptr, -1, true);
     sched::spawn("lkpi-rcu", rcu_thread, nullptr, -1, true);
     system_wq = make_wq("lkpi-events");
-    system_highpri_wq = system_long_wq = system_unbound_wq = system_freezable_wq = system_power_efficient_wq = system_wq;
+    // Unbound/high-priority/long work (GPU drivers, tasklets) runs on its
+    // own pool, so it isn't stuck behind items that sleep on system_wq.
+    system_highpri_wq = system_long_wq = system_unbound_wq = make_wq_workers("lkpi-unbound", WQ_MAX_WORKERS);
+    system_freezable_wq = system_power_efficient_wq = system_wq;
     init_pci();
     // GPU acceleration test boots ("gpu"): DRM driver + modesetting debug
     // messages go to the boot log unless drm.debug= says otherwise.
