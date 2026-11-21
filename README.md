@@ -1,6 +1,6 @@
 # Syluxium
 
-A from-scratch x86_64 operating system written in C++20: monolithic kernel, (Aided with AI for more efficient workflows and productivity)
+A from-scratch x86_64 operating system written in C,C++20, and Python: monolithic kernel, (Aided with AI for more efficient workflows and productivity)
 booted by [Limine](https://github.com/limine-bootloader/limine).
 
 ## Screenshots
