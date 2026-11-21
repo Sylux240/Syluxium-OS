@@ -146,24 +146,76 @@ def ar_members(path: str) -> dict:
     return members
 
 
-def open_data_tar(members: dict) -> tarfile.TarFile:
+def open_member_tar(members: dict, prefix: str) -> tarfile.TarFile:
     for name, blob in members.items():
-        if not name.startswith("data.tar"):
+        if not name.startswith(prefix):
             continue
         if name.endswith(".zst"):
             blob = subprocess.run(["zstd", "-dc"], input=blob, capture_output=True, check=True).stdout
             return tarfile.open(fileobj=io.BytesIO(blob), mode="r:")
         return tarfile.open(fileobj=io.BytesIO(blob), mode="r:*")
-    sys.exit("package has no data.tar member")
+    sys.exit(f"package has no {prefix} member")
 
 
-def extract(deb: str, out: str) -> int:
+def open_data_tar(members: dict) -> tarfile.TarFile:
+    return open_member_tar(members, "data.tar")
+
+
+# ---- dpkg database (/var/lib/dpkg) ----
+# Packages are recorded as "unpacked": dpkg --configure -a then runs their
+# install scripts (tools/configure-packages.sh), as if apt had installed them.
+INFO_FILES = ("preinst", "postinst", "prerm", "postrm", "config", "templates", "triggers",
+              "conffiles", "md5sums", "shlibs", "symbols")
+
+
+def record_dpkg(members: dict, out: str, paths: list) -> None:
+    info = os.path.join(out, "var/lib/dpkg/info")
+    os.makedirs(info, exist_ok=True)
+    files = {}
+    with open_member_tar(members, "control.tar") as tar:
+        for m in tar.getmembers():
+            name = m.name.lstrip("./")
+            if m.isfile() and (name == "control" or name in INFO_FILES):
+                with tar.extractfile(m) as f:
+                    files[name] = (f.read(), m.mode)
+    control = files.pop("control")[0].decode("utf-8", "replace").rstrip("\n")
+    fields = dict(line.split(":", 1) for line in control.splitlines() if line and not line[0].isspace() and ":" in line)
+    pkg = fields["Package"].strip()
+    arch = fields.get("Architecture", "all").strip()
+    multi_same = fields.get("Multi-Arch", "").strip() == "same"
+    base = f"{pkg}:{arch}" if multi_same else pkg
+    for name, (data, mode) in files.items():
+        path = os.path.join(info, f"{base}.{name}")
+        with open(path, "wb") as f:
+            f.write(data)
+        os.chmod(path, 0o755 if name in ("preinst", "postinst", "prerm", "postrm", "config") else 0o644)
+    with open(os.path.join(info, f"{base}.list"), "w") as f:
+        f.write("/.\n" + "".join(f"/{p}\n" for p in paths))
+    # Status entry: the control fields, "unpacked", and the conffiles' checksums.
+    lines = control.splitlines()
+    entry = [lines[0], "Status: install ok unpacked"] + lines[1:]
+    if "conffiles" in files:
+        entry.append("Conffiles:")
+        for cf in files["conffiles"][0].decode().split():
+            cfp = os.path.join(out, cf.lstrip("/"))
+            if os.path.isfile(cfp) and not os.path.islink(cfp):
+                digest = hashlib.md5(open(cfp, "rb").read()).hexdigest()
+                entry.append(f" {cf} {digest}")
+    with open(os.path.join(out, "var/lib/dpkg/status"), "a") as f:
+        f.write("\n".join(entry) + "\n\n")
+
+
+def extract(deb: str, out: str, dpkg_db: bool = False) -> int:
     count = 0
-    with open_data_tar(ar_members(deb)) as tar:
+    parts = ar_members(deb)
+    paths = []
+    with open_data_tar(parts) as tar:
         members = tar.getmembers()
         by_name = {m.name: m for m in members}
         for m in members:
             rel = m.name.lstrip("./")
+            if rel and ".." not in rel.split("/"):
+                paths.append(rel.rstrip("/"))
             if not rel or rel.startswith(SKIP_PREFIXES) or ".." in rel.split("/"):
                 continue
             dest = os.path.join(out, rel)
@@ -191,6 +243,8 @@ def extract(deb: str, out: str) -> int:
             else:
                 continue  # device nodes etc.: the kernel provides /dev itself
             count += 1
+    if dpkg_db:
+        record_dpkg(parts, out, paths)
     return count
 
 
@@ -205,6 +259,8 @@ def main() -> None:
                     help="extra repository BASEURL|SUITE|COMP1,COMP2 (packages there override Debian's)")
     ap.add_argument("--no-deps", action="store_true",
                     help="only the named packages, not their dependencies (to pick files out of them)")
+    ap.add_argument("--dpkg-db", action="store_true",
+                    help="also write /var/lib/dpkg (status, install scripts, file lists): packages 'unpacked'")
     ap.add_argument("packages", nargs="+")
     args = ap.parse_args()
     global ARCH
@@ -224,8 +280,14 @@ def main() -> None:
     exclude = {e for e in args.exclude.split(",") if e}
     order = list(args.packages) if args.no_deps else resolve(index, args.packages, exclude)
     total = 0
+    if args.dpkg_db:
+        d = os.path.join(args.out, "var/lib/dpkg")
+        for sub in ("info", "updates", "triggers", "alternatives"):
+            os.makedirs(os.path.join(d, sub), exist_ok=True)
+        for f in ("status", "available", "diversions", "statoverride"):
+            open(os.path.join(d, f), "a").close()
     for name in order:
-        total += extract(download(index, name, args.cache), args.out)
+        total += extract(download(index, name, args.cache), args.out, args.dpkg_db)
     print(f"  debian: {len(order)} packages, {total} files: {' '.join(order)}", file=sys.stderr)
 
 

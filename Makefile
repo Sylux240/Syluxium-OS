@@ -50,9 +50,10 @@ TRINITY_PKGS := dbus tdebase-trinity-bin twin-trinity kicker-trinity kdesktop-tr
                 tde-style-qtcurve-trinity twin-style-dekorator-trinity ksplash-trinity ksysguard-trinity \
                 kmag-trinity kvkbd-trinity ksystemlog-trinity kate-trinity tdeprint-trinity
 DEBIAN_PKGS  := bash busybox hello ncurses-base pciutils pci.ids netbase alsa-utils xserver-xorg-core xserver-xorg-video-fbdev xserver-xorg-input-evdev xinit x11-xserver-utils x11-xkb-utils xterm twm xfonts-base sudo libpam-runtime libpam-modules login fdisk e2fsprogs dosfstools xdotool firefox-esr \
-                wine wine64 iw wpasupplicant wireless-regdb hostapd fonts-wine xcape gparted python3 python3-gi gir1.2-gtk-3.0 librsvg2-common cups cups-bsd
+                wine wine64 iw wpasupplicant wireless-regdb hostapd fonts-wine xcape gparted python3 python3-gi gir1.2-gtk-3.0 librsvg2-common cups cups-bsd dpkg apt debconf libc-bin
 DEBIAN_ROOT  := $(BUILD)/rootfs-debian
 DEBIAN_STAMP := $(DEBIAN_ROOT)/.fetched
+DEBIAN_CONFIGURED := $(DEBIAN_ROOT)/.configured
 # A few i386 packages for testing 32-bit dynamic linking (Steam is 32-bit).
 DEBIAN_I386_PKGS  := hello busybox bash
 # Only the libraries these programs need (base-files would pull in gawk & co.).
@@ -63,7 +64,7 @@ DEBIAN_I386_PKGS  := hello busybox bash
 # capi, opencl); without them those modules don't load and the rest
 # of Wine works. FFmpeg + GStreamer alone would add ~150 MB.
 WINE_EXCLUDE := libavcodec61,libavformat61,libavutil59,libgstreamer-plugins-base1.0-0,libgstreamer1.0-0,libgphoto2-6t64,libgphoto2-port12t64,libpcap0.8t64,libpulse0,libcapi20-3t64,ocl-icd-libopencl1
-DEBIAN_EXCLUDE := mesa-libgallium,libllvm19,libz3-4,libgl1-mesa-dri,libglx-mesa0,libegl-mesa0,cpp,cpp-14,cpp-14-x86-64-linux-gnu,cpp-x86-64-linux-gnu,man-db,groff-base,systemd,udev,debconf,debconf-2.0,xbase-clients,systemd-sysv,libpam-systemd,dbus-user-session,$(WINE_EXCLUDE)
+DEBIAN_EXCLUDE := mesa-libgallium,libllvm19,libz3-4,libgl1-mesa-dri,libglx-mesa0,libegl-mesa0,cpp,cpp-14,cpp-14-x86-64-linux-gnu,cpp-x86-64-linux-gnu,man-db,groff-base,systemd,udev,xbase-clients,systemd-sysv,libpam-systemd,dbus-user-session,$(WINE_EXCLUDE)
 DEBIAN_I386_EXCLUDE := base-files,debianutils,gawk,libmpfr6,libgmp10,libsigsegv2,readline-common,libreadline8t64
 DEBIAN_I386_PROGS := hello busybox bash
 DEBIAN_I386_ROOT  := $(BUILD)/rootfs-debian-i386
@@ -270,7 +271,13 @@ $(TESTS_DIR)/winbox32.exe: $(TESTS_DIR)/winhello32.exe
 
 $(DEBIAN_STAMP): tools/debian-fetch.py Makefile
 	@echo "  DEB   $(DEBIAN_PKGS) (+ dependencies, Debian $(DEBIAN_SUITE))"
-	@python3 tools/debian-fetch.py --suite $(DEBIAN_SUITE) --out $(DEBIAN_ROOT) --cache deps/debian --exclude $(DEBIAN_EXCLUDE) --repo "$(TRINITY_REPO)" $(DEBIAN_PKGS) $(TRINITY_PKGS)
+	@python3 tools/debian-fetch.py --suite $(DEBIAN_SUITE) --out $(DEBIAN_ROOT) --cache deps/debian --dpkg-db --exclude $(DEBIAN_EXCLUDE) --repo "$(TRINITY_REPO)" $(DEBIAN_PKGS) $(TRINITY_PKGS)
+	@touch $@
+
+# Debian's install scripts, run once per package set (fake root, no sudo).
+$(DEBIAN_CONFIGURED): $(DEBIAN_STAMP) tools/configure-packages.sh
+	@echo "  DPKG  dpkg --configure -a (install scripts)"
+	@tools/configure-packages.sh $(DEBIAN_ROOT) $(BUILD)/configure-packages.log
 	@touch $@
 
 # Device firmware from Debian's non-free-firmware section: the packages are
@@ -296,14 +303,14 @@ $(WINE_I386_STAMP): tools/debian-fetch.py Makefile
 	@python3 tools/debian-fetch.py --arch i386 --suite $(DEBIAN_SUITE) --out $(WINE_I386_ROOT) --cache deps/debian --no-deps libwine
 	@touch $@
 
-$(INITRAMFS): $(KERNEL) $(PICKER) tools/mkfontdir.py tools/debrand-tde.py tools/syluxium_names.py tools/run-triggers.sh tools/wine-setup.sh tools/wine-prefix-links.py $(DEBIAN_STAMP) $(DEBIAN_I386_STAMP) $(WINE_I386_STAMP) $(FIRMWARE_STAMP) $(USER_PROGS) $(USER32_PROGS) $(WIN_PROGS) $(shell find rootfs -type f 2>/dev/null) $(shell find rootfs -type d 2>/dev/null) Makefile
+$(INITRAMFS): $(KERNEL) $(PICKER) $(DEBIAN_CONFIGURED) tools/merge-accounts.py tools/mkfontdir.py tools/debrand-tde.py tools/syluxium_names.py tools/run-triggers.sh tools/wine-setup.sh tools/wine-prefix-links.py $(DEBIAN_STAMP) $(DEBIAN_I386_STAMP) $(WINE_I386_STAMP) $(FIRMWARE_STAMP) $(USER_PROGS) $(USER32_PROGS) $(WIN_PROGS) $(shell find rootfs -type f 2>/dev/null) $(shell find rootfs -type d 2>/dev/null) Makefile
 	@echo "  ROOT  $(ROOTFS)"
 	@rm -rf $(ROOTFS)
 	@cp -a $(DEBIAN_ROOT) $(ROOTFS)
-	@rm -f $(ROOTFS)/.fetched
+	@rm -f $(ROOTFS)/.fetched $(ROOTFS)/.configured
 	@# busybox provides the basic commands (ls, cat, grep, ...) that coreutils would
 	@for applet in $$($(DEBIAN_ROOT)/usr/bin/busybox --list); do \
-	    [ -e $(ROOTFS)/usr/bin/$$applet ] || [ -e $(ROOTFS)/usr/sbin/$$applet ] || \
+	    [ -e $(ROOTFS)/usr/bin/$$applet ] || [ -L $(ROOTFS)/usr/bin/$$applet ] || [ -e $(ROOTFS)/usr/sbin/$$applet ] || \
 	        ln -s busybox $(ROOTFS)/usr/bin/$$applet; done
 	@ln -sf busybox $(ROOTFS)/usr/bin/sh
 	@mkdir -p $(ROOTFS)/opt/syluxium/tests
@@ -315,7 +322,8 @@ $(INITRAMFS): $(KERNEL) $(PICKER) tools/mkfontdir.py tools/debrand-tde.py tools/
 	@rm -rf $(ROOTFS)/usr/lib/i386-linux-gnu/gconv   # iconv modules: 8 MiB nobody needs here
 	@cp -a $(DEBIAN_I386_ROOT)/usr/lib/ld-linux.so.2 $(ROOTFS)/usr/lib/
 	@for prog in $(DEBIAN_I386_PROGS); do cp $(DEBIAN_I386_ROOT)/usr/bin/$$prog $(ROOTFS)/usr/bin/$$prog-i386; done
-	@cp -r rootfs/. $(ROOTFS)/
+	@cp -r --remove-destination rootfs/. $(ROOTFS)/
+	@python3 tools/merge-accounts.py $(ROOTFS) $(DEBIAN_ROOT)
 	@# Menu entries read "Control Panel", "Start Menu", ... rather than TDE's names.
 	@python3 tools/debrand-tde.py $(ROOTFS)
 	@# What Debian's install scripts and triggers would build (MIME types, image loaders, schemas, icons).

@@ -1,0 +1,11 @@
+#!/bin/sh
+# Once per boot, as root: owners that Debian's install scripts gave files
+# (the image itself is packed as root; tools/configure-packages.sh lists them).
+[ "$(id -u)" = 0 ] || exit 0
+[ -e /run/syluxium-early ] && exit 0
+: > /run/syluxium-early
+if [ -f /var/lib/syluxium/ownership ]; then
+    while read -r uid gid path; do
+        [ -e "$path" ] || [ -L "$path" ] && chown -h "$uid:$gid" "$path" 2>/dev/null
+    done < /var/lib/syluxium/ownership
+fi

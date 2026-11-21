@@ -6,6 +6,8 @@ mkdir -p /var/log /var/lib/tdm /tmp/.X11-unix /tmp/.ICE-unix /run/dbus /var/lib/
 chmod 1777 /tmp/.X11-unix /tmp/.ICE-unix
 chmod 755 /run/user
 
+syluxium-early
+
 # X display driver for this machine (modesetting on a DRM device, else fbdev).
 syluxium-display-config > /dev/null 2>&1
 
