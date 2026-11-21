@@ -1,0 +1,4 @@
+# Calculator: the display in the Dusk colours (navy, the logo's cyan).
+[Colors]
+BackColor=20,26,58
+ForeColor=111,227,240

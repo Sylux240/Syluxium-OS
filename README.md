@@ -200,7 +200,9 @@ Legend: ✅ done · 🟡 partly done · ⬜ to do
 - 🟡 Networking UI: Wi-Fi chooser by the clock; Network Connections (every adapter's status, IPv4/IPv6
      addresses, gateway, DNS, MAC, Wi-Fi speed; DHCP or static address; enable/disable); firewall
      (needs a packet filter in the kernel) and remote desktop to do
-- 🟡 Printing: CUPS print service + Printers; automatic network printer discovery to do
+- 🟡 Printing: CUPS print service + Printers (network printers by address); automatic discovery
+     (avahi-daemon + cups-browsed, installed) waits for IPv4/IPv6 multicast and netlink credentials
+     in the kernel
 - ⬜ Programming tools: IDE (editor, build, debugger front end)
 - ✅ Image Writer: .iso/.img to USB sticks and SD cards with a read-back check
 - ✅ Firefox (Debian firefox-esr) preinstalled and the default browser

@@ -47,7 +47,12 @@ for want in SESSION_MANAGER DBUS_SESSION_BUS_ADDRESS; do for e in /proc/[0-9]*/e
     env=$(tr '\0' '\n' < "$e" | grep -E '^[A-Za-z_][A-Za-z0-9_]*=' | grep -v "'" | sed "s/^/export /; s/=/='/; s/\$/'/")
 done; done
 [ -n "$env" ] || { say "no session environment found"; env="export DISPLAY=:0"; }
-asuser() { ( eval "$env"; exec setpriv --reuid=1000 --regid=1000 --init-groups "$@" ) < /dev/null >> $LOG 2>&1; }
+# (the arguments stay as they are: no shell in between)
+asuser() {
+    ( eval "$env"; exec python3 -c 'import os, sys
+os.initgroups("syluxium", 1000); os.setgid(1000); os.setuid(1000)
+os.execvp(sys.argv[1], sys.argv[1:])' "$@" ) < /dev/null >> $LOG 2>&1
+}
 place() { for i in $(seq 1 30); do w=$(xdotool search --onlyvisible --name "$1" 2>/dev/null | head -1); [ -n "$w" ] && xdotool windowmove "$w" "$2" "$3" && return 0; sleep 0.5; done; say "no window '$1'"; return 1; }
 
 phase=${ACCTEST_PHASES:-"notify apps snip netconn mdns menu store craft"}

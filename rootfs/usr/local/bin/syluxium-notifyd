@@ -115,7 +115,11 @@ class Bubble(Gtk.Window):
         self.set_app_paintable(True)
         self.set_keep_above(True)
         self.set_type_hint(Gdk.WindowTypeHint.NOTIFICATION)
-        self.set_default_size(WIDTH, -1)
+        self.set_size_request(WIDTH, -1)
+        self.set_resizable(False)
+        self.height = 0
+        # The window sizes itself to its text: stack the bubbles again when that changes.
+        self.connect("size-allocate", self.on_allocate)
         screen = self.get_screen()
         visual = screen.get_rgba_visual()
         self.glass = bool(visual and screen.is_composited())
@@ -230,6 +234,19 @@ class Bubble(Gtk.Window):
             self.timer = GLib.timeout_add(timeout, self.on_timeout)
         self.queue_draw()
 
+    def on_allocate(self, _w, alloc):
+        if alloc.height != self.height:
+            self.height = alloc.height
+            GLib.idle_add(self.daemon.layout)
+            if not self.glass:
+                # No compositor: round the corners with a window shape instead.
+                import cairo
+                surface = cairo.ImageSurface(cairo.FORMAT_A1, alloc.width, alloc.height)
+                cr = cairo.Context(surface)
+                rounded(cr, 0, 0, alloc.width, alloc.height, RADIUS)
+                cr.fill()
+                self.shape_combine_region(Gdk.cairo_region_create_from_surface(surface))
+
     def on_timeout(self):
         self.timer = 0
         self.daemon.close(self.nid, EXPIRED)
@@ -253,8 +270,9 @@ class Bubble(Gtk.Window):
             rounded(cr, 0.5, 0.5, w - 1, h - 1, RADIUS)
             cr.set_source_rgba(0.078, 0.102, 0.227, 0.86)  # #141A3A glass
         else:
-            cr.rectangle(0, 0, w, h)
             cr.set_source_rgb(0.078, 0.102, 0.227)
+            cr.paint()
+            rounded(cr, 0.5, 0.5, w - 1, h - 1, RADIUS)
         cr.fill_preserve()
         cr.set_line_width(1)
         cr.set_source_rgba(*accent, 0.55)
@@ -336,9 +354,7 @@ class Daemon:
         bottom = area.y + area.height if area.height < geo.height else geo.y + geo.height - 48
         y = bottom - MARGIN
         for b in reversed(list(self.bubbles.values())):
-            _min, nat = b.get_preferred_height_for_width(WIDTH)
-            h = max(nat, 60)
-            b.resize(WIDTH, h)
+            h = max(b.height, b.get_preferred_height_for_width(WIDTH)[1])
             y -= h
             b.move(area.x + area.width - WIDTH - MARGIN, y)
             if os.environ.get("SYLUXIUM_NOTIFYD_DEBUG"):
