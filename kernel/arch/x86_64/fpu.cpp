@@ -76,9 +76,23 @@ void init_bsp() {
     memcpy(&mask, g_initial_state + 28, 4); // MXCSR_MASK field of the legacy area
     if (mask)
         g_mxcsr_mask = mask;
+    // The saved image still holds whatever the firmware left in the XMM/YMM
+    // registers (UEFI uses SSE): build the clean image explicitly instead.
+    // Legacy area: FCW 0x037F, MXCSR 0x1F80, everything else zero. XSAVE
+    // header: XSTATE_BV = 0, so XRSTOR puts every component in its init
+    // state (MXCSR is still loaded from the legacy area).
+    memset(g_initial_state, 0, sizeof(g_initial_state));
+    u16 fcw = 0x037F;
+    memcpy(g_initial_state + 0, &fcw, 2);
+    memcpy(g_initial_state + 24, &mxcsr, 4);
+    memcpy(g_initial_state + 28, &g_mxcsr_mask, 4);
+    restore(g_initial_state); // the boot CPU starts clean too
 }
 
-void init_ap() { enable_on_this_cpu(); }
+void init_ap() {
+    enable_on_this_cpu();
+    restore(g_initial_state); // not whatever the firmware left in the registers
+}
 
 usize state_size() { return g_size; }
 
