@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Calculator
+GenericName=Calculator
+Comment=Standard and scientific calculator
+Exec=kcalc
+Icon=syluxium-calculator
+Terminal=false
+Categories=X-Syluxium-Accessories;
+Keywords=calc;math;

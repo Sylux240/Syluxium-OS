@@ -70,6 +70,10 @@ DEBIAN_PKGS  += libinput-tools
 # syluxium-b43-firmware fetches Broadcom's driver and cuts it out with this.
 DEBIAN_CONTRIB_REPO := http://deb.debian.org/debian|$(DEBIAN_SUITE)|contrib
 DEBIAN_PKGS  += b43-fwcutter
+# Accessories: WordPad (AbiWord, reads and writes .rtf/.doc/.odt), notify-send;
+# network printer discovery (mDNS: avahi-daemon, cups-browsed, .local names).
+DEBIAN_PKGS  += abiword libnotify-bin avahi-daemon avahi-utils cups-browsed libnss-mdns
+TRINITY_PKGS += kcalc-trinity kcharselect-trinity kolourpaint-trinity ksnapshot-trinity
 DEBIAN_ROOT  := $(BUILD)/rootfs-debian
 DEBIAN_STAMP := $(DEBIAN_ROOT)/.fetched
 DEBIAN_CONFIGURED := $(DEBIAN_ROOT)/.configured

@@ -154,6 +154,67 @@ def message(parent, text, secondary="", kind=Gtk.MessageType.INFO, buttons=Gtk.B
     return r
 
 
+class AdminRunner:
+    """Runs commands as root through sudo with the user's own password (asked
+    once per window), like the App Store's administrator prompt."""
+
+    def __init__(self, parent, why="This changes the computer for everyone."):
+        self.parent, self.why, self.password = parent, why, None
+
+    def ready(self):
+        if os.geteuid() == 0 or self.password is not None:
+            return True
+        if subprocess.run(["sudo", "-n", "true"], capture_output=True).returncode == 0:
+            self.password = ""
+            return True
+        user = os.environ.get("USER") or os.environ.get("LOGNAME") or "you"
+        for attempt in range(3):
+            d = Gtk.Dialog(title="Administrator Permission", transient_for=self.parent, modal=True)
+            d.add_buttons("Cancel", Gtk.ResponseType.CANCEL, "OK", Gtk.ResponseType.OK)
+            d.set_default_response(Gtk.ResponseType.OK)
+            box = d.get_content_area()
+            box.set_spacing(8)
+            box.set_margin_start(12)
+            box.set_margin_end(12)
+            box.set_margin_top(12)
+            row = Gtk.Box(spacing=12)
+            row.pack_start(Gtk.Image.new_from_icon_name("dialog-password", Gtk.IconSize.DIALOG), False, False, 0)
+            row.pack_start(label(f"{self.why}\nType the password of {user} (an administrator) to continue."
+                                 + ("\n\nThat password was not right. Try again." if attempt else ""),
+                                 wrap=True), True, True, 0)
+            box.add(row)
+            entry = Gtk.Entry(visibility=False, activates_default=True)
+            box.add(entry)
+            d.show_all()
+            r = d.run()
+            pw = entry.get_text()
+            d.destroy()
+            if r != Gtk.ResponseType.OK:
+                return False
+            p = subprocess.run(["sudo", "-S", "-k", "-p", "", "true"], input=pw + "\n", capture_output=True,
+                               text=True)
+            if p.returncode == 0:
+                self.password = pw
+                return True
+            if "not in the sudoers" in p.stderr or "may not run sudo" in p.stderr:
+                message(self.parent, "Only administrators can do this.",
+                        f"{user} is not an administrator.", Gtk.MessageType.WARNING)
+                return False
+        return False
+
+    def run(self, cmd, timeout=60):
+        """(exit code, output) of cmd run as root; (-1, "") when not allowed."""
+        if not self.ready():
+            return -1, ""
+        full = list(cmd) if os.geteuid() == 0 else ["sudo", "-S", "-p", ""] + list(cmd)
+        try:
+            p = subprocess.run(full, input=(self.password or "") + "\n", capture_output=True, text=True,
+                               timeout=timeout)
+        except subprocess.TimeoutExpired:
+            return 124, "It took too long."
+        return p.returncode, (p.stdout + p.stderr).strip()
+
+
 def launch(*cmd):
     try:
         subprocess.Popen(list(cmd), start_new_session=True)

@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=WordPad
+GenericName=Word Processor
+Comment=Write and format documents (.rtf, .doc, .docx, .odt)
+Exec=abiword %U
+Icon=syluxium-wordpad
+Terminal=false
+MimeType=application/rtf;text/rtf;application/msword;application/vnd.openxmlformats-officedocument.wordprocessingml.document;application/vnd.oasis.opendocument.text;application/x-abiword;
+Categories=X-Syluxium-Accessories;
+Keywords=rtf;document;word;write;

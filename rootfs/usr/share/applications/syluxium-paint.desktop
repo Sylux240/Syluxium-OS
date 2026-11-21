@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Paint
+GenericName=Paint
+Comment=Draw pictures and edit images
+Exec=kolourpaint %U
+Icon=syluxium-paint
+Terminal=false
+Categories=X-Syluxium-Accessories;
+Keywords=draw;image;picture;

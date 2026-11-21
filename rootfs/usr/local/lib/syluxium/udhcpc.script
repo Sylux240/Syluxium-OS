@@ -1,0 +1,21 @@
+#!/bin/sh
+# busybox udhcpc's script for syluxium-netconfig (an adapter switched back
+# to DHCP gets an address right away; the kernel's own DHCP client renews it
+# from then on). $interface, $ip, $mask, $router, $dns come from udhcpc.
+case "$1" in
+    bound|renew)
+        old=$(ip -4 -o addr show dev "$interface" 2>/dev/null | awk '{print $4; exit}')
+        [ -n "$old" ] && [ "$old" != "$ip/$mask" ] && ip addr del "$old" dev "$interface" 2>/dev/null
+        ip addr add "$ip/$mask" dev "$interface" 2>/dev/null
+        if [ -n "$router" ]; then
+            ip route del default 2>/dev/null
+            ip route add default via "${router%% *}" dev "$interface" 2>/dev/null
+        fi
+        # The kernel's list (/run/resolv.conf) is empty when it never got a lease itself.
+        if [ -n "$dns" ] && [ -L /etc/resolv.conf ] && ! grep -q nameserver /run/resolv.conf 2>/dev/null; then
+            rm -f /etc/resolv.conf
+            { echo "# From DHCP (Network Connections)"; for s in $dns; do echo "nameserver $s"; done; } > /etc/resolv.conf
+        fi
+        ;;
+esac
+exit 0

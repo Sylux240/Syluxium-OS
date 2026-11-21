@@ -193,24 +193,31 @@ Legend: ✅ done · 🟡 partly done · ⬜ to do
 - ✅ Device Manager: every device by category, driver and status, problem devices flagged
 - ✅ Computer Management (Event Viewer, Services, Local Users, Device Manager, Disk Management)
      and Disk Management with partitioning and formatting (GParted)
-- 🟡 Accessories: Files (Konqueror), Media Player (Kaffeine), E-mail (KMail), Notepad (Wine);
-     WordPad, Paint, Calculator, Character Map, Snipping Tool to do
+- ✅ Accessories: Files (Konqueror), Media Player (Kaffeine), E-mail (KMail), Notepad (Wine), WordPad
+     (AbiWord: .rtf, .doc, .docx, .odt), Paint (KolourPaint), Calculator (KCalc), Character Map
+     (KCharSelect), Snipping Tool (KSnapshot: region, window or full screen; save or copy), Dusk icons
 - ✅ Magnifier, On-Screen Keyboard (KMag, KVkbd)
-- 🟡 Networking UI: Wi-Fi chooser by the clock; adapter settings, firewall, remote desktop to do
-- 🟡 Printing: CUPS print service + Printers; automatic network printer discovery to do
+- 🟡 Networking UI: Wi-Fi chooser by the clock; Network Connections (every adapter's status, IPv4/IPv6
+     addresses, gateway, DNS, MAC, Wi-Fi speed; DHCP or static address; enable/disable); firewall
+     (needs a packet filter in the kernel) and remote desktop to do
+- 🟡 Printing: CUPS print service + Printers (network printers by address); automatic discovery
+     (avahi-daemon + cups-browsed, installed) waits for IPv4/IPv6 multicast and netlink credentials
+     in the kernel
 - ⬜ Programming tools: IDE (editor, build, debugger front end)
 - ✅ Image Writer: .iso/.img to USB sticks and SD cards with a read-back check
 - ✅ Firefox (Debian firefox-esr) preinstalled and the default browser
 - ✅ Windows programs: double-click an .exe (Wine)
 - 🟡 Android apps: binder IPC and container support in the kernel (for Waydroid) in progress
-- 🟡 Notifications: bubbles for AutoPlay and Wi-Fi; system-wide notifications (KNotify) to do
+- ✅ Notifications: Dusk glass bubbles in the lower right for every program (the desktop's
+     org.freedesktop.Notifications service: notify-send, Firefox, GTK programs), AutoPlay and Wi-Fi
 
 **Packages and system**
 - ✅ Installer: step-by-step wizard (language, keyboard, network, software and updates, installation
      type with a partition view: erase / alongside Windows / manual, time-zone map, account) → GPT +
      ext4 + Limine (UEFI/BIOS)
 - ✅ App Store: Debian and desktop packages by category, search, featured programs, install/remove
-     with dependencies (apt), updates; double-click a .deb to install it
+     with dependencies (apt), updates; double-click a .deb to install it; optional Craft apps
+     (LightCraft, PhotoCraft, VectorCraft, FilmCraft and 12 more, from their makers' .deb releases)
 - ✅ Packages' install scripts run (real dpkg database; apt works)
 - ✅ Accounts: graphical login, User Accounts (add/remove users, passwords), administrator prompts
 - 🟡 Security: NX, kernel W^X, guard pages, per-user permissions done; ASLR, SMEP/SMAP to do
@@ -219,4 +226,4 @@ Legend: ✅ done · 🟡 partly done · ⬜ to do
 - ✅ Updates (Syluxium Update: Debian and Trinity through apt) and a Recovery boot entry
      (repair disks and packages, reset settings or passwords, root prompt)
 
-Tally: 45 done · 15 partly done · 2 to do.
+Tally: 47 done · 13 partly done · 2 to do.

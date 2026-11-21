@@ -83,8 +83,114 @@ FEATURED = [
     ("Utilities", [("htop", "htop", "htop"), ("fastfetch", "fastfetch", "utilities-terminal"),
                    ("hello", "GNU Hello", "utilities-terminal")]),
 ]
+# Optional programs that aren't in the Debian catalog: the Craft apps
+# (github.com/storytold, MIT/Apache-2.0, native Rust + wgpu). Each one's
+# release page has a .deb; the store asks GitHub for the newest one and
+# falls back to the release named here (version, download size, SHA-256).
+# They draw with Vulkan: on computers without a Vulkan GPU driver, Mesa's
+# software renderer (lavapipe, in mesa-vulkan-drivers) is installed with them.
+OPTIONAL_SECTION = "x-syluxium-optional"
+OPTIONAL_REPO = "https://github.com/storytold"
+OPTIONAL = [  # (package, name, summary, version, download bytes, sha256)
+    ("lightcraft", "LightCraft", "Photo library and raw developer, non-destructive", "0.21.1", 124351728,
+     "c91ef47bec44995d99ce58e6c748af9fa6ab1ff1c11de9e290e0b8231176dad1"),
+    ("photocraft", "PhotoCraft", "Photo editor with layers, masks and filters", "0.23.1", 141624678,
+     "baabdcdbe46df2f72ccf6ecc2e98be00fbc33dbd4c1cd9426362a89a4b95f673"),
+    ("vectorcraft", "VectorCraft", "Vector art and illustration", "0.24.1", 160193464,
+     "ae6733083d2819efe980d76d41d1908d40fe487bb9a5e7679292b53fd8dc49d7"),
+    ("designcraft", "DesignCraft", "Page and layout design", "0.20.1", 126829130,
+     "a4b50ceffd33a13d2d52e01530f6de3236d50ada02a7cf0c8946de3195057b0f"),
+    ("figcraft", "FigCraft", "Interface design and prototyping", "0.18.1", 103654584,
+     "ed9abee9a02cf8ce1feb1a1de10e5c04148c4d1f7b9128080d7fe6cdb1f0efb4"),
+    ("anicraft", "AniCraft", "2D animation editor", "0.2.1", 20183444,
+     "8e0321581daa591fd812b6cecccaf06a56688b2c5a6c624cbd3fee6553f403a4"),
+    ("texturecraft", "TextureCraft", "3D texture painting", "0.6.1", 43793990,
+     "c1b3a4a43eb2f1e3e90b92047a3e81fc14ee85278b5e8f0352480ac4655389b9"),
+    ("materialcraft", "MaterialCraft", "Node-based material designer", "0.4.1", 22575954,
+     "55d66a14f1900404165cac3ca38587d78b88c4422ca5a872f2220c7115ce2287"),
+    ("filmcraft", "FilmCraft", "Video editor (nonlinear)", "0.20.1", 113697526,
+     "5667c7505c91d2ad9de3c4acb15cb02fc9f138fae74dce9c7c5f08bc29edb3a8"),
+    ("effectcraft", "EffectCraft", "Motion graphics and compositing", "0.24.1", 83726180,
+     "731f1e37aa872c35a6accfab9fa98a16674db5f9a588eb68804e006a442fbd59"),
+    ("soundcraft", "SoundCraft", "Digital audio workstation: record, edit and mix", "0.20.1", 22456886,
+     "a217c7f65bb55ef4d7417f1c204244d974f25d6b779477727c440800d8256081"),
+    ("wordcraft", "WordCraft", "Word processor", "0.18.1", 120018580,
+     "9b557161ded7b5973112c8c21f600fe0b0110c1a4d3151184485733c96f87e19"),
+    ("gridcraft", "GridCraft", "Spreadsheet", "0.19.1", 53695106,
+     "3e9b093ee3bed8b1f008ea56c8d60e6a96890e24317be2bbb93e431f3c9d8112"),
+    ("deckcraft", "DeckCraft", "Presentations and slide shows", "0.18.1", 106105064,
+     "59801c24ef5bdaf01a6a465f0e1d5f59aba36ad1e723cb833304b22d98c3f909"),
+    ("pdfcraft", "PdfCraft", "PDF reader and editor", "0.21.1", 122486546,
+     "e87baa0ef638be6ea97b521883e912318012028a80dbe1359f93cd21437be253"),
+    ("cadcraft", "CADCraft", "Computer-aided design and drafting", "0.20.1", 76474842,
+     "8e6ad1f487d6cd44dbcb73cd88ef1efb52252a2071094f2c23a468a641a06faa"),
+]
+OPTIONAL_BY = {o[0]: o for o in OPTIONAL}
+CATEGORIES.append(("Optional: Craft Apps", "applications-graphics", {OPTIONAL_SECTION}))
+FEATURED.insert(1, ("Craft Apps (optional)", [(o[0], o[1], o[0]) for o in OPTIONAL[:8]]))
 NAMES = {p: n for _, items in FEATURED for p, n, _ in items}
+NAMES.update({o[0]: o[1] for o in OPTIONAL})
 ICONS = {p: i for _, items in FEATURED for p, _, i in items}
+ICONS.update({o[0]: f"ai.storyteller.{o[0]}" for o in OPTIONAL})
+
+
+def optional_packages():
+    """The optional programs as catalog entries."""
+    out = {}
+    for pkg, name, summary, version, size, _sha in OPTIONAL:
+        p = Package(pkg)
+        p.version, p.section, p.size = version, OPTIONAL_SECTION, size // 1024
+        p.summary, p.homepage = summary, f"{OPTIONAL_REPO}/{pkg}"
+        out[pkg] = p
+    return out
+
+
+def optional_release(pkg):
+    """(version, .deb URL, download bytes, sha256) of the newest release, from
+    GitHub; the release named in OPTIONAL when GitHub doesn't answer."""
+    import json
+    import urllib.request
+    _pkg, _name, _summary, version, size, sha = OPTIONAL_BY[pkg]
+    fallback = (version, f"{OPTIONAL_REPO}/{pkg}/releases/download/v{version}/{pkg}-{version}-linux-x86_64.deb",
+                size, sha)
+    try:
+        req = urllib.request.Request(f"https://api.github.com/repos/storytold/{pkg}/releases/latest",
+                                     headers={"User-Agent": "Syluxium-App-Store", "Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=15) as r:
+            rel = json.load(r)
+        for a in rel.get("assets", []):
+            if a["name"].endswith("-linux-x86_64.deb") and str(a.get("digest", "")).startswith("sha256:"):
+                return rel["tag_name"].lstrip("v"), a["browser_download_url"], a["size"], a["digest"][7:]
+    except Exception:  # noqa: BLE001 - offline, rate-limited, changed format: the pinned release
+        pass
+    return fallback
+
+
+def download(url, dest, size, sha, progress):
+    """Download url to dest checking its SHA-256; progress(fraction) from this
+    thread. Returns None or an error text."""
+    import hashlib
+    import urllib.request
+    h = hashlib.sha256()
+    got = 0
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Syluxium-App-Store"})
+        with urllib.request.urlopen(req, timeout=60) as r, open(dest + ".part", "wb") as f:
+            while True:
+                chunk = r.read(256 * 1024)
+                if not chunk:
+                    break
+                f.write(chunk)
+                h.update(chunk)
+                got += len(chunk)
+                progress(min(got / size, 1.0) if size else 0)
+    except Exception as e:  # noqa: BLE001
+        return f"The download failed: {e}"
+    if h.hexdigest() != sha:
+        os.remove(dest + ".part")
+        return "The downloaded file is not the one that was published (checksum mismatch), so it was not installed."
+    os.replace(dest + ".part", dest)
+    return None
 
 # Packages Syluxium is built from: removing them breaks the desktop.
 PROTECTED = re.compile(r"^(tdebase-|twin|kicker|kdesktop|konqueror|kcontrol|ksmserver|tdm-|tdelibs|xserver-|xorg|"
@@ -860,6 +966,8 @@ class Store:
         threading.Thread(target=work, daemon=True).start()
 
     def loaded(self, pkgs, inst, up, then):
+        if pkgs:
+            pkgs.update(optional_packages())
         self.pkgs, self.installed, self.upgradable = pkgs, inst, up
         self.show_update_count()
         self.build_featured()
@@ -1050,13 +1158,23 @@ class Store:
         if cat:
             info += f"   •   {cat}"
         self.d_info.set_text(info)
-        self.d_install.set_label("_Update" if inst and pkg in self.upgradable else "_Install")
-        self.d_install.set_visible(not inst or pkg in self.upgradable)
+        newer = pkg in self.upgradable or (pkg in OPTIONAL_BY and inst and version_newer_fast(p.version, inst))
+        self.d_install.set_label("_Update" if inst and newer else "_Install")
+        self.d_install.set_visible(not inst or newer)
         self.d_remove.set_visible(bool(inst))
         self.d_install.set_sensitive(not self.runner.busy)
         self.d_remove.set_sensitive(not self.runner.busy and not PROTECTED.match(pkg))
         buf = self.d_text.get_buffer()
         buf.set_text(p.summary + "\n\n")
+        if pkg in OPTIONAL_BY:
+            buf.set_text(f"{p.summary}.\n\n{display_name(pkg)} is one of the Craft apps: open-source programs "
+                         "written from scratch in Rust (MIT or Apache-2.0 license). It is optional and not part "
+                         "of Syluxium: it comes from its makers' release page and is installed as a .deb package "
+                         "(remove it here like any other program).\n\nIt draws with Vulkan. Computers without a "
+                         "Vulkan graphics driver use Mesa's software renderer, which is installed with it; "
+                         f"that works everywhere but is slower.\n\nWebsite: {p.homepage}\n"
+                         f"Download size: {human_kb(p.size)}")
+            return
 
         def work():
             desc, extra = long_description(pkg)
@@ -1123,6 +1241,9 @@ class Store:
     def install(self, pkg):
         if not pkg or self.runner.busy:
             return
+        if pkg in OPTIONAL_BY:
+            self.install_optional(pkg)
+            return
         name = display_name(pkg)
 
         def go(res):
@@ -1137,6 +1258,61 @@ class Store:
                                  new=res["install"]):
                 self.busy(True)
         self.planned(["install", pkg], go)
+
+    def install_optional(self, pkg):
+        """A Craft app: download its .deb from the release page (checked against
+        its SHA-256), then apt installs it with what it needs."""
+        name = display_name(pkg)
+        self.busy(True)
+        self.status.set_text(f"Looking for the newest {name}...")
+        self.progress.pulse()
+
+        def found(rel):
+            self.busy(False)
+            version, url, size, sha = rel
+            if message(self.win, f"Install {name} {version}?",
+                       f"{name} is an optional program from {OPTIONAL_REPO}/{pkg} (not part of Syluxium).\n\n"
+                       f"Download: {human(size)}, plus the libraries it needs (Vulkan; Mesa's software renderer "
+                       "for computers without a Vulkan graphics driver).",
+                       Gtk.MessageType.QUESTION, Gtk.ButtonsType.YES_NO) != Gtk.ResponseType.YES:
+                self.status.set_text("")
+                return
+            if not self.admin.ready():
+                return
+            cache = os.path.expanduser("~/.cache/syluxium-appstore")
+            os.makedirs(cache, exist_ok=True)
+            dest = os.path.join(cache, f"{pkg}_{version}_amd64.deb")
+            self.busy(True)
+            self.status.set_text(f"Downloading {name}...")
+            self.progress.set_fraction(0)
+            self.progress.set_text(f"Downloading {name}...")
+
+            def step(frac):
+                GLib.idle_add(lambda: (self.progress.set_fraction(frac * 0.4),
+                                       self.progress.set_text(f"Downloading {name} ({frac * 100:.0f}%)")) and False)
+
+            def fetch():
+                err = None if os.path.exists(dest) else download(url, dest, size, sha, step)
+                GLib.idle_add(lambda: downloaded(err) and False)
+
+            def downloaded(err):
+                self.busy(False)
+                if err:
+                    self.status.set_text("That did not work.")
+                    message(self.win, f"{name} could not be downloaded.", err, Gtk.MessageType.ERROR)
+                    return
+                self.runner.log(f"{name} {version}: {url}\n  sha256 {sha} (checked)\n")
+                cmd = ["apt-get"] + APT_OPTS + ["install", dest, "mesa-vulkan-drivers", "libvulkan1"]
+                if self.runner.start(cmd, f"Installing {name}...",
+                                     lambda ok, out: self.after(ok, out, f"{name} was installed.", pkg),
+                                     recover=True, new=[pkg]):
+                    self.busy(True)
+            threading.Thread(target=fetch, daemon=True).start()
+
+        def work():
+            rel = optional_release(pkg)
+            GLib.idle_add(lambda: found(rel) and False)
+        threading.Thread(target=work, daemon=True).start()
 
     def remove(self, pkg):
         if not pkg or self.runner.busy:

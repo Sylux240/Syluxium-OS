@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Network Connections
+GenericName=Network Connections
+Comment=Network adapters: status, IP addresses, DHCP or static settings, enable or disable
+Exec=syluxium-netconn
+Icon=syluxium-network-connections
+Terminal=false
+Categories=Settings;System;
+Keywords=network;ethernet;wifi;ip;dhcp;adapter;firewall;
