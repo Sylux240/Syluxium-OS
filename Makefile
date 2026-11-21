@@ -109,7 +109,7 @@ CXXFLAGS := \
     -Wall -Wextra -Wshadow -Wno-unused-parameter \
     -ffreestanding \
     -fno-exceptions -fno-rtti \
-    -fno-stack-protector -fno-stack-check \
+    -fstack-protector-strong -mstack-protector-guard=global -fno-stack-check \
     -fno-threadsafe-statics \
     -fno-pic -fno-pie \
     -fno-omit-frame-pointer \
