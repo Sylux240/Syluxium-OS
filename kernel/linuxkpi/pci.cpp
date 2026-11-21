@@ -39,6 +39,11 @@ void sylux_unmap_physical(void* v) { vmalloc::unmap_physical(v); }
 #include <linux/pci.h>
 #include <linux/slab.h>
 #include <linux/workqueue.h>
+
+extern unsigned long g_acpi_early_lookups; // acpi.cpp
+extern "C" void lkpi_acpi_path(void* node, char* buf, unsigned size);   // acpi.cpp
+extern "C" void* lkpi_acpi_find(void* parent, const char* path);          // acpi.cpp
+extern "C" void* lkpi_acpi_handle(struct device* dev);                   // glue/gpu.c
 #undef class
 #undef min
 #undef max
@@ -344,7 +349,15 @@ void set_bound(pci::Function* f, pci_dev* pdev) {
             g_bound[i] = pdev;
 }
 
+struct AcpiRetry {
+    const dev::Driver* drv;
+    dev::Device* d;
+};
+AcpiRetry g_acpi_retry[8];
+u32 g_acpi_retries = 0;
+
 long lkpi_probe(const dev::Driver* drv, dev::Device* d) {
+    unsigned long early = __atomic_load_n(&g_acpi_early_lookups, __ATOMIC_RELAXED);
     auto* pdrv = static_cast<pci_driver*>(drv->ctx);
     pci::Function* f = pci::function_of(d);
     auto* pdev = static_cast<pci_dev*>(kzalloc(sizeof(pci_dev), GFP_KERNEL));
@@ -371,6 +384,14 @@ long lkpi_probe(const dev::Driver* drv, dev::Device* d) {
         if ((d->class_code >> 16) == 0x03)
             lkpi_gpu_probe_failed(pdrv->name);
         kfree(pdev);
+        // It asked for its ACPI companion before AML ran (nouveau on Optimus
+        // laptops: the video BIOS only comes from the _ROM method): once more
+        // when the interpreter is up.
+        if (gpu && __atomic_load_n(&g_acpi_early_lookups, __ATOMIC_RELAXED) != early && g_acpi_retries < 8) {
+            klog::info("linuxkpi: %s: %s will be probed again once ACPI methods are available", pdrv->name,
+                       d->bus_id);
+            g_acpi_retry[g_acpi_retries++] = {drv, d};
+        }
         return r;
     }
     return 0;
@@ -882,3 +903,39 @@ void init_pci() {}
 
 // i915_driver.c: "gpufail=<n>" fails probe step n.
 extern "C" int lkpi_gpu_fail_step(void) { return static_cast<int>(cmdline_number("gpufail=", 0)); }
+
+namespace linuxkpi {
+
+void acpi_ready() {
+    // Each display device's ACPI node, for the boot log (video BIOS methods
+    // on hybrid-graphics laptops live there).
+    for (u32 i = 0; i < pci::count() && i < 256; i++) {
+        pci::Function* f = pci::function_at(i);
+        if (!f || !f->entry || (f->entry->class_code >> 16) != 0x03)
+            continue;
+        pci_dev* pdev = pdev_of_index(i);
+        void* node = pdev ? lkpi_acpi_handle(&pdev->dev) : nullptr;
+        char path[96];
+        lkpi_acpi_path(node, path, sizeof(path));
+        klog::info("linuxkpi: %s: ACPI node %s%s%s", f->entry->bus_id, node ? path : "(none)",
+                   node && lkpi_acpi_find(node, "_ROM") ? ", video BIOS method _ROM" : "",
+                   node && lkpi_acpi_find(node, "ATRM") ? ", video BIOS method ATRM" : "");
+    }
+    u32 n = g_acpi_retries;
+    g_acpi_retries = 0;
+    for (u32 i = 0; i < n; i++) {
+        dev::Device* d = g_acpi_retry[i].d;
+        const dev::Driver* drv = g_acpi_retry[i].drv;
+        klog::info("linuxkpi: %s: probing %s again (ACPI methods available now)", drv->name, d->bus_id);
+        long r = lkpi_probe(drv, d);
+        if (r == 0) {
+            d->status = dev::Status::Ok;
+            d->status_text[0] = 0;
+        } else {
+            snprintf(d->status_text, sizeof(d->status_text), "%s failed to start (error %ld)", drv->name, -r);
+        }
+    }
+    g_acpi_retries = 0; // a retry doesn't queue another
+}
+
+} // namespace linuxkpi

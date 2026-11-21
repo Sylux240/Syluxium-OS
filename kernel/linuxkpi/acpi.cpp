@@ -64,9 +64,15 @@ uacpi_iteration_decision child_cb(void* user, uacpi_namespace_node* node, uacpi_
 
 // The PCI host bridge (PNP0A08 / PNP0A03) for `bus`, or null (also while
 // the AML interpreter isn't running).
+// ACPI companion lookups that came before the AML interpreter ran (GPU
+// probes run first): a probe that failed after one is retried later.
+unsigned long g_acpi_early_lookups = 0;
+
 extern "C" void* lkpi_acpi_pci_root(unsigned bus) {
-    if (!acpi::interpreter_ready())
+    if (!acpi::interpreter_ready()) {
+        __atomic_fetch_add(&g_acpi_early_lookups, 1, __ATOMIC_RELAXED);
         return nullptr;
+    }
     static const uacpi_char* const hids[] = {"PNP0A08", "PNP0A03", nullptr};
     RootSearch rs{bus, nullptr};
     uacpi_find_devices_at(uacpi_namespace_root(), hids, root_cb, &rs);
@@ -122,3 +128,15 @@ extern "C" int lkpi_acpi_eval_buffer(void* node, const u64* ints, unsigned nints
 }
 
 extern "C" bool lkpi_acpi_has_method(void* node, const char* name) { return lkpi_acpi_find(node, name) != nullptr; }
+
+// The absolute ACPI path of `node` ("\\_SB_.PCI0.GFX0") into buf.
+extern "C" void lkpi_acpi_path(void* node, char* buf, unsigned size) {
+    buf[0] = 0;
+    if (!node || !size)
+        return;
+    const uacpi_char* path = uacpi_namespace_node_generate_absolute_path(static_cast<uacpi_namespace_node*>(node));
+    if (!path)
+        return;
+    snprintf(buf, size, "%s", path);
+    uacpi_free_absolute_path(path);
+}

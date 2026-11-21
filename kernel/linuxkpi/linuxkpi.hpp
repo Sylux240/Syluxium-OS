@@ -15,6 +15,10 @@ namespace linuxkpi {
 // module_init(). Call before dev::probe_all() so PCI drivers can bind.
 void init();
 
+// The AML interpreter runs now: retry GPU probes that failed while their
+// ACPI companion wasn't available yet.
+void acpi_ready();
+
 // Internal: PCI/IRQ glue setup (called by init()).
 void init_pci();
 
