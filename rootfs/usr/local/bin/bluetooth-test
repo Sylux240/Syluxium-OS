@@ -1,0 +1,34 @@
+#!/bin/sh
+# Test aid: a virtual Bluetooth controller (bt-vhci-test.py behind /dev/vhci),
+# then the desktop (logged in here) with the Bluetooth window: the adapter is
+# shown and, while another client searches, the controller's test device.
+# Results go to the kernel log ("BTTEST ...").
+#   bluetooth-test [seconds to wait for the desktop, default 70]
+say() { echo "BTTEST $*" > /dev/kmsg; }
+python3 /opt/syluxium/tests/bt-vhci-test.py serve 900 > /var/log/bt-vhci.log 2>&1 &
+startdesktop > /dev/null 2>&1 &
+sleep 25
+export DISPLAY=:0 XAUTHORITY="$(ls /var/run/xauth/A:0-* 2>/dev/null | head -1)"
+xdotool key Return 2> /dev/null # log in (the login screen's user has no password)
+sleep "${1:-70}"
+say "bluetoothd $(pidof bluetoothd > /dev/null && echo running || echo NOT running)"
+bluetoothctl power on > /dev/null 2>&1
+say "$(bluetoothctl show 2>&1 | grep -E 'Controller|Powered' | tr '\n' ' ')"
+syluxium-bluetooth > /var/log/syluxium-bluetooth.log 2>&1 &
+for i in $(seq 1 30); do w=$(xdotool search --name "^Bluetooth$" 2>/dev/null | head -1); [ -n "$w" ] && break; sleep 1; done
+[ -n "$w" ] && say "window open" || say "window NOT open"
+xdotool windowmove "$w" 200 60 windowactivate "$w" 2>/dev/null
+say "after the window opened: $(bluetoothctl show 2>&1 | grep -E Powered | tr -d "\t")"
+sleep 2
+# Search from another client: the window lists what is found while the adapter searches.
+bluetoothctl --timeout 300 scan on > /dev/null 2>&1 &
+sleep 12
+say "$(bluetoothctl devices 2>&1 | tr '\n' ' ')"
+cat /var/log/syluxium-bluetooth.log > /dev/kmsg
+# What the X server shows in the device list (bright pixels = a listed device).
+say "list area: $(python3 -c '
+import gi; gi.require_version("Gdk", "3.0"); from gi.repository import Gdk
+pb = Gdk.pixbuf_get_from_window(Gdk.get_default_root_window(), 220, 245, 400, 60)
+px = pb.get_pixels(); n = pb.get_n_channels()
+print(sum(1 for i in range(0, len(px), n) if px[i] > 150), "bright pixels")' 2>&1)"
+say "done"

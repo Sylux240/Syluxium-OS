@@ -1,0 +1,369 @@
+#!/usr/bin/python3
+"""Bluetooth: turn the adapter on or off, make the computer visible, find
+devices nearby, pair, connect, disconnect and remove them. Talks to BlueZ
+(bluetoothd) over the system D-Bus and answers its pairing questions
+(confirm a code, type a PIN or passkey) as its pairing agent.
+  syluxium-bluetooth"""
+import sys
+
+sys.path.insert(0, "/usr/local/lib/syluxium/python")
+from syluxium_sys import Gtk, GLib, label, message, window  # noqa: E402
+from gi.repository import Gio  # noqa: E402
+
+BLUEZ = "org.bluez"
+ADAPTER, DEVICE, AGENT_MGR = "org.bluez.Adapter1", "org.bluez.Device1", "org.bluez.AgentManager1"
+PROPS = "org.freedesktop.DBus.Properties"
+AGENT_PATH = "/org/syluxium/bluetooth/agent"
+AGENT_XML = """<node><interface name="org.bluez.Agent1">
+<method name="Release"/>
+<method name="RequestPinCode"><arg type="o" direction="in"/><arg type="s" direction="out"/></method>
+<method name="DisplayPinCode"><arg type="o" direction="in"/><arg type="s" direction="in"/></method>
+<method name="RequestPasskey"><arg type="o" direction="in"/><arg type="u" direction="out"/></method>
+<method name="DisplayPasskey"><arg type="o" direction="in"/><arg type="u" direction="in"/><arg type="q" direction="in"/></method>
+<method name="RequestConfirmation"><arg type="o" direction="in"/><arg type="u" direction="in"/></method>
+<method name="RequestAuthorization"><arg type="o" direction="in"/></method>
+<method name="AuthorizeService"><arg type="o" direction="in"/><arg type="s" direction="in"/></method>
+<method name="Cancel"/>
+</interface></node>"""
+
+# What a device's "Icon" property says it is.
+KINDS = {
+    "audio-headset": ("Headset", "audio-headset"), "audio-headphones": ("Headphones", "audio-headphones"),
+    "audio-card": ("Speaker", "audio-speakers"), "input-keyboard": ("Keyboard", "input-keyboard"),
+    "input-mouse": ("Mouse", "input-mouse"), "input-gaming": ("Game controller", "input-gaming"),
+    "input-tablet": ("Tablet", "input-tablet"), "phone": ("Phone", "phone"),
+    "computer": ("Computer", "computer"), "printer": ("Printer", "printer"),
+}
+
+
+class Bluetooth:
+    def __init__(self):
+        self.win = window("Bluetooth", 640, 520, "syluxium-bluetooth")
+        self.bus = Gio.bus_get_sync(Gio.BusType.SYSTEM, None)
+        self.adapter = None      # object path
+        self.devices = {}        # path -> properties
+        self.discovering = False
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10, margin=14)
+        self.win.add(box)
+        head = Gtk.Box(spacing=12)
+        head.pack_start(Gtk.Image.new_from_icon_name("syluxium-bluetooth", Gtk.IconSize.DIALOG), False, False, 0)
+        names = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        self.title = label("Bluetooth", bold=True, size="large")
+        self.subtitle = label("", wrap=True)
+        names.pack_start(self.title, False, False, 0)
+        names.pack_start(self.subtitle, False, False, 0)
+        head.pack_start(names, True, True, 0)
+        self.power = Gtk.Switch(valign=Gtk.Align.CENTER)
+        self.power_handler = self.power.connect("notify::active", self.on_power)
+        head.pack_end(self.power, False, False, 0)
+        box.pack_start(head, False, False, 0)
+
+        self.visible = Gtk.CheckButton(label="Let other devices find this computer")
+        self.visible_handler = self.visible.connect("toggled", self.on_visible)
+        box.pack_start(self.visible, False, False, 0)
+
+        bar = Gtk.Box(spacing=6)
+        self.add_btn = Gtk.Button(label="Add a Device...")
+        self.add_btn.connect("clicked", self.on_scan)
+        self.connect_btn = Gtk.Button(label="Connect")
+        self.connect_btn.connect("clicked", self.on_connect)
+        self.remove_btn = Gtk.Button(label="Remove Device")
+        self.remove_btn.connect("clicked", self.on_remove)
+        for b in (self.add_btn, self.connect_btn, self.remove_btn):
+            bar.pack_start(b, False, False, 0)
+        self.spinner = Gtk.Spinner()
+        bar.pack_end(self.spinner, False, False, 0)
+        box.pack_start(bar, False, False, 0)
+
+        self.store = Gtk.ListStore(str, str, str)  # icon, markup, path
+        self.view = Gtk.TreeView(model=self.store, headers_visible=False)
+        col = Gtk.TreeViewColumn()
+        ic, tx = Gtk.CellRendererPixbuf(stock_size=Gtk.IconSize.DND), Gtk.CellRendererText()
+        col.pack_start(ic, False)
+        col.pack_start(tx, True)
+        col.add_attribute(ic, "icon-name", 0)
+        col.add_attribute(tx, "markup", 1)
+        self.view.append_column(col)
+        self.view.get_selection().connect("changed", lambda *_: self.update_buttons())
+        self.view.connect("row-activated", lambda *_: self.on_connect())
+        sw = Gtk.ScrolledWindow(vexpand=True)
+        sw.add(self.view)
+        box.pack_start(sw, True, True, 0)
+        self.status = label("", wrap=True)
+        box.pack_start(self.status, False, False, 0)
+
+        self.register_agent()
+        self.bus.signal_subscribe(BLUEZ, None, None, None, None, Gio.DBusSignalFlags.NONE,
+                                  lambda *_: GLib.idle_add(self.refresh_soon), None)
+        self.pending_refresh = False
+        self.refresh()
+        GLib.timeout_add_seconds(5, lambda: self.refresh() or True)
+        self.win.show_all()
+
+    # ---- D-Bus ----
+    def call(self, path, iface, method, args=None, reply=None, timeout=25000):
+        return self.bus.call_sync(BLUEZ, path, iface, method, args, reply, Gio.DBusCallFlags.NONE, timeout, None)
+
+    def call_async(self, path, iface, method, args, done, timeout=60000):
+        def finish(bus, res):
+            try:
+                bus.call_finish(res)
+                done(None)
+            except GLib.Error as e:
+                done(e)
+        self.bus.call(BLUEZ, path, iface, method, args, None, Gio.DBusCallFlags.NONE, timeout, None, finish)
+
+    def set_prop(self, path, iface, name, value):
+        try:
+            self.call(path, PROPS, "Set", GLib.Variant("(ssv)", (iface, name, value)))
+            return None
+        except GLib.Error as e:
+            return e
+
+    def objects(self):
+        try:
+            r = self.call("/", "org.freedesktop.DBus.ObjectManager", "GetManagedObjects")
+            return r.unpack()[0]
+        except GLib.Error:
+            return None
+
+    # ---- pairing agent ----
+    def register_agent(self):
+        node = Gio.DBusNodeInfo.new_for_xml(AGENT_XML)
+        try:
+            self.bus.register_object(AGENT_PATH, node.interfaces[0], self.on_agent_call, None, None)
+            self.call("/org/bluez", AGENT_MGR, "RegisterAgent", GLib.Variant("(os)", (AGENT_PATH, "KeyboardDisplay")))
+            self.call("/org/bluez", AGENT_MGR, "RequestDefaultAgent", GLib.Variant("(o)", (AGENT_PATH,)))
+        except GLib.Error:
+            pass  # bluetoothd not running: refresh() says so
+
+    def device_name(self, path):
+        p = self.devices.get(path, {})
+        return p.get("Alias") or p.get("Name") or p.get("Address", "the device")
+
+    def on_agent_call(self, conn, sender, path, iface, method, params, inv):
+        args = params.unpack()
+        reject = lambda: inv.return_dbus_error("org.bluez.Error.Rejected", "Rejected by the user")
+        if method == "RequestConfirmation":
+            dev, passkey = args
+            ok = self.ask(f"Pair with {self.device_name(dev)}?",
+                          f"Check that {self.device_name(dev)} shows this code:\n\n{passkey:06d}")
+            inv.return_value(None) if ok else reject()
+        elif method == "RequestAuthorization":
+            ok = self.ask(f"Allow {self.device_name(args[0])} to pair with this computer?", "")
+            inv.return_value(None) if ok else reject()
+        elif method == "AuthorizeService":
+            inv.return_value(None)  # paired devices may use their services
+        elif method == "RequestPinCode":
+            pin = self.ask_text(f"Type the PIN for {self.device_name(args[0])}",
+                                "Many headsets and speakers use 0000. A keyboard asks you to type the "
+                                "PIN shown here on it, then Enter.", "0000")
+            inv.return_value(GLib.Variant("(s)", (pin,))) if pin else reject()
+        elif method == "RequestPasskey":
+            pk = self.ask_text(f"Type the passkey shown on {self.device_name(args[0])}", "", "")
+            if pk and pk.isdigit():
+                inv.return_value(GLib.Variant("(u)", (int(pk),)))
+            else:
+                reject()
+        elif method in ("DisplayPinCode", "DisplayPasskey"):
+            code = args[1] if method == "DisplayPinCode" else f"{args[1]:06d}"
+            self.status.set_text(f"Type {code} on {self.device_name(args[0])}, then press Enter.")
+            inv.return_value(None)
+        else:  # Release, Cancel
+            inv.return_value(None)
+
+    def ask(self, text, secondary):
+        return message(self.win, text, secondary, Gtk.MessageType.QUESTION, Gtk.ButtonsType.YES_NO) == \
+            Gtk.ResponseType.YES
+
+    def ask_text(self, text, secondary, default):
+        d = Gtk.MessageDialog(transient_for=self.win, modal=True, message_type=Gtk.MessageType.QUESTION,
+                              buttons=Gtk.ButtonsType.OK_CANCEL, text=text)
+        if secondary:
+            d.format_secondary_text(secondary)
+        entry = Gtk.Entry(text=default, activates_default=True)
+        d.get_content_area().pack_end(entry, False, False, 6)
+        d.set_default_response(Gtk.ResponseType.OK)
+        d.show_all()
+        r = d.run()
+        value = entry.get_text().strip()
+        d.destroy()
+        return value if r == Gtk.ResponseType.OK else None
+
+    # ---- the window ----
+    def refresh_soon(self):
+        if not self.pending_refresh:
+            self.pending_refresh = True
+            GLib.timeout_add(300, self.refresh)
+        return False
+
+    def refresh(self):
+        self.pending_refresh = False
+        objs = self.objects()
+        if objs is None:
+            self.show_missing("Bluetooth isn't running.", "The Bluetooth service (bluetoothd) didn't answer.")
+            return False
+        adapters = sorted(p for p, ifs in objs.items() if ADAPTER in ifs)
+        if not adapters:
+            self.show_missing("No Bluetooth adapter was found.",
+                              "Plug in a USB Bluetooth adapter, or turn Bluetooth on with the laptop's "
+                              "wireless switch or key.")
+            return False
+        self.adapter = adapters[0]
+        a = objs[self.adapter][ADAPTER]
+        self.devices = {p: ifs[DEVICE] for p, ifs in objs.items()
+                        if DEVICE in ifs and ifs[DEVICE].get("Adapter") == self.adapter}
+        powered = a.get("Powered", False)
+        self.discovering = a.get("Discovering", False)
+        self.title.set_text(a.get("Alias") or a.get("Name") or "Bluetooth")
+        self.subtitle.set_text(("On" if powered else "Off") + "  -  " + a.get("Address", ""))
+        with self.power.handler_block(self.power_handler):
+            self.power.set_active(powered)
+        with self.visible.handler_block(self.visible_handler):
+            self.visible.set_active(a.get("Discoverable", False))
+        for w in (self.power, self.visible, self.view):
+            w.set_sensitive(True)
+        self.visible.set_sensitive(powered)
+        self.add_btn.set_sensitive(powered)
+        self.add_btn.set_label("Stop Searching" if self.discovering else "Add a Device...")
+        if self.discovering:
+            self.spinner.start()
+        else:
+            self.spinner.stop()
+
+        keep = self.selected()
+        self.store.clear()
+        sel = None
+        order = sorted(self.devices, key=lambda p: (not self.devices[p].get("Paired", False),
+                                                    self.device_name(p).lower()))
+        for p in order:
+            d = self.devices[p]
+            if not d.get("Paired") and not self.discovering and not d.get("Connected"):
+                continue  # found earlier, not paired: only while searching
+            kind, icon = KINDS.get(d.get("Icon", ""), ("Device", "syluxium-bluetooth"))
+            state = ("Connected" if d.get("Connected") else "Paired" if d.get("Paired")
+                     else "Ready to pair")
+            markup = (f"<b>{GLib.markup_escape_text(self.device_name(p))}</b>  <small>{kind}</small>\n"
+                      f"<small>{state}</small>")
+            it = self.store.append([icon, markup, p])
+            if p == keep:
+                sel = it
+        if sel is not None:
+            self.view.get_selection().select_iter(sel)
+        if not len(self.store):
+            self.status.set_text("No devices yet. Turn Bluetooth on, put the device in pairing mode, "
+                                 "then choose Add a Device." if powered else "Bluetooth is off.")
+        elif self.discovering:
+            self.status.set_text("Searching... Select a device and choose Pair.")
+        self.update_buttons()
+        return False
+
+    def show_missing(self, title, text):
+        self.adapter = None
+        self.title.set_text(title)
+        self.subtitle.set_text(text)
+        self.store.clear()
+        for w in (self.power, self.visible, self.add_btn, self.connect_btn, self.remove_btn):
+            w.set_sensitive(False)
+
+    def selected(self):
+        model, it = self.view.get_selection().get_selected()
+        return model[it][2] if it else None
+
+    def update_buttons(self):
+        p = self.selected()
+        d = self.devices.get(p) if p else None
+        self.connect_btn.set_sensitive(bool(d))
+        self.remove_btn.set_sensitive(bool(d and (d.get("Paired") or d.get("Connected"))))
+        if d:
+            self.connect_btn.set_label("Disconnect" if d.get("Connected") else
+                                       "Connect" if d.get("Paired") else "Pair")
+
+    # ---- actions ----
+    def busy(self, text):
+        self.status.set_text(text)
+        self.spinner.start()
+
+    def on_power(self, *_):
+        if self.adapter:
+            err = self.set_prop(self.adapter, ADAPTER, "Powered", GLib.Variant("b", self.power.get_active()))
+            if err:
+                message(self.win, "Bluetooth could not be switched.", err.message, Gtk.MessageType.WARNING)
+            self.refresh_soon()
+
+    def on_visible(self, *_):
+        if self.adapter:
+            self.set_prop(self.adapter, ADAPTER, "Discoverable", GLib.Variant("b", self.visible.get_active()))
+            self.refresh_soon()
+
+    def on_scan(self, *_):
+        if not self.adapter:
+            return
+        method = "StopDiscovery" if self.discovering else "StartDiscovery"
+        try:
+            self.call(self.adapter, ADAPTER, method)
+        except GLib.Error as e:
+            message(self.win, "Searching for devices didn't start.", e.message, Gtk.MessageType.WARNING)
+        if method == "StartDiscovery":  # stop after a minute, as Windows does
+            GLib.timeout_add_seconds(60, self.stop_scan)
+        self.refresh_soon()
+
+    def stop_scan(self):
+        if self.adapter and self.discovering:
+            try:
+                self.call(self.adapter, ADAPTER, "StopDiscovery")
+            except GLib.Error:
+                pass
+        return False
+
+    def on_connect(self, *_):
+        p = self.selected()
+        d = self.devices.get(p) if p else None
+        if not d:
+            return
+        name = self.device_name(p)
+
+        def done(err, what):
+            self.spinner.stop()
+            if err:
+                self.status.set_text("")
+                message(self.win, f"{what} {name} didn't work.", err.message.split(": ")[-1],
+                        Gtk.MessageType.WARNING)
+            self.refresh_soon()
+
+        if d.get("Connected"):
+            self.busy(f"Disconnecting {name}...")
+            self.call_async(p, DEVICE, "Disconnect", None, lambda e: done(e, "Disconnecting"))
+        elif d.get("Paired"):
+            self.busy(f"Connecting to {name}...")
+            self.call_async(p, DEVICE, "Connect", None, lambda e: done(e, "Connecting to"))
+        else:
+            self.busy(f"Pairing with {name}...")
+
+            def paired(err):
+                if err:
+                    done(err, "Pairing with")
+                    return
+                self.set_prop(p, DEVICE, "Trusted", GLib.Variant("b", True))  # reconnects on its own later
+                self.busy(f"Connecting to {name}...")
+                self.call_async(p, DEVICE, "Connect", None, lambda e: done(e, "Connecting to"))
+            self.call_async(p, DEVICE, "Pair", None, paired, timeout=90000)
+
+    def on_remove(self, *_):
+        p = self.selected()
+        if not p or not self.adapter:
+            return
+        if not self.ask(f"Remove {self.device_name(p)}?",
+                        "It will have to be paired again before it can be used with this computer."):
+            return
+        try:
+            self.call(self.adapter, ADAPTER, "RemoveDevice", GLib.Variant("(o)", (p,)))
+        except GLib.Error as e:
+            message(self.win, "The device could not be removed.", e.message, Gtk.MessageType.WARNING)
+        self.refresh_soon()
+
+
+if __name__ == "__main__":
+    Bluetooth()
+    Gtk.main()

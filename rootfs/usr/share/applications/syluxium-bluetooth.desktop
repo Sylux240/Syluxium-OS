@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Bluetooth
+GenericName=Bluetooth
+Comment=Turn Bluetooth on or off, pair and connect mice, keyboards, headphones and phones
+Exec=syluxium-bluetooth
+Icon=syluxium-bluetooth
+Terminal=false
+Categories=Settings;HardwareSettings;
+Keywords=bluetooth;pair;headset;headphones;mouse;keyboard;wireless;
