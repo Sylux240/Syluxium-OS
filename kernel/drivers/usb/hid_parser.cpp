@@ -18,7 +18,7 @@ namespace {
 constexpr u8 TYPE_MAIN = 0, TYPE_GLOBAL = 1, TYPE_LOCAL = 2;
 constexpr u8 MAIN_INPUT = 8, MAIN_OUTPUT = 9, MAIN_COLLECTION = 10, MAIN_FEATURE = 11, MAIN_END_COLLECTION = 12;
 constexpr u8 GLOBAL_USAGE_PAGE = 0, GLOBAL_LOGICAL_MIN = 1, GLOBAL_LOGICAL_MAX = 2, GLOBAL_PHYSICAL_MIN = 3,
-             GLOBAL_PHYSICAL_MAX = 4, GLOBAL_REPORT_SIZE = 7, GLOBAL_REPORT_ID = 8, GLOBAL_REPORT_COUNT = 9,
+             GLOBAL_PHYSICAL_MAX = 4, GLOBAL_UNIT_EXPONENT = 5, GLOBAL_UNIT = 6, GLOBAL_REPORT_SIZE = 7, GLOBAL_REPORT_ID = 8, GLOBAL_REPORT_COUNT = 9,
              GLOBAL_PUSH = 10, GLOBAL_POP = 11;
 constexpr u8 LOCAL_USAGE = 0, LOCAL_USAGE_MIN = 1, LOCAL_USAGE_MAX = 2;
 constexpr u8 COLLECTION_PHYSICAL = 0, COLLECTION_APPLICATION = 1;
@@ -34,11 +34,15 @@ struct Globals {
     u8 logical_max_size = 0;
     u32 report_size = 0, report_count = 0;
     u8 report_id = 0;
+    i32 physical_min = 0, physical_max = 0;
+    i8 unit_exponent = 0;
+    u32 unit = 0;
 };
 
 struct Collection {
     u8 type;
     u32 usage;
+    u16 serial;
 };
 
 struct Parser {
@@ -53,6 +57,7 @@ struct Parser {
     bool have_min = false, have_max = false;
     Collection collections[16];
     int collection_depth = 0;
+    u16 collection_serial = 0;
     u32 bit_offset[3][256] = {}; // per report kind and ID
 
     u32 resolve(u32 u) const {
@@ -109,6 +114,11 @@ struct Parser {
         f.logical_max = g.logical_min < 0 ? g.logical_max : static_cast<i32>(g.logical_max_raw);
         f.application = application();
         f.physical = physical();
+        f.collection = collection_depth ? collections[collection_depth - 1].serial : 0;
+        f.physical_min = g.physical_min;
+        f.physical_max = g.physical_max;
+        f.unit_exponent = g.unit_exponent;
+        f.unit = g.unit;
         f.usage_first = static_cast<u16>(out->usage_count);
         f.usage_count = 0;
         f.usage_min = have_min ? resolve(usage_min) : 0;
@@ -192,7 +202,7 @@ long parse(const u8* data, usize length, ReportDescriptor* out) {
                 }
                 u32 u = p->usage_count ? p->resolve(p->usages[0]) : p->have_min ? p->resolve(p->usage_min) : 0;
                 u8 ctype = static_cast<u8>(value);
-                p->collections[p->collection_depth++] = Collection{ctype, u};
+                p->collections[p->collection_depth++] = Collection{ctype, u, ++p->collection_serial};
                 if (ctype == COLLECTION_APPLICATION && p->collection_depth == 1 &&
                     out->application_count < ReportDescriptor::MAX_APPLICATIONS)
                     out->applications[out->application_count++] = u;
@@ -218,7 +228,12 @@ long parse(const u8* data, usize length, ReportDescriptor* out) {
                 p->g.logical_max_raw = value;
                 p->g.logical_max_size = size;
                 break;
-            case GLOBAL_PHYSICAL_MIN: case GLOBAL_PHYSICAL_MAX: break; // units: not needed for evdev
+            case GLOBAL_PHYSICAL_MIN: p->g.physical_min = svalue; break; // touchpads: size in mm
+            case GLOBAL_PHYSICAL_MAX: p->g.physical_max = svalue; break;
+            case GLOBAL_UNIT_EXPONENT: // 4-bit two's complement
+                p->g.unit_exponent = static_cast<i8>(value & 0x8 ? static_cast<i32>(value & 0xF) - 16 : value & 0xF);
+                break;
+            case GLOBAL_UNIT: p->g.unit = value; break;
             case GLOBAL_REPORT_SIZE: p->g.report_size = value; break;
             case GLOBAL_REPORT_COUNT: p->g.report_count = value; break;
             case GLOBAL_REPORT_ID:

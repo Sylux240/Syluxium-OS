@@ -23,7 +23,8 @@ constexpr u16 PAGE_GENERIC_DESKTOP = 0x01, PAGE_SIMULATION = 0x02, PAGE_KEYBOARD
 constexpr u32 GD_POINTER = usage(1, 0x01), GD_MOUSE = usage(1, 0x02), GD_JOYSTICK = usage(1, 0x04),
               GD_GAMEPAD = usage(1, 0x05), GD_KEYBOARD = usage(1, 0x06), GD_KEYPAD = usage(1, 0x07),
               GD_SYSTEM_CONTROL = usage(1, 0x80), CONSUMER_CONTROL = usage(0x0C, 0x01),
-              DG_DIGITIZER = usage(0x0D, 0x01), DG_PEN = usage(0x0D, 0x02), DG_TOUCHSCREEN = usage(0x0D, 0x04);
+              DG_DIGITIZER = usage(0x0D, 0x01), DG_PEN = usage(0x0D, 0x02), DG_TOUCHSCREEN = usage(0x0D, 0x04),
+              DG_TOUCHPAD = usage(0x0D, 0x05), DG_DEVICE_CONFIG = usage(0x0D, 0x0E);
 
 enum class ReportKind : u8 { Input, Output, Feature };
 
@@ -45,6 +46,10 @@ struct Field {
     // when a list was given, else usage_min + v - logical_min.
     u16 usage_first, usage_count;
     u32 usage_min, usage_max;
+    u16 collection;      // serial number of the innermost collection (fields of one finger share it)
+    i32 physical_min, physical_max;
+    i8 unit_exponent;
+    u32 unit;
 
     bool is_variable() const { return flags & FLAG_VARIABLE; }
     bool is_relative() const { return flags & FLAG_RELATIVE; }
