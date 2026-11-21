@@ -137,6 +137,7 @@ struct Process {
     // ---- Signals ----
     u64 sig_pending = 0;                 // process-wide pending signals, bit n-1 = signal n
     i32 sig_code[65] = {}, sig_pid[65] = {}; u32 sig_uid[65] = {}; // who sent each (siginfo)
+    u64 sig_value[65] = {}; i32 sig_timer[65] = {}; // POSIX timer signals: sigev_value and timer id
     SigAction sigactions[MAX_SIGNALS + 1];  // shared by all threads (per-thread masks live in Thread)
 };
 

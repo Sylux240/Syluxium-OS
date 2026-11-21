@@ -137,6 +137,56 @@ static void test_aslr(void) {
     check(c[0] && strcmp(c, d) == 0, "ASLR off with personality(ADDR_NO_RANDOMIZE)");
 }
 
+// POSIX timers: a signal carrying the timer's value, a thread callback
+// (SIGEV_THREAD, done by the C library), a periodic timer.
+static volatile sig_atomic_t timer_hits, timer_value_ok;
+static void on_timer(int sig, siginfo_t* si, void* uc) {
+    (void)sig; (void)uc;
+    timer_hits++;
+    if (si->si_code == SI_TIMER && si->si_value.sival_int == 4242)
+        timer_value_ok = 1;
+}
+static volatile int thread_calls;
+static void timer_thread_fn(union sigval v) {
+    if (v.sival_int == 77)
+        __atomic_add_fetch(&thread_calls, 1, __ATOMIC_SEQ_CST);
+}
+
+static void test_posix_timers(void) {
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_sigaction = on_timer;
+    sa.sa_flags = SA_SIGINFO;
+    sigaction(SIGRTMIN + 1, &sa, NULL);
+    struct sigevent ev;
+    memset(&ev, 0, sizeof(ev));
+    ev.sigev_notify = SIGEV_SIGNAL;
+    ev.sigev_signo = SIGRTMIN + 1;
+    ev.sigev_value.sival_int = 4242;
+    timer_t t;
+    check(timer_create(CLOCK_MONOTONIC, &ev, &t) == 0, "timer_create (signal)");
+    struct itimerspec its = {{0, 20 * 1000 * 1000}, {0, 20 * 1000 * 1000}}; // every 20 ms
+    check(timer_settime(t, 0, &its, NULL) == 0, "timer_settime periodic");
+    for (int i = 0; i < 100 && timer_hits < 5; i++)
+        usleep(20 * 1000);
+    struct itimerspec cur;
+    check(timer_gettime(t, &cur) == 0 && cur.it_interval.tv_nsec == 20 * 1000 * 1000, "timer_gettime");
+    check(timer_hits >= 5 && timer_value_ok, "timer signals arrive with si_value");
+    check(timer_delete(t) == 0, "timer_delete");
+
+    memset(&ev, 0, sizeof(ev));
+    ev.sigev_notify = SIGEV_THREAD;
+    ev.sigev_notify_function = timer_thread_fn;
+    ev.sigev_value.sival_int = 77;
+    check(timer_create(CLOCK_REALTIME, &ev, &t) == 0, "timer_create (SIGEV_THREAD)");
+    struct itimerspec once = {{0, 0}, {0, 30 * 1000 * 1000}};
+    timer_settime(t, 0, &once, NULL);
+    for (int i = 0; i < 100 && !thread_calls; i++)
+        usleep(10 * 1000);
+    check(thread_calls == 1, "SIGEV_THREAD timer runs its function");
+    timer_delete(t);
+}
+
 int main(int argc, char** argv) {
     if (argc > 1 && strcmp(argv[1], "addrs") == 0) {
         int local;
@@ -151,6 +201,7 @@ int main(int argc, char** argv) {
     test_sigtimedwait();
     test_mlock();
     test_aslr();
+    test_posix_timers();
     printf("newsyscalls: %d failed\n", fails);
     return fails;
 }

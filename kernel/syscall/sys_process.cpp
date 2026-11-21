@@ -292,6 +292,33 @@ long sys_vfork(SYSCALL_ARGS) {
 // clone(flags, new_sp, parent_tid, child_tid, tls) -- x86_64 argument order
 long sys_clone(SYSCALL_ARGS) { SYSCALL_UNUSED; return proc::do_clone(frame, a0, a1, a2, a3, a4); }
 
+// clone3(args, size): clone with its arguments in a struct (glibc's
+// pthread_create tries it first). What clone() can do is supported; the
+// clone3-only features (pidfd, set_tid, cgroups, clearing handlers) answer
+// ENOSYS, which makes the C library fall back to clone().
+long sys_clone3(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    struct CloneArgs {
+        u64 flags, pidfd, child_tid, parent_tid, exit_signal, stack, stack_size, tls, set_tid, set_tid_size, cgroup;
+    } ca{};
+    constexpr u64 SIZE_VER0 = 64;
+    if (a1 < SIZE_VER0 || a1 > 4096)
+        return -err::INVAL;
+    usize n = a1 < sizeof(ca) ? a1 : sizeof(ca);
+    if (long r = uaccess::copy_from(&ca, reinterpret_cast<const void*>(a0), n); r < 0)
+        return r;
+    constexpr u64 CSIGNAL = 0xff, CLONE_PIDFD = 0x1000, CLONE_CLEAR_SIGHAND = 0x100000000ull,
+                  CLONE_INTO_CGROUP = 0x200000000ull;
+    if ((ca.flags & CSIGNAL) || ca.exit_signal > 64)
+        return -err::INVAL;
+    if ((ca.flags & (CLONE_PIDFD | CLONE_CLEAR_SIGHAND | CLONE_INTO_CGROUP)) || ca.set_tid_size || ca.cgroup)
+        return -err::NOSYS;
+    if ((ca.stack == 0) != (ca.stack_size == 0))
+        return -err::INVAL;
+    u64 sp = ca.stack ? ca.stack + ca.stack_size : 0;
+    return proc::do_clone(frame, (ca.flags & 0xFFFFFFFFull) | ca.exit_signal, sp, ca.parent_tid, ca.child_tid, ca.tls);
+}
+
 // Copies a NULL-terminated array of user strings into one kernel block.
 class StringVector {
 public:
@@ -522,6 +549,8 @@ long sys_rt_sigtimedwait(SYSCALL_ARGS) {
             return -err::INVAL;
         deadline = clock::now_ns() + static_cast<u64>(ts.sec) * 1'000'000'000 + static_cast<u64>(ts.nsec);
     }
+    sched::Thread* self = sched::current();
+    u64 mine = __atomic_load_n(&self->sig_pending, __ATOMIC_ACQUIRE) & set;
     int sig = signal::dequeue(set);
     if (!sig) {
         sched::WaitQueue wq; // woken by the sender (it wakes every sleeping thread)
@@ -534,6 +563,7 @@ long sys_rt_sigtimedwait(SYSCALL_ARGS) {
             } else {
                 wq.wait_until(ready);
             }
+            mine = __atomic_load_n(&self->sig_pending, __ATOMIC_ACQUIRE) & set;
             if ((sig = signal::dequeue(set)) != 0)
                 break;
             if (signal::interrupted())
@@ -553,10 +583,17 @@ long sys_rt_sigtimedwait(SYSCALL_ARGS) {
             u8 rest[104];
         } info{};
         Process* p = proc::current();
+        bool from_thread = mine & (1ull << (sig - 1));
         info.signo = sig;
-        info.code = p->sig_code[sig];
-        info.pid = p->sig_pid[sig];
-        info.uid = p->sig_uid[sig];
+        info.code = from_thread ? self->sig_code[sig] : p->sig_code[sig];
+        info.pid = from_thread ? self->sig_pid[sig] : p->sig_pid[sig];
+        info.uid = from_thread ? self->sig_uid[sig] : p->sig_uid[sig];
+        if (info.code == signal::SI_TIMER) { // si_timerid, si_overrun, si_value
+            info.pid = p->sig_timer[sig];
+            info.uid = 0;
+            u64 value = p->sig_value[sig];
+            memcpy(info.rest, &value, 8);
+        }
         if (long r = uaccess::put(reinterpret_cast<SigInfo*>(a1), info); r < 0)
             return r;
     }
@@ -1320,7 +1357,7 @@ void register_process() {
     set(128, sys_rt_sigtimedwait, "rt_sigtimedwait");
     set(200, sys_tkill, "tkill");
     set(234, sys_tgkill, "tgkill");
-    set(435, sys_quiet_nosys, "clone3");
+    set(435, sys_clone3, "clone3");
     set(131, sys_sigaltstack, "sigaltstack");
     set(158, sys_arch_prctl, "arch_prctl");
     set(186, sys_gettid, "gettid");
