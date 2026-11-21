@@ -9,3 +9,9 @@ if [ -f /var/lib/syluxium/ownership ]; then
         [ -e "$path" ] || [ -L "$path" ] && chown -h "$uid:$gid" "$path" 2>/dev/null
     done < /var/lib/syluxium/ownership
 fi
+# Changing the owner clears setuid/setgid bits: set them again (sudo, passwd, ...).
+if [ -f /var/lib/syluxium/modes ]; then
+    while read -r mode path; do
+        [ -f "$path" ] && chmod "$mode" "$path" 2>/dev/null
+    done < /var/lib/syluxium/modes
+fi

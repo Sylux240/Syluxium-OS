@@ -1553,6 +1553,16 @@ long sys_sync(SYSCALL_ARGS) {
     return 0;
 }
 
+// sync_file_range(fd, offset, nbytes, flags): only a hint to start writing a
+// range back early (dpkg gives it for every file it unpacks); the data reaches
+// the disk with the next fsync/sync, so nothing needs doing here.
+long sys_sync_file_range(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    if (a3 & ~7ul || static_cast<i64>(a1) < 0 || static_cast<i64>(a2) < 0)
+        return -err::INVAL;
+    return 0;
+}
+
 long sys_mount(SYSCALL_ARGS) {
     SYSCALL_UNUSED;
     if (!proc::capable())
@@ -1742,6 +1752,7 @@ void register_file() {
     set(165, sys_mount, "mount");
     set(166, sys_umount2, "umount2");
     set(306, sys_sync, "syncfs");
+    set(277, sys_sync_file_range, "sync_file_range");
     set(76, sys_truncate, "truncate");
     set(77, sys_ftruncate, "ftruncate");
     set(79, sys_getcwd, "getcwd");
