@@ -18,6 +18,15 @@ u64 lost_wakeups();
 // FUTEX_WAKE: wake up to `count` waiters whose bitset intersects. Returns how many.
 long wake(u64 uaddr, int count, u32 bitset, bool is_private);
 
+// futex_waitv: sleep until one of `n` futexes is woken. Returns its index,
+// -EAGAIN (a word didn't hold its expected value), -ETIMEDOUT or -EINTR.
+struct WaitvRequest {
+    u64 uaddr;
+    u32 expected;
+    bool is_private;
+};
+long waitv(const WaitvRequest* req, u32 n, u64 deadline_ns);
+
 // FUTEX_(CMP_)REQUEUE: wake `wake_count`, move up to `requeue_count` more to uaddr2.
 long requeue(u64 uaddr, u64 uaddr2, int wake_count, int requeue_count, bool compare, u32 expected,
              bool is_private);

@@ -2,6 +2,7 @@
 #include <core/log.hpp>
 #include <lib/errno.hpp>
 #include <lib/spinlock.hpp>
+#include <mm/heap.hpp>
 #include <proc/futex.hpp>
 #include <proc/process.hpp>
 #include <proc/signal.hpp>
@@ -125,6 +126,118 @@ long wait(u64 uaddr, u32 expected, u64 deadline_ns, u32 bitset, bool is_private)
 
 u64 lost_wakeups() { return g_lost_wakeups; }
 
+// ---- futex_waitv: sleep on several futexes at once (Proton's fsync) ----
+// Waiters sit on one global list (they're rare); wake() looks through it
+// for waiters of the woken futex.
+namespace {
+
+struct WaitvEntry {
+    Key key;
+    u64 uaddr;
+    u32 expected;
+};
+
+struct Waitv {
+    sched::Thread* thread;
+    WaitvEntry* entries;
+    u32 count;
+    int woken = -1; // index of the futex that woke us
+    sched::WaitList list;
+    Waitv* next = nullptr;
+};
+
+IrqSpinlock g_waitv_lock;
+Waitv* g_waitv = nullptr;
+u32 g_waitv_count = 0;
+
+// Under g_waitv_lock: wake up to `count` waitv sleepers of `key`.
+long wake_waitv(const Key& key, long count) {
+    long woken = 0;
+    for (Waitv* w = g_waitv; w && woken < count; w = w->next) {
+        if (w->woken >= 0)
+            continue;
+        for (u32 i = 0; i < w->count; i++) {
+            if (w->entries[i].key == key) {
+                w->woken = static_cast<int>(i);
+                if (w->thread->wait_node.linked()) {
+                    w->list.remove(w->thread);
+                    sched::wake(w->thread);
+                }
+                woken++;
+                break;
+            }
+        }
+    }
+    return woken;
+}
+
+} // namespace
+
+long waitv(const WaitvRequest* req, u32 n, u64 deadline_ns) {
+    if (n == 0 || n > 128)
+        return -err::INVAL;
+    auto* entries = static_cast<WaitvEntry*>(kmalloc(n * sizeof(WaitvEntry)));
+    if (!entries)
+        return -err::NOMEM;
+    for (u32 i = 0; i < n; i++) {
+        if (long r = make_key(req[i].uaddr, req[i].is_private, &entries[i].key); r < 0) {
+            kfree(entries);
+            return r;
+        }
+        entries[i].uaddr = req[i].uaddr;
+        entries[i].expected = req[i].expected;
+    }
+    Waitv w;
+    w.thread = sched::current();
+    w.entries = entries;
+    w.count = n;
+    long result;
+    g_waitv_lock.lock();
+    for (u32 i = 0; i < n; i++) {
+        if (user_word(entries[i].uaddr) != entries[i].expected) {
+            g_waitv_lock.unlock();
+            kfree(entries);
+            return -err::AGAIN;
+        }
+    }
+    w.next = g_waitv;
+    g_waitv = &w;
+    __atomic_add_fetch(&g_waitv_count, 1, __ATOMIC_ACQ_REL);
+    for (;;) {
+        if (w.woken >= 0) {
+            result = w.woken;
+            break;
+        }
+        if (signal::interrupted()) {
+            result = -err::INTR;
+            break;
+        }
+        if (deadline_ns && clock::now_ns() >= deadline_ns) {
+            result = -err::TIMEDOUT;
+            break;
+        }
+        u64 slice = clock::now_ns() + RECHECK_NS;
+        sched::block_on(w.list, g_waitv_lock, deadline_ns && deadline_ns < slice ? deadline_ns : slice,
+                        [](void* p) { return static_cast<Waitv*>(p)->woken >= 0 || signal::interrupted(); }, &w);
+        if (w.woken < 0) {
+            // Same safety net as wait(): a word that changed with no wakeup.
+            for (u32 i = 0; i < n && w.woken < 0; i++)
+                if (user_word(entries[i].uaddr) != entries[i].expected)
+                    w.woken = static_cast<int>(i);
+        }
+    }
+    for (Waitv** link = &g_waitv; *link; link = &(*link)->next) {
+        if (*link == &w) {
+            *link = w.next;
+            break;
+        }
+    }
+    __atomic_sub_fetch(&g_waitv_count, 1, __ATOMIC_ACQ_REL);
+    g_waitv_lock.unlock();
+    kfree(entries);
+    return result;
+}
+
 long wake(u64 uaddr, int count, u32 bitset, bool is_private) {
     Key key;
     if (long r = make_key(uaddr, is_private, &key); r < 0)
@@ -142,6 +255,10 @@ long wake(u64 uaddr, int count, u32 bitset, bool is_private) {
             woken++;
         }
         t = next;
+    }
+    if (woken < count && __atomic_load_n(&g_waitv_count, __ATOMIC_ACQUIRE)) {
+        LockGuard wguard(g_waitv_lock);
+        woken += wake_waitv(key, count - woken);
     }
     return woken;
 }

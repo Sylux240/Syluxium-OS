@@ -1203,6 +1203,51 @@ long sys_membarrier(SYSCALL_ARGS) {
     }
 }
 
+// futex_waitv(waiters, nr, flags, timeout, clockid): wait on up to 128
+// futexes (32-bit ones) at once; returns the index of the one woken.
+long sys_futex_waitv(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    constexpr u32 FUTEX2_SIZE_U32 = 0x02, FUTEX2_SIZE_MASK = 0x03, FUTEX2_PRIVATE = 128;
+    struct UserWaitv {
+        u64 val, uaddr;
+        u32 flags, reserved;
+    };
+    u32 n = static_cast<u32>(a1);
+    if (a2 != 0 || n == 0 || n > 128)
+        return -err::INVAL;
+    UserWaitv uw[128];
+    if (long r = uaccess::copy_from(uw, reinterpret_cast<const void*>(a0), n * sizeof(UserWaitv)); r < 0)
+        return r;
+    futex::WaitvRequest req[128];
+    for (u32 i = 0; i < n; i++) {
+        if ((uw[i].flags & FUTEX2_SIZE_MASK) != FUTEX2_SIZE_U32 || (uw[i].flags & ~(FUTEX2_SIZE_MASK | FUTEX2_PRIVATE)) ||
+            uw[i].reserved || uw[i].val > 0xFFFFFFFFull)
+            return -err::INVAL;
+        req[i] = futex::WaitvRequest{uw[i].uaddr, static_cast<u32>(uw[i].val), (uw[i].flags & FUTEX2_PRIVATE) != 0};
+    }
+    u64 deadline = 0;
+    if (a3) {
+        struct { i64 sec, nsec; } ts;
+        if (long r = uaccess::copy_from(&ts, reinterpret_cast<void*>(a3), sizeof(ts)); r < 0)
+            return r;
+        if (ts.sec < 0 || ts.nsec < 0 || ts.nsec >= 1'000'000'000)
+            return -err::INVAL;
+        u64 t = static_cast<u64>(ts.sec) * 1'000'000'000 + static_cast<u64>(ts.nsec);
+        constexpr u64 CLOCK_REALTIME = 0, CLOCK_MONOTONIC = 1;
+        if (a4 == CLOCK_REALTIME) {
+            u64 real_now = rtc::realtime_ns(), mono_now = clock::now_ns();
+            deadline = t > real_now ? mono_now + (t - real_now) : mono_now;
+        } else if (a4 == CLOCK_MONOTONIC) {
+            deadline = t;
+        } else {
+            return -err::INVAL;
+        }
+        if (deadline == 0)
+            deadline = 1;
+    }
+    return futex::waitv(req, n, deadline);
+}
+
 void register_process() {
     set(135, sys_personality, "personality");
     set(149, sys_mlock_ok, "mlock");
@@ -1280,6 +1325,7 @@ void register_process() {
     set(158, sys_arch_prctl, "arch_prctl");
     set(186, sys_gettid, "gettid");
     set(202, sys_futex, "futex");
+    set(449, sys_futex_waitv, "futex_waitv");
     set(203, sys_sched_setaffinity, "sched_setaffinity");
     set(204, sys_sched_getaffinity, "sched_getaffinity");
     set(218, sys_set_tid_address, "set_tid_address");

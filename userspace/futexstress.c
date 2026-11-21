@@ -22,6 +22,7 @@
 #include <signal.h>
 #include <stdatomic.h>
 #include <stdint.h>
+#include <sys/types.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -399,6 +400,78 @@ static int test_signal(void) {
     return bad;
 }
 
+// ---- 5. futex_waitv (Proton's fsync): wait on several futexes at once ----
+struct waitv_entry {
+    unsigned long long val, uaddr;
+    unsigned flags, reserved;
+};
+static atomic_int wv[3];
+static atomic_long wv_rounds;
+
+static long futex_waitv(struct waitv_entry* w, unsigned n, struct timespec* ts) {
+    return syscall(449, w, n, 0, ts, CLOCK_MONOTONIC);
+}
+
+static void* wv_waiter(void* arg) {
+    (void)arg;
+    while (!atomic_load(&stop)) {
+        struct waitv_entry w[3];
+        for (int i = 0; i < 3; i++)
+            w[i] = (struct waitv_entry){(unsigned)atomic_load(&wv[i]), (unsigned long long)(uintptr_t)&wv[i], 0x02 | 128, 0};
+        struct timespec ts;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        ts.tv_sec += 2;
+        long r = futex_waitv(w, 3, &ts);
+        if (r >= 0 || errno == EAGAIN)
+            atomic_fetch_add(&wv_rounds, 1), atomic_fetch_add(&progress, 1);
+    }
+    return NULL;
+}
+
+static int test_waitv(void) {
+    current_test = "futex_waitv";
+    struct waitv_entry w[3];
+    for (int i = 0; i < 3; i++)
+        w[i] = (struct waitv_entry){0, (unsigned long long)(uintptr_t)&wv[i], 0x02 | 128, 0};
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    ts.tv_nsec += 20 * 1000 * 1000;
+    if (ts.tv_nsec >= 1000000000) { ts.tv_sec++; ts.tv_nsec -= 1000000000; }
+    int bad = 0;
+    long r = futex_waitv(w, 3, &ts);
+    if (!(r < 0 && errno == ETIMEDOUT)) { printf("  [FAIL] futex_waitv timeout: %ld\n", r); bad = 1; }
+    w[1].val = 5;
+    r = futex_waitv(w, 3, NULL);
+    if (!(r < 0 && errno == EAGAIN)) { printf("  [FAIL] futex_waitv mismatch: %ld\n", r); bad = 1; }
+    // Waiters woken through each of the three words in turn.
+    pthread_t t[4];
+    for (int i = 0; i < 4; i++)
+        pthread_create(&t[i], NULL, wv_waiter, NULL);
+    double end = now() + seconds;
+    long wakes = 0;
+    while (now() < end) {
+        int i = (int)(wakes % 3);
+        atomic_fetch_add(&wv[i], 1);
+        syscall(SYS_futex, &wv[i], FUTEX_WAKE_PRIVATE, 4, NULL, NULL, 0);
+        wakes++;
+        if ((wakes & 255) == 0)
+            usleep(50);
+    }
+    atomic_store(&stop, 1);
+    for (int i = 0; i < 3; i++) {
+        atomic_fetch_add(&wv[i], 1);
+        syscall(SYS_futex, &wv[i], FUTEX_WAKE_PRIVATE, 100, NULL, NULL, 0);
+    }
+    for (int i = 0; i < 4; i++)
+        pthread_join(t[i], NULL);
+    if (atomic_load(&wv_rounds) < 100)
+        bad = 1;
+    printf("  [%s] futex_waitv: timeout, EAGAIN, %ld waits ended by %ld wakes\n", bad ? "FAIL" : "PASS",
+           atomic_load(&wv_rounds), wakes);
+    atomic_store(&stop, 0);
+    return bad;
+}
+
 int main(int argc, char** argv) {
     if (argc > 1)
         seconds = atoi(argv[1]);
@@ -406,7 +479,7 @@ int main(int argc, char** argv) {
     printf("futexstress: %d s per test\n", seconds);
     pthread_t wd;
     pthread_create(&wd, NULL, watchdog, NULL);
-    int fails = test_gil() + test_pingpong() + test_raw() + test_signal();
+    int fails = test_gil() + test_pingpong() + test_raw() + test_signal() + test_waitv();
     printf("futexstress: %s\n", fails ? "FAILED" : "all passed");
     return fails ? 1 : 0;
 }
