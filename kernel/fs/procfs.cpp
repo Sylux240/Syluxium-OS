@@ -787,6 +787,23 @@ void init() {
 
 namespace sysfs {
 
+namespace {
+vfs::Inode* g_sysfs_root = nullptr;
+} // namespace
+
+bool contains(const void* inode) {
+    // Directories know their parent (".."); files don't (sd-device checks directories).
+    auto* n = static_cast<const vfs::Inode*>(inode);
+    for (int depth = 0; n && g_sysfs_root && depth < 64; depth++) {
+        if (n == g_sysfs_root)
+            return true;
+        if (n->parent == n)
+            break;
+        n = n->parent;
+    }
+    return false;
+}
+
 void init() {
     vfs::Inode* root = vfs::root();
     root->unlink("sys", 3, true);
@@ -815,8 +832,10 @@ void init() {
     genfs::static_file("/sys/kernel/hostname", "syluxium\n");
     // Separate st_dev values so tools (df, findmnt) tell these mounts apart from /.
     vfs::Inode* n;
-    if (vfs::resolve("/sys", nullptr, true, &n) == 0)
+    if (vfs::resolve("/sys", nullptr, true, &n) == 0) {
         n->dev = 5;
+        g_sysfs_root = n;
+    }
     if (vfs::resolve("/dev", nullptr, true, &n) == 0)
         n->dev = 6;
 }
