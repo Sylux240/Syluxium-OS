@@ -74,6 +74,8 @@ syluxium-automount > /var/log/automount.log 2>&1 &
 syluxium-wifi > /var/log/syluxium-wifi.log 2>&1 &
 # Bluetooth: bluetoothd (adapters plugged in later reach it through the kernel).
 /usr/libexec/bluetooth/bluetoothd -n --noplugin=sap > /var/log/bluetoothd.log 2>&1 &
+# Bluetooth headphones and speakers: bluealsa, default output while connected.
+syluxium-bluetooth-audio > /var/log/syluxium-bluetooth-audio.log 2>&1 &
 # Adapter settings from Network Connections (static addresses, disabled adapters).
 syluxium-netconfig apply > /var/log/syluxium-netconfig.log 2>&1 &
 # Network printers and other devices announced on the local network (mDNS /

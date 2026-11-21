@@ -70,6 +70,8 @@ DEBIAN_PKGS  += 7zip
 DEBIAN_PKGS  += libinput-tools
 # Bluetooth: BlueZ (bluetoothd, bluetoothctl, btmgmt)
 DEBIAN_PKGS  += bluez
+# Bluetooth audio (A2DP, HFP/HSP) for the ALSA-only system: bluealsad + the "bluealsa" ALSA device
+DEBIAN_PKGS  += bluez-alsa-utils libasound2-plugin-bluez
 # Broadcom b43 Wi-Fi (iMacs, older MacBooks): its firmware may not be shipped;
 # syluxium-b43-firmware fetches Broadcom's driver and cuts it out with this.
 DEBIAN_CONTRIB_REPO := http://deb.debian.org/debian|$(DEBIAN_SUITE)|contrib
