@@ -254,7 +254,11 @@ extern "C" void lkpi_zap_user_range(u64 offset, u64 len) { proc::zap_device_rang
 #include <fs/procfs.hpp>
 extern "C" void lkpi_sysfs_char_device(unsigned int major, unsigned int minor, const char* devname,
                                        const char* pci_bus_id) {
-    sysfs::add_char_device(major, minor, devname, pci_bus_id);
+    sysfs::add_char_device(major, minor, devname, pci_bus_id, true);
+}
+extern "C" void lkpi_sysfs_char_device_platform(unsigned int major, unsigned int minor, const char* devname,
+                                                const char* platform_name) {
+    sysfs::add_char_device(major, minor, devname, platform_name, false);
 }
 
 // ---- descriptors as binder moves them ----
