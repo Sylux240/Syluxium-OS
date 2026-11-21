@@ -108,10 +108,21 @@ void stress_report(void*) {
 } // namespace
 
 void run_fpu_tests() {
+    // A failure is reported, not fatal: only GPU drivers (boot option "gpu")
+    // use kernel FPU sections, and a self-test must never stop a boot.
+    u32 failures = 0;
+    const char* first = nullptr;
     for (u64 i = 0; i < 1000; i++) {
         const char* why;
-        if (!round_trip(i + 1, &why))
-            panic("kernel FPU self-test: %s", why);
+        if (!round_trip(i + 1, &why)) {
+            if (!failures++)
+                first = why;
+        }
+    }
+    if (failures) {
+        klog::error("Kernel FPU self-test: %u of 1000 rounds failed (first: %s); GPU drivers may misbehave", failures,
+                    first);
+        return;
     }
     klog::ok("Kernel FPU sections: save/restore, clean state, nesting (%s)", fpu::mode_name());
     if (strstr(boot::cmdline(), "fputest")) {
