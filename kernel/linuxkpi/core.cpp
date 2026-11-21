@@ -1174,6 +1174,11 @@ struct task_struct* lkpi_current(void) {
     return &static_cast<LkpiTask*>(th->lkpi_task)->t;
 }
 
+int lkpi_kernel_uaccess_active(void) {
+    sched::Thread* th = sched::current();
+    return th && th->lkpi_task && static_cast<LkpiTask*>(th->lkpi_task)->t.lkpi_kernel_uaccess > 0;
+}
+
 void lkpi_set_current_state(long state) {
     __atomic_store_n(&lkpi_current()->__state, state, __ATOMIC_SEQ_CST);
 }

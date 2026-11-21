@@ -6,6 +6,7 @@
 #include <fs/poll.hpp>
 #include <lib/format.hpp>
 #include <mm/heap.hpp>
+#include <linuxkpi/linuxkpi.hpp>
 #include <net/internal.hpp>
 #include <proc/process.hpp>
 #include <proc/signal.hpp>
@@ -481,8 +482,14 @@ long sys_socket(SYSCALL_ARGS) {
         else
             return -EPROTONOSUPPORT;
         break;
-    default:
-        return -EAFNOSUPPORT;
+    default: {
+        // Families implemented by Linux code (AF_BLUETOOTH): kernel/linuxkpi/socket.cpp.
+        long error = 0;
+        s = linuxkpi::create_socket(domain, type, protocol, &error);
+        if (!s)
+            return error;
+        break;
+    }
     }
     if (!s)
         return -err::NOMEM;

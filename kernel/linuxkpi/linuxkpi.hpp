@@ -8,6 +8,9 @@ namespace usb {
 class Device;
 struct Interface;
 }
+namespace net {
+class Socket;
+}
 
 namespace linuxkpi {
 
@@ -26,5 +29,9 @@ void init_pci();
 // (struct usb_driver id_tables). On a match the driver's probe() runs and
 // *driver_name is set. Topology lock held (called from usb::attach).
 bool usb_probe(usb::Device* d, const usb::Interface& intf, const char** driver_name);
+
+// socket(2) for an address family a Linux driver registered (AF_BLUETOOTH):
+// a socket, or nullptr with *error set (-EAFNOSUPPORT if none did).
+net::Socket* create_socket(int family, int type, int protocol, long* error);
 
 } // namespace linuxkpi
