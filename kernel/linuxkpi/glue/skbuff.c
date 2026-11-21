@@ -65,8 +65,8 @@ struct page* page_pool_alloc_frag(struct page_pool* pool, unsigned int* offset, 
 	if (!page)
 		return NULL;
 	page->pp = pool;
-	if (pool->p.flags & PP_FLAG_DMA_MAP)
-		page->dma_addr = dma_map_page(pool->p.dev, page, 0, PAGE_SIZE << pool->p.order, pool->p.dma_dir);
+	if (pool->p.flags & PP_FLAG_DMA_MAP) /* bounced under the device's mask if need be */
+		page->dma_addr = lkpi_dma_map_virt(pool->p.dev, page_address(page), PAGE_SIZE << pool->p.order, pool->p.dma_dir);
 	*offset = 0;
 	return page;
 }

@@ -54,6 +54,9 @@ u64 reclaim_bootloader_memory();
 // Physical page 0 is never handed out, so 0 is a safe failure value.
 u64 alloc_pages(unsigned order, bool zero = false);
 inline u64 alloc_page(bool zero = false) { return alloc_pages(0, zero); }
+// The same, for a block that must end at or below `limit` (devices that can
+// only address 32 bits, ...). Slower: it searches the free lists.
+u64 alloc_pages_below(unsigned order, u64 limit, bool zero = false);
 void free_pages(u64 phys, unsigned order);
 inline void free_page(u64 phys) { free_pages(phys, 0); }
 
