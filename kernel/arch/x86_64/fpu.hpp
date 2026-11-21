@@ -22,6 +22,14 @@ void sanitize(void* state);   // make user-supplied state safe to restore (sigre
 void save(void* state);
 void restore(const void* state);
 
+// Floating point in the kernel (Linux's kernel_fpu_begin/end, for GPU
+// drivers' display bandwidth maths). Not from interrupt handlers. Between
+// begin and end the thread must not sleep: preemption is off, the user's
+// registers are parked per CPU and a clean state is loaded. Nests.
+void kernel_begin();
+void kernel_end();
+bool kernel_active(); // inside a kernel FPU section on this CPU
+
 const char* mode_name();
 u64 xcr0();
 

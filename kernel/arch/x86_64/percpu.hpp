@@ -46,6 +46,11 @@ struct alignas(64) Cpu {
     u32 cur_khz = 0;         // measured (APERF/MPERF) or set frequency
     u32 cur_ratio = 0;       // legacy governor: the ratio last written
     u64 last_aperf = 0, last_mperf = 0;
+
+    // Kernel FPU sections (fpu::kernel_begin/end): the interrupted thread's
+    // FPU/SSE/AVX registers are kept here meanwhile.
+    void* kernel_fpu_save = nullptr;
+    u32 kernel_fpu_depth = 0;
 };
 
 static_assert(__builtin_offsetof(Cpu, self) == cpu_local::OFFSET_SELF);

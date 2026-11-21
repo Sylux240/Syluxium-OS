@@ -266,7 +266,6 @@ static inline bool sysfs_streq(const char *s1, const char *s2)
 		return true;
 	return false;
 }
-void sort(void *base, size_t num, size_t size, int (*cmp)(const void *, const void *), void (*swap)(void *, void *, int));
 struct list_head;
 void list_sort(void *priv, struct list_head *head, int (*cmp)(void *, const struct list_head *, const struct list_head *));
 #define __list_del_entry(e) list_del(e)
@@ -287,8 +286,8 @@ static inline int atomic_dec_and_mutex_lock(atomic_t *cnt, struct mutex *lock)
 	mutex_unlock(lock);
 	return 0;
 }
-#define kernel_fpu_begin() do { } while (0)
-#define kernel_fpu_end() do { } while (0)
+void kernel_fpu_begin(void);
+void kernel_fpu_end(void);
 #define sched_set_fifo(t) do { } while (0)
 #define sched_set_fifo_low(t) do { } while (0)
 

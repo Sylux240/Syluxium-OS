@@ -6,5 +6,6 @@ namespace selftest {
 
 void run_memory_tests();
 void run_scheduler_tests();
+void run_fpu_tests(); // kernel FPU sections (+ "fputest" stress)
 
 } // namespace selftest

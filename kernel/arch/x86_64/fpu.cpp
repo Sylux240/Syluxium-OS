@@ -1,5 +1,7 @@
 #include <arch/x86_64/cpu.hpp>
+#include <arch/x86_64/cpu_local.hpp>
 #include <arch/x86_64/fpu.hpp>
+#include <arch/x86_64/percpu.hpp>
 #include <core/panic.hpp>
 #include <lib/string.hpp>
 #include <mm/heap.hpp>
@@ -124,6 +126,28 @@ void restore(const void* state) {
     else
         asm volatile("fxrstor64 (%0)" : : "r"(state) : "memory");
 }
+
+void kernel_begin() {
+    cpu_local::preempt_disable();
+    Cpu* cpu = this_cpu();
+    if (cpu->kernel_fpu_depth++ == 0) {
+        if (!cpu->kernel_fpu_save)
+            cpu->kernel_fpu_save = alloc_state();
+        save(cpu->kernel_fpu_save);   // whoever's registers these are (eager switching: the current thread's)
+        restore(g_initial_state);     // clean x87/SSE/AVX state, default MXCSR (exceptions masked)
+    }
+}
+
+void kernel_end() {
+    Cpu* cpu = this_cpu();
+    if (cpu->kernel_fpu_depth && --cpu->kernel_fpu_depth == 0)
+        restore(cpu->kernel_fpu_save);
+    bool zero = cpu_local::preempt_dec();
+    if (zero && cpu_local::need_resched() && arch::interrupts_enabled())
+        sched_preempt_point();
+}
+
+bool kernel_active() { return this_cpu()->kernel_fpu_depth != 0; }
 
 const char* mode_name() {
     if (!g_xsave)

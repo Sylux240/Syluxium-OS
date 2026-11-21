@@ -506,6 +506,7 @@ void kernel_main_thread(void*) {
     klog::ok("Reclaimed %lu KiB of bootloader memory", reclaimed / KiB);
 
     selftest::run_scheduler_tests();
+    selftest::run_fpu_tests();
     run_userspace_tests();
     run_shell_tests();
 
