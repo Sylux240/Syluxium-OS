@@ -256,7 +256,8 @@ long probe(dev::Device* d) {
         n->wr16(INTR_MASK, INT_RX_OK | INT_RX_ERR | INT_TX_OK | INT_TX_ERR | INT_RX_OVERFLOW | INT_LINK_CHANGE |
                                INT_RX_FIFO_OVER);
     }
-    klog::warn("r8169: driver is untested on real hardware");
+    klog::warn("r8169: %s, MAC %02x:%02x:%02x:%02x:%02x:%02x: driver is untested on real hardware", d->name,
+               n->mac[0], n->mac[1], n->mac[2], n->mac[3], n->mac[4], n->mac[5]);
     net::register_interface(n);
     sched::spawn("r8169-rx", rx_thread, n, -1, true);
     return 0;
