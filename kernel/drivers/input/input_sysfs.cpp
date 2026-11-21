@@ -7,6 +7,7 @@
 //   /sys/devices/virtual/input/inputN/eventN/ uevent (MAJOR, MINOR,
 //       DEVNAME=input/eventN), dev, device -> ..
 //   /sys/class/input/{inputN,eventN} and /sys/dev/char/13:<64+N> -> those
+//   NETLINK_KOBJECT_UEVENT add/remove events (kernel and udev format)
 //   /run/udev/data/c13:<64+N>                 the properties udevd's
 //       input_id builtin would have stored: ID_INPUT=1, ID_INPUT_KEYBOARD,
 //       _KEY, _MOUSE, _TOUCHPAD, _TOUCHSCREEN, _TABLET, _JOYSTICK, _SWITCH
@@ -21,6 +22,7 @@
 #include <fs/vfs.hpp>
 #include <lib/format.hpp>
 #include <lib/string.hpp>
+#include <net/uevent.hpp>
 #include <time/clock.hpp>
 
 namespace input::sysfs {
@@ -295,6 +297,49 @@ void create_device_dirs(u32 n) {
 
 void path_of(char* out, usize size, const char* prefix, u32 n) { snprintf(out, size, "%s13:%u", prefix, EVDEV_MINOR_BASE + n); }
 
+// Hot-plug events for libudev monitors (libinput, wlroots): one for
+// inputN, one for eventN, as Linux sends them.
+void announce(u32 n, const char* action) {
+    TextBuffer db;
+    if (!gen_udev_db(db, ctx_of(n)))
+        return;
+    // The database's "E:KEY=VALUE" lines are the udev properties.
+    constexpr int MAX_PROPS = 16;
+    char props[MAX_PROPS][64];
+    const char* udev_env[MAX_PROPS + 4] = {};
+    int np = 0;
+    char line[96];
+    usize pos = 0;
+    while (pos < db.size() && np < MAX_PROPS) {
+        usize l = 0;
+        while (pos < db.size() && db.data()[pos] != '\n' && l + 1 < sizeof(line))
+            line[l++] = db.data()[pos++];
+        line[l] = 0;
+        pos++;
+        if (line[0] == 'E' && line[1] == ':') {
+            snprintf(props[np], sizeof(props[np]), "%s", line + 2);
+            udev_env[np] = props[np];
+            np++;
+        }
+    }
+    static const char* const tags[] = {"seat", "uaccess", nullptr};
+    char devpath[80];
+    snprintf(devpath, sizeof(devpath), "/devices/virtual/input/input%u", n);
+    net::uevent_broadcast(action, devpath, "input", nullptr, udev_env, nullptr);
+
+    char major[16] = "MAJOR=13", minor[16], kname[32], uname[40];
+    snprintf(minor, sizeof(minor), "MINOR=%u", EVDEV_MINOR_BASE + n);
+    snprintf(kname, sizeof(kname), "DEVNAME=input/event%u", n);
+    snprintf(uname, sizeof(uname), "DEVNAME=/dev/input/event%u", n);
+    const char* kernel_env[] = {major, minor, kname, nullptr};
+    udev_env[np] = major;
+    udev_env[np + 1] = minor;
+    udev_env[np + 2] = uname;
+    udev_env[np + 3] = nullptr;
+    snprintf(devpath, sizeof(devpath), "/devices/virtual/input/input%u/event%u", n, n);
+    net::uevent_broadcast(action, devpath, "input", kernel_env, udev_env, tags);
+}
+
 } // namespace
 
 void init() {
@@ -305,6 +350,9 @@ void init() {
     vfs::mkdir_p("/sys/devices/virtual/input", 0755);
     vfs::mkdir_p("/sys/dev/char", 0755);
     vfs::mkdir_p("/run/udev/data", 0755);
+    // libudev only subscribes its monitors to udevd's broadcasts (which the
+    // kernel sends, see net/uevent.hpp) when udevd's control socket exists.
+    genfs::static_file("/run/udev/control", "", 0600);
     g_ready = true;
 }
 
@@ -325,11 +373,13 @@ void added(u32 n) {
     vfs::add_node(path, new GeneratedLink(link_dev_char, c));
     path_of(path, sizeof(path), "/run/udev/data/c", n);
     vfs::add_node(path, new GeneratedFile(gen_udev_db, c, 0644));
+    announce(n, "add");
 }
 
 void removed(u32 n) {
     if (!g_ready || n >= 64)
         return;
+    announce(n, "remove"); // while the device's properties can still be read
     char path[96];
     path_of(path, sizeof(path), "/run/udev/data/c", n);
     vfs::remove_node(path);
