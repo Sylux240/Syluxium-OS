@@ -72,4 +72,6 @@ cp /etc/machine-id /var/lib/dbus/machine-id 2>/dev/null
 syluxium-automount > /var/log/automount.log 2>&1 &
 # Wi-Fi: wpa_supplicant for every wireless interface (network icon in the session).
 syluxium-wifi > /var/log/syluxium-wifi.log 2>&1 &
+# Adapter settings from Network Connections (static addresses, disabled adapters).
+{ syluxium-netconfig apply; exec syluxium-netconfig watch; } > /var/log/syluxium-netconfig.log 2>&1 &
 exec tdm -nodaemon ${TDM_DEBUG:+-debug $TDM_DEBUG} -error /var/log/tdm.log > /var/log/tdm.out 2>&1

@@ -1,0 +1,369 @@
+#!/usr/bin/python3
+"""Syluxium notifications: the desktop's org.freedesktop.Notifications
+service (what notify-send, Firefox, GTK programs and scripts talk to).
+
+Every notification is a Dusk glass bubble in the lower right corner, above
+the taskbar, like the Wi-Fi and AutoPlay bubbles; newer ones stack above
+older ones. A click on a bubble closes it (and runs its default action),
+action buttons are shown when the program sends some, critical ones stay
+until clicked. D-Bus starts this on the first notification
+(/usr/share/dbus-1/services/org.freedesktop.Notifications.service); the
+session also starts it at login."""
+import math
+import os
+import re
+import sys
+
+import gi
+
+gi.require_version("Gtk", "3.0")
+gi.require_version("Gdk", "3.0")
+gi.require_version("GdkPixbuf", "2.0")
+from gi.repository import Gdk, GdkPixbuf, Gio, GLib, Gtk, Pango  # noqa: E402
+
+BUS_NAME = "org.freedesktop.Notifications"
+PATH = "/org/freedesktop/Notifications"
+XML = """
+<node>
+  <interface name="org.freedesktop.Notifications">
+    <method name="GetCapabilities"><arg direction="out" type="as"/></method>
+    <method name="Notify">
+      <arg direction="in" type="s" name="app_name"/>
+      <arg direction="in" type="u" name="replaces_id"/>
+      <arg direction="in" type="s" name="app_icon"/>
+      <arg direction="in" type="s" name="summary"/>
+      <arg direction="in" type="s" name="body"/>
+      <arg direction="in" type="as" name="actions"/>
+      <arg direction="in" type="a{sv}" name="hints"/>
+      <arg direction="in" type="i" name="expire_timeout"/>
+      <arg direction="out" type="u" name="id"/>
+    </method>
+    <method name="CloseNotification"><arg direction="in" type="u" name="id"/></method>
+    <method name="GetServerInformation">
+      <arg direction="out" type="s" name="name"/>
+      <arg direction="out" type="s" name="vendor"/>
+      <arg direction="out" type="s" name="version"/>
+      <arg direction="out" type="s" name="spec_version"/>
+    </method>
+    <signal name="NotificationClosed"><arg type="u" name="id"/><arg type="u" name="reason"/></signal>
+    <signal name="ActionInvoked"><arg type="u" name="id"/><arg type="s" name="action_key"/></signal>
+  </interface>
+</node>
+"""
+# NotificationClosed reasons
+EXPIRED, DISMISSED, CLOSED = 1, 2, 3
+
+WIDTH = 340
+MARGIN = 8           # from the screen edge / taskbar
+GAP = 8              # between bubbles
+DEFAULT_TIMEOUT = 6000
+MAX_BUBBLES = 5
+RADIUS = 14
+
+CSS = b"""
+.dusk-bubble { background: transparent; }
+.dusk-bubble label { color: #eef2ff; font-family: Inter, "DejaVu Sans", sans-serif; }
+.dusk-bubble .summary { font-weight: 600; font-size: 11pt; }
+.dusk-bubble .body { color: #c9d1f2; font-size: 10pt; }
+.dusk-bubble .app { color: #6fe3f0; font-size: 8.5pt; font-weight: 600; }
+.dusk-bubble button {
+  background-image: none; background-color: rgba(37, 45, 92, 0.85);
+  border: 1px solid rgba(111, 227, 240, 0.45); border-radius: 8px;
+  color: #eef2ff; padding: 2px 10px; min-height: 22px; box-shadow: none; text-shadow: none;
+}
+.dusk-bubble button:hover { background-color: rgba(111, 227, 240, 0.25); }
+.dusk-bubble button.close { border: none; background-color: transparent; padding: 0 4px; min-height: 0; }
+.dusk-bubble button.close:hover { background-color: rgba(242, 154, 182, 0.30); }
+"""
+
+
+def rounded(cr, x, y, w, h, r):
+    cr.new_sub_path()
+    cr.arc(x + w - r, y + r, r, -math.pi / 2, 0)
+    cr.arc(x + w - r, y + h - r, r, 0, math.pi / 2)
+    cr.arc(x + r, y + h - r, r, math.pi / 2, math.pi)
+    cr.arc(x + r, y + r, r, math.pi, 3 * math.pi / 2)
+    cr.close_path()
+
+
+def markup_ok(text):
+    """The body is shown as markup (b, i, u, a) when it parses as such."""
+    try:
+        Pango.parse_markup(re.sub(r"</?a\b[^>]*>", "", text), -1, "\x00")
+        return True
+    except Exception:  # noqa: BLE001 - GLib.Error or a bad argument: plain text then
+        return False
+
+
+def pixbuf_from_hint(v):
+    """image-data / icon_data hint: (width, height, rowstride, alpha, bits, channels, data)."""
+    try:
+        w, h, stride, alpha, bits, _ch, data = v
+        pb = GdkPixbuf.Pixbuf.new_from_bytes(GLib.Bytes.new(bytes(data)), GdkPixbuf.Colorspace.RGB,
+                                             bool(alpha), bits, w, h, stride)
+        return pb
+    except Exception:  # noqa: BLE001 - a broken image just means no image
+        return None
+
+
+class Bubble(Gtk.Window):
+    def __init__(self, daemon, nid):
+        super().__init__(type=Gtk.WindowType.POPUP)
+        self.daemon, self.nid = daemon, nid
+        self.timer = 0
+        self.critical = False
+        self.set_app_paintable(True)
+        self.set_keep_above(True)
+        self.set_type_hint(Gdk.WindowTypeHint.NOTIFICATION)
+        self.set_default_size(WIDTH, -1)
+        screen = self.get_screen()
+        visual = screen.get_rgba_visual()
+        self.glass = bool(visual and screen.is_composited())
+        if self.glass:
+            self.set_visual(visual)
+        self.get_style_context().add_class("dusk-bubble")
+        self.connect("draw", self.on_draw)
+        self.connect("button-release-event", self.on_click)
+        self.add_events(Gdk.EventMask.BUTTON_RELEASE_MASK)
+
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, margin=14)
+        top = Gtk.Box(spacing=12)
+        self.image = Gtk.Image()
+        self.image.set_valign(Gtk.Align.START)
+        top.pack_start(self.image, False, False, 0)
+        text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
+        head = Gtk.Box(spacing=6)
+        self.app = Gtk.Label(xalign=0)
+        self.app.get_style_context().add_class("app")
+        self.app.set_ellipsize(Pango.EllipsizeMode.END)
+        head.pack_start(self.app, True, True, 0)
+        close = Gtk.Button(label="✕")
+        close.get_style_context().add_class("close")
+        close.set_relief(Gtk.ReliefStyle.NONE)
+        close.connect("clicked", lambda *_: self.daemon.close(self.nid, DISMISSED))
+        head.pack_end(close, False, False, 0)
+        text.pack_start(head, False, False, 0)
+        self.summary = Gtk.Label(xalign=0)
+        self.summary.get_style_context().add_class("summary")
+        self.summary.set_line_wrap(True)
+        self.summary.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        self.summary.set_max_width_chars(30)
+        text.pack_start(self.summary, False, False, 0)
+        self.body = Gtk.Label(xalign=0)
+        self.body.get_style_context().add_class("body")
+        self.body.set_line_wrap(True)
+        self.body.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        self.body.set_max_width_chars(36)
+        self.body.set_lines(6)
+        self.body.set_ellipsize(Pango.EllipsizeMode.END)
+        text.pack_start(self.body, False, False, 0)
+        top.pack_start(text, True, True, 0)
+        outer.pack_start(top, False, False, 0)
+        self.actions_box = Gtk.Box(spacing=6, halign=Gtk.Align.END)
+        outer.pack_start(self.actions_box, False, False, 0)
+        self.add(outer)
+
+    def update(self, app_name, icon, summary, body, actions, hints, timeout):
+        urgency = hints.get("urgency", 1)
+        self.critical = urgency == 2
+        self.app.set_text(app_name or "")
+        self.app.set_visible(bool(app_name))
+        self.summary.set_text(summary or "")
+        body = body or ""
+        if markup_ok(body):
+            self.body.set_markup(body)
+        else:
+            self.body.set_text(body)
+        self.body.set_visible(bool(body))
+        # Image: image-data, image-path, app_icon, icon_data (in the spec's order).
+        pb = None
+        for key in ("image-data", "image_data"):
+            if key in hints:
+                pb = pixbuf_from_hint(hints[key])
+        path = hints.get("image-path") or hints.get("image_path") or icon
+        if pb is None and path:
+            if path.startswith("file://"):
+                path = GLib.filename_from_uri(path)[0]
+            if path.startswith("/"):
+                try:
+                    pb = GdkPixbuf.Pixbuf.new_from_file_at_scale(path, 48, 48, True)
+                except GLib.Error:
+                    pb = None
+            else:
+                try:
+                    pb = Gtk.IconTheme.get_default().load_icon(path, 48, Gtk.IconLookupFlags.FORCE_SIZE)
+                except GLib.Error:
+                    pb = None
+        if pb is None and "icon_data" in hints:
+            pb = pixbuf_from_hint(hints["icon_data"])
+        if pb is None:
+            try:
+                pb = Gtk.IconTheme.get_default().load_icon("syluxium-notification", 48, Gtk.IconLookupFlags.FORCE_SIZE)
+            except GLib.Error:
+                pb = None
+        if pb is not None and (pb.get_width() > 48 or pb.get_height() > 48):
+            s = 48 / max(pb.get_width(), pb.get_height())
+            pb = pb.scale_simple(max(1, int(pb.get_width() * s)), max(1, int(pb.get_height() * s)),
+                                 GdkPixbuf.InterpType.BILINEAR)
+        self.image.set_from_pixbuf(pb)
+        self.image.set_visible(pb is not None)
+        # Actions: pairs of (key, label); "default" is the click on the bubble.
+        for child in self.actions_box.get_children():
+            self.actions_box.remove(child)
+        self.default_action = False
+        for key, lab in zip(actions[0::2], actions[1::2]):
+            if key == "default":
+                self.default_action = True
+                continue
+            b = Gtk.Button(label=lab)
+            b.connect("clicked", lambda _b, k=key: self.daemon.invoke(self.nid, k))
+            self.actions_box.pack_start(b, False, False, 0)
+        self.actions_box.show_all()
+        self.actions_box.set_visible(bool(self.actions_box.get_children()))
+        # Timeout: -1 = ours, 0 = until clicked; critical ones stay.
+        if self.timer:
+            GLib.source_remove(self.timer)
+            self.timer = 0
+        if timeout < 0:
+            timeout = 0 if self.critical else DEFAULT_TIMEOUT
+        if timeout > 0:
+            self.timer = GLib.timeout_add(timeout, self.on_timeout)
+        self.queue_draw()
+
+    def on_timeout(self):
+        self.timer = 0
+        self.daemon.close(self.nid, EXPIRED)
+        return False
+
+    def on_click(self, _w, ev):
+        if ev.button == 1 and self.default_action:
+            self.daemon.invoke(self.nid, "default")
+        else:
+            self.daemon.close(self.nid, DISMISSED)
+        return True
+
+    def on_draw(self, _w, cr):
+        alloc = self.get_allocation()
+        w, h = alloc.width, alloc.height
+        accent = (0.95, 0.60, 0.71) if self.critical else (0.435, 0.89, 0.94)  # pink / cyan
+        if self.glass:
+            cr.set_operator(0)  # CLEAR
+            cr.paint()
+            cr.set_operator(2)  # OVER
+            rounded(cr, 0.5, 0.5, w - 1, h - 1, RADIUS)
+            cr.set_source_rgba(0.078, 0.102, 0.227, 0.86)  # #141A3A glass
+        else:
+            cr.rectangle(0, 0, w, h)
+            cr.set_source_rgb(0.078, 0.102, 0.227)
+        cr.fill_preserve()
+        cr.set_line_width(1)
+        cr.set_source_rgba(*accent, 0.55)
+        cr.stroke()
+        # A thin accent line along the top, as on the Dusk panels.
+        cr.set_source_rgba(*accent, 0.85)
+        cr.rectangle(RADIUS, 1, max(0, w - 2 * RADIUS), 2)
+        cr.fill()
+        return False
+
+    def finish(self):
+        if self.timer:
+            GLib.source_remove(self.timer)
+            self.timer = 0
+        self.destroy()
+
+
+class Daemon:
+    def __init__(self):
+        self.next_id = 1
+        self.bubbles = {}  # id -> Bubble, oldest first
+        self.conn = None
+        provider = Gtk.CssProvider()
+        provider.load_from_data(CSS)
+        Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), provider,
+                                                 Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+        self.node = Gio.DBusNodeInfo.new_for_xml(XML)
+        self.owner = Gio.bus_own_name(Gio.BusType.SESSION, BUS_NAME, Gio.BusNameOwnerFlags.DO_NOT_QUEUE,
+                                      self.on_bus, None, self.on_lost)
+
+    def on_bus(self, conn, _name):
+        self.conn = conn
+        conn.register_object(PATH, self.node.interfaces[0], self.on_call, None, None)
+
+    def on_lost(self, _conn, _name):
+        # Another notification service has the name (or there's no bus).
+        print("syluxium-notifyd: org.freedesktop.Notifications is taken or no session bus", file=sys.stderr)
+        Gtk.main_quit()
+
+    def on_call(self, _conn, _sender, _path, _iface, method, params, inv):
+        if method == "GetCapabilities":
+            inv.return_value(GLib.Variant("(as)", (["body", "body-markup", "body-hyperlinks", "actions",
+                                                    "icon-static", "persistence"],)))
+        elif method == "GetServerInformation":
+            inv.return_value(GLib.Variant("(ssss)", ("Syluxium Notifications", "Syluxium", "1.0", "1.2")))
+        elif method == "CloseNotification":
+            self.close(params.unpack()[0], CLOSED)
+            inv.return_value(None)
+        elif method == "Notify":
+            app_name, replaces, icon, summary, body, actions, hints, timeout = params.unpack()
+            nid = self.show(app_name, replaces, icon, summary, body, actions, hints, timeout)
+            inv.return_value(GLib.Variant("(u)", (nid,)))
+        else:
+            inv.return_dbus_error("org.freedesktop.DBus.Error.UnknownMethod", method)
+
+    def show(self, app_name, replaces, icon, summary, body, actions, hints, timeout):
+        bubble = self.bubbles.get(replaces) if replaces else None
+        if bubble is None:
+            nid = self.next_id
+            self.next_id += 1
+            bubble = Bubble(self, nid)
+            bubble.get_child().show_all()
+            self.bubbles[nid] = bubble
+            # Too many at once: the oldest go.
+            while len(self.bubbles) > MAX_BUBBLES:
+                self.close(next(iter(self.bubbles)), EXPIRED)
+        bubble.update(app_name, icon, summary, body, list(actions), hints, timeout)
+        bubble.show()
+        GLib.idle_add(self.layout)
+        return bubble.nid
+
+    def layout(self):
+        """Stack the bubbles upwards from the lower right corner of the work area."""
+        display = Gdk.Display.get_default()
+        mon = display.get_primary_monitor() or display.get_monitor(0)
+        area = mon.get_workarea()
+        geo = mon.get_geometry()
+        # Without a work area from the window manager: keep clear of the taskbar.
+        bottom = area.y + area.height if area.height < geo.height else geo.y + geo.height - 48
+        y = bottom - MARGIN
+        for b in reversed(list(self.bubbles.values())):
+            _min, nat = b.get_preferred_height_for_width(WIDTH)
+            h = max(nat, 60)
+            b.resize(WIDTH, h)
+            y -= h
+            b.move(area.x + area.width - WIDTH - MARGIN, y)
+            if os.environ.get("SYLUXIUM_NOTIFYD_DEBUG"):
+                print(f"syluxium-notifyd: bubble {b.nid} at {area.x + area.width - WIDTH - MARGIN},{y} "
+                      f"{WIDTH}x{h} (work area {area.x},{area.y} {area.width}x{area.height})", file=sys.stderr)
+            y -= GAP
+        return False
+
+    def close(self, nid, reason):
+        b = self.bubbles.pop(nid, None)
+        if b is None:
+            return
+        b.finish()
+        self.emit("NotificationClosed", GLib.Variant("(uu)", (nid, reason)))
+        GLib.idle_add(self.layout)
+
+    def invoke(self, nid, key):
+        self.emit("ActionInvoked", GLib.Variant("(us)", (nid, key)))
+        self.close(nid, DISMISSED)
+
+    def emit(self, signal, args):
+        if self.conn:
+            self.conn.emit_signal(None, PATH, BUS_NAME, signal, args)
+
+
+if __name__ == "__main__":
+    Daemon()
+    Gtk.main()
