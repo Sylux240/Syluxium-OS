@@ -9,7 +9,7 @@ constexpr long PERM = 1, NOENT = 2, SRCH = 3, INTR = 4, IO = 5, NXIO = 6, TOOBIG
                FAULT = 14, BUSY = 16, EXIST = 17, XDEV = 18, NODEV = 19, NOTDIR = 20,
                ISDIR = 21, INVAL = 22, NFILE = 23, MFILE = 24, NOTTY = 25, FBIG = 27,
                NOSPC = 28, SPIPE = 29, ROFS = 30, MLINK = 31, PIPE = 32, RANGE = 34,
-               NAMETOOLONG = 36, NOSYS = 38, NOTEMPTY = 39, LOOP = 40, NODATA = 61,
+               DEADLK = 35, NAMETOOLONG = 36, NOSYS = 38, NOTEMPTY = 39, LOOP = 40, NODATA = 61,
                OVERFLOW = 75, OPNOTSUPP = 95, TIMEDOUT = 110;
 
 } // namespace err

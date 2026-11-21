@@ -8,6 +8,8 @@ struct Cpu;
 namespace vmm { class AddressSpace; }
 namespace proc { struct Process; }
 
+namespace interrupts { struct Frame; }
+
 namespace sched {
 
 enum class ThreadState : u8 {
@@ -51,10 +53,12 @@ struct Thread {
     u64 tls_desc[3] = {};
     u16 user_fs_sel = 0, user_gs_sel = 0;
     u64 clear_child_tid = 0;             // set_tid_address / CLONE_CHILD_CLEARTID
+    u64 robust_list = 0;                 // set_robust_list: robust mutexes released at exit
     int user_tid = 0;                    // Linux thread id (shares the pid number space)
     int vtid = 0;                        // the thread id inside its process's PID namespace (= user_tid outside one)
     u64 sig_pending = 0;                 // signals sent to this thread only (tgkill)
     i64 cur_syscall = -1;                // the system call it's in (-1: none), /proc/<pid>/syscall
+    interrupts::Frame* syscall_frame = nullptr; // its user registers while in a system call
     u64 last_fault_code = 0;             // page-fault error code of the last fault (crash reports)
     u64 fault_cr2 = 0;                   // address of the last page fault (sigcontext.cr2)
     // The synchronous signal a CPU exception raised (SIGSEGV on a page

@@ -119,10 +119,12 @@ bool Memory::copy_on_write(Vma* v, uptr page) {
     if (!new_phys)
         return false;
     memcpy(mm::phys_to_virt(new_phys), mm::phys_to_virt(old_phys), PAGE_SIZE);
-    m_as->unmap(page);
-    bool ok = m_as->map(page, new_phys, flags);
+    // One PTE store: threads of this process reading the page on other CPUs
+    // (the kernel's futex code among them, holding a spinlock) never find it
+    // missing -- they see the old copy or the new one.
+    bool ok = m_as->replace(page, new_phys, flags) != 0;
     vmm::shootdown(page, 1, m_as);
-    vmm::release_user_page(old_phys);
+    vmm::release_user_page(ok ? old_phys : new_phys);
     return ok;
 }
 
@@ -296,6 +298,12 @@ long Memory::map(uptr addr, usize len, u32 prot, u32 flags, vfs::Inode* file, u6
         prepare_locked(addr, len, false);
     *out = addr;
     return 0;
+}
+
+bool Memory::shared_at(uptr addr) {
+    LockGuard guard(m_lock);
+    Vma* v = find(addr);
+    return v && v->kind == VMA_DEVICE;
 }
 
 bool Memory::mapping_at(uptr addr, vfs::Inode** file, usize* len) {

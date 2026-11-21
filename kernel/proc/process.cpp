@@ -188,6 +188,10 @@ void page_fault(interrupts::Frame* frame) {
     if (!from_user && addr < mm::USER_END && (frame->error_code & 1) && !(frame->error_code & 16) &&
         protect::smap_violation(addr, frame->rip, &frame->rflags, smap_caller(frame)))
         return;
+    // The futex code reads user memory under spinlocks: it gets -EFAULT and
+    // faults the page in itself after letting go (resolving here may sleep).
+    if (!from_user && futex::fault_fixup(frame))
+        return;
     if (p && p->mem && addr < mm::USER_END) {
         // Resolving may sleep on the memory lock; fine with interrupts on.
         if (frame->rflags & arch::RFLAGS_IF)
@@ -933,6 +937,11 @@ void exit_thread(int code) {
     KASSERT(p != nullptr);
     sched::Thread* me = sched::current();
 
+    // Robust mutexes it still holds: marked "owner died", a waiter woken.
+    if (me->robust_list && p->mem) {
+        futex::exit_robust_list(me->robust_list, me->vtid);
+        me->robust_list = 0;
+    }
     // pthread_join waits on this word: clear it and wake the joiner.
     if (me->clear_child_tid && p->mem) {
         i32 zero = 0;
