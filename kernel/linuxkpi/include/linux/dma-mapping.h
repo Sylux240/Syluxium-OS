@@ -7,7 +7,8 @@
 LKPI_EXTERN_C_BEGIN
 
 /* No IOMMU: bus addresses are physical addresses. Memory is cache-coherent
- * on x86, so the sync calls are barriers only. */
+ * on x86, so the sync calls are barriers - except for buffers bounced below
+ * a device's DMA mask by dma_map_single() (pci.cpp), which they copy. */
 enum dma_data_direction {
     DMA_BIDIRECTIONAL = 0,
     DMA_TO_DEVICE = 1,
@@ -23,7 +24,10 @@ void* dma_alloc_coherent(struct device* dev, size_t size, dma_addr_t* handle, gf
 void dma_free_coherent(struct device* dev, size_t size, void* cpu, dma_addr_t handle);
 dma_addr_t dma_map_single(struct device* dev, void* ptr, size_t size, enum dma_data_direction dir);
 #define dma_map_single_attrs(d, p, s, dir, a) dma_map_single(d, p, s, dir)
-static inline void dma_unmap_single(struct device* dev, dma_addr_t a, size_t s, enum dma_data_direction d) {}
+dma_addr_t lkpi_dma_map_virt(struct device* dev, void* virt, size_t size, int dir);
+void lkpi_dma_unmap(dma_addr_t a);
+void lkpi_dma_sync(dma_addr_t a, size_t size, int for_cpu);
+static inline void dma_unmap_single(struct device* dev, dma_addr_t a, size_t s, enum dma_data_direction d) { lkpi_dma_unmap(a); }
 struct page;
 dma_addr_t dma_map_page(struct device* dev, struct page* page, size_t offset, size_t size, enum dma_data_direction dir);
 #define dma_map_page_attrs(d, p, o, s, dir, a) dma_map_page(d, p, o, s, dir)
@@ -39,10 +43,10 @@ dma_addr_t dma_map_page(struct device* dev, struct page* page, size_t offset, si
 #define dma_set_seg_boundary(d, m) 0
 #define dma_sync_single_range_for_cpu(d, a, o, s, dir) dma_sync_single_for_cpu(d, (a) + (o), s, dir)
 #define dma_sync_single_range_for_device(d, a, o, s, dir) dma_sync_single_for_device(d, (a) + (o), s, dir)
-static inline void dma_unmap_page(struct device* dev, dma_addr_t a, size_t s, enum dma_data_direction d) {}
+static inline void dma_unmap_page(struct device* dev, dma_addr_t a, size_t s, enum dma_data_direction d) { lkpi_dma_unmap(a); }
 static inline int dma_mapping_error(struct device* dev, dma_addr_t a) { return a == 0; }
-static inline void dma_sync_single_for_cpu(struct device* d, dma_addr_t a, size_t s, enum dma_data_direction dir) { __atomic_thread_fence(__ATOMIC_SEQ_CST); }
-static inline void dma_sync_single_for_device(struct device* d, dma_addr_t a, size_t s, enum dma_data_direction dir) { __atomic_thread_fence(__ATOMIC_SEQ_CST); }
+static inline void dma_sync_single_for_cpu(struct device* d, dma_addr_t a, size_t s, enum dma_data_direction dir) { lkpi_dma_sync(a, s, 1); }
+static inline void dma_sync_single_for_device(struct device* d, dma_addr_t a, size_t s, enum dma_data_direction dir) { lkpi_dma_sync(a, s, 0); }
 int dma_set_mask(struct device* dev, u64 mask);
 int dma_set_coherent_mask(struct device* dev, u64 mask);
 int dma_set_mask_and_coherent(struct device* dev, u64 mask);
@@ -58,4 +62,7 @@ void dma_pool_free(struct dma_pool* pool, void* vaddr, dma_addr_t handle);
 
 LKPI_EXTERN_C_END
 
+#ifndef DMA_MAPPING_ERROR
+#define DMA_MAPPING_ERROR (~(dma_addr_t)0)
+#endif
 #endif

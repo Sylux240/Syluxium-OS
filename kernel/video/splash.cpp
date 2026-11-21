@@ -221,7 +221,7 @@ class SplashDevice : public vfs::Inode {
 public:
     SplashDevice() {
         ino = vfs::next_ino();
-        mode = vfs::S_IFCHR | 0600;
+        mode = vfs::S_IFCHR | 0622; // the desktop session (Wayland shell) ends the splash too
         rdev = (10 << 8) | 250;
         atime = mtime = ctime = vfs::now();
     }

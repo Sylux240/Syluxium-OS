@@ -636,3 +636,10 @@ void zap_page_range_single(struct vm_area_struct *vma, unsigned long address, un
 {
 	zap_vma_ptes(vma, address, size);
 }
+
+/* The size of a Linux file's inode (a dma-buf's buffer size): fstat and
+ * lseek(SEEK_END) report it, as on Linux - Mesa sizes imported dma-bufs so. */
+long long lkpi_file_size(struct file *f)
+{
+	return f && f->f_inode ? f->f_inode->i_size : 0;
+}

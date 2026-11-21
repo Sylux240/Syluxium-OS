@@ -1,5 +1,6 @@
 // File and filesystem system calls.
 
+#include <arch/x86_64/protect.hpp>
 #include <block/block.hpp>
 #include <fs/ext2.hpp>
 #include <core/log.hpp>
@@ -142,6 +143,9 @@ long do_read(File* f, u64 user_buf, u64 count, i64 offset = -1) {
         return -err::ISDIR;
     if (long r = uaccess::check(reinterpret_cast<void*>(user_buf), count, true); r < 0)
         return r;
+    // File systems and drivers fill the user buffer directly: a SMAP window
+    // for the duration of the read (and of the write below).
+    protect::UserAccess window;
     if (offset >= 0)
         return f->inode->read_file(f, static_cast<u64>(offset), reinterpret_cast<void*>(user_buf), count);
     LockGuard guard(f->lock);
@@ -156,6 +160,7 @@ long do_write(File* f, u64 user_buf, u64 count, i64 offset = -1) {
         return -err::BADF;
     if (long r = uaccess::check(reinterpret_cast<void*>(user_buf), count, false); r < 0)
         return r;
+    protect::UserAccess window;
     if (offset >= 0) {
         isize n = f->inode->write_file(f, static_cast<u64>(offset), reinterpret_cast<const void*>(user_buf), count);
         if (n > 0 && is_reg(f->inode->mode))
@@ -410,6 +415,28 @@ long sys_readv(SYSCALL_ARGS) { SYSCALL_UNUSED; return vectored(a0, a1, a2, false
 long sys_writev(SYSCALL_ARGS) { SYSCALL_UNUSED; return vectored(a0, a1, a2, true); }
 
 long sys_open(SYSCALL_ARGS) { SYSCALL_UNUSED; return do_openat(AT_FDCWD, a0, static_cast<u32>(a1), static_cast<u32>(a2)); }
+// openat2(dirfd, path, how, size): openat with its flags in a struct. The
+// RESOLVE_* restrictions (no symlinks, stay beneath dirfd, ...) aren't
+// implemented: asking for any answers ENOSYS (callers fall back to openat)
+// rather than opening something the caller meant to forbid.
+long sys_openat2(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    struct OpenHow {
+        u64 flags, mode, resolve;
+    } how{};
+    if (a3 < sizeof(how) || a3 > 4096)
+        return -err::INVAL;
+    if (long r = uaccess::copy_from(&how, reinterpret_cast<const void*>(a2), sizeof(how)); r < 0)
+        return r;
+    if (how.flags >> 32 || how.mode & ~07777ull || (!(how.flags & (O_CREAT | 020000000 /* O_TMPFILE */)) && how.mode))
+        return -err::INVAL;
+    if (how.resolve & ~0x3Full)
+        return -err::INVAL;
+    if (how.resolve)
+        return -err::NOSYS;
+    return do_openat(static_cast<i32>(a0), a1, static_cast<u32>(how.flags), static_cast<u32>(how.mode));
+}
+
 long sys_openat(SYSCALL_ARGS) {
     SYSCALL_UNUSED;
     return do_openat(static_cast<long>(static_cast<i32>(a0)), a1, static_cast<u32>(a2), static_cast<u32>(a3));
@@ -1006,6 +1033,7 @@ long sys_getdents64(SYSCALL_ARGS) {
         u8* rec = out + used;
         u64 next_off = f->offset + 1;
         u16 rl = static_cast<u16>(reclen);
+        protect::UserAccess window; // rec: in the caller's (user) buffer
         memcpy(rec, &e.ino, 8);
         memcpy(rec + 8, &next_off, 8);
         memcpy(rec + 16, &rl, 2);
@@ -1335,6 +1363,76 @@ long sys_sendfile(SYSCALL_ARGS) {
     kfree(buf);
     if (a2 && offset >= 0)
         uaccess::put(reinterpret_cast<i64*>(a2), offset);
+    return total ? static_cast<long>(total) : result;
+}
+
+// copy_file_range(fd_in, off_in*, fd_out, off_out*, len, flags): copy between
+// two regular files in the kernel (cp and install use it). A NULL offset
+// pointer means the file's own position, which then advances.
+long sys_copy_file_range(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    if (a5 != 0)
+        return -err::INVAL;
+    Process* p = proc::current();
+    FileRef in(p, static_cast<long>(a0));
+    FileRef out(p, static_cast<long>(a2));
+    if (!in || !out)
+        return -err::BADF;
+    if (!can_read(in.get()) || !can_write(out.get()) || (out->flags & O_APPEND))
+        return -err::BADF;
+    if (!vfs::is_reg(in->inode->mode) || !vfs::is_reg(out->inode->mode))
+        return vfs::is_dir(in->inode->mode) || vfs::is_dir(out->inode->mode) ? -err::ISDIR : -err::INVAL;
+    i64 off_in = -1, off_out = -1;
+    if (a1 && uaccess::get(&off_in, reinterpret_cast<const i64*>(a1)) < 0)
+        return -err::FAULT;
+    if (a3 && uaccess::get(&off_out, reinterpret_cast<const i64*>(a3)) < 0)
+        return -err::FAULT;
+    if ((a1 && off_in < 0) || (a3 && off_out < 0))
+        return -err::INVAL;
+    u64 rpos = a1 ? static_cast<u64>(off_in) : in->offset;
+    u64 wpos = a3 ? static_cast<u64>(off_out) : out->offset;
+    u64 len = a4;
+    // The same file: the ranges may not overlap.
+    if (in->inode == out->inode && rpos < wpos + len && wpos < rpos + len)
+        return -err::INVAL;
+
+    constexpr usize CHUNK = 64 * KiB;
+    auto* buf = static_cast<u8*>(kmalloc(CHUNK));
+    if (!buf)
+        return -err::NOMEM;
+    u64 total = 0;
+    long result = 0;
+    while (total < len) {
+        usize want = min<u64>(CHUNK, len - total);
+        isize n = in->inode->read_file(in.get(), rpos, buf, want);
+        if (n <= 0) {
+            result = n;
+            break;
+        }
+        isize w = out->inode->write_file(out.get(), wpos, buf, static_cast<usize>(n));
+        if (w <= 0) {
+            result = w;
+            break;
+        }
+        rpos += static_cast<u64>(w);
+        wpos += static_cast<u64>(w);
+        total += static_cast<u64>(w);
+        if (w < n)
+            break;
+    }
+    kfree(buf);
+    if (a1)
+        uaccess::put(reinterpret_cast<i64*>(a1), static_cast<i64>(rpos));
+    else {
+        LockGuard guard(in->lock);
+        in->offset = rpos;
+    }
+    if (a3)
+        uaccess::put(reinterpret_cast<i64*>(a3), static_cast<i64>(wpos));
+    else {
+        LockGuard guard(out->lock);
+        out->offset = wpos;
+    }
     return total ? static_cast<long>(total) : result;
 }
 
@@ -1927,8 +2025,8 @@ long sys_kcmp(SYSCALL_ARGS) {
     if (type < KCMP_FILE || type >= KCMP_EPOLL_TFD)
         return -err::INVAL;
     LockGuard guard(proc::table_lock());
-    Process* p1 = proc::find(static_cast<int>(a0));
-    Process* p2 = proc::find(static_cast<int>(a1));
+    Process* p1 = proc::find_visible(static_cast<int>(a0), proc::current());
+    Process* p2 = proc::find_visible(static_cast<int>(a1), proc::current());
     if (!p1 || !p2)
         return -err::SRCH;
     Process* self = proc::current();
@@ -2023,6 +2121,8 @@ void register_file() {
     set(7, sys_poll, "poll");
     set(23, sys_select, "select");
     set(40, sys_sendfile, "sendfile");
+    set(326, sys_copy_file_range, "copy_file_range");
+    set(437, sys_openat2, "openat2");
     set(41, sys_socket, "socket");
     set(42, sys_not_socket, "connect");
     set(51, sys_not_socket, "getsockname");

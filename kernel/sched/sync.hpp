@@ -17,8 +17,12 @@ public:
     template <typename Cond>
     void wait_until(Cond cond) {
         m_lock.lock();
-        while (!cond())
-            block_on(m_waiters, m_lock);
+        Recheck<Cond> rc{&cond, false};
+        while (!cond()) {
+            block_on(m_waiters, m_lock, 0, &Recheck<Cond>::check, &rc);
+            if (rc.hit) // the re-check came out true (and did its work): done
+                break;
+        }
         m_lock.unlock();
     }
 
@@ -28,8 +32,14 @@ public:
         u64 deadline = clock::now_ns() + timeout_ns;
         m_lock.lock();
         bool ok;
-        while (!(ok = cond()) && clock::now_ns() < deadline)
-            block_on(m_waiters, m_lock, deadline);
+        Recheck<Cond> rc{&cond, false};
+        while (!(ok = cond()) && clock::now_ns() < deadline) {
+            block_on(m_waiters, m_lock, deadline, &Recheck<Cond>::check, &rc);
+            if (rc.hit) {
+                ok = true;
+                break;
+            }
+        }
         m_lock.unlock();
         return ok;
     }
@@ -41,6 +51,20 @@ public:
     IrqSpinlock& lock() { return m_lock; }
 
 private:
+    // The condition is checked again once the thread is marked asleep (see
+    // block_on): a signal that arrives in between still wakes the wait.
+    // Conditions may have side effects (Completion counts itself down), so
+    // a true re-check ends the wait without evaluating it once more.
+    template <typename Cond>
+    struct Recheck {
+        Cond* cond;
+        bool hit;
+        static bool check(void* p) {
+            auto* r = static_cast<Recheck*>(p);
+            return r->hit = (*r->cond)();
+        }
+    };
+
     IrqSpinlock m_lock;
     WaitList m_waiters;
 };

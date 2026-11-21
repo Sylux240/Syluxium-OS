@@ -186,6 +186,8 @@ struct sk_buff* alloc_skb(unsigned int size, gfp_t gfp);
 struct sk_buff* netdev_alloc_skb(struct net_device* dev, unsigned int len);
 #define __netdev_alloc_skb(dev, len, gfp) netdev_alloc_skb(dev, len)
 struct sk_buff* napi_alloc_skb(struct napi_struct* napi, unsigned int len);
+struct sk_buff* build_skb(void* data, unsigned int frag_size);
+struct sk_buff* napi_build_skb(void* data, unsigned int frag_size);
 #define dev_alloc_skb(len) netdev_alloc_skb(NULL, len)
 #define __dev_alloc_skb(len, gfp) netdev_alloc_skb(NULL, len)
 static inline struct sk_buff* netdev_alloc_skb_ip_align(struct net_device* dev, unsigned int len) {
@@ -235,7 +237,7 @@ void skb_queue_head(struct sk_buff_head* list, struct sk_buff* newsk);
 void skb_unlink(struct sk_buff* skb, struct sk_buff_head* list);
 void skb_append(struct sk_buff* old, struct sk_buff* newsk, struct sk_buff_head* list);
 
-#define skb_shinfo(skb) (&(skb)->lkpi_shinfo)
+#define skb_shinfo(skb) ((struct skb_shared_info*)&(skb)->lkpi_shinfo) /* const skbs too, as in Linux */
 static inline struct sk_buff* skb_get(struct sk_buff* skb) { refcount_inc(&skb->users); return skb; }
 static inline int skb_shared(const struct sk_buff* skb) { return refcount_read(&skb->users) != 1; }
 static inline int skb_cloned(const struct sk_buff* skb) { return 0; }

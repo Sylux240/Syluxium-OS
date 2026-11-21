@@ -143,50 +143,100 @@ void populate_devices() {
     }, nullptr);
 }
 
-// /sys/dev/char/<major>:<minor> for a character device of a PCI device
-// (DRM's card and render nodes): "device" leads to the PCI device and
-// "uevent" names the node, as libdrm's drmGetDevice2() (Mesa) expects.
+// /sys/dev/char/<major>:<minor> for a character device (DRM's card and
+// render nodes) of a PCI or platform device: "device" leads to the parent
+// device, "uevent" and "dev" name the node, as libdrm's drmGetDevice2()
+// (Mesa) and drmGetDeviceNameFromFd2() (wlroots) expect; /sys/class/drm/<node>
+// links to it so udev's enumeration (wlroots, libinput's seat) finds it.
 namespace {
 struct CharDev {
-    char pci[32];
+    char parent[96]; // /sys path of the parent device
     char uevent[96];
 };
 bool link_chardev_device(char* out, usize size, const void* c) {
-    snprintf(out, size, "/sys/bus/pci/devices/%s", static_cast<const CharDev*>(c)->pci);
+    snprintf(out, size, "%s", static_cast<const CharDev*>(c)->parent);
     return true;
 }
 bool gen_chardev_uevent(TextBuffer& o, const void* c) {
     o.append(static_cast<const CharDev*>(c)->uevent);
     return true;
 }
+struct ClassLink {
+    char target[48];
+};
+bool link_class(char* out, usize size, const void* c) {
+    snprintf(out, size, "%s", static_cast<const ClassLink*>(c)->target);
+    return true;
+}
 } // namespace
 
 void add_char_device(u32 major, u32 minor, const char* devname, const char* pci_bus_id) {
+    add_char_device(major, minor, devname, pci_bus_id, true);
+}
+
+void add_char_device(u32 major, u32 minor, const char* devname, const char* parent_name, bool pci) {
     char dir[64];
     snprintf(dir, sizeof(dir), "/sys/dev/char/%u:%u", major, minor);
     vfs::mkdir_p(dir, 0755);
+    const char* base = devname;
+    for (const char* p = devname; *p; p++)
+        if (*p == '/')
+            base = p + 1;
     auto* cd = new CharDev;
-    snprintf(cd->pci, sizeof(cd->pci), "%s", pci_bus_id);
-    snprintf(cd->uevent, sizeof(cd->uevent), "MAJOR=%u\nMINOR=%u\nDEVNAME=%s\n", major, minor, devname);
+    if (pci) {
+        snprintf(cd->parent, sizeof(cd->parent), "/sys/bus/pci/devices/%s", parent_name);
+    } else {
+        // A platform device (simpledrm's simple-framebuffer.0).
+        snprintf(cd->parent, sizeof(cd->parent), "/sys/devices/platform/%s", parent_name);
+        char pdev[128];
+        snprintf(pdev, sizeof(pdev), "%s/uevent", cd->parent);
+        vfs::mkdir_p(cd->parent, 0755);
+        char text[256];
+        // libdrm's drmGetDevice2() describes platform devices by their
+        // device-tree node (OF_FULLNAME / OF_COMPATIBLE_N): give it one.
+        snprintf(text, sizeof(text),
+                 "DRIVER=%s\nOF_NAME=framebuffer\nOF_FULLNAME=/%s\nOF_COMPATIBLE_0=%s\nOF_COMPATIBLE_N=1\n"
+                 "MODALIAS=platform:%s\n",
+                 parent_name, parent_name, parent_name, parent_name);
+        for (char* c = text; *c; c++) // the driver name without the instance (".0")
+            if (*c == '.' && c[1] >= '0' && c[1] <= '9') {
+                char* nl = c;
+                while (*nl && *nl != '\n')
+                    nl++;
+                memmove(c, nl, strlen(nl) + 1);
+            }
+        genfs::static_file(pdev, text);
+        vfs::mkdir_p("/sys/bus/platform/devices", 0755);
+        add(cd->parent, "subsystem", new GeneratedLink([](char* out, usize size, const void*) {
+            snprintf(out, size, "/sys/bus/platform");
+            return true;
+        }, cd));
+    }
+    snprintf(cd->uevent, sizeof(cd->uevent), "MAJOR=%u\nMINOR=%u\nDEVNAME=%s\nDEVTYPE=drm_minor\n", major, minor,
+             devname);
     add(dir, "device", new GeneratedLink(link_chardev_device, cd));
     add(dir, "uevent", new GeneratedFile(gen_chardev_uevent, cd));
     add(dir, "subsystem", new GeneratedLink([](char* out, usize size, const void*) {
         snprintf(out, size, "../../../class/drm");
         return true;
     }, cd));
-    // <pci device>/drm/<card0|renderD128>: libdrm finds a device's other
-    // nodes there (the X server hands clients the render node for DRI3).
-    const char* base = devname;
-    for (const char* p = devname; *p; p++)
-        if (*p == '/')
-            base = p + 1;
-    char node[128];
-    snprintf(node, sizeof(node), "/sys/bus/pci/devices/%s/drm/%s", pci_bus_id, base);
-    vfs::mkdir_p(node, 0755);
-    add(node, "uevent", new GeneratedFile(gen_chardev_uevent, cd));
     char devnum[32];
     snprintf(devnum, sizeof(devnum), "%u:%u\n", major, minor);
-    char devpath[160];
+    char devfile[96];
+    snprintf(devfile, sizeof(devfile), "%s/dev", dir);
+    genfs::static_file(devfile, devnum);
+    // /sys/class/drm/<card0|renderD128> -> ../../dev/char/<major>:<minor>
+    vfs::mkdir_p("/sys/class/drm", 0755);
+    auto* cl = new ClassLink;
+    snprintf(cl->target, sizeof(cl->target), "../../dev/char/%u:%u", major, minor);
+    add("/sys/class/drm", base, new GeneratedLink(link_class, cl));
+    // <parent device>/drm/<card0|renderD128>: libdrm finds a device's other
+    // nodes there (the X server hands clients the render node for DRI3).
+    char node[160];
+    snprintf(node, sizeof(node), "%s/drm/%s", cd->parent, base);
+    vfs::mkdir_p(node, 0755);
+    add(node, "uevent", new GeneratedFile(gen_chardev_uevent, cd));
+    char devpath[192];
     snprintf(devpath, sizeof(devpath), "%s/dev", node);
     genfs::static_file(devpath, devnum);
 }

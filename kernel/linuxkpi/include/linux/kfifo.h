@@ -17,3 +17,11 @@
 #define kfifo_get(f, ptr) ({ int __ok = !kfifo_is_empty(f); \
 	if (__ok) { *(ptr) = (f)->buf[(f)->out & (f)->mask]; smp_wmb(); (f)->out++; } __ok; })
 #define kfifo_peek(f, ptr) ({ int __ok = !kfifo_is_empty(f); if (__ok) *(ptr) = (f)->buf[(f)->out & (f)->mask]; __ok; })
+
+/* FIFOs whose buffer is allocated at run time (DECLARE_KFIFO_PTR + kfifo_alloc). */
+#define DECLARE_KFIFO_PTR(fifo, type) \
+	struct { unsigned int in, out, mask; type *buf; } fifo
+#define kfifo_alloc(f, size, gfp) ({ unsigned int __n = roundup_pow_of_two(size); \
+	(f)->in = (f)->out = 0; (f)->mask = __n - 1; \
+	(f)->buf = kcalloc(__n, sizeof(*(f)->buf), gfp); (f)->buf ? 0 : -ENOMEM; })
+#define kfifo_free(f) do { kfree((f)->buf); (f)->buf = NULL; (f)->mask = 0; } while (0)

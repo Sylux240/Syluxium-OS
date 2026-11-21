@@ -1,6 +1,8 @@
+#include <arch/x86_64/protect.hpp>
 #include <core/watchdog.hpp>
 #include <video/splash.hpp>
 #include <drivers/input/input.hpp>
+#include <drivers/input/input_sysfs.hpp>
 #include <fs/poll.hpp>
 #include <fs/vfs.hpp>
 #include <lib/format.hpp>
@@ -108,6 +110,7 @@ public:
             if (c->count) {
                 usize n = min(count / sizeof(LinuxEvent), c->count);
                 auto* out = static_cast<LinuxEvent*>(buf);
+                protect::UserAccess window; // out: the reader's (user) buffer
                 for (usize i = 0; i < n; i++) {
                     out[i] = c->queue[c->head];
                     c->head = (c->head + 1) % CLIENT_QUEUE;
@@ -323,6 +326,7 @@ void register_device(Device* d) {
     vfs::add_node(path, new EvdevNode(&g_states[slot]));
     if (slot == g_count)
         g_count++;
+    sysfs::added(slot);
 }
 
 void unregister_device(Device* d) {
@@ -332,6 +336,7 @@ void unregister_device(Device* d) {
     char path[32];
     snprintf(path, sizeof(path), "/dev/input/event%u", d->index);
     vfs::remove_node(path);
+    sysfs::removed(d->index);
     {
         LockGuard guard(st->readers.lock());
         st->dev = nullptr;
@@ -341,8 +346,21 @@ void unregister_device(Device* d) {
     poll::notify();
 }
 
+bool sysfs::snapshot(u32 slot, Device* out, bool* combined) {
+    if (slot >= g_count)
+        return false;
+    LockGuard guard(g_states[slot].readers.lock());
+    Device* d = g_states[slot].dev;
+    if (!d)
+        return false;
+    memcpy(static_cast<void*>(out), d, sizeof(Device));
+    *combined = d == &g_all_keyboards || d == &g_all_pointers;
+    return true;
+}
+
 void init() {
     vfs::mkdir_p("/dev/input");
+    sysfs::init();
     auto name = [](Device& d, const char* n) {
         for (usize i = 0; n[i] && i < sizeof(d.name) - 1; i++)
             d.name[i] = n[i];

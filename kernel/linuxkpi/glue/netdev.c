@@ -971,6 +971,38 @@ int mii_ethtool_set_link_ksettings(struct mii_if_info* mii, const struct ethtool
 	return -EOPNOTSUPP;
 }
 
+static void lkpi_dummy_setup(struct net_device* dev) { }
+
+struct net_device* alloc_netdev_dummy(int sizeof_priv)
+{
+	return alloc_netdev(sizeof_priv, "dummy#", NET_NAME_UNKNOWN, lkpi_dummy_setup);
+}
+
+/* The old ethtool interface (usbnet drivers): speed from what both ends offer. */
+void mii_ethtool_gset(struct mii_if_info* mii, struct ethtool_cmd* ecmd)
+{
+	int bmcr = mii->mdio_read(mii->dev, mii->phy_id, MII_BMCR);
+	int common = mii->mdio_read(mii->dev, mii->phy_id, MII_ADVERTISE) & mii->mdio_read(mii->dev, mii->phy_id, MII_LPA);
+	int speed = (bmcr & BMCR_SPEED100) || (common & (ADVERTISE_100FULL | ADVERTISE_100HALF)) ? SPEED_100 : SPEED_10;
+	if (mii->supports_gmii) {
+		int stat1000 = mii->mdio_read(mii->dev, mii->phy_id, MII_STAT1000);
+		if (stat1000 & (LPA_1000FULL | LPA_1000HALF))
+			speed = SPEED_1000;
+	}
+	memset(ecmd, 0, sizeof(*ecmd));
+	ecmd->speed = (u16)speed;
+	ecmd->speed_hi = (u16)(speed >> 16);
+	ecmd->duplex = mii->full_duplex ? DUPLEX_FULL : DUPLEX_HALF;
+	ecmd->port = PORT_MII;
+	ecmd->phy_address = (u8)mii->phy_id;
+	ecmd->autoneg = (bmcr & BMCR_ANENABLE) ? AUTONEG_ENABLE : AUTONEG_DISABLE;
+}
+
+int mii_ethtool_sset(struct mii_if_info* mii, struct ethtool_cmd* ecmd)
+{
+	return -EOPNOTSUPP;
+}
+
 int generic_mii_ioctl(struct mii_if_info* mii, struct mii_ioctl_data* data, int cmd, unsigned int* duplex_changed)
 {
 	if (duplex_changed)

@@ -1,3 +1,4 @@
+#include <arch/x86_64/protect.hpp>
 #include <boot/limine_requests.hpp>
 #include <arch/x86_64/cpu.hpp>
 #include <arch/x86_64/gdt.hpp>
@@ -103,6 +104,7 @@ extern "C" void syscall_dispatch(interrupts::Frame* frame) {
         kprintf_serial("[strace %d] %s(%#lx, %#lx, %#lx, %#lx) ...\n", traced->pid,
                        g_table[nr].name ? g_table[nr].name : "?", frame->rdi, frame->rsi, frame->rdx, frame->r10);
     sched::Thread* self = sched::current();
+    protect::report_pending();
     self->cur_syscall = static_cast<i64>(nr);
     self->cur_args[0] = frame->rdi, self->cur_args[1] = frame->rsi, self->cur_args[2] = frame->rdx;
     if (nr < MAX_SYSCALLS && g_table[nr].handler) {

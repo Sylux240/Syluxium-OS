@@ -39,6 +39,14 @@ public:
         atime = mtime = ctime = vfs::now();
     }
     bool seekable() const override { return false; }
+
+    // Several Files can share one of these inodes (opening /proc/<pid>/fd/N
+    // makes a new File for the same inode): only the last close frees it.
+    void on_open(vfs::File*) override { __atomic_add_fetch(&m_opens, 1, __ATOMIC_ACQ_REL); }
+    bool last_close() { return __atomic_sub_fetch(&m_opens, 1, __ATOMIC_ACQ_REL) == 0; }
+
+private:
+    u32 m_opens = 0;
 };
 
 long install(vfs::Inode* inode, u32 flags, const char* name) {
@@ -121,7 +129,10 @@ public:
         return static_cast<u16>((m_count ? poll::POLLIN : 0) | (m_count < EVENTFD_MAX ? poll::POLLOUT : 0));
     }
 
-    void on_release(vfs::File*) override { delete this; }
+    void on_release(vfs::File*) override {
+        if (last_close())
+            delete this;
+    }
 
 private:
     u64 m_count;
@@ -267,6 +278,8 @@ public:
     }
 
     void on_release(vfs::File*) override {
+        if (!last_close())
+            return;
         {
             LockGuard guard(g_timers_lock);
             TimerFd** link = &g_timers;
@@ -376,7 +389,10 @@ public:
     }
 
     u16 poll(vfs::File*) override { return (signal::pending_set() & mask) ? poll::POLLIN : 0; }
-    void on_release(vfs::File*) override { delete this; }
+    void on_release(vfs::File*) override {
+        if (last_close())
+            delete this;
+    }
 };
 
 // ======================= epoll =======================
@@ -521,6 +537,8 @@ public:
     }
 
     void on_release(vfs::File*) override {
+        if (!last_close())
+            return;
         {
             LockGuard guard(g_epolls_lock);
             Epoll** link = &g_epolls;
@@ -761,6 +779,93 @@ long sys_epoll_pwait2(SYSCALL_ARGS) {
     return pwait_with_mask(static_cast<int>(a0), a1, static_cast<int>(a2), timeout, a4, a5);
 }
 
+
+// ======================= pidfd =======================
+// A file that refers to one process (pidfd_open): readable once the process
+// has exited, and a way to signal it without racing pid reuse
+// (pidfd_send_signal). The process is remembered by pid and start time, so
+// a new process that reuses the pid isn't mistaken for it.
+
+constexpr u8 KIND_PIDFD = 0xB1;
+
+class PidFd : public AnonInode {
+public:
+    PidFd(int pid, u64 start) : pid(pid), start_ns(start) { anon_kind = KIND_PIDFD; }
+    int pid;       // as the opener's PID namespace numbers it
+    u64 start_ns;  // the process's creation time
+
+    // The process if it still exists (caller holds the process table lock).
+    proc::Process* target(proc::Process* viewer) const {
+        proc::Process* p = proc::find_visible(pid, viewer);
+        return p && p->start_ns == start_ns ? p : nullptr;
+    }
+
+    bool exited() {
+        LockGuard guard(proc::table_lock());
+        proc::Process* p = target(proc::current());
+        return !p || p->state == proc::State::Zombie;
+    }
+
+    u16 poll(vfs::File*) override { return exited() ? poll::POLLIN : 0; }
+    isize read_file(vfs::File*, u64, void*, usize) override { return -err::INVAL; }
+    void on_release(vfs::File*) override {
+        if (last_close())
+            delete this;
+    }
+};
+
+long sys_pidfd_open(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    constexpr u64 PIDFD_NONBLOCK = 04000;
+    if (a1 & ~PIDFD_NONBLOCK)
+        return -err::INVAL;
+    int pid = static_cast<int>(a0);
+    if (pid <= 0)
+        return -err::INVAL;
+    u64 start;
+    {
+        LockGuard guard(proc::table_lock());
+        proc::Process* p = proc::find_visible(pid, proc::current());
+        if (!p)
+            return -err::SRCH;
+        start = p->start_ns;
+    }
+    auto* f = new PidFd(pid, start);
+    return install(f, (a1 & PIDFD_NONBLOCK ? O_NONBLOCK_FLAG : 0) | O_CLOEXEC_FLAG, "pidfd"); // always close-on-exec
+}
+
+// pidfd_send_signal(pidfd, sig, info, flags): info must be NULL (the kernel
+// fills in the sender), no flags.
+long sys_pidfd_send_signal(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    if (a3 != 0 || a2 != 0)
+        return -err::INVAL;
+    int sig = static_cast<int>(a1);
+    if (sig < 0 || sig > proc::MAX_SIGNALS)
+        return -err::INVAL;
+    vfs::File* f = proc::fd_get(proc::current(), static_cast<int>(a0));
+    if (!f)
+        return -err::BADF;
+    long r = 0;
+    if (f->inode->anon_kind != KIND_PIDFD) {
+        r = -err::BADF;
+    } else {
+        auto* pf = static_cast<PidFd*>(f->inode);
+        LockGuard guard(proc::table_lock());
+        proc::Process* p = pf->target(proc::current());
+        const proc::Cred& c = proc::cred();
+        if (!p || p->state == proc::State::Zombie)
+            r = -err::SRCH;
+        else if (!(c.euid == 0 || c.ruid == p->cred.ruid || c.ruid == p->cred.suid || c.euid == p->cred.ruid ||
+                   c.euid == p->cred.suid))
+            r = -err::PERM;
+        else if (sig)
+            signal::send(p, sig, signal::SI_USER);
+    }
+    vfs::file_put(f);
+    return r;
+}
+
 } // namespace
 
 } // namespace events
@@ -782,6 +887,8 @@ void register_events() {
     set(290, events::sys_eventfd2, "eventfd2");
     set(291, events::sys_epoll_create1, "epoll_create1");
     set(441, events::sys_epoll_pwait2, "epoll_pwait2");
+    set(434, events::sys_pidfd_open, "pidfd_open");
+    set(424, events::sys_pidfd_send_signal, "pidfd_send_signal");
 }
 
 } // namespace syscall

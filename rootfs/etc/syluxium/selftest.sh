@@ -9,11 +9,12 @@ check() {
     # check "description" command...
     desc=$1
     shift
-    if "$@" >/dev/null 2>&1; then
+    if "$@" >/tmp/selftest.out 2>&1; then
         echo "  [PASS] $desc"
         pass=$((pass + 1))
     else
         echo "  [FAIL] $desc"
+        tail -n 6 /tmp/selftest.out | sed 's/^/         /'
         fail=$((fail + 1))
     fi
 }
@@ -59,6 +60,13 @@ check "/proc/<pid>/cmdline"                 sh -c 'sleep 3 & p=$!; tr "\\0" " " 
 check "/proc/<pid>/fd lists open files"     sh -c 'exec 7</etc/hostname; [ "$(readlink /proc/$$/fd/7)" = /etc/hostname ]'
 check "free / uptime work"                  sh -c 'free >/dev/null && uptime >/dev/null'
 check "/sys/devices/system/cpu/online"      sh -c 'grep -q "^0" /sys/devices/system/cpu/online'
+
+# --- threads and pipes under stress (1 s each part): futex handoffs (a
+# lost wakeup hangs it: the program's own watchdog fails it), both pipe ends
+# closed at once, dup storms, fork/exec with inherited pipes ---
+check "futex stress (GIL handoff, condvars, timeouts)" /opt/syluxium/tests/futexstress 1
+check "pipe / fd stress (close races, dup, fork)"     /opt/syluxium/tests/pipestress 1
+check "copy_file_range, pidfd, sigtimedwait, mlock"   /opt/syluxium/tests/newsyscalls
 
 echo "selftest: $pass passed, $fail failed"
 exit $fail

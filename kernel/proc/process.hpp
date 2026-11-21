@@ -89,19 +89,11 @@ struct Process {
     void* mntns = nullptr;      // mount namespace (vfs table); nullptr: the system's
     int vpid = 0;               // pid inside pidns (= pid in the system's)
     PidNs* child_pidns = nullptr; // setns(pid): where our children will live
-    // POSIX timers (timer_create): polled by the itimer thread (sys_time.cpp).
-    struct PosixTimer {
-        bool used;
-        int sig;        // 0: SIGEV_NONE
-        int thread_tid; // SIGEV_THREAD_ID: that thread (vtid), else the process
-        u64 deadline, interval, overrun;
-    };
-    static constexpr int MAX_POSIX_TIMERS = 8;
-    PosixTimer posix_timers[MAX_POSIX_TIMERS] = {};
     Uts* uts = nullptr;         // nullptr: the system's
     // ITIMER_REAL / alarm(): absolute deadline (clock ns, 0 = off) and reload interval.
     u64 alarm_deadline = 0, alarm_interval = 0;
     u32 umask = 022;
+    u32 personality = 0; // personality(2); ADDR_NO_RANDOMIZE turns ASLR off for its execs
     Cred cred;
     int oom_score_adj = 0; // /proc/<pid>/oom_score_adj (kept, not used: no OOM killer yet)
     // LinuxKPI's view of this process (binder): its task_struct (the threads'
@@ -145,6 +137,7 @@ struct Process {
     // ---- Signals ----
     u64 sig_pending = 0;                 // process-wide pending signals, bit n-1 = signal n
     i32 sig_code[65] = {}, sig_pid[65] = {}; u32 sig_uid[65] = {}; // who sent each (siginfo)
+    u64 sig_value[65] = {}; i32 sig_timer[65] = {}; // POSIX timer signals: sigev_value and timer id
     SigAction sigactions[MAX_SIGNALS + 1];  // shared by all threads (per-thread masks live in Thread)
 };
 

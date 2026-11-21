@@ -1,3 +1,4 @@
+#include <arch/x86_64/protect.hpp>
 #include <lib/errno.hpp>
 #include <lib/string.hpp>
 #include <mm/layout.hpp>
@@ -21,6 +22,7 @@ long check(const void* ptr, usize len, bool write) {
 long copy_from(void* dst, const void* user_src, usize len) {
     if (long r = check(user_src, len, false); r < 0)
         return r;
+    protect::UserAccess window;
     memcpy(dst, user_src, len);
     return 0;
 }
@@ -28,6 +30,7 @@ long copy_from(void* dst, const void* user_src, usize len) {
 long copy_to(void* user_dst, const void* src, usize len) {
     if (long r = check(user_dst, len, true); r < 0)
         return r;
+    protect::UserAccess window;
     memcpy(user_dst, src, len);
     return 0;
 }
@@ -41,6 +44,7 @@ long string_from(const char* user_src, char* dst, usize max_len) {
         usize chunk = min<usize>(page_end - (addr + n), max_len - n);
         if (long r = check(user_src + n, chunk, false); r < 0)
             return r;
+        protect::UserAccess window;
         for (usize i = 0; i < chunk; i++) {
             dst[n] = user_src[n];
             if (dst[n] == 0)

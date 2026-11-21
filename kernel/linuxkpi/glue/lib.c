@@ -930,6 +930,7 @@ void lkpi_drm_card_added(int delta);
 void lkpi_bus_device_added(struct device* dev);
 void lkpi_bus_device_removed(struct device* dev);
 void lkpi_sysfs_char_device(unsigned int major, unsigned int minor, const char *devname, const char *pci_bus_id);
+void lkpi_sysfs_char_device_platform(unsigned int major, unsigned int minor, const char *devname, const char *platform_name);
 int device_add(struct device* dev)
 {
 	if (dev->init_name) {
@@ -949,12 +950,19 @@ int device_add(struct device* dev)
 		snprintf(path, sizeof(path), "/dev/%s", name ? name : dev_name(dev));
 		kfree(name);
 		lkpi_chrdev_node(path, MAJOR(dev->devt), MINOR(dev->devt), mode ? mode : 0666);
+		bool published = false;
 		for (struct device *p = dev->parent; p; p = p->parent) {
 			if (dev_is_pci(p)) { /* libdrm/Mesa find the GPU through /sys/dev/char */
 				lkpi_sysfs_char_device(MAJOR(dev->devt), MINOR(dev->devt), path + 5, dev_name(p));
+				published = true;
 				break;
 			}
 		}
+		/* DRM nodes of a platform device (simpledrm): wlroots and libdrm
+		 * need their /sys/dev/char entry too. */
+		if (!published && dev->parent && !strncmp(path, "/dev/dri/", 9))
+			lkpi_sysfs_char_device_platform(MAJOR(dev->devt), MINOR(dev->devt), path + 5,
+							dev_name(dev->parent));
 		if (!strncmp(path, "/dev/dri/card", 13))
 			lkpi_drm_card_added(1);
 	}

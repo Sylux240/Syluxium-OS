@@ -1,4 +1,5 @@
 #include <arch/x86_64/cpu.hpp>
+#include <boot/limine_requests.hpp>
 #include <core/log.hpp>
 #include <lib/random.hpp>
 #include <lib/string.hpp>
@@ -6,6 +7,7 @@
 #include <mm/layout.hpp>
 #include <proc/compat.hpp>
 #include <proc/elf.hpp>
+#include <proc/process.hpp>
 
 namespace elf {
 
@@ -296,12 +298,35 @@ long load_interpreter(proc::Memory* mem, const char* path, const Layout& layout,
     return 0;
 }
 
+// ---- ASLR: where things go differs on every exec (like Linux: 28 bits of
+// page entropy for mmap and PIE programs, 22 for the stack, 32 MiB for brk;
+// 8 bits for 32-bit programs). Off with "norandmaps" on the kernel command
+// line, or per process with personality(ADDR_NO_RANDOMIZE) (setarch -R).
+constexpr u32 ADDR_NO_RANDOMIZE = 0x0040000;
+
+bool randomize(const proc::Process* p) {
+    static int boot_off = -1;
+    if (boot_off < 0)
+        boot_off = strstr(boot::cmdline(), "norandmaps") ? 1 : 0;
+    return !boot_off && !(p && (p->personality & ADDR_NO_RANDOMIZE));
+}
+
+// A random multiple of the page size below 2^bits pages.
+u64 random_pages(u32 bits) { return (random::next_u64() & ((1ull << bits) - 1)) << mm::PAGE_SHIFT; }
+
 // `img` (already read) is reused as scratch space for the interpreter's headers.
 long load_image(proc::Memory* mem, vfs::Inode* file, const char* exec_path, const char* const* argv,
                 const char* const* envp, Image* img, LoadResult* out, const ExecIds& ids) {
     const Layout& layout = img->is32 ? LAYOUT32 : LAYOUT64;
     if (layout.is32)
         mem->set_compat(); // before anything is mapped: mmap() must stay below 4 GiB
+    bool aslr = randomize(proc::current());
+    u64 pie_shift = aslr ? random_pages(layout.is32 ? 8 : 28) : 0;
+    u64 stack_shift = aslr ? random_pages(layout.is32 ? 11 : 22) : 0; // 8 MiB / 16 GiB
+    u64 brk_shift = aslr ? random_pages(13) : 0;                        // 32 MiB
+    if (aslr)
+        mem->set_mmap_shift(random_pages(layout.is32 ? 8 : 28));
+    u64 stack_top = layout.stack_top - stack_shift;
 
     char interp[256] = {};
     for (u32 i = 0; i < img->eh.phnum; i++) {
@@ -314,7 +339,7 @@ long load_image(proc::Memory* mem, vfs::Inode* file, const char* exec_path, cons
     }
 
     // Everything the auxiliary vector needs from the program's own headers.
-    u64 base = img->eh.type == ET_DYN ? layout.pie_base : 0;
+    u64 base = img->eh.type == ET_DYN ? layout.pie_base + pie_shift : 0;
     u64 highest, phdr_addr;
     if (long r = map_segments(mem, file, *img, base, layout, &highest, &phdr_addr); r < 0)
         return r;
@@ -331,7 +356,7 @@ long load_image(proc::Memory* mem, vfs::Inode* file, const char* exec_path, cons
             return r;
         }
     }
-    mem->set_brk_base(highest);
+    mem->set_brk_base(highest + brk_shift);
 
     if (layout.is32) {
         if (long r = compat::map_vsyscall_page(mem); r < 0)
@@ -340,14 +365,14 @@ long load_image(proc::Memory* mem, vfs::Inode* file, const char* exec_path, cons
 
     // Stack: 8 MiB, faulted in on demand.
     uptr stack_base;
-    long r = mem->map(layout.stack_top - proc::STACK_SIZE, proc::STACK_SIZE, proc::PROT_READ | proc::PROT_WRITE,
+    long r = mem->map(stack_top - proc::STACK_SIZE, proc::STACK_SIZE, proc::PROT_READ | proc::PROT_WRITE,
                       proc::MAP_PRIVATE | proc::MAP_ANONYMOUS | proc::MAP_FIXED | proc::MAP_GROWSDOWN, nullptr, 0, 0,
                       &stack_base);
     if (r < 0)
         return r;
 
     // ---- Initial stack, from the top down ----
-    StackBuilder sb(layout.stack_top);
+    StackBuilder sb(stack_top);
     usize argc = count(argv), envc = count(envp);
 
     u64 execfn = sb.push_string(exec_path);

@@ -1,5 +1,6 @@
 // Time and sleeping.
 
+#include <mm/heap.hpp>
 #include <proc/process.hpp>
 #include <proc/uaccess.hpp>
 #include <proc/signal.hpp>
@@ -169,30 +170,6 @@ void alarm_thread(void*) {
                 p->alarm_deadline = p->alarm_interval ? t + p->alarm_interval : 0;
                 signal::send(p, signal::SIGALRM);
             }
-            for (auto& pt : p->posix_timers) {
-                if (!pt.used || !pt.deadline || t < pt.deadline)
-                    continue;
-                if (pt.interval) {
-                    u64 missed = (t - pt.deadline) / pt.interval;
-                    pt.overrun += missed;
-                    pt.deadline += (missed + 1) * pt.interval;
-                } else {
-                    pt.deadline = 0;
-                }
-                if (!pt.sig)
-                    continue;
-                sched::Thread* target = nullptr;
-                if (pt.thread_tid) {
-                    LockGuard guard(p->thread_lock);
-                    for (sched::Thread* th : p->threads)
-                        if (th->vtid == pt.thread_tid)
-                            target = th;
-                }
-                if (target)
-                    signal::send_thread(target, pt.sig, -2 /* SI_TIMER */);
-                else
-                    signal::send(p, pt.sig, -2 /* SI_TIMER */);
-            }
         }, &now);
     }
 }
@@ -244,113 +221,6 @@ long sys_getitimer(SYSCALL_ARGS) {
     return uaccess::put(reinterpret_cast<ITimerVal*>(a1), current_itimer(proc::current()));
 }
 
-// ---- POSIX timers ----
-
-struct SigEvent {
-    u64 value;
-    i32 signo, notify;
-    i32 tid;
-    i32 pad[11];
-};
-struct ITimerSpec {
-    i64 interval_sec, interval_nsec, value_sec, value_nsec;
-};
-constexpr int SIGEV_SIGNAL = 0, SIGEV_NONE = 1, SIGEV_THREAD = 2, SIGEV_THREAD_ID = 4;
-
-long sys_timer_create(SYSCALL_ARGS) {
-    SYSCALL_UNUSED;
-    if (a0 > 11)
-        return -err::INVAL; // clocks: realtime, monotonic, boottime (... all run on one clock here)
-    SigEvent ev{};
-    ev.signo = signal::SIGALRM;
-    ev.notify = SIGEV_SIGNAL;
-    if (a1 && uaccess::get(&ev, reinterpret_cast<SigEvent*>(a1)) < 0)
-        return -err::FAULT;
-    if (ev.notify == SIGEV_THREAD) // glibc makes these SIGEV_THREAD_ID itself
-        return -err::INVAL;
-    if (ev.notify != SIGEV_NONE && (ev.signo < 1 || ev.signo > proc::MAX_SIGNALS))
-        return -err::INVAL;
-    proc::Process* p = proc::current();
-    for (int i = 0; i < proc::Process::MAX_POSIX_TIMERS; i++) {
-        auto& pt = p->posix_timers[i];
-        if (pt.used)
-            continue;
-        pt = {true, ev.notify == SIGEV_NONE ? 0 : ev.signo, ev.notify == SIGEV_THREAD_ID ? ev.tid : 0, 0, 0, 0};
-        i32 id = i;
-        if (uaccess::put(reinterpret_cast<i32*>(a2), id) < 0) {
-            pt.used = false;
-            return -err::FAULT;
-        }
-        return 0;
-    }
-    return -err::AGAIN;
-}
-
-proc::Process::PosixTimer* timer_of(u64 id) {
-    proc::Process* p = proc::current();
-    return id < proc::Process::MAX_POSIX_TIMERS && p->posix_timers[id].used ? &p->posix_timers[id] : nullptr;
-}
-
-ITimerSpec timer_left(const proc::Process::PosixTimer* pt) {
-    ITimerSpec s{};
-    u64 now = clock::now_ns();
-    u64 left = pt->deadline > now ? pt->deadline - now : (pt->deadline ? 1 : 0);
-    s.value_sec = static_cast<i64>(left / 1'000'000'000);
-    s.value_nsec = static_cast<i64>(left % 1'000'000'000);
-    s.interval_sec = static_cast<i64>(pt->interval / 1'000'000'000);
-    s.interval_nsec = static_cast<i64>(pt->interval % 1'000'000'000);
-    return s;
-}
-
-long sys_timer_settime(SYSCALL_ARGS) {
-    SYSCALL_UNUSED;
-    constexpr u64 TIMER_ABSTIME = 1;
-    auto* pt = timer_of(a0);
-    if (!pt)
-        return -err::INVAL;
-    ITimerSpec nv;
-    if (uaccess::get(&nv, reinterpret_cast<ITimerSpec*>(a2)) < 0)
-        return -err::FAULT;
-    if (a3 && uaccess::put(reinterpret_cast<ITimerSpec*>(a3), timer_left(pt)) < 0)
-        return -err::FAULT;
-    u64 value = static_cast<u64>(nv.value_sec) * 1'000'000'000ull + static_cast<u64>(nv.value_nsec);
-    pt->interval = static_cast<u64>(nv.interval_sec) * 1'000'000'000ull + static_cast<u64>(nv.interval_nsec);
-    pt->overrun = 0;
-    if (!value)
-        pt->deadline = 0;
-    else if (a1 & TIMER_ABSTIME) // absolute: on the clock it was created for (CLOCK_REALTIME differs)
-        pt->deadline = value > clock::now_ns() ? value : clock::now_ns();
-    else
-        pt->deadline = clock::now_ns() + value;
-    if (value)
-        ensure_alarm_thread();
-    return 0;
-}
-
-long sys_timer_gettime(SYSCALL_ARGS) {
-    SYSCALL_UNUSED;
-    auto* pt = timer_of(a0);
-    if (!pt)
-        return -err::INVAL;
-    return uaccess::put(reinterpret_cast<ITimerSpec*>(a1), timer_left(pt));
-}
-
-long sys_timer_getoverrun(SYSCALL_ARGS) {
-    SYSCALL_UNUSED;
-    auto* pt = timer_of(a0);
-    return pt ? static_cast<long>(pt->overrun) : -err::INVAL;
-}
-
-long sys_timer_delete(SYSCALL_ARGS) {
-    SYSCALL_UNUSED;
-    auto* pt = timer_of(a0);
-    if (!pt)
-        return -err::INVAL;
-    pt->used = false;
-    pt->deadline = 0;
-    return 0;
-}
-
 long sys_alarm(SYSCALL_ARGS) {
     SYSCALL_UNUSED;
     proc::Process* p = proc::current();
@@ -361,6 +231,222 @@ long sys_alarm(SYSCALL_ARGS) {
     if (a0)
         ensure_alarm_thread();
     return left;
+}
+
+} // namespace
+
+// ---- POSIX timers (timer_create & co.): a signal to the process (or one
+// thread) when they expire. SIGEV_THREAD is done by the C library on top of
+// SIGEV_THREAD_ID; the timer's sigev_value travels with the signal. ----
+
+namespace {
+
+struct PosixTimer {
+    int id;
+    int pid;           // owner (system pid) and its start time: the pid may be reused
+    u64 start_ns;
+    int clock;         // CLOCK_REALTIME (0) or a monotonic one
+    int signo;         // 0 = SIGEV_NONE
+    int tid;           // SIGEV_THREAD_ID: the thread (system tid); 0 = the process
+    u64 value;         // sigev_value
+    u64 deadline = 0;  // monotonic ns; 0 = disarmed
+    u64 interval = 0;
+    u32 overrun = 0;
+    PosixTimer* next = nullptr;
+};
+
+IrqSpinlock g_ptimers_lock;
+PosixTimer* g_ptimers = nullptr;
+int g_next_timer_id = 1;
+bool g_ptimer_thread_started = false;
+
+void ptimer_thread(void*) {
+    for (;;) {
+        sched::sleep_ms(1);
+        u64 now = clock::now_ns();
+        LockGuard guard(g_ptimers_lock);
+        for (PosixTimer* t = g_ptimers; t; t = t->next) {
+            if (!t->deadline || now < t->deadline)
+                continue;
+            if (t->interval) {
+                u64 late = (now - t->deadline) / t->interval;
+                t->overrun = static_cast<u32>(late);
+                t->deadline += (late + 1) * t->interval;
+            } else {
+                t->deadline = 0;
+            }
+            if (!t->signo)
+                continue;
+            LockGuard pguard(proc::table_lock());
+            proc::Process* p = proc::find(t->pid);
+            if (!p || p->start_ns != t->start_ns || p->state == proc::State::Zombie)
+                continue;
+            p->sig_value[t->signo] = t->value;
+            p->sig_timer[t->signo] = t->id;
+            if (t->tid) {
+                if (sched::Thread* th = proc::find_thread(t->tid); th && th->process == p) {
+                    signal::send_thread(th, t->signo, signal::SI_TIMER);
+                    continue;
+                }
+            }
+            signal::send(p, t->signo, signal::SI_TIMER);
+        }
+    }
+}
+
+// Under g_ptimers_lock: the caller's timer `id`.
+PosixTimer* find_ptimer(int id) {
+    proc::Process* me = proc::current();
+    for (PosixTimer* t = g_ptimers; t; t = t->next)
+        if (t->id == id && t->pid == me->pid && t->start_ns == me->start_ns)
+            return t;
+    return nullptr;
+}
+
+struct ITimerSpec64 {
+    i64 interval_sec, interval_nsec, value_sec, value_nsec;
+};
+
+u64 clock_now(int clock) { return clock == 0 ? rtc::realtime_ns() : clock::now_ns(); }
+
+long sys_timer_create(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    int clock = static_cast<int>(a0);
+    if (clock != 0 && clock != 1 && clock != 4 && clock != 7) // REALTIME, MONOTONIC, MONOTONIC_RAW, BOOTTIME
+        return -err::INVAL;
+    constexpr int SIGEV_SIGNAL = 0, SIGEV_NONE = 1, SIGEV_THREAD_ID = 4;
+    struct SigEvent {
+        u64 value;
+        i32 signo, notify;
+        i32 tid;
+        u8 pad[44];
+    } ev{};
+    ev.signo = 14; // SIGALRM by default
+    ev.notify = SIGEV_SIGNAL;
+    if (a1 && uaccess::copy_from(&ev, reinterpret_cast<const void*>(a1), sizeof(ev)) < 0)
+        return -err::FAULT;
+    if (ev.notify != SIGEV_SIGNAL && ev.notify != SIGEV_NONE && ev.notify != SIGEV_THREAD_ID)
+        return -err::INVAL;
+    if (ev.notify != SIGEV_NONE && (ev.signo < 1 || ev.signo > proc::MAX_SIGNALS))
+        return -err::INVAL;
+    proc::Process* me = proc::current();
+    auto* t = new PosixTimer;
+    t->pid = me->pid;
+    t->start_ns = me->start_ns;
+    t->clock = clock;
+    t->signo = ev.notify == SIGEV_NONE ? 0 : ev.signo;
+    t->value = a1 ? ev.value : 0;
+    if (ev.notify == SIGEV_THREAD_ID) {
+        LockGuard pguard(proc::table_lock());
+        sched::Thread* th = proc::find_visible_thread(ev.tid, me);
+        if (!th || th->process != me) {
+            delete t;
+            return -err::INVAL;
+        }
+        t->tid = static_cast<int>(th->user_tid);
+    }
+    {
+        LockGuard guard(g_ptimers_lock);
+        t->id = g_next_timer_id++;
+        if (!a1)
+            t->value = static_cast<u64>(t->id);
+        t->next = g_ptimers;
+        g_ptimers = t;
+    }
+    if (!__atomic_exchange_n(&g_ptimer_thread_started, true, __ATOMIC_ACQ_REL))
+        sched::spawn("posix-timers", ptimer_thread, nullptr, -1, true);
+    i32 id = t->id;
+    if (long r = uaccess::put(reinterpret_cast<i32*>(a2), id); r < 0)
+        return r;
+    return 0;
+}
+
+ITimerSpec64 ptimer_current(PosixTimer* t) {
+    ITimerSpec64 s{};
+    s.interval_sec = static_cast<i64>(t->interval / 1'000'000'000);
+    s.interval_nsec = static_cast<i64>(t->interval % 1'000'000'000);
+    if (t->deadline) {
+        u64 now = clock::now_ns();
+        u64 left = t->deadline > now ? t->deadline - now : 1;
+        s.value_sec = static_cast<i64>(left / 1'000'000'000);
+        s.value_nsec = static_cast<i64>(left % 1'000'000'000);
+    }
+    return s;
+}
+
+long sys_timer_settime(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    constexpr u64 TIMER_ABSTIME = 1;
+    ITimerSpec64 nv;
+    if (long r = uaccess::copy_from(&nv, reinterpret_cast<const void*>(a2), sizeof(nv)); r < 0)
+        return r;
+    if (nv.value_nsec < 0 || nv.value_nsec >= 1'000'000'000 || nv.interval_nsec < 0 ||
+        nv.interval_nsec >= 1'000'000'000 || nv.value_sec < 0 || nv.interval_sec < 0)
+        return -err::INVAL;
+    ITimerSpec64 old;
+    {
+        LockGuard guard(g_ptimers_lock);
+        PosixTimer* t = find_ptimer(static_cast<int>(a0));
+        if (!t)
+            return -err::INVAL;
+        old = ptimer_current(t);
+        u64 value = static_cast<u64>(nv.value_sec) * 1'000'000'000 + static_cast<u64>(nv.value_nsec);
+        t->interval = static_cast<u64>(nv.interval_sec) * 1'000'000'000 + static_cast<u64>(nv.interval_nsec);
+        t->overrun = 0;
+        if (!value) {
+            t->deadline = 0;
+        } else if (a1 & TIMER_ABSTIME) {
+            u64 now_c = clock_now(t->clock), now_m = clock::now_ns();
+            t->deadline = value > now_c ? now_m + (value - now_c) : now_m;
+            if (!t->deadline)
+                t->deadline = 1;
+        } else {
+            t->deadline = clock::now_ns() + value;
+        }
+    }
+    if (a3)
+        return uaccess::copy_to(reinterpret_cast<void*>(a3), &old, sizeof(old));
+    return 0;
+}
+
+long sys_timer_gettime(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    ITimerSpec64 cur;
+    {
+        LockGuard guard(g_ptimers_lock);
+        PosixTimer* t = find_ptimer(static_cast<int>(a0));
+        if (!t)
+            return -err::INVAL;
+        cur = ptimer_current(t);
+    }
+    return uaccess::copy_to(reinterpret_cast<void*>(a1), &cur, sizeof(cur));
+}
+
+long sys_timer_getoverrun(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    LockGuard guard(g_ptimers_lock);
+    PosixTimer* t = find_ptimer(static_cast<int>(a0));
+    return t ? static_cast<long>(t->overrun) : -err::INVAL;
+}
+
+long sys_timer_delete(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    PosixTimer* gone = nullptr;
+    {
+        LockGuard guard(g_ptimers_lock);
+        PosixTimer* t = find_ptimer(static_cast<int>(a0));
+        if (!t)
+            return -err::INVAL;
+        for (PosixTimer** link = &g_ptimers; *link; link = &(*link)->next) {
+            if (*link == t) {
+                *link = t->next;
+                gone = t;
+                break;
+            }
+        }
+    }
+    delete gone;
+    return 0;
 }
 
 } // namespace
@@ -412,17 +498,17 @@ void register_time() {
     set(36, sys_getitimer, "getitimer");
     set(37, sys_alarm, "alarm");
     set(38, sys_setitimer, "setitimer");
-    set(222, sys_timer_create, "timer_create");
-    set(223, sys_timer_settime, "timer_settime");
-    set(224, sys_timer_gettime, "timer_gettime");
-    set(225, sys_timer_getoverrun, "timer_getoverrun");
-    set(226, sys_timer_delete, "timer_delete");
     set(35, sys_nanosleep, "nanosleep");
     set(96, sys_gettimeofday, "gettimeofday");
     set(201, sys_time, "time");
     set(228, sys_clock_gettime, "clock_gettime");
     set(229, sys_clock_getres, "clock_getres");
     set(230, sys_clock_nanosleep, "clock_nanosleep");
+    set(222, sys_timer_create, "timer_create");
+    set(223, sys_timer_settime, "timer_settime");
+    set(224, sys_timer_gettime, "timer_gettime");
+    set(225, sys_timer_getoverrun, "timer_getoverrun");
+    set(226, sys_timer_delete, "timer_delete");
 }
 
 } // namespace syscall

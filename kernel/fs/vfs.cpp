@@ -1,3 +1,4 @@
+#include <arch/x86_64/protect.hpp>
 #include <fs/ramfs.hpp>
 #include <fs/inotify.hpp>
 #include <fs/vfs.hpp>
@@ -412,6 +413,8 @@ long Inode::ioctl_file(File*, u64 request, u64 arg) {
         arg_size = 36;
     if (arg && uaccess::check(reinterpret_cast<void*>(arg), arg_size, true) < 0)
         return -err::FAULT;
+    // Drivers' ioctl() read and write the argument directly: a SMAP window.
+    protect::UserAccess window;
     return ioctl(request, arg);
 }
 

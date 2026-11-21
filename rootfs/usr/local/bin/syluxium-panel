@@ -1,0 +1,342 @@
+#!/usr/bin/python3
+"""Syluxium shell (Wayland): the Dusk taskbar - a glass bar along the bottom
+with the launcher button (hex logo), pinned apps, and the clock with the
+date; the launcher opens a panel with search, pinned apps and all apps.
+A GTK layer-shell surface; Wayfire blurs what's behind it."""
+import os
+import subprocess
+import sys
+import time
+
+import gi
+
+gi.require_version("Gtk", "3.0")
+gi.require_version("GtkLayerShell", "0.1")
+from gi.repository import Gdk, GdkPixbuf, Gio, GLib, Gtk, GtkLayerShell  # noqa: E402
+
+LOGO = "/usr/share/syluxium/dusk/logo-hex.png"
+HEIGHT = 54
+PINNED = ["firefox-esr.desktop", "syluxium-mydocuments.desktop", "syluxium-mycomputer.desktop",
+          "syluxium-appstore.desktop", "syluxium-taskmgr.desktop", "syluxium-installer.desktop"]
+
+CSS = b"""
+* { font-family: Inter, sans-serif; color: #eef2ff; }
+.bar { background: rgba(18, 23, 54, 0.78); border-top: 1px solid rgba(111, 227, 240, 0.40); }
+.launcher { background: rgba(111, 227, 240, 0.16); border: 1px solid rgba(111, 227, 240, 0.55);
+            border-radius: 12px; box-shadow: 0 0 16px rgba(111, 227, 240, 0.35); padding: 2px 6px; }
+.launcher:hover { background: rgba(111, 227, 240, 0.28); }
+.pin { background: transparent; border: none; border-radius: 10px; padding: 4px 8px; }
+.pin:hover { background: rgba(111, 227, 240, 0.12); }
+.sep { background: rgba(255, 255, 255, 0.14); min-width: 1px; margin: 12px 6px; }
+.clock-time { font-weight: 500; font-size: 10pt; color: #ffffff; }
+.clock-date { font-size: 9pt; color: #aab3d6; }
+.menu { background: rgba(18, 23, 54, 0.86); border: 1px solid rgba(111, 227, 240, 0.28);
+        border-radius: 16px; padding: 18px; }
+.menu-name { font-weight: 500; font-size: 12pt; }
+.menu-sub { color: #aab3d6; font-size: 9pt; }
+.section { color: #aab3d6; font-size: 8pt; letter-spacing: 1px; }
+.search { background: rgba(255, 255, 255, 0.07); border: 1px solid rgba(255, 255, 255, 0.12);
+          border-radius: 10px; padding: 8px 10px; color: #eef2ff; caret-color: #6fe3f0; }
+.app { background: transparent; border: none; border-radius: 12px; padding: 10px 4px; }
+.app:hover { background: rgba(111, 227, 240, 0.10); }
+.app label { font-size: 9pt; color: #e6eaff; }
+.power { background: rgba(242, 154, 182, 0.12); border: 1px solid rgba(242, 154, 182, 0.40);
+         border-radius: 10px; }
+.allapps { background: transparent; border: none; color: #6fe3f0; }
+list, list row { background: transparent; }
+list row:hover { background: rgba(111, 227, 240, 0.10); border-radius: 8px; }
+"""
+
+
+def app_info(desktop_id):
+    try:
+        return Gio.DesktopAppInfo.new(desktop_id)
+    except TypeError:
+        return None
+
+
+def icon_image(info, size):
+    img = Gtk.Image()
+    icon = info.get_icon() if info else None
+    if icon:
+        img.set_from_gicon(icon, Gtk.IconSize.DIALOG)
+    else:
+        img.set_from_icon_name("application-x-executable", Gtk.IconSize.DIALOG)
+    img.set_pixel_size(size)
+    return img
+
+
+def launch(info):
+    try:
+        info.launch([], None)
+    except GLib.Error as e:
+        print("launch failed:", e, file=sys.stderr)
+
+
+class Launcher(Gtk.Window):
+    """The launcher panel: user, search, pinned apps, all apps, power."""
+
+    def __init__(self):
+        super().__init__()
+        GtkLayerShell.init_for_window(self)
+        GtkLayerShell.set_layer(self, GtkLayerShell.Layer.OVERLAY)
+        GtkLayerShell.set_anchor(self, GtkLayerShell.Edge.BOTTOM, True)
+        GtkLayerShell.set_anchor(self, GtkLayerShell.Edge.LEFT, True)
+        GtkLayerShell.set_margin(self, GtkLayerShell.Edge.BOTTOM, HEIGHT + 12)
+        GtkLayerShell.set_margin(self, GtkLayerShell.Edge.LEFT, 12)
+        GtkLayerShell.set_keyboard_mode(self, GtkLayerShell.KeyboardMode.ON_DEMAND)
+        GtkLayerShell.set_namespace(self, "syluxium-launcher")
+        self.set_app_paintable(True)
+        self.set_visual(self.get_screen().get_rgba_visual())
+        self.set_default_size(418, 508)  # the menu's full size from the first frame
+        self.set_size_request(418, 508)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
+        box.get_style_context().add_class("menu")
+        box.set_size_request(380, 470)
+        self.add(box)
+        # user
+        user = Gtk.Box(spacing=12)
+        name = GLib.get_real_name() or GLib.get_user_name()
+        avatar = Gtk.Label(label=(name[:1] or "S").upper())
+        avatar.set_size_request(44, 44)
+        avatar.get_style_context().add_class("menu-name")
+        user.pack_start(avatar, False, False, 0)
+        names = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        n1 = Gtk.Label(label=name, xalign=0)
+        n1.get_style_context().add_class("menu-name")
+        n2 = Gtk.Label(label=GLib.get_user_name(), xalign=0)
+        n2.get_style_context().add_class("menu-sub")
+        names.pack_start(n1, False, False, 0)
+        names.pack_start(n2, False, False, 0)
+        user.pack_start(names, False, False, 0)
+        box.pack_start(user, False, False, 0)
+        # search
+        self.search = Gtk.Entry(placeholder_text="Search apps and files")
+        self.search.get_style_context().add_class("search")
+        self.search.connect("changed", self.on_search)
+        self.search.connect("activate", self.on_activate)
+        box.pack_start(self.search, False, False, 0)
+        # pinned grid / results list
+        self.stack = Gtk.Stack()
+        pinned = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        sec = Gtk.Label(label="PINNED", xalign=0)
+        sec.get_style_context().add_class("section")
+        pinned.pack_start(sec, False, False, 0)
+        grid = Gtk.Grid(column_spacing=4, row_spacing=4, column_homogeneous=True)
+        for i, did in enumerate(PINNED):
+            info = app_info(did)
+            if not info:
+                continue
+            grid.attach(self.app_button(info), i % 3, i // 3, 1, 1)
+        pinned.pack_start(grid, False, False, 0)
+        self.stack.add_named(pinned, "pinned")
+        self.results = Gtk.ListBox()
+        self.results.connect("row-activated", lambda _l, row: self.run(row.info))
+        sw = Gtk.ScrolledWindow(min_content_height=260)
+        sw.add(self.results)
+        self.stack.add_named(sw, "results")
+        box.pack_start(self.stack, True, True, 0)
+        # bottom row
+        row = Gtk.Box()
+        allb = Gtk.Button(label="All apps")
+        allb.get_style_context().add_class("allapps")
+        allb.connect("clicked", lambda *_: self.show_all_apps())
+        row.pack_start(allb, False, False, 0)
+        power = Gtk.Button()
+        power.get_style_context().add_class("power")
+        power.set_tooltip_text("Power options")
+        power.add(Gtk.Image.new_from_icon_name("system-shutdown", Gtk.IconSize.BUTTON))
+        power.connect("clicked", self.on_power)
+        row.pack_end(power, False, False, 0)
+        box.pack_start(row, False, False, 0)
+        self.apps = sorted((a for a in Gio.AppInfo.get_all() if a.should_show()),
+                           key=lambda a: a.get_display_name().lower())
+        self.connect("key-press-event", self.on_key)
+
+    def app_button(self, info):
+        b = Gtk.Button()
+        b.get_style_context().add_class("app")
+        v = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        v.pack_start(icon_image(info, 40), False, False, 0)
+        lab = Gtk.Label(label=info.get_display_name())
+        lab.set_ellipsize(3)
+        lab.set_max_width_chars(12)
+        v.pack_start(lab, False, False, 0)
+        b.add(v)
+        b.connect("clicked", lambda *_: self.run(info))
+        return b
+
+    def fill(self, apps):
+        for child in self.results.get_children():
+            self.results.remove(child)
+        for a in apps[:60]:
+            row = Gtk.ListBoxRow()
+            row.info = a
+            h = Gtk.Box(spacing=10, margin=6)
+            h.pack_start(icon_image(a, 24), False, False, 0)
+            h.pack_start(Gtk.Label(label=a.get_display_name(), xalign=0), True, True, 0)
+            row.add(h)
+            self.results.add(row)
+        self.results.show_all()
+
+    def show_all_apps(self):
+        self.fill(self.apps)
+        self.stack.set_visible_child_name("results")
+
+    def on_search(self, *_):
+        q = self.search.get_text().strip().lower()
+        if not q:
+            self.stack.set_visible_child_name("pinned")
+            return
+        hits = [a for a in self.apps if q in a.get_display_name().lower()
+                or q in (a.get_description() or "").lower()]
+        self.fill(hits)
+        self.stack.set_visible_child_name("results")
+
+    def on_activate(self, *_):
+        row = self.results.get_row_at_index(0)
+        if row and self.stack.get_visible_child_name() == "results":
+            self.run(row.info)
+
+    def run(self, info):
+        self.hide()
+        launch(info)
+
+    def on_power(self, *_):
+        menu = Gtk.Menu()
+        for label, cmd in (("Restart", ["reboot"]), ("Shut down", ["poweroff"]),
+                           ("Sign out", ["pkill", "-x", "wayfire"])):
+            item = Gtk.MenuItem(label=label)
+            item.connect("activate", lambda _i, c=cmd: subprocess.Popen(c))
+            menu.append(item)
+        menu.show_all()
+        menu.popup_at_pointer(None)
+
+    def on_key(self, _w, ev):
+        if ev.keyval == Gdk.KEY_Escape:
+            self.hide()
+            return True
+        return False
+
+    def toggle(self):
+        if self.get_visible():
+            self.hide()
+        else:
+            self.search.set_text("")
+            self.stack.set_visible_child_name("pinned")
+            self.show_all()
+            self.search.grab_focus()
+            # A bottom-anchored surface that grows moves up: repaint it all
+            # once the compositor has placed it.
+            GLib.timeout_add(120, lambda: self.queue_draw() or False)
+            GLib.timeout_add(400, lambda: self.queue_draw() or False)
+
+
+class Panel(Gtk.Window):
+    def __init__(self):
+        super().__init__()
+        GtkLayerShell.init_for_window(self)
+        GtkLayerShell.set_layer(self, GtkLayerShell.Layer.TOP)
+        for edge in (GtkLayerShell.Edge.BOTTOM, GtkLayerShell.Edge.LEFT, GtkLayerShell.Edge.RIGHT):
+            GtkLayerShell.set_anchor(self, edge, True)
+        GtkLayerShell.auto_exclusive_zone_enable(self)
+        GtkLayerShell.set_namespace(self, "syluxium-panel")
+        self.set_app_paintable(True)
+        self.set_visual(self.get_screen().get_rgba_visual())
+        self.set_size_request(-1, HEIGHT)
+        bar = Gtk.Box(spacing=6)
+        bar.get_style_context().add_class("bar")
+        self.add(bar)
+        self.launcher = Launcher()
+        btn = Gtk.Button()
+        btn.get_style_context().add_class("launcher")
+        btn.set_tooltip_text("Launcher")
+        try:
+            btn.add(Gtk.Image.new_from_pixbuf(GdkPixbuf.Pixbuf.new_from_file_at_scale(LOGO, -1, 34, True)))
+        except GLib.Error:
+            btn.add(Gtk.Label(label="S"))
+        btn.set_margin_start(10)
+        btn.set_margin_top(6)
+        btn.set_margin_bottom(6)
+        btn.connect("clicked", lambda *_: self.launcher.toggle())
+        bar.pack_start(btn, False, False, 0)
+        sep = Gtk.Box()
+        sep.get_style_context().add_class("sep")
+        bar.pack_start(sep, False, False, 0)
+        for did in PINNED[:3]:
+            info = app_info(did)
+            if not info:
+                continue
+            b = Gtk.Button()
+            b.get_style_context().add_class("pin")
+            b.set_tooltip_text(info.get_display_name())
+            b.add(icon_image(info, 24))
+            b.connect("clicked", lambda _b, i=info: launch(i))
+            b.set_margin_top(7)
+            b.set_margin_bottom(7)
+            bar.pack_start(b, False, False, 0)
+        clock = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        clock.set_valign(Gtk.Align.CENTER)
+        clock.set_margin_end(16)
+        self.time = Gtk.Label(xalign=1)
+        self.time.get_style_context().add_class("clock-time")
+        self.date = Gtk.Label(xalign=1)
+        self.date.get_style_context().add_class("clock-date")
+        clock.pack_start(self.time, False, False, 0)
+        clock.pack_start(self.date, False, False, 0)
+        bar.pack_end(clock, False, False, 0)
+        for icon in ("audio-volume-high", "network-wireless"):
+            img = Gtk.Image.new_from_icon_name(icon, Gtk.IconSize.MENU)
+            img.set_margin_end(6)
+            bar.pack_end(img, False, False, 0)
+        self.tick()
+        GLib.timeout_add_seconds(5, self.tick)
+
+    def tick(self):
+        now = time.localtime()
+        self.time.set_text(time.strftime("%-I:%M %p", now))
+        self.date.set_text(time.strftime("%a, %b %-d", now))
+        return True
+
+
+def main():
+    prov = Gtk.CssProvider()
+    prov.load_from_data(CSS)
+    Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), prov, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+    panel = Panel()
+    if os.environ.get("SYLUXIUM_PANEL_DEBUG"):
+        dbg = open(os.path.expanduser("~/.cache/syluxium-panel-debug.log"), "a", buffering=1)
+        panel.connect("size-allocate", lambda w, a: print(time.time(), "allocation", a.x, a.y, a.width, a.height,
+                                                          file=dbg))
+        panel.connect("configure-event", lambda w, e: print(time.time(), "configure", e.width, e.height,
+                                                            file=dbg) or False)
+    panel.show_all()
+    # The first frames of a new layer surface can be missed (software
+    # rendering): draw again a few times once the compositor has placed it.
+    for ms in (300, 800, 1500, 3000):
+        GLib.timeout_add(ms, lambda: panel.queue_draw() or False)
+
+    # Wayfire places layer surfaces again whenever another one maps; the
+    # panel's first placement (before its size was known) left it off the
+    # bottom of the screen on the software path. A 1x1 invisible surface
+    # mapped for a moment makes it place everything again.
+    def nudge():
+        w = Gtk.Window()
+        GtkLayerShell.init_for_window(w)
+        GtkLayerShell.set_layer(w, GtkLayerShell.Layer.BACKGROUND)
+        GtkLayerShell.set_namespace(w, "syluxium-nudge")
+        w.set_app_paintable(True)
+        w.set_visual(w.get_screen().get_rgba_visual())
+        w.set_size_request(1, 1)
+        w.show_all()
+        GLib.timeout_add(300, lambda: w.destroy() or False)
+        return False
+    GLib.timeout_add(1000, nudge)
+    GLib.timeout_add(2500, nudge)
+    if os.environ.get("SYLUXIUM_PANEL_OPEN_LAUNCHER"):  # tests: show the launcher at start
+        GLib.timeout_add(800, lambda: panel.launcher.toggle() or False)
+    Gtk.main()
+
+
+if __name__ == "__main__":
+    main()

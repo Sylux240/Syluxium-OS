@@ -140,10 +140,16 @@ int setup_msi(struct pci_dev* pdev) {
     // One vector per device: plain MSI when the device has it (82574/e1000e
     // and Intel Wi-Fi route their causes differently once MSI-X is on, and
     // drivers given a single vector program the MSI scheme).
-    if (!pci::enable_msi(*f, vector, true))
+    // Display devices (class 03) keep MSI-X when they have it: GPUs ran
+    // with it on real hardware (nouveau on a GTX 1650), and with plain MSI
+    // the GTX 1650 took 45 s to initialize glamor - interrupts apparently
+    // lost, the driver only moving on when its waits timed out.
+    bool display = (pdev->lkpi_class >> 16) == 0x03;
+    bool prefer_msi = !display;
+    if (!pci::enable_msi(*f, vector, prefer_msi))
         return -EIO;
     pdev->irq = vector;
-    pdev->msix_enabled = f->msi_cap == 0;
+    pdev->msix_enabled = f->msix_cap && !(prefer_msi && f->msi_cap);
     pdev->msi_enabled = !pdev->msix_enabled;
     return 0;
 }
@@ -779,16 +785,113 @@ void pci_disable_msi(struct pci_dev*) {}
 
 // ---- DMA (no IOMMU: bus address = physical address) ----
 
+// Devices that address less than all of memory (32-bit Wi-Fi chips on a
+// machine with more than 4 GiB): coherent buffers come from memory under
+// their mask, and streaming mappings of buffers above it go through a
+// bounce buffer under it (copied at map/unmap/sync, as Linux's swiotlb).
 void* dma_alloc_coherent(struct device* dev, size_t size, dma_addr_t* handle, gfp_t) {
     unsigned order = pmm::order_for_size(size ? size : 1);
+    u64 mask = dev ? dev->coherent_dma_mask : 0;
     u64 phys = pmm::alloc_pages(order, true);
+    if (phys && mask && phys + (4096ull << order) - 1 > mask) {
+        pmm::free_pages(phys, order);
+        phys = pmm::alloc_pages_below(order, mask, true);
+        if (!phys)
+            klog::warn("linuxkpi: %s: no memory under the DMA mask %#lx for %zu bytes", dev_name(dev), mask, size);
+    }
     if (!phys)
         return nullptr;
-    if (dev && dev->coherent_dma_mask && phys + size - 1 > dev->coherent_dma_mask)
-        klog::warn("linuxkpi: %s: DMA buffer at %#lx is above the device's mask %#lx", dev_name(dev), phys,
-                   dev->coherent_dma_mask);
     *handle = phys;
     return mm::phys_to_virt<void>(phys);
+}
+
+namespace {
+struct Bounce {
+    u64 bounce = 0; // 0: free slot
+    void* orig = nullptr;
+    usize size = 0;
+    int dir = 0;
+};
+constexpr int MAX_BOUNCE = 1024;
+Bounce g_bounce[MAX_BOUNCE];
+IrqSpinlock g_bounce_lock;
+u32 g_bounce_warned = 0;
+u32 g_bounce_count = 0; // live bounce buffers: unmap/sync return at once when none
+
+Bounce* bounce_of(u64 addr) {
+    for (Bounce& b : g_bounce)
+        if (b.bounce && addr >= b.bounce && addr < b.bounce + b.size)
+            return &b;
+    return nullptr;
+}
+} // namespace
+
+extern "C" dma_addr_t lkpi_dma_map_virt(struct device* dev, void* virt, size_t size, int dir) {
+    u64 phys = mm::direct_virt_to_phys(virt);
+    u64 mask = dev && dev->dma_mask && *dev->dma_mask ? *dev->dma_mask : ~0ull;
+    if (!size || phys + size - 1 <= mask)
+        return phys;
+    unsigned order = pmm::order_for_size(size);
+    u64 b = pmm::alloc_pages_below(order, mask);
+    if (!b) {
+        if (g_bounce_warned++ < 5)
+            klog::warn("linuxkpi: %s: no bounce buffer under the DMA mask %#lx", dev_name(dev), mask);
+        return 0; // dma_mapping_error()
+    }
+    if (dir == DMA_TO_DEVICE || dir == DMA_BIDIRECTIONAL)
+        memcpy(mm::phys_to_virt<void>(b), virt, size);
+    static bool told = false;
+    if (!told) {
+        told = true;
+        klog::info("linuxkpi: %s: DMA buffers above its mask %#lx go through bounce buffers", dev_name(dev), mask);
+    }
+    LockGuard guard(g_bounce_lock);
+    for (Bounce& e : g_bounce)
+        if (!e.bounce) {
+            e = Bounce{b, virt, size, dir};
+            g_bounce_count++;
+            return b;
+        }
+    pmm::free_pages(b, order);
+    return 0;
+}
+
+extern "C" void lkpi_dma_unmap(dma_addr_t addr) {
+    if (!__atomic_load_n(&g_bounce_count, __ATOMIC_RELAXED))
+        return;
+    u64 b;
+    usize size;
+    {
+        LockGuard guard(g_bounce_lock);
+        Bounce* e = bounce_of(addr);
+        if (!e)
+            return;
+        if (e->dir == DMA_FROM_DEVICE || e->dir == DMA_BIDIRECTIONAL)
+            memcpy(e->orig, mm::phys_to_virt<void>(e->bounce), e->size);
+        b = e->bounce;
+        size = e->size;
+        *e = Bounce{};
+        g_bounce_count--;
+    }
+    pmm::free_pages(b, pmm::order_for_size(size));
+}
+
+extern "C" void lkpi_dma_sync(dma_addr_t addr, size_t size, int for_cpu) {
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    if (!__atomic_load_n(&g_bounce_count, __ATOMIC_RELAXED))
+        return;
+    LockGuard guard(g_bounce_lock);
+    Bounce* e = bounce_of(addr);
+    if (!e)
+        return;
+    usize off = addr - e->bounce;
+    usize n = size && off + size <= e->size ? size : e->size - off;
+    u8* bounce = mm::phys_to_virt<u8>(e->bounce) + off;
+    u8* orig = static_cast<u8*>(e->orig) + off;
+    if (for_cpu && e->dir != DMA_TO_DEVICE)
+        memcpy(orig, bounce, n);
+    else if (!for_cpu && e->dir != DMA_FROM_DEVICE)
+        memcpy(bounce, orig, n);
 }
 
 void dma_free_coherent(struct device*, size_t size, void*, dma_addr_t handle) {
@@ -796,18 +899,28 @@ void dma_free_coherent(struct device*, size_t size, void*, dma_addr_t handle) {
         pmm::free_pages(handle, pmm::order_for_size(size ? size : 1));
 }
 
-dma_addr_t dma_map_single(struct device*, void* ptr, size_t, enum dma_data_direction) {
-    return mm::direct_virt_to_phys(ptr);
+dma_addr_t dma_map_single(struct device* dev, void* ptr, size_t size, enum dma_data_direction dir) {
+    return lkpi_dma_map_virt(dev, ptr, size, dir);
 }
 
 
+// Test option "lkpi_dma32": every Linux driver's device gets a 32-bit DMA
+// mask, so the bounce buffers above are exercised in a VM with > 4 GiB.
+static u64 clamp_mask(u64 mask) {
+    static int test = -1;
+    if (test < 0)
+        test = strstr(boot::cmdline(), "lkpi_dma32") ? 1 : 0;
+    return test && mask > 0xFFFFFFFFull ? 0xFFFFFFFFull : mask;
+}
+
 int dma_set_mask(struct device* dev, u64 mask) {
+    mask = clamp_mask(mask);
     dev->dma_mask_storage = mask;
     dev->dma_mask = &dev->dma_mask_storage;
     return 0;
 }
 int dma_set_coherent_mask(struct device* dev, u64 mask) {
-    dev->coherent_dma_mask = mask;
+    dev->coherent_dma_mask = clamp_mask(mask);
     return 0;
 }
 int dma_set_mask_and_coherent(struct device* dev, u64 mask) {

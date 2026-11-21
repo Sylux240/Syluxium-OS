@@ -116,6 +116,16 @@ void evict_one() {
 }
 
 // Find or load block `n` of `d`. Cache lock held.
+constexpr u32 READ_AHEAD = 16; // blocks per read command (64 KiB)
+alignas(4096) u8 g_ahead_buf[READ_AHEAD * BLOCK]; // used with g_cache_lock held
+
+CacheBlock* find_cached(Device* d, u64 n) {
+    for (CacheBlock* b = g_hash[hash_of(d, n)]; b; b = b->hash_next)
+        if (b->dev == d && b->number == n)
+            return b;
+    return nullptr;
+}
+
 CacheBlock* get_block(Device* d, u64 n, bool will_overwrite) {
     for (CacheBlock* b = g_hash[hash_of(d, n)]; b; b = b->hash_next) {
         if (b->dev == d && b->number == n) {
@@ -136,12 +146,32 @@ CacheBlock* get_block(Device* d, u64 n, bool will_overwrite) {
     u64 start = n * BLOCK;
     u64 end = min<u64>(start + BLOCK, d->size_bytes());
     b->valid_bytes = static_cast<u32>(end - start);
+    // Read-ahead: the following blocks come along in the same command (up
+    // to 64 KiB) unless one of them is cached already. Every command costs
+    // the disk's latency - about 1 ms on USB, which held a USB 2 stick to a
+    // few MB/s when files were read one 4 KiB block at a time.
+    u32 ahead = 0;
+    if (!will_overwrite && BLOCK % d->sector_size == 0) {
+        while (ahead < READ_AHEAD - 1 && (n + ahead + 2) * BLOCK <= d->size_bytes() &&
+               !find_cached(d, n + ahead + 1))
+            ahead++;
+    }
     if (!will_overwrite) {
-        u32 sectors = (b->valid_bytes + d->sector_size - 1) / d->sector_size;
-        if (d->read_sectors(start / d->sector_size, sectors, b->data) != 0) {
-            pmm::free_page(phys);
-            delete b;
-            return nullptr;
+        if (ahead) {
+            u32 sectors = static_cast<u32>((ahead + 1) * BLOCK / d->sector_size);
+            if (d->read_sectors(start / d->sector_size, sectors, g_ahead_buf) != 0) {
+                ahead = 0; // fall back to the single block
+            } else {
+                memcpy(b->data, g_ahead_buf, BLOCK);
+            }
+        }
+        if (!ahead) {
+            u32 sectors = (b->valid_bytes + d->sector_size - 1) / d->sector_size;
+            if (d->read_sectors(start / d->sector_size, sectors, b->data) != 0) {
+                pmm::free_page(phys);
+                delete b;
+                return nullptr;
+            }
         }
     }
     usize h = hash_of(d, n);
@@ -149,6 +179,22 @@ CacheBlock* get_block(Device* d, u64 n, bool will_overwrite) {
     g_hash[h] = b;
     g_lru.push_back(b);
     g_cached++;
+    // The read-ahead blocks: least recently used, so they go first if
+    // nobody wants them.
+    for (u32 i = 1; i <= ahead; i++) {
+        if (g_cached >= MAX_CACHED)
+            evict_one();
+        u64 p2 = pmm::alloc_page();
+        if (!p2)
+            break;
+        auto* r = new CacheBlock{d, n + i, mm::phys_to_virt<u8>(p2), static_cast<u32>(BLOCK), 0, {}, nullptr, {}};
+        memcpy(r->data, g_ahead_buf + i * BLOCK, BLOCK);
+        usize h2 = hash_of(d, n + i);
+        r->hash_next = g_hash[h2];
+        g_hash[h2] = r;
+        g_lru.push_front(r);
+        g_cached++;
+    }
     return b;
 }
 

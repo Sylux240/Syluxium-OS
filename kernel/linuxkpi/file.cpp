@@ -64,12 +64,16 @@ isize do_write(file* lf, vfs::File* f, const void* buf, usize n) {
     return r;
 }
 
+extern "C" long long lkpi_file_size(file* f); // glue/file.c
+
 // One Linux file, the same struct file for every descriptor sharing it.
 class LinuxFileNode : public vfs::Inode {
 public:
     explicit LinuxFileNode(file* lf) : m_file(lf) {
         ino = vfs::next_ino();
         mode = vfs::S_IFREG | 0600;
+        long long sz = lkpi_file_size(lf); // a dma-buf's size (fstat, lseek SEEK_END)
+        size = sz > 0 ? static_cast<u64>(sz) : 0;
         atime = mtime = ctime = vfs::now();
     }
     ~LinuxFileNode() override { fput(m_file); }
@@ -91,7 +95,7 @@ public:
     long mmap_phys(u64 offset, u64* phys) override { return lkpi_vma_phys(offset, phys); }
     void mmap_range_ref(u64 offset, int delta) override { lkpi_vma_ref(offset, delta); }
     u32 mmap_cache_flags(u64 offset) override { return cache_flags(offset); }
-    bool seekable() const override { return false; }
+    bool seekable() const override { return size != 0; } // dma-bufs: lseek(SEEK_END) gives the size
     isize read_file(vfs::File* f, u64, void* buf, usize n) override { return do_read(m_file, f, buf, n); }
     isize write_file(vfs::File* f, u64, const void* buf, usize n) override { return do_write(m_file, f, buf, n); }
     long ioctl_file(vfs::File*, u64 req, u64 arg) override {
@@ -254,7 +258,11 @@ extern "C" void lkpi_zap_user_range(u64 offset, u64 len) { proc::zap_device_rang
 #include <fs/procfs.hpp>
 extern "C" void lkpi_sysfs_char_device(unsigned int major, unsigned int minor, const char* devname,
                                        const char* pci_bus_id) {
-    sysfs::add_char_device(major, minor, devname, pci_bus_id);
+    sysfs::add_char_device(major, minor, devname, pci_bus_id, true);
+}
+extern "C" void lkpi_sysfs_char_device_platform(unsigned int major, unsigned int minor, const char* devname,
+                                                const char* platform_name) {
+    sysfs::add_char_device(major, minor, devname, platform_name, false);
 }
 
 // ---- descriptors as binder moves them ----

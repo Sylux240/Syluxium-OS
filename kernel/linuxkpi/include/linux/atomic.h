@@ -28,6 +28,12 @@ static inline int atomic_cmpxchg(atomic_t* v, int old, int n) {
     __atomic_compare_exchange_n(&v->counter, &old, n, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
     return old;
 }
+static inline int atomic_dec_if_positive(atomic_t* v) {
+    int c = atomic_read(v);
+    while (c > 0 && !__atomic_compare_exchange_n(&v->counter, &c, c - 1, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) {
+    }
+    return c - 1;
+}
 static inline bool atomic_add_unless(atomic_t* v, int a, int u) {
     int c = atomic_read(v);
     while (c != u) { if (__atomic_compare_exchange_n(&v->counter, &c, c + a, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) return true; }

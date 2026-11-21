@@ -1,0 +1,398 @@
+#!/usr/bin/python3
+"""Network Connections: every network adapter with its status, addresses,
+MAC address and speed; IP settings (automatic through DHCP, or a static
+address) and enable/disable through syluxium-netconfig. A Firewall page
+says why there's none yet (the kernel has no packet filter)."""
+import fcntl
+import os
+import socket
+import struct
+import subprocess
+import sys
+import threading
+
+sys.path.insert(0, "/usr/local/lib/syluxium/python")
+from syluxium_sys import *  # noqa: F401,F403,E402
+from syluxium_sys import AdminRunner, Gtk, GLib, human, label, message, read, window  # noqa: E402
+
+NETCONFIG = "/usr/local/sbin/syluxium-netconfig"
+CONF_DIR = "/etc/syluxium/network"
+IFF_UP, IFF_RUNNING, IFF_LOOPBACK = 0x1, 0x40, 0x8
+
+
+def ioctl(name, req):
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        return fcntl.ioctl(s, req, struct.pack("16s16x", name.encode()[:15]))
+    except OSError:
+        return None
+    finally:
+        s.close()
+
+
+def wireless():
+    """Wi-Fi adapters: name -> (SSID or "", bitrate text or "")."""
+    out = {}
+    try:
+        dev = subprocess.run(["/usr/sbin/iw", "dev"], capture_output=True, text=True, timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        return out
+    for line in dev.splitlines():
+        p = line.split()
+        if len(p) == 2 and p[0] == "Interface":
+            ssid, rate = "", ""
+            try:
+                link = subprocess.run(["/usr/sbin/iw", "dev", p[1], "link"], capture_output=True, text=True,
+                                      timeout=5).stdout
+                for l in link.splitlines():
+                    l = l.strip()
+                    if l.startswith("SSID:"):
+                        ssid = l[5:].strip()
+                    elif l.startswith("tx bitrate:"):
+                        rate = " ".join(l.split()[2:4])
+            except (OSError, subprocess.SubprocessError):
+                pass
+            out[p[1]] = (ssid, rate)
+    return out
+
+
+def gateways():
+    gw = {}
+    for line in read("/proc/net/route").splitlines()[1:]:
+        f = line.split()
+        if len(f) > 3 and f[1] == "00000000" and f[2] != "00000000":
+            gw[f[0]] = socket.inet_ntoa(struct.pack("<I", int(f[2], 16)))
+    return gw
+
+
+def dns_servers():
+    return [l.split()[1] for l in read("/etc/resolv.conf").splitlines() if l.startswith("nameserver ") and
+            len(l.split()) > 1]
+
+
+def ipv6_addresses():
+    out = {}
+    for line in read("/proc/net/if_inet6").splitlines():
+        f = line.split()
+        if len(f) >= 6:
+            a = socket.inet_ntop(socket.AF_INET6, bytes.fromhex(f[0]))
+            out.setdefault(f[5], []).append(f"{a}/{int(f[2], 16)}")
+    return out
+
+
+def carriers():
+    """Adapters with a link (from netlink: the ioctl flags always say RUNNING)."""
+    try:
+        out = subprocess.run(["ip", "-o", "link"], capture_output=True, text=True, timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        return set()
+    up = set()
+    for line in out.splitlines():
+        f = line.split(":", 2)
+        if len(f) == 3 and "<" in f[2]:
+            flags = f[2][f[2].find("<") + 1:f[2].find(">")].split(",")
+            if "UP" in flags and "NO-CARRIER" not in flags:
+                up.add(f[1].strip().split("@")[0])
+    return up
+
+
+def config(name):
+    conf = {"METHOD": "dhcp", "ENABLED": "yes"}
+    for line in read(os.path.join(CONF_DIR, name + ".conf")).splitlines():
+        if "=" in line and not line.startswith("#"):
+            k, v = line.split("=", 1)
+            conf[k.strip()] = v.strip().strip('"')
+    return conf
+
+
+def adapters():
+    wifi = wireless()
+    gws = gateways()
+    v6 = ipv6_addresses()
+    links = carriers()
+    result = []
+    for line in read("/proc/net/dev").splitlines()[2:]:
+        name, _, rest = line.partition(":")
+        name = name.strip()
+        nums = rest.split()
+        if not name or name == "lo" or len(nums) < 9:
+            continue
+        a = {"name": name, "rx": int(nums[0]), "tx": int(nums[8]), "wifi": name in wifi}
+        r = ioctl(name, 0x8913)  # SIOCGIFFLAGS
+        flags = struct.unpack("H", r[16:18])[0] if r else 0
+        a["up"] = bool(flags & IFF_UP)
+        r = ioctl(name, 0x8927)  # SIOCGIFHWADDR
+        a["mac"] = ":".join(f"{b:02X}" for b in r[18:24]) if r else ""
+        r = ioctl(name, 0x8915)  # SIOCGIFADDR
+        a["ip"] = socket.inet_ntoa(r[20:24]) if r else ""
+        if a["ip"] == "0.0.0.0":
+            a["ip"] = ""
+        r = ioctl(name, 0x891B)  # SIOCGIFNETMASK
+        a["prefix"] = bin(struct.unpack("!I", r[20:24])[0]).count("1") if r and a["ip"] else 0
+        a["gateway"] = gws.get(name, "")
+        a["ipv6"] = v6.get(name, [])
+        a["conf"] = config(name)
+        ssid, rate = wifi.get(name, ("", ""))
+        a["ssid"] = ssid
+        a["speed"] = rate or ("" if a["wifi"] else "")
+        if not a["up"]:
+            a["status"] = "Disabled"
+        elif a["wifi"] and not ssid:
+            a["status"] = "Not connected"
+        elif name not in links:
+            a["status"] = "Network cable unplugged"
+        elif a["ip"]:
+            a["status"] = f"Connected to {ssid}" if ssid else "Connected"
+        else:
+            a["status"] = "Waiting for an address (DHCP)" if a["conf"]["METHOD"] == "dhcp" else "No address"
+        result.append(a)
+    return result
+
+
+class IpDialog(Gtk.Dialog):
+    """Internet Protocol (TCP/IPv4) Properties."""
+
+    def __init__(self, parent, a):
+        super().__init__(title=f"{a['name']} - IP Settings", transient_for=parent, modal=True)
+        self.add_buttons("Cancel", Gtk.ResponseType.CANCEL, "OK", Gtk.ResponseType.OK)
+        self.set_default_response(Gtk.ResponseType.OK)
+        conf = a["conf"]
+        box = self.get_content_area()
+        box.set_spacing(8)
+        for m in ("set_margin_start", "set_margin_end", "set_margin_top", "set_margin_bottom"):
+            getattr(box, m)(14)
+        box.add(label("IP settings can be assigned automatically by your network (DHCP). Otherwise ask your "
+                      "network administrator for the right settings.", wrap=True))
+        self.auto = Gtk.RadioButton.new_with_label(None, "Obtain an IP address automatically (DHCP)")
+        self.manual = Gtk.RadioButton.new_with_label_from_widget(self.auto, "Use the following IP address:")
+        box.add(self.auto)
+        box.add(self.manual)
+        grid = Gtk.Grid(column_spacing=10, row_spacing=6, margin_start=24)
+        self.fields = {}
+        cur_ip = conf.get("ADDRESS") or a["ip"]
+        cur_prefix = conf.get("PREFIX") or (str(a["prefix"]) if a["prefix"] else "24")
+        dns = (conf.get("DNS") or " ".join(dns_servers())).split()
+        rows = [("address", "IP address:", cur_ip), ("prefix", "Subnet prefix length:", cur_prefix),
+                ("gateway", "Default gateway:", conf.get("GATEWAY") or a["gateway"]),
+                ("dns1", "Preferred DNS server:", dns[0] if dns else ""),
+                ("dns2", "Alternate DNS server:", dns[1] if len(dns) > 1 else "")]
+        for i, (key, text, value) in enumerate(rows):
+            grid.attach(label(text), 0, i, 1, 1)
+            e = Gtk.Entry(text=value or "", width_chars=18)
+            grid.attach(e, 1, i, 1, 1)
+            self.fields[key] = e
+        box.add(grid)
+        self.grid = grid
+        (self.manual if conf["METHOD"] == "static" else self.auto).set_active(True)
+        self.auto.connect("toggled", lambda *_: self.sync())
+        self.sync()
+        self.show_all()
+
+    def sync(self):
+        self.grid.set_sensitive(self.manual.get_active())
+
+    def command(self, name):
+        """The syluxium-netconfig arguments, or an error text."""
+        if self.auto.get_active():
+            return ["dhcp", name], None
+        v = {k: e.get_text().strip() for k, e in self.fields.items()}
+        try:
+            socket.inet_aton(v["address"])
+            prefix = int(v["prefix"] or "24")
+            assert 1 <= prefix <= 32
+        except (OSError, ValueError, AssertionError):
+            return None, "Type a valid IP address and a prefix length between 1 and 32 (24 = 255.255.255.0)."
+        extra = [x for x in (v["gateway"], v["dns1"], v["dns2"]) if x]
+        for x in extra:
+            try:
+                socket.inet_aton(x)
+            except OSError:
+                return None, f"\"{x}\" is not a valid address."
+        if not v["gateway"] and (v["dns1"] or v["dns2"]):
+            return None, "Type the default gateway too (DNS servers need a way out of the local network)."
+        return ["static", name, f"{v['address']}/{prefix}"] + extra, None
+
+
+class NetworkConnections:
+    def __init__(self):
+        self.win = window("Network Connections", 760, 480, "syluxium-network-connections")
+        self.admin = AdminRunner(self.win, "Changing network settings affects everyone on this computer.")
+        self.busy = False
+        nb = Gtk.Notebook()
+        self.win.add(nb)
+
+        # ---- adapters ----
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, margin=10)
+        bar = Gtk.Box(spacing=6)
+        self.toggle_btn = Gtk.Button(label="Disable")
+        self.toggle_btn.connect("clicked", self.on_toggle)
+        self.props_btn = Gtk.Button(label="IP Settings...")
+        self.props_btn.connect("clicked", self.on_props)
+        self.wifi_btn = Gtk.Button(label="Wi-Fi Networks...")
+        self.wifi_btn.connect("clicked", lambda *_: subprocess.Popen(["syluxium-wifi-menu"], start_new_session=True))
+        refresh = Gtk.Button(label="Refresh")
+        refresh.connect("clicked", lambda *_: self.refresh())
+        for b in (self.toggle_btn, self.props_btn, self.wifi_btn):
+            bar.pack_start(b, False, False, 0)
+        bar.pack_end(refresh, False, False, 0)
+        self.spinner = Gtk.Spinner()
+        bar.pack_end(self.spinner, False, False, 0)
+        page.pack_start(bar, False, False, 0)
+
+        paned = Gtk.Paned()
+        self.store = Gtk.ListStore(str, str, str)  # icon, markup, name
+        self.view = Gtk.TreeView(model=self.store, headers_visible=False)
+        col = Gtk.TreeViewColumn()
+        ic, tx = Gtk.CellRendererPixbuf(stock_size=Gtk.IconSize.DND), Gtk.CellRendererText()
+        col.pack_start(ic, False)
+        col.pack_start(tx, True)
+        col.add_attribute(ic, "icon-name", 0)
+        col.add_attribute(tx, "markup", 1)
+        self.view.append_column(col)
+        self.view.get_selection().connect("changed", lambda *_: self.show_details())
+        self.view.connect("row-activated", lambda *_: self.on_props())
+        sw = Gtk.ScrolledWindow()
+        sw.set_size_request(280, -1)
+        sw.add(self.view)
+        paned.pack1(sw, False, False)
+        self.details = Gtk.Grid(column_spacing=14, row_spacing=6, margin=12)
+        dsw = Gtk.ScrolledWindow()
+        dsw.add(self.details)
+        paned.pack2(dsw, True, False)
+        page.pack_start(paned, True, True, 0)
+        nb.append_page(page, Gtk.Label(label="Adapters"))
+
+        # ---- firewall ----
+        fw = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10, margin=24)
+        row = Gtk.Box(spacing=14)
+        row.pack_start(Gtk.Image.new_from_icon_name("dialog-information", Gtk.IconSize.DIALOG), False, False, 0)
+        row.pack_start(label("Firewall: not available yet", bold=True, size="large"), False, False, 0)
+        fw.pack_start(row, False, False, 0)
+        fw.pack_start(label("Syluxium can't filter network traffic yet: the system has no packet filter, so "
+                            "there are no firewall rules to turn on here. Programs only receive connections on "
+                            "ports they open themselves.\n\nThis page will let you allow or block programs and "
+                            "ports once packet filtering is part of the system.", wrap=True), False, False, 0)
+        nb.append_page(fw, Gtk.Label(label="Firewall"))
+
+        self.adapters = []
+        self.refresh()
+        GLib.timeout_add_seconds(3, self.tick)
+        self.win.show_all()
+
+    def selected(self):
+        model, it = self.view.get_selection().get_selected()
+        name = model[it][2] if it else None
+        return next((a for a in self.adapters if a["name"] == name), None)
+
+    def tick(self):
+        if not self.busy:
+            self.refresh()
+        return True
+
+    def refresh(self):
+        keep = self.selected()
+        self.adapters = adapters()
+        self.store.clear()
+        sel = None
+        for a in self.adapters:
+            kind = "Wi-Fi" if a["wifi"] else "Ethernet"
+            icon = "network-wireless" if a["wifi"] else "syluxium-network-connections"
+            markup = (f"<b>{GLib.markup_escape_text(a['name'])}</b>  <small>{kind}</small>\n"
+                      f"<small>{GLib.markup_escape_text(a['status'])}"
+                      f"{'  ' + a['ip'] if a['ip'] else ''}</small>")
+            it = self.store.append([icon, markup, a["name"]])
+            if keep and keep["name"] == a["name"]:
+                sel = it
+        if sel is None and len(self.store):
+            sel = self.store.get_iter_first()
+        if sel is not None:
+            self.view.get_selection().select_iter(sel)
+        if not self.adapters:
+            self.show_details()
+
+    def show_details(self):
+        for c in self.details.get_children():
+            self.details.remove(c)
+        a = self.selected()
+        if not a:
+            self.details.attach(label("No network adapters were found.", wrap=True), 0, 0, 2, 1)
+            for b in (self.toggle_btn, self.props_btn, self.wifi_btn):
+                b.set_sensitive(False)
+            self.details.show_all()
+            return
+        conf = a["conf"]
+        method = ("Static address" if conf["METHOD"] == "static" else "Automatic (DHCP)")
+        speed = a["speed"] or ("Not reported by the driver" if not a["wifi"] else "-")
+        rows = [
+            ("Status", a["status"]),
+            ("Type", "Wi-Fi" if a["wifi"] else "Ethernet"),
+            ("IP settings", method),
+            ("IPv4 address", f"{a['ip']}/{a['prefix']}" if a["ip"] else "None"),
+            ("Default gateway", a["gateway"] or "None"),
+            ("DNS servers", ", ".join(dns_servers()) or "None"),
+            ("IPv6 addresses", "\n".join(a["ipv6"]) or "None"),
+            ("Physical (MAC) address", a["mac"] or "-"),
+            ("Speed", speed),
+            ("Sent", human(a["tx"])),
+            ("Received", human(a["rx"])),
+        ]
+        self.details.attach(label(a["name"], bold=True, size="large"), 0, 0, 2, 1)
+        for i, (k, v) in enumerate(rows, 1):
+            self.details.attach(label(k + ":"), 0, i, 1, 1)
+            val = label(v, wrap=True)
+            val.set_selectable(True)
+            self.details.attach(val, 1, i, 1, 1)
+        self.toggle_btn.set_label("Enable" if not a["up"] else "Disable")
+        self.toggle_btn.set_sensitive(not self.busy)
+        self.props_btn.set_sensitive(not self.busy)
+        self.wifi_btn.set_sensitive(a["wifi"])
+        self.details.show_all()
+
+    def run_admin(self, args, done_text):
+        if not self.admin.ready():
+            return
+        self.busy = True
+        self.spinner.start()
+        self.toggle_btn.set_sensitive(False)
+        self.props_btn.set_sensitive(False)
+
+        def work():
+            rc, out = self.admin.run([NETCONFIG] + args, timeout=60)
+            GLib.idle_add(finish, rc, out)
+
+        def finish(rc, out):
+            self.busy = False
+            self.spinner.stop()
+            self.refresh()
+            if rc != 0 and rc != -1:
+                message(self.win, "The network settings could not be changed.", out or f"Error {rc}",
+                        Gtk.MessageType.WARNING)
+            return False
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def on_toggle(self, *_):
+        a = self.selected()
+        if a:
+            self.run_admin(["enable" if not a["up"] else "disable", a["name"]], "")
+
+    def on_props(self, *_):
+        a = self.selected()
+        if not a:
+            return
+        d = IpDialog(self.win, a)
+        while True:
+            if d.run() != Gtk.ResponseType.OK:
+                d.destroy()
+                return
+            args, err = d.command(a["name"])
+            if not err:
+                break
+            message(d, "Check the IP settings", err, Gtk.MessageType.WARNING)
+        d.destroy()
+        self.run_admin(args, "")
+
+
+if __name__ == "__main__":
+    NetworkConnections()
+    Gtk.main()

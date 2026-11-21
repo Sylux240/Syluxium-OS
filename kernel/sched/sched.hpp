@@ -44,6 +44,12 @@ void wake(Thread* thread);
 // Releases the lock while asleep and re-acquires it before returning.
 // deadline_ns = 0 waits forever. Returns false on timeout.
 bool block_on(WaitList& list, IrqSpinlock& lock, u64 deadline_ns = 0);
+// The same, but `abort(ctx)` (the caller's wait condition) is checked once
+// more after the thread is marked asleep, so a condition that changes
+// without the lock (a signal arriving: its sender only wakes threads that are
+// already Blocked) can't slip in between the caller's check and the sleep.
+// Returns true (as for a wakeup) when it aborted.
+bool block_on(WaitList& list, IrqSpinlock& lock, u64 deadline_ns, bool (*abort)(void*), void* ctx);
 
 // ---- Startup ----
 void init();                                 // reaper + idle thread for the boot CPU
