@@ -9,6 +9,15 @@ chmod 755 /run/user
 # X display driver for this machine (modesetting on a DRM device, else fbdev).
 syluxium-display-config > /dev/null 2>&1
 
+# Printing (CUPS): what its install scripts would set up, then the print service.
+if [ -x /usr/sbin/cupsd ]; then
+    [ -f /etc/cups/cupsd.conf ] || cp /usr/share/cups/cupsd.conf.default /etc/cups/cupsd.conf
+    mkdir -p /run/cups/certs /var/spool/cups/tmp /var/cache/cups /var/log/cups
+    chown root:lp /var/spool/cups /var/cache/cups /etc/cups 2>/dev/null
+    chmod 710 /var/spool/cups; chmod 1770 /var/spool/cups/tmp
+    pidof cupsd > /dev/null || cupsd
+fi
+
 # Home folders: make any missing ones from /etc/skel and give them to
 # their owners (the live system's files all start out as root's).
 while IFS=: read -r name _ uid gid _ home _; do

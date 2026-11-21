@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Printers and Faxes
+GenericName=Printers and Faxes
+Comment=Add printers, see print jobs and set printing options
+Exec=tdecmshell printers
+Icon=printer
+Categories=Qt;TDE;Settings;HardwareSettings;Printing;
