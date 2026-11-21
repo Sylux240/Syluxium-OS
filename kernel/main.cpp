@@ -266,13 +266,15 @@ void discover_hardware() {
     uhci::register_driver();
     ohci::register_driver();
     net::init(); // loopback first: it becomes ifindex 1, like Linux
-    e1000::register_driver();
     virtio_net::register_driver();
-    r8169::register_driver();
     sound::init(); // phase 8: ALSA-compatible sound core
     hda::register_driver();
     virtio_snd::register_driver();
     linuxkpi::init(); // Linux drivers register themselves (module_init) here
+    // Native drivers behind Linux's r8169 and e1000e (tried in registration order):
+    // they take the device if the Linux driver fails, and the chips Linux's don't cover.
+    e1000::register_driver();
+    r8169::register_driver();
     pci::init();
     dev::register_platform_devices(g_keyboard);
     // Disks and USB first, so the root file system (root=) is mounted before

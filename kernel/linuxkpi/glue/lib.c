@@ -927,6 +927,8 @@ int device_rename(struct device* dev, const char* new_name)
 }
 
 void lkpi_drm_card_added(int delta);
+void lkpi_bus_device_added(struct device* dev);
+void lkpi_bus_device_removed(struct device* dev);
 void lkpi_sysfs_char_device(unsigned int major, unsigned int minor, const char *devname, const char *pci_bus_id);
 int device_add(struct device* dev)
 {
@@ -956,11 +958,15 @@ int device_add(struct device* dev)
 		if (!strncmp(path, "/dev/dri/card", 13))
 			lkpi_drm_card_added(1);
 	}
+	if (dev->bus)
+		lkpi_bus_device_added(dev); /* registered buses bind a driver (glue/devmodel.c) */
 	return 0;
 }
 
 void device_del(struct device* dev)
 {
+	if (dev->bus && dev->lkpi_added)
+		lkpi_bus_device_removed(dev);
 	if (dev->devt && dev->lkpi_added) {
 		char path[96], *name = NULL;
 		if (dev->class && dev->class->devnode)

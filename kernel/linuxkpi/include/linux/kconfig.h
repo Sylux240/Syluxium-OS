@@ -39,6 +39,13 @@
 #define CONFIG_MT7601U 1
 #define CONFIG_MAC80211_HWSIM 1
 #define CONFIG_RTL8XXXU 1
+/* Ethernet: r8169 with phylib and the Realtek PHY driver */
+#define CONFIG_PHYLIB 1
+#define CONFIG_MDIO_DEVICE 1
+#define CONFIG_MDIO_BUS 1
+#define CONFIG_MDIO_DEVRES 1
+#define CONFIG_R8169 1
+#define CONFIG_REALTEK_PHY 1
 #define CONFIG_BASE_SMALL 0
 #define CONFIG_PAGE_SHIFT 12
 /* DRM fbdev emulation: GPU drivers light the screen up themselves and hand

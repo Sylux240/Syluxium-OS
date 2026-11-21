@@ -51,7 +51,9 @@ volatile void* map_bar(const Function& f, int bar);
 
 // Route the device's interrupt to `vector` on the boot CPU: MSI-X if
 // available, else MSI. Returns false if the device has neither.
-bool enable_msi(Function& f, u8 vector);
+// prefer_msi: plain MSI when the device has both (what a single-vector
+// driver that asked for MSI expects; MSI-X otherwise).
+bool enable_msi(Function& f, u8 vector, bool prefer_msi = false);
 
 Function* function_of(const dev::Device* d);
 u32 count();

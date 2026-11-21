@@ -373,7 +373,7 @@ static inline bool mem_is_zero(const void *s, size_t n)
 	memset((char *)(dest) + _n, pad, sizeof(dest) - _n); } while (0)
 #define list_for_each_entry_from_reverse(pos, head, member) \
 	for (; &pos->member != (head); pos = list_prev_entry(pos, member))
-struct fwnode_handle { struct fwnode_handle *secondary; const void *ops; };
+struct fwnode_handle { struct fwnode_handle *secondary; const void *ops; u8 flags; /* flags appended */ };
 #define fwnode_handle_put(f) do { } while (0)
 #define fwnode_handle_get(f) (f)
 #define lock_acquire_shared_recursive(...) do { } while (0) /* args may name lockdep-only maps */
