@@ -26,5 +26,8 @@ void init_pci();
 // (struct usb_driver id_tables). On a match the driver's probe() runs and
 // *driver_name is set. Topology lock held (called from usb::attach).
 bool usb_probe(usb::Device* d, const usb::Interface& intf, const char** driver_name);
+// Probe again the USB interfaces whose Linux driver failed for want of
+// firmware before the root file system was mounted.
+void usb_retry_deferred();
 
 } // namespace linuxkpi

@@ -713,6 +713,23 @@ static struct usb_device* udev_for(void* sylux, const u8* config, unsigned int c
 	return udev;
 }
 
+/* Probes that failed because firmware wasn't readable yet (-EAGAIN,
+ * -ENOENT: the root file system on a USB stick is mounted after USB
+ * enumeration) are tried again once it is (lkpi_usb_retry_deferred). */
+#define MAX_DEFERRED 8
+static struct {
+	void* sylux;
+	struct usb_device* udev;
+	u8 ifnum;
+	void* registry;
+	char path[32];
+} deferred[MAX_DEFERRED];
+static int ndeferred;
+void lkpi_sylux_usb_bound(void* registry, const char* driver_name);
+
+static int probe_intf(void* sylux, struct usb_device* udev, struct usb_interface* intf, const char* path,
+		      bool retry, const char** driver_name);
+
 /* Called from usb.cpp for every interface of every new device. */
 int lkpi_usb_offer(void* sylux, const u8* config, unsigned int config_len, u8 ifnum, int speed, const char* path,
 		   const char* product, void* registry, const char** driver_name)
@@ -732,6 +749,52 @@ int lkpi_usb_offer(void* sylux, const u8* config, unsigned int config_len, u8 if
 	intf = usb_ifnum_to_if(udev, ifnum);
 	if (!intf || intf->lkpi_driver)
 		return 0;
+	r = probe_intf(sylux, udev, intf, path, false, driver_name);
+	if (r == -EAGAIN || r == -ENOENT) {
+		mutex_lock(&usb_glue_lock);
+		if (ndeferred < MAX_DEFERRED) {
+			deferred[ndeferred].sylux = sylux;
+			deferred[ndeferred].udev = udev;
+			deferred[ndeferred].ifnum = ifnum;
+			deferred[ndeferred].registry = registry;
+			snprintf(deferred[ndeferred].path, sizeof(deferred[ndeferred].path), "%s", path);
+			ndeferred++;
+		}
+		mutex_unlock(&usb_glue_lock);
+	}
+	return r == 1;
+}
+
+/* After the root file system is mounted: the deferred probes again. */
+void lkpi_usb_retry_deferred(void)
+{
+	int n;
+	mutex_lock(&usb_glue_lock);
+	n = ndeferred;
+	ndeferred = 0;
+	mutex_unlock(&usb_glue_lock);
+	for (int k = 0; k < n; k++) {
+		struct usb_device* udev = deferred[k].udev;
+		struct usb_interface* intf = usb_ifnum_to_if(udev, deferred[k].ifnum);
+		const char* name = NULL;
+		if (udev->lkpi_gone || !intf || intf->lkpi_driver)
+			continue;
+		printk(KERN_INFO "usb %s: trying the driver again (root file system mounted)\n", deferred[k].path);
+		if (probe_intf(deferred[k].sylux, udev, intf, deferred[k].path, true, &name) == 1)
+			lkpi_sylux_usb_bound(deferred[k].registry, name);
+	}
+}
+
+/* Match and probe one interface: 1 when bound, 0 when no driver wants it,
+ * or the probe's error. `retry`: its endpoints are open already. */
+static int probe_intf(void* sylux, struct usb_device* udev, struct usb_interface* intf, const char* path,
+		      bool retry, const char** driver_name)
+{
+	struct usb_driver* drv;
+	const struct usb_device_id* id = NULL;
+	u8 ifnum = intf->cur_altsetting->desc.bInterfaceNumber;
+	int r, i;
+
 	mutex_lock(&usb_glue_lock);
 	for (drv = drivers; drv; drv = drv->lkpi_next) {
 		id = usb_match_id(intf, drv->id_table);
@@ -742,7 +805,7 @@ int lkpi_usb_offer(void* sylux, const u8* config, unsigned int config_len, u8 if
 	if (!drv)
 		return 0;
 
-	for (i = 0; i < intf->cur_altsetting->desc.bNumEndpoints; i++) {
+	for (i = 0; !retry && i < intf->cur_altsetting->desc.bNumEndpoints; i++) {
 		struct usb_endpoint_descriptor* d = &intf->cur_altsetting->endpoint[i].desc;
 		lkpi_sylux_usb_open_endpoint(sylux, d->bEndpointAddress, d->bmAttributes, usb_endpoint_maxp(d), d->bInterval);
 	}
@@ -755,7 +818,7 @@ int lkpi_usb_offer(void* sylux, const u8* config, unsigned int config_len, u8 if
 		printk(KERN_WARNING "usb %s: %s probe failed (%d)\n", path, drv->name, r);
 		intf->lkpi_driver = NULL;
 		intf->condition = USB_INTERFACE_UNBOUND;
-		return 0;
+		return r;
 	}
 	intf->condition = USB_INTERFACE_BOUND;
 	intf->dev.driver = &drv->drvwrap.driver;

@@ -2,6 +2,7 @@
 // usb.cpp's offer() asks usb_probe() whether a Linux USB driver wants an
 // interface; transfers from Linux drivers end up in the usb::Device API.
 
+#include <dev/device.hpp>
 #include <drivers/usb/usb.hpp>
 #include <linuxkpi/linuxkpi.hpp>
 
@@ -29,13 +30,25 @@ void lkpi_sylux_usb_cancel(void* d, u8 ep_address) {
     static_cast<usb::Device*>(d)->cancel(ep_address);
 }
 
+// A deferred probe bound later: the device list shows the driver.
+void lkpi_sylux_usb_bound(void* registry, const char* driver_name) {
+    if (auto* e = static_cast<dev::Device*>(registry)) {
+        e->category = dev::Category::Network;
+        e->driver_name = driver_name;
+    }
+}
+
 void lkpi_sylux_usb_add_binding(void* d, void* udev) {
     static_cast<usb::Device*>(d)->add_binding([](void* ctx) { lkpi_usb_disconnect(ctx); }, udev);
 }
 
 } // extern "C"
 
+extern "C" void lkpi_usb_retry_deferred(void);
+
 namespace linuxkpi {
+
+void usb_retry_deferred() { lkpi_usb_retry_deferred(); }
 
 bool usb_probe(usb::Device* d, const usb::Interface& intf, const char** driver_name) {
     return lkpi_usb_offer(d, d->config_desc, d->config_len, intf.number, d->speed, d->path, d->product_name, d->entry,
