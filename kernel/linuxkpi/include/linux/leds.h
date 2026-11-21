@@ -36,3 +36,16 @@ static inline int devm_led_classdev_register(struct device *parent, struct led_c
 {
 	return led_classdev_register(parent, led);
 }
+
+/* LEDs on GPIO lines (no GPIO LED driver here). */
+struct gpio_led {
+	const char *name;
+	const char *default_trigger;
+	unsigned gpio;
+	unsigned active_low : 1;
+	unsigned retain_state_suspended : 1;
+	unsigned panic_indicator : 1;
+	unsigned default_state : 2;
+	unsigned retain_state_shutdown : 1;
+	struct gpio_desc *gpiod;
+};

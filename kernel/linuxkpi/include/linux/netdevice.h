@@ -299,6 +299,7 @@ struct napi_struct {
     volatile unsigned long state;
     struct work_struct lkpi_work;
     unsigned int napi_id; /* appended */
+    struct sk_buff* skb;  /* appended: napi_get_frags()'s packet in the making */
 };
 #define NAPI_POLL_WEIGHT 64
 
@@ -385,6 +386,7 @@ struct net_device {
     const struct xdp_metadata_ops* xdp_metadata_ops;
     const struct xsk_tx_metadata_ops* xsk_tx_metadata_ops;
     u32 xdp_features;
+    u8 threaded;                      /* NAPI in its own thread (dev_set_threaded): polls are work items here */
     unsigned long lkpi_priv[] __aligned(64);
 };
 
@@ -412,6 +414,8 @@ static inline void* netdev_priv(const struct net_device* dev) { return (void*)de
 struct net_device* alloc_netdev_mqs(int sizeof_priv, const char* name, unsigned char name_assign_type,
                                     void (*setup)(struct net_device*), unsigned int txqs, unsigned int rxqs);
 #define alloc_netdev(sizeof_priv, name, name_assign_type, setup) alloc_netdev_mqs(sizeof_priv, name, name_assign_type, setup, 1, 1)
+/* A net_device that is never registered: a home for NAPI contexts. */
+struct net_device* alloc_netdev_dummy(int sizeof_priv);
 struct net_device* alloc_etherdev_mqs(int sizeof_priv, unsigned int txqs, unsigned int rxqs);
 #define alloc_etherdev(sizeof_priv) alloc_etherdev_mqs(sizeof_priv, 1, 1)
 #define alloc_etherdev_mq(sizeof_priv, q) alloc_etherdev_mqs(sizeof_priv, q, q)

@@ -27,6 +27,7 @@ int request_threaded_irq(unsigned int irq, irq_handler_t handler, irq_handler_t 
 void free_irq(unsigned int irq, void* dev_id);
 #define devm_request_irq(dev, irq, h, f, n, id) request_irq(irq, h, f, n, id)
 #define devm_request_threaded_irq(dev, irq, h, t, f, n, id) request_threaded_irq(irq, h, t, f, n, id)
+#define devm_free_irq(dev, irq, id) free_irq(irq, id)
 void disable_irq(unsigned int irq);
 void disable_irq_nosync(unsigned int irq);
 void enable_irq(unsigned int irq);

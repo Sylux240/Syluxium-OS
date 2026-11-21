@@ -209,6 +209,41 @@ u64 alloc_pages(unsigned order, bool zero) {
     return phys;
 }
 
+u64 alloc_pages_below(unsigned order, u64 limit, bool zero) {
+    if (order >= MAX_ORDER)
+        return 0;
+    u64 pfn = NO_PAGE;
+    {
+        LockGuard guard(g_lock);
+        unsigned k = order;
+        // The first free block (of the size asked or larger) whose low
+        // part, which is what's kept after splitting, lies under the limit.
+        for (; k < MAX_ORDER && pfn == NO_PAGE; k++)
+            for (u32 p = g_free_head[k]; p != NO_PAGE; p = g_frames[p].next)
+                if (((static_cast<u64>(p) << PAGE_SHIFT) + (PAGE_SIZE << order) - 1) <= limit) {
+                    pfn = p;
+                    break;
+                }
+        if (pfn == NO_PAGE)
+            return 0;
+        k--;
+        list_remove(pfn, k);
+        while (k > order) {
+            k--;
+            list_push(pfn + (1ull << k), k);
+        }
+        PageFrame& f = g_frames[pfn];
+        f.flags = PF_ALLOCATED;
+        f.order = static_cast<u8>(order);
+        f.refcount = 1;
+        g_free_pages -= 1ull << order;
+    }
+    u64 phys = pfn << PAGE_SHIFT;
+    if (zero)
+        memset(mm::phys_to_virt(phys), 0, PAGE_SIZE << order);
+    return phys;
+}
+
 void free_pages(u64 phys, unsigned order) {
     u64 pfn = phys >> PAGE_SHIFT;
     if ((phys & (PAGE_SIZE - 1)) || pfn >= g_frame_count || order >= MAX_ORDER)
