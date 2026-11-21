@@ -70,6 +70,8 @@ DEBIAN_PKGS  += 7zip
 DEBIAN_PKGS  += libinput-tools
 # Bluetooth: BlueZ (bluetoothd, bluetoothctl, btmgmt)
 DEBIAN_PKGS  += bluez
+# Bluetooth audio (A2DP, HFP/HSP) for the ALSA-only system: bluealsad + the "bluealsa" ALSA device
+DEBIAN_PKGS  += bluez-alsa-utils libasound2-plugin-bluez
 # Broadcom b43 Wi-Fi (iMacs, older MacBooks): tools/b43-firmware.sh cuts its
 # firmware out of Broadcom's driver at build time (syluxium-b43-firmware can
 # still do it on the machine).
@@ -499,6 +501,12 @@ $(INITRAMFS): $(KERNEL) $(PICKER) $(DEBIAN_CONFIGURED) tools/merge-accounts.py t
 	    [ -f "$$f" ] || continue; skip=; for k in $(GPU_FIRMWARE_SKIP); do case $$f in $$k) skip=1;; esac; done; [ -z "$$skip" ] || continue; \
 	    mkdir -p $(CURDIR)/$(ROOTFS)/usr/lib/firmware/$$(dirname $$f); \
 	    cp -L "$$f" $(CURDIR)/$(ROOTFS)/usr/lib/firmware/$$f; done
+	@# Firmware that is a link to another file in the same set stays a link
+	@# (Intel's Bluetooth firmware: 63 links, 17 MB if copied twice).
+	@cd $(FIRMWARE_ROOT)/usr/lib/firmware && for f in $(GPU_FIRMWARE) $(NET_FIRMWARE); do \
+	    [ -L "$$f" ] || continue; t=$$(readlink "$$f"); case $$t in /*|*..*) continue;; esac; \
+	    [ -e "$(CURDIR)/$(ROOTFS)/usr/lib/firmware/$$(dirname $$f)/$$t" ] || continue; \
+	    ln -sf "$$t" "$(CURDIR)/$(ROOTFS)/usr/lib/firmware/$$f"; done
 	@ln -sf mediatek/mt7601u.bin $(ROOTFS)/usr/lib/firmware/mt7601u.bin # older drivers ask for it at the top level
 	@# Broadcom b43 (older MacBooks, iMacs): cut from Broadcom's driver at build time.
 	@tools/b43-firmware.sh $(ROOTFS)

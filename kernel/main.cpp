@@ -22,6 +22,7 @@
 #include <dev/platform.hpp>
 #include <drivers/pci/pci.hpp>
 #include <drivers/input/input.hpp>
+#include <drivers/input/uhid.hpp>
 #include <drivers/ps2kbd.hpp>
 #include <drivers/usb/usb.hpp>
 #include <linuxkpi/linuxkpi.hpp>
@@ -640,6 +641,7 @@ extern "C" [[noreturn]] __attribute__((no_stack_protector)) void kmain() {
     vfs::init();
     tty::init();
     input::init();
+    uhid::init(); // /dev/uhid (Bluetooth keyboards and mice through BlueZ)
     g_keyboard = ps2kbd::init();
     devices::init();
     proc::init();
