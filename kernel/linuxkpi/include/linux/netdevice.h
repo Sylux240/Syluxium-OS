@@ -196,7 +196,12 @@ void dev_sw_netstats_tx_add(struct net_device* dev, unsigned int packets, unsign
 void dev_fetch_sw_netstats(struct rtnl_link_stats64* s, const struct pcpu_sw_netstats* netstats);
 void dev_get_tstats64(struct net_device* dev, struct rtnl_link_stats64* s);
 
-enum tc_setup_type { TC_SETUP_QDISC_MQPRIO, TC_QUERY_CAPS };
+enum tc_setup_type {
+    TC_QUERY_CAPS, TC_SETUP_QDISC_MQPRIO, TC_SETUP_CLSU32, TC_SETUP_CLSFLOWER, TC_SETUP_CLSMATCHALL, TC_SETUP_CLSBPF,
+    TC_SETUP_BLOCK, TC_SETUP_QDISC_CBS, TC_SETUP_QDISC_RED, TC_SETUP_QDISC_PRIO, TC_SETUP_QDISC_MQ,
+    TC_SETUP_QDISC_ETF, TC_SETUP_ROOT_QDISC, TC_SETUP_QDISC_GRED, TC_SETUP_QDISC_TAPRIO, TC_SETUP_FT,
+    TC_SETUP_QDISC_ETS, TC_SETUP_QDISC_TBF, TC_SETUP_QDISC_FIFO, TC_SETUP_QDISC_HTB, TC_SETUP_ACT,
+};
 enum net_device_path_type {
     DEV_PATH_ETHERNET = 0, DEV_PATH_VLAN, DEV_PATH_BRIDGE, DEV_PATH_PPPOE, DEV_PATH_DSA, DEV_PATH_MTK_WDMA,
 };
@@ -217,6 +222,11 @@ struct net_device_path_ctx {
     struct { u16 id; __be16 proto; } vlan[NET_DEVICE_PATH_VLAN_MAX];
 };
 
+struct netdev_bpf;
+struct xdp_frame;
+struct skb_shared_hwtstamps;
+struct xdp_metadata_ops;
+struct xsk_tx_metadata_ops;
 struct net_device_ops {
     int (*ndo_init)(struct net_device* dev);
     void (*ndo_uninit)(struct net_device* dev);
@@ -243,6 +253,11 @@ struct net_device_ops {
     netdev_features_t (*ndo_fix_features)(struct net_device* dev, netdev_features_t features);
     int (*ndo_set_features)(struct net_device* dev, netdev_features_t features);
     int (*ndo_fill_forward_path)(struct net_device_path_ctx* ctx, struct net_device_path* path);
+    /* appended: XDP / AF_XDP / hardware time stamps (never called here) */
+    int (*ndo_bpf)(struct net_device* dev, struct netdev_bpf* bpf);
+    int (*ndo_xdp_xmit)(struct net_device* dev, int n, struct xdp_frame** xdp, u32 flags);
+    int (*ndo_xsk_wakeup)(struct net_device* dev, u32 queue_id, u32 flags);
+    ktime_t (*ndo_get_tstamp)(struct net_device* dev, const struct skb_shared_hwtstamps* hwtstamps, bool cycles);
 };
 
 /* Hardware address lists (multicast filters). */
@@ -283,6 +298,7 @@ struct napi_struct {
     int weight;
     volatile unsigned long state;
     struct work_struct lkpi_work;
+    unsigned int napi_id; /* appended */
 };
 #define NAPI_POLL_WEIGHT 64
 
@@ -365,6 +381,10 @@ struct net_device {
     struct sfp_bus* sfp_bus;
     struct ethtool_netdev_state* ethtool;
     unsigned long mem_start, mem_end; /* shared memory (old ISA cards; e1000e prints the BAR) */
+    bool dismantle;                   /* being unregistered */
+    const struct xdp_metadata_ops* xdp_metadata_ops;
+    const struct xsk_tx_metadata_ops* xsk_tx_metadata_ops;
+    u32 xdp_features;
     unsigned long lkpi_priv[] __aligned(64);
 };
 

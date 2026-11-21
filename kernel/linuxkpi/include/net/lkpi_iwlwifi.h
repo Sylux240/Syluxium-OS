@@ -45,10 +45,6 @@ struct pci_bus;
 static inline void lkpi_dummy_netdev_setup(struct net_device *dev) { }
 #define alloc_netdev_dummy(priv) alloc_netdev(priv, "dummy%d", 0, lkpi_dummy_netdev_setup)
 
-static inline u64 mul_u64_u64_div_u64(u64 a, u64 b, u64 c)
-{
-    return (u64)(((unsigned __int128)a * b) / c);
-}
 
 #include <linux/tcp.h>
 

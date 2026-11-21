@@ -55,6 +55,23 @@ u64 timecounter_cyc2time(const struct timecounter *tc, u64 cycle_tstamp)
 	return nsec;
 }
 
+/* ethtool string tables: fixed ETH_GSTRING_LEN slots. */
+void ethtool_sprintf(u8 **data, const char *fmt, ...)
+{
+	va_list args;
+
+	va_start(args, fmt);
+	vsnprintf((char *)*data, ETH_GSTRING_LEN, fmt, args);
+	va_end(args);
+	*data += ETH_GSTRING_LEN;
+}
+
+void ethtool_puts(u8 **data, const char *str)
+{
+	strscpy((char *)*data, str, ETH_GSTRING_LEN);
+	*data += ETH_GSTRING_LEN;
+}
+
 void ethtool_convert_legacy_u32_to_link_mode(unsigned long *dst, u32 legacy_u32)
 {
 	linkmode_zero(dst);
