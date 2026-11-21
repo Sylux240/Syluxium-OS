@@ -1588,10 +1588,12 @@ void init() {
     system_highpri_wq = system_long_wq = system_unbound_wq = make_wq_workers("lkpi-unbound", WQ_MAX_WORKERS);
     system_freezable_wq = system_power_efficient_wq = system_wq;
     init_pci();
-    // GPU acceleration test boots ("gpu"): DRM driver + modesetting debug
-    // messages go to the boot log unless drm.debug= says otherwise.
+    // GPU acceleration test boots ("gpu"): modesetting debug messages go to
+    // the boot log unless drm.debug= says otherwise. Not driver debug
+    // (DRM_UT_DRIVER): nouveau logs every GPU fence event there, thousands a
+    // second, and writing them out made a GTX 1650 desktop crawl and freeze.
     if (strstr(boot::cmdline(), " gpu") || !strncmp(boot::cmdline(), "gpu", 3))
-        __drm_debug = 0x06; // DRM_UT_DRIVER | DRM_UT_KMS
+        __drm_debug = 0x04; // DRM_UT_KMS
     apply_module_params();
     // GPU drivers (probed later) take the display over from the firmware
     // framebuffer when it lies in their memory (glue/gpu.c).
