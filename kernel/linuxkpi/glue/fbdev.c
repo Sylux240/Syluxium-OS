@@ -37,9 +37,20 @@ void framebuffer_release(struct fb_info *info)
 }
 
 /* A shadow-buffered framebuffer: tell the driver the whole screen changed. */
+unsigned long long lkpi_console_changes(void); /* core.cpp */
 static void flush_fn(struct work_struct *w)
 {
+	static unsigned long long flushed = ~0ull;
 	struct fb_info *info = READ_ONCE(console_info);
+	unsigned long long changes = lkpi_console_changes();
+	/* Only when the console drew: every flush is a display commit (amdgpu
+	 * runs a full atomic check for it). */
+	if (changes == flushed) {
+		if (info)
+			schedule_delayed_work(&console_flush_work, msecs_to_jiffies(100));
+		return;
+	}
+	flushed = changes;
 	if (info && info->fbdefio && info->fbdefio->deferred_io && lkpi_console_text_mode()) {
 		struct fb_deferred_io_pageref first = { 0 }, last = { 0 };
 		LIST_HEAD(pages);
@@ -70,6 +81,15 @@ int register_framebuffer(struct fb_info *info)
 	if (!lkpi_boot_fb_taken_by_gpu() || !vaddr || var->bits_per_pixel != 32)
 		return 0;
 	console_info = info;
+	/* What fbcon does when it takes a framebuffer over: set the mode, so the
+	 * screen scans out this framebuffer (DRM's fbdev emulation does no mode
+	 * set of its own; without this the screen kept showing the firmware
+	 * picture until a program opened and closed /dev/dri). */
+	if (info->fbops && info->fbops->fb_set_par) {
+		int r = info->fbops->fb_set_par(info);
+		if (r)
+			printk(KERN_WARNING "fbdev: %s: setting the display mode failed (%d)\n", info->fix.id, r);
+	}
 	lkpi_console_attach(vaddr, var->xres, var->yres, info->fix.line_length, var->red.offset, var->green.offset,
 			    var->blue.offset);
 	if (!flush_ready) {

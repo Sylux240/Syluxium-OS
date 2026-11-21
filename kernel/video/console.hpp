@@ -19,6 +19,8 @@ bool ready();
 // its text in memory but doesn't touch the screen (an X server owns it).
 void set_graphics(bool graphics);
 bool graphics();
+// Bumped whenever the console draws (GPU framebuffers flush only then).
+u64 changes();
 void putc(char c);
 void write(const char* s, usize len);
 void clear();

@@ -448,3 +448,80 @@ int drm_pci_set_busid(struct drm_device *dev, struct drm_master *master)
 	master->unique_len = strlen(master->unique);
 	return 0;
 }
+
+/* ---- ACPI companions and method evaluation (kernel/linuxkpi/acpi.cpp) ---- */
+#include <linux/acpi.h>
+void *lkpi_acpi_pci_root(unsigned bus);
+void *lkpi_acpi_child_by_adr(void *parent, u64 adr);
+void *lkpi_acpi_find(void *parent, const char *path);
+int lkpi_acpi_eval_buffer(void *node, const u64 *ints, unsigned nints, void **data, u32 *len);
+
+/* A PCI device's ACPI node: its _ADR under its bridge's node (recursively up
+ * to the host bridge). NULL until the AML interpreter runs. */
+acpi_handle lkpi_acpi_handle(struct device *dev)
+{
+	struct pci_dev *pdev, *bridge;
+	void *parent;
+	if (!dev_is_pci(dev))
+		return NULL;
+	pdev = to_pci_dev(dev);
+	bridge = pci_upstream_bridge(pdev);
+	parent = bridge ? lkpi_acpi_handle(&bridge->dev) : lkpi_acpi_pci_root(pdev->bus_number);
+	if (!parent)
+		return NULL;
+	return lkpi_acpi_child_by_adr(parent, ((u64)PCI_SLOT(pdev->devfn) << 16) | PCI_FUNC(pdev->devfn));
+}
+
+acpi_status acpi_get_handle(acpi_handle parent, const char *path, acpi_handle *ret)
+{
+	void *n = lkpi_acpi_find(parent, path);
+	*ret = n;
+	return n ? AE_OK : AE_NOT_FOUND;
+}
+
+bool acpi_has_method(acpi_handle handle, const char *name)
+{
+	return handle && lkpi_acpi_find(handle, name);
+}
+
+/* Integer arguments, buffer result (what drivers fetch BIOS images and
+ * tables with). Other forms fail: drivers fall back to their non-ACPI paths. */
+acpi_status acpi_evaluate_object(acpi_handle handle, const char *path, struct acpi_object_list *args, struct acpi_buffer *ret)
+{
+	u64 ints[7];
+	unsigned n = args ? args->count : 0;
+	void *node = path ? lkpi_acpi_find(handle, path) : handle, *data;
+	u32 len;
+	union acpi_object *obj;
+	if (!node || n > 7)
+		return AE_NOT_FOUND;
+	for (unsigned i = 0; i < n; i++) {
+		if (args->pointer[i].type != ACPI_TYPE_INTEGER)
+			return AE_ERROR;
+		ints[i] = args->pointer[i].integer.value;
+	}
+	if (lkpi_acpi_eval_buffer(node, ints, n, &data, &len))
+		return AE_ERROR;
+	if (!ret || ret->length != ACPI_ALLOCATE_BUFFER) {
+		kfree(data);
+		return ret ? AE_ERROR : AE_OK;
+	}
+	obj = kmalloc(sizeof(*obj) + len, GFP_KERNEL);
+	if (!obj) {
+		kfree(data);
+		return AE_ERROR;
+	}
+	obj->buffer.type = ACPI_TYPE_BUFFER;
+	obj->buffer.length = len;
+	obj->buffer.pointer = (u8 *)(obj + 1);
+	memcpy(obj + 1, data, len);
+	kfree(data);
+	ret->pointer = obj;
+	ret->length = sizeof(*obj) + len;
+	return AE_OK;
+}
+
+acpi_status acpi_evaluate_integer(acpi_handle handle, const char *path, struct acpi_object_list *args, unsigned long long *ret)
+{
+	return AE_ERROR; /* not needed by the GPU drivers' paths so far */
+}

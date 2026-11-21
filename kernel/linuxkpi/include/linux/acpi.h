@@ -1,6 +1,8 @@
-/* LinuxKPI: the ACPI interfaces Linux drivers call. Devices have no ACPI
- * companion here (ACPI_HANDLE() is NULL), so _DSM / method evaluation
- * never happens and drivers take their non-ACPI paths. */
+/* LinuxKPI: the ACPI interfaces Linux drivers call, on uACPI (glue/gpu.c,
+ * kernel/linuxkpi/acpi.cpp). PCI devices find their ACPI companion by _ADR
+ * once the AML interpreter runs; methods can be evaluated with integer
+ * arguments and buffer/integer results (nouveau's _ROM). _DSM stays
+ * unsupported, so drivers take their non-_DSM paths. */
 #pragma once
 #include <linux/lkpi_all.h>
 #include <linux/uuid.h>
@@ -47,7 +49,12 @@ struct acpi_device;
 struct acpi_bus_event { struct list_head node; char device_class[20]; char bus_id[15]; u32 type; u32 data; };
 struct fwnode_handle;
 
-#define ACPI_HANDLE(dev) ((acpi_handle)NULL)
+acpi_handle lkpi_acpi_handle(struct device *dev);
+#define ACPI_HANDLE(dev) lkpi_acpi_handle(dev)
+acpi_status acpi_get_handle(acpi_handle parent, const char *path, acpi_handle *ret);
+bool acpi_has_method(acpi_handle handle, const char *name);
+acpi_status acpi_evaluate_object(acpi_handle handle, const char *path, struct acpi_object_list *args, struct acpi_buffer *ret);
+acpi_status acpi_evaluate_integer(acpi_handle handle, const char *path, struct acpi_object_list *args, unsigned long long *ret);
 #define ACPI_HANDLE_FWNODE(fw) ((acpi_handle)NULL)
 #define ACPI_COMPANION(dev) ((struct acpi_device *)NULL)
 #define ACPI_COMPANION_SET(dev, adev) do { } while (0)
@@ -55,11 +62,7 @@ struct fwnode_handle;
 #define acpi_fwnode_handle(adev) ((struct fwnode_handle *)NULL)
 #define acpi_find_child_device(parent, addr, check) ((struct acpi_device *)NULL)
 #define acpi_get_name(h, type, buf) AE_NOT_FOUND
-#define acpi_get_handle(parent, path, ret) AE_NOT_FOUND
-#define acpi_has_method(h, name) false
 #define acpi_get_next_object(type, parent, child, out) AE_NOT_FOUND
-#define acpi_evaluate_object(h, path, args, ret) AE_NOT_FOUND
-#define acpi_evaluate_integer(h, path, args, ret) AE_NOT_FOUND
 #define acpi_evaluate_dsm(h, guid, rev, func, argv4) ((union acpi_object *)NULL)
 #define acpi_evaluate_dsm_typed(h, guid, rev, func, argv4, type) ((union acpi_object *)NULL)
 #define acpi_check_dsm(h, guid, rev, funcs) false
