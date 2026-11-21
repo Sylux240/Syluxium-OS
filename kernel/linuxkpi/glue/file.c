@@ -9,6 +9,7 @@
 #include <linux/anon_inodes.h>
 #include <linux/slab.h>
 #include <linux/uaccess.h>
+#include <linux/uio.h>
 #include <linux/lkpi_binder.h>
 
 /* ---- Syluxium side (file.cpp) ---- */
@@ -120,12 +121,42 @@ int nonseekable_open(struct inode *inode, struct file *f) { return 0; }
 int stream_open(struct inode *inode, struct file *f) { return 0; }
 
 /* Called by file.cpp for system calls on bridged files. */
+/* read_iter/write_iter: the program's data goes through a kernel buffer
+ * (iterators here are kernel vectors only). */
+static long file_iter(struct file *f, char __user *buf, size_t n, long long *pos, bool write)
+{
+	struct kiocb iocb = { .ki_filp = f, .ki_pos = *pos, .ki_flags = (f->f_flags & O_NONBLOCK) ? IOCB_NOWAIT : 0 };
+	struct kvec v;
+	struct iov_iter iter;
+	long r;
+	void *kbuf = kvmalloc(n ? n : 1, GFP_KERNEL);
+	if (!kbuf)
+		return -ENOMEM;
+	if (write && copy_from_user(kbuf, buf, n)) {
+		kvfree(kbuf);
+		return -EFAULT;
+	}
+	v.iov_base = kbuf;
+	v.iov_len = n;
+	iov_iter_kvec(&iter, write ? ITER_SOURCE : ITER_DEST, &v, 1, n);
+	r = write ? f->f_op->write_iter(&iocb, &iter) : f->f_op->read_iter(&iocb, &iter);
+	if (!write && r > 0 && copy_to_user(buf, kbuf, r))
+		r = -EFAULT;
+	*pos = iocb.ki_pos;
+	kvfree(kbuf);
+	return r;
+}
+
 long lkpi_file_read(struct file *f, char __user *buf, size_t n, long long *pos)
 {
+	if (f->f_op && !f->f_op->read && f->f_op->read_iter)
+		return file_iter(f, buf, n, pos, false);
 	return f->f_op && f->f_op->read ? f->f_op->read(f, buf, n, pos) : -EINVAL;
 }
 long lkpi_file_write(struct file *f, const char __user *buf, size_t n, long long *pos)
 {
+	if (f->f_op && !f->f_op->write && f->f_op->write_iter)
+		return file_iter(f, (char __user *)buf, n, pos, true);
 	return f->f_op && f->f_op->write ? f->f_op->write(f, buf, n, pos) : -EINVAL;
 }
 long lkpi_file_ioctl(struct file *f, unsigned int cmd, unsigned long arg)

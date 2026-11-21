@@ -137,7 +137,14 @@ static inline void* dev_get_drvdata(const struct device* d) { return d->driver_d
 static inline void dev_set_drvdata(struct device* d, void* data) { d->driver_data = data; }
 static inline const char* dev_name(const struct device* d) { return d->init_name ? d->init_name : d->lkpi_name; }
 static inline void* dev_get_platdata(const struct device* d) { return d->platform_data; }
-#define get_device(d) (d)
+/* A reference on an initialized device (put_device() drops it and releases
+ * the device at zero); devices never initialized aren't counted. */
+static inline struct device* get_device(struct device* d)
+{
+    if (d && kref_read(&d->kobj.kref) > 0)
+        kref_get(&d->kobj.kref);
+    return d;
+}
 #define device_set_wakeup_enable(d, e) 0
 #define device_set_wakeup_capable(d, e) do { (void)(d); } while (0)
 #define device_may_wakeup(d) 0

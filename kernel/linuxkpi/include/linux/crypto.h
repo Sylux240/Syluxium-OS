@@ -34,6 +34,14 @@ struct lkpi_crypto {
     void* aes;             /* struct crypto_aes_ctx */
 };
 
+/* Every request here completes before the call returns: waiting is a no-op. */
+struct crypto_wait {
+    int err;
+};
+#define DECLARE_CRYPTO_WAIT(name) struct crypto_wait name = { 0 }
+static inline int crypto_wait_req(int err, struct crypto_wait *wait) { return err; }
+static inline void crypto_req_done(void *data, int err) {}
+
 LKPI_EXTERN_C_END
 
 #endif

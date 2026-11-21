@@ -41,3 +41,12 @@
 #define devm_pm_runtime_enable(dev) 0
 #define pm_runtime_barrier(dev) do { } while (0)
 #define pm_runtime_set_autosuspend_delay(dev, d) do { } while (0)
+#ifndef pm_runtime_suspend
+#define pm_runtime_suspend(dev) 0
+#endif
+#ifndef pm_runtime_forbid
+#define pm_runtime_forbid(dev) do { } while (0)
+#endif
+#ifndef pm_runtime_allow
+#define pm_runtime_allow(dev) do { } while (0)
+#endif

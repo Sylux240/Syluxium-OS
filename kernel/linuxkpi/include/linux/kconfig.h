@@ -69,6 +69,25 @@
 #define CONFIG_ATH9K_PCI 1
 #define CONFIG_ATH9K_BTCOEX_SUPPORT 1
 #define CONFIG_ATH9K_PCOEM 1
+/* Bluetooth: core (BR/EDR + LE), L2CAP, SCO, ISO, RFCOMM sockets */
+#define CONFIG_BT 1
+#define CONFIG_BT_BREDR 1
+#define CONFIG_BT_LE 1
+#define CONFIG_BT_LE_L2CAP_ECRED 1
+#define CONFIG_BT_RFCOMM 1
+#define CONFIG_BT_SELFTEST 1
+#define CONFIG_BT_SELFTEST_ECDH 1
+#define CONFIG_BT_SELFTEST_SMP 1
+/* Bluetooth drivers: USB (with the Intel, Realtek, Broadcom, MediaTek setup code), virtual HCI */
+#define CONFIG_BT_HCIBTUSB 1
+#define CONFIG_BT_HCIBTUSB_BCM 1
+#define CONFIG_BT_HCIBTUSB_RTL 1
+#define CONFIG_BT_HCIBTUSB_MTK 1
+#define CONFIG_BT_INTEL 1
+#define CONFIG_BT_BCM 1
+#define CONFIG_BT_RTL 1
+#define CONFIG_BT_MTK 1
+#define CONFIG_BT_HCIVHCI 1
 /* Broadcom: bcma (PCI host) and b43 (N/HT/G/LP PHYs: BCM4321 .. BCM4331) */
 #define CONFIG_BCMA 1
 #define CONFIG_BCMA_HOST_PCI 1

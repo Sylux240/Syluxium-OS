@@ -241,7 +241,7 @@ kuid_t sock_i_uid(struct sock *sk);
 #define sock_skb_cb_check_size(size) BUILD_BUG_ON((size) > sizeof_field(struct sk_buff, cb))
 static inline void sock_recv_timestamp(struct msghdr *msg, struct sock *sk, struct sk_buff *skb) {}
 static inline void sock_recv_cmsgs(struct msghdr *msg, struct sock *sk, struct sk_buff *skb) {}
-#define sk_error_report(sk) ((sk)->sk_error_report(sk))
+static inline void sk_error_report(struct sock *sk) { sk->sk_error_report(sk); }
 
 /* Socket lists (hlists of sk_node). */
 #define sk_entry(node) hlist_entry(node, struct sock, sk_node)

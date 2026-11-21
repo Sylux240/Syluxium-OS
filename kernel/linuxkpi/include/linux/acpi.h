@@ -41,7 +41,11 @@ union acpi_object {
 	struct { acpi_object_type type; u32 length; char *pointer; } string;
 	struct { acpi_object_type type; u32 length; u8 *pointer; } buffer;
 	struct { acpi_object_type type; u32 count; union acpi_object *elements; } package;
+	struct { acpi_object_type type; acpi_object_type actual_type; acpi_handle handle; } reference;
 };
+#ifndef ACPI_TYPE_LOCAL_REFERENCE
+#define ACPI_TYPE_LOCAL_REFERENCE 0x14
+#endif
 struct acpi_buffer { acpi_size length; void *pointer; };
 struct acpi_object_list { u32 count; union acpi_object *pointer; };
 struct acpi_device_id { u8 id[16]; unsigned long driver_data; u32 cls; u32 cls_msk; };

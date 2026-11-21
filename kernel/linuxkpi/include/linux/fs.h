@@ -44,6 +44,8 @@ struct inode {
 	struct cdev *i_cdev;
 };
 
+struct kiocb;
+struct iov_iter;
 struct file_operations {
 	struct module *owner;
 	loff_t (*llseek)(struct file *, loff_t, int);
@@ -60,7 +62,16 @@ struct file_operations {
 	void (*show_fdinfo)(struct seq_file *, struct file *);
 	unsigned long fop_flags;
 	bool lkpi_user_address; /* LinuxKPI: mmap() sees the real user address in vm_start (binder) */
+	/* appended: I/O through iterators (glue/file.c copies through a kernel buffer) */
+	ssize_t (*read_iter)(struct kiocb *, struct iov_iter *);
+	ssize_t (*write_iter)(struct kiocb *, struct iov_iter *);
 };
+struct kiocb {
+	struct file *ki_filp;
+	loff_t ki_pos;
+	int ki_flags;
+};
+#define IOCB_NOWAIT (1 << 7)
 #define FOP_UNSIGNED_OFFSET 0x1
 
 struct file {
