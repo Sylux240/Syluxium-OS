@@ -43,6 +43,11 @@ public:
 
     // Unmap one 4 KiB page; returns the physical address it pointed to (0 if none).
     u64 unmap(uptr virt);
+    // Point a present 4 KiB page at another frame in one store (never
+    // not-present in between: copy-on-write while other threads read the
+    // page). Returns the old frame, 0 if the page wasn't mapped. Local TLB
+    // only; the caller shoots down other CPUs.
+    u64 replace(uptr virt, u64 phys, u32 flags);
 
     // Whether an existing 4 KiB mapping is writable.
     bool is_writable(uptr virt) const;

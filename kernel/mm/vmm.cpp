@@ -170,6 +170,24 @@ u64 AddressSpace::unmap(uptr virt) {
     return phys;
 }
 
+u64 AddressSpace::replace(uptr virt, u64 phys, u32 flags) {
+    LockGuard guard(m_lock);
+    u64* table = mm::phys_to_virt<u64>(m_pml4);
+    for (int level = 4; level > 1; level--) {
+        u64 e = table[table_index(virt, level)];
+        if (!(e & PTE_PRESENT) || (e & PTE_HUGE))
+            return 0;
+        table = mm::phys_to_virt<u64>(e & PTE_ADDR_MASK);
+    }
+    u64& e = table[table_index(virt, 1)];
+    if (!(e & PTE_PRESENT))
+        return 0;
+    u64 old = e & PTE_ADDR_MASK;
+    __atomic_store_n(&e, leaf_entry(phys, flags, PageSize::Size4K), __ATOMIC_RELEASE);
+    arch::invlpg(virt);
+    return old;
+}
+
 AddressSpace* AddressSpace::create_user() {
     auto* as = new AddressSpace;
     as->m_pml4 = alloc_table();

@@ -646,7 +646,26 @@ long sys_set_tid_address(SYSCALL_ARGS) {
     return sched::current()->vtid;
 }
 
-long sys_set_robust_list(SYSCALL_ARGS) { SYSCALL_UNUSED; return 0; }
+long sys_set_robust_list(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    if (a1 == 12) // a 32-bit program's list (4-byte pointers): accepted, not walked at exit
+        return 0;
+    if (a1 != 24) // sizeof(struct robust_list_head)
+        return -err::INVAL;
+    sched::current()->robust_list = a0;
+    return 0;
+}
+
+// get_robust_list(pid, head_ptr, len_ptr): only the caller's own (pid 0 / itself).
+long sys_get_robust_list(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    sched::Thread* me = sched::current();
+    if (a0 && static_cast<int>(a0) != me->vtid)
+        return -err::PERM;
+    if (long r = uaccess::put(reinterpret_cast<u64*>(a1), me->robust_list); r < 0)
+        return r;
+    return uaccess::put(reinterpret_cast<u64*>(a2), u64(24));
+}
 
 // Optional kernel features that libc probes for and copes without (rseq,
 // clone3 falls back to clone). Answer quietly instead of logging a warning.
@@ -1053,7 +1072,8 @@ long sys_sched_setaffinity(SYSCALL_ARGS) {
 
 long sys_futex(SYSCALL_ARGS) {
     SYSCALL_UNUSED;
-    constexpr u32 FUTEX_WAIT = 0, FUTEX_WAKE = 1, FUTEX_REQUEUE = 3, FUTEX_CMP_REQUEUE = 4,
+    constexpr u32 FUTEX_WAIT = 0, FUTEX_WAKE = 1, FUTEX_REQUEUE = 3, FUTEX_CMP_REQUEUE = 4, FUTEX_WAKE_OP = 5,
+                  FUTEX_LOCK_PI = 6, FUTEX_UNLOCK_PI = 7, FUTEX_TRYLOCK_PI = 8, FUTEX_LOCK_PI2 = 13,
                   FUTEX_WAIT_BITSET = 9, FUTEX_WAKE_BITSET = 10;
     constexpr u32 FUTEX_PRIVATE_FLAG = 128, FUTEX_CLOCK_REALTIME = 256;
     u64 uaddr = a0;
@@ -1091,6 +1111,33 @@ long sys_futex(SYSCALL_ARGS) {
         return futex::wake(uaddr, static_cast<int>(val), ~0u, is_private);
     case FUTEX_WAKE_BITSET:
         return futex::wake(uaddr, static_cast<int>(val), static_cast<u32>(a5), is_private);
+    case FUTEX_LOCK_PI:
+    case FUTEX_LOCK_PI2:
+    case FUTEX_TRYLOCK_PI: {
+        u64 deadline = 0; // absolute: CLOCK_REALTIME for LOCK_PI, else as FUTEX_CLOCK_REALTIME says
+        if (a3 && cmd != FUTEX_TRYLOCK_PI) {
+            struct { i64 sec, nsec; } ts;
+            if (long r = uaccess::copy_from(&ts, reinterpret_cast<void*>(a3), sizeof(ts)); r < 0)
+                return r;
+            if (ts.sec < 0 || ts.nsec < 0 || ts.nsec >= 1'000'000'000)
+                return -err::INVAL;
+            u64 t = static_cast<u64>(ts.sec) * 1'000'000'000 + static_cast<u64>(ts.nsec);
+            if (cmd == FUTEX_LOCK_PI || (op & FUTEX_CLOCK_REALTIME)) {
+                u64 real_now = rtc::realtime_ns(), mono_now = clock::now_ns();
+                deadline = t > real_now ? mono_now + (t - real_now) : mono_now;
+            } else {
+                deadline = t;
+            }
+            if (deadline == 0)
+                deadline = 1;
+        }
+        return futex::lock_pi(uaddr, deadline, cmd == FUTEX_TRYLOCK_PI, is_private);
+    }
+    case FUTEX_UNLOCK_PI:
+        return futex::unlock_pi(uaddr, is_private);
+    case FUTEX_WAKE_OP: // a3 is not a timeout here: the second wake count
+        return futex::wake_op(uaddr, static_cast<int>(val), a4, static_cast<int>(a3), static_cast<u32>(a5),
+                              is_private);
     case FUTEX_REQUEUE:
     case FUTEX_CMP_REQUEUE:
         return futex::requeue(uaddr, a4, static_cast<int>(val), static_cast<int>(a3), cmd == FUTEX_CMP_REQUEUE,
@@ -1447,6 +1494,7 @@ void register_process() {
     set(218, sys_set_tid_address, "set_tid_address");
     set(231, sys_exit_group, "exit_group");
     set(273, sys_set_robust_list, "set_robust_list");
+    set(274, sys_get_robust_list, "get_robust_list");
     set(302, sys_prlimit64, "prlimit64");
     set(318, sys_getrandom, "getrandom");
     set(309, sys_getcpu, "getcpu");

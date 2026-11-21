@@ -78,6 +78,10 @@ public:
     long remap(uptr old_addr, usize old_len, usize new_len, u32 flags, uptr new_addr, uptr* out);
     // The file-backed mapping that starts exactly at `addr` (shmdt): its file and length.
     bool mapping_at(uptr addr, vfs::Inode** file, usize* len);
+    // Is `addr` in memory shared with other address spaces (a MAP_SHARED
+    // mapping of a shareable file, or device memory)? Its pages never move;
+    // all other pages may be copied on write (after fork).
+    bool shared_at(uptr addr);
     long protect(uptr addr, usize len, u32 prot);
     long brk(uptr new_end);  // returns the (possibly unchanged) break
     void set_brk_base(uptr base) { m_brk_base = m_brk = base; }

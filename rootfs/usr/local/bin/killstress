@@ -1,0 +1,21 @@
+#!/bin/sh
+# Test aid: the self-test's "kill a sleeping process (SIGTERM)" check, over
+# and over, timing each round. A round over 2 s means a signal (SIGTERM to
+# the sleeper or SIGCHLD to this shell) didn't wake its target.
+#     killstress [rounds]
+rounds=${1:-300}
+slow=0 bad=0 i=0
+cs() { read up _ < /proc/uptime; echo "${up%.*}${up#*.}"; } # uptime in 1/100 s
+while [ $i -lt "$rounds" ]; do
+    t0=$(cs)
+    sleep 10 & p=$!
+    kill $p
+    wait $p
+    st=$?
+    t1=$(cs)
+    d=$((t1 - t0))
+    [ $st -eq 143 ] || { bad=$((bad + 1)); echo "round $i: status $st"; }
+    [ $d -gt 200 ] && { slow=$((slow + 1)); echo "round $i: took $((d / 100)).$((d % 100)) s"; }
+    i=$((i + 1))
+done
+echo "KILLSTRESS DONE: $rounds rounds, $slow slow, $bad wrong status"
