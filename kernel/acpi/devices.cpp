@@ -8,6 +8,7 @@
 #include <acpi/devices.hpp>
 #include <acpi/ec.hpp>
 #include <acpi/power.hpp>
+#include <drivers/input/input.hpp>
 #include <power/cpupower.hpp>
 #include <block/block.hpp>
 #include <core/log.hpp>
@@ -288,6 +289,24 @@ bool gen_ac_uevent(genfs::TextBuffer& out, const void*) {
     return true;
 }
 
+input::Device g_lid_switch;
+
+bool lid_closed() {
+    u64 open = 1;
+    uacpi_eval_simple_integer(g_lid, "_LID", &open);
+    return !open;
+}
+
+uacpi_status lid_notify(uacpi_handle, uacpi_namespace_node*, uacpi_u64 value) {
+    if (value == 0x80) { // lid status changed
+        bool closed = lid_closed();
+        g_lid_switch.report(input::EV_SW, input::SW_LID, closed ? 1 : 0);
+        g_lid_switch.sync();
+        klog::info("ACPI: lid %s", closed ? "closed" : "opened");
+    }
+    return UACPI_STATUS_OK;
+}
+
 bool gen_lid(genfs::TextBuffer& out, const void*) {
     u64 open = 1;
     uacpi_eval_simple_integer(g_lid, "_LID", &open);
@@ -428,6 +447,17 @@ void publish_power_supplies() {
                       new genfs::GeneratedLink(link_power_supply_subsystem, nullptr));
     }
     if (g_lid) {
+        // Like Linux's ACPI button driver: a "Lid Switch" input device (EV_SW
+        // SW_LID, 1 = closed) that power managers watch.
+        const char name[] = "Lid Switch";
+        memcpy(g_lid_switch.name, name, sizeof(name));
+        g_lid_switch.bustype = input::BUS_HOST;
+        g_lid_switch.product = 0x0005;
+        g_lid_switch.set_sw(input::SW_LID);
+        if (lid_closed())
+            g_lid_switch.sw_state = 1ull << input::SW_LID;
+        input::register_device(&g_lid_switch);
+        uacpi_install_notify_handler(g_lid, lid_notify, nullptr);
         vfs::mkdir_p("/proc/acpi/button/lid/LID0");
         vfs::add_node("/proc/acpi/button/lid/LID0/state", new genfs::GeneratedFile(gen_lid, nullptr));
     }

@@ -8,7 +8,8 @@
 namespace input {
 
 // Event types and codes (Linux values, subset).
-constexpr u16 EV_SYN = 0x00, EV_KEY = 0x01, EV_REL = 0x02, EV_ABS = 0x03, EV_MSC = 0x04, EV_REP = 0x14;
+constexpr u16 EV_SYN = 0x00, EV_KEY = 0x01, EV_REL = 0x02, EV_ABS = 0x03, EV_MSC = 0x04, EV_SW = 0x05, EV_REP = 0x14;
+constexpr u16 SW_LID = 0x00;
 constexpr u16 SYN_REPORT = 0;
 constexpr u16 REL_X = 0x00, REL_Y = 0x01, REL_Z = 0x02, REL_RX = 0x03, REL_RY = 0x04, REL_RZ = 0x05,
               REL_HWHEEL = 0x06, REL_DIAL = 0x07, REL_WHEEL = 0x08, REL_MISC = 0x09, REL_WHEEL_HI_RES = 0x0B,
@@ -31,7 +32,7 @@ constexpr u16 KEY_MUTE = 113, KEY_VOLUMEDOWN = 114, KEY_VOLUMEUP = 115, KEY_POWE
 constexpr u16 KEY_MAX = 0x2FF;
 // Device properties (EVIOCGPROP).
 constexpr u32 INPUT_PROP_POINTER = 0, INPUT_PROP_DIRECT = 1;
-constexpr u16 BUS_I8042 = 0x11, BUS_USB = 0x03, BUS_VIRTUAL = 0x06;
+constexpr u16 BUS_I8042 = 0x11, BUS_USB = 0x03, BUS_VIRTUAL = 0x06, BUS_HOST = 0x19;
 
 class Device {
 public:
@@ -69,6 +70,12 @@ public:
     i32 abs_value[ABS_MAX + 1] = {};  // current axis values (for EVIOCGABS)
     u32 index = 0; // N in eventN
     u8 mirror_pending = 0; // bit 0: keyboard events, bit 1: pointer events since the last sync
+    u64 sw_bits = 0;       // switches (EV_SW: lid, tablet mode...)
+    u64 sw_state = 0;      // their current state (for EVIOCGSW)
+    void set_sw(u16 code) {
+        ev_bits |= 1ull << EV_SW;
+        sw_bits |= 1ull << code;
+    }
 };
 
 // Register a device: creates /dev/input/eventN.

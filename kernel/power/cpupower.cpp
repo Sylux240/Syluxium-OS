@@ -302,8 +302,8 @@ void idle(u64 expected_ns) {
             // A port that doesn't actually stop the core would make idle CPUs
             // spin: after many instant returns in a row, fall back to hlt.
             static u32 instant = 0;
-            if (clock::now_ns() - before < 2000) {
-                if (++instant == 5000) {
+            if (clock::now_ns() - before < 20000) { // 20 us: a real C-state lasts until the next interrupt
+                if (++instant == 2000) {
                     __atomic_store_n(&g_io_cstate_port, 0, __ATOMIC_RELEASE);
                     g_cstate_name = "C1 (hlt; the ACPI C2 port did not idle)";
                 }

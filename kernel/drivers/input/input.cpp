@@ -47,11 +47,17 @@ constexpr u32 ioc_nr(u64 req) { return req & 0xFF; }
 constexpr u32 ioc_type(u64 req) { return (req >> 8) & 0xFF; }
 constexpr u32 ioc_size(u64 req) { return (req >> 16) & 0x3FFF; }
 
-long copy_bits(u64 arg, const void* bits, usize bits_bytes, u32 size) {
+// Copy a bit array to the caller, zero-filling the rest of the length it
+// gave (some programs rely on that) - except for switches: TDE's hardware
+// daemon asks for EV_CNT (32) bytes of switch bits into an 8-byte array,
+// and filling to the length it gave smashed its stack. Linux copies only
+// its own array size there (8 bytes for switches).
+long copy_bits(u64 arg, const void* bits, usize bits_bytes, u32 size, u32 fill_limit = 0xFFFFFFFF) {
     usize n = min<usize>(size, bits_bytes);
     memcpy(reinterpret_cast<void*>(arg), bits, n);
-    if (size > n)
-        memset(reinterpret_cast<u8*>(arg) + n, 0, size - n);
+    usize fill = min<usize>(size, fill_limit);
+    if (fill > n)
+        memset(reinterpret_cast<u8*>(arg) + n, 0, fill - n);
     return static_cast<long>(n);
 }
 
@@ -170,10 +176,15 @@ public:
             return static_cast<long>(n);
         }
         case 0x09: // EVIOCGPROP
-            return copy_bits(arg, &d->props, sizeof(d->props), size);
+        { // Linux keeps the properties in one long: 8 bytes, not our 4
+            u64 props = d->props;
+            return copy_bits(arg, &props, sizeof(props), size);
+        }
         case 0x18: // EVIOCGKEY: currently pressed keys
             return copy_bits(arg, d->key_down, sizeof(d->key_down), size);
-        case 0x19: case 0x1a: case 0x1b: // LED / SND / SW state: none
+        case 0x1b: // EVIOCGSW: switch state
+            return copy_bits(arg, &d->sw_state, sizeof(d->sw_state), size, 8);
+        case 0x19: case 0x1a: // LED / SND state: none
             return copy_bits(arg, "\0\0\0\0\0\0\0\0", 8, size);
         case 0x90: // EVIOCGRAB
         case 0xa0: // EVIOCSCLOCKID
@@ -189,7 +200,11 @@ public:
             case EV_REL: return copy_bits(arg, &d->rel_bits, 8, size);
             case EV_ABS: return copy_bits(arg, &d->abs_bits, 8, size);
             case EV_MSC: return copy_bits(arg, &d->msc_bits, 8, size);
-            default: return copy_bits(arg, "\0\0\0\0\0\0\0\0", 8, size);
+            case EV_SW: return copy_bits(arg, &d->sw_bits, 8, size, 8);
+            default: { // FF and the rest: none (FF_CNT bits = 16 bytes)
+                static const u64 none[2] = {};
+                return copy_bits(arg, none, sizeof(none), size);
+            }
             }
         }
         if (nr >= 0x40 && nr < 0x80) { // EVIOCGABS(axis): struct input_absinfo
@@ -248,6 +263,11 @@ void Device::report(u16 type, u16 code, i32 value) {
             key_down[code / 64] &= ~(1ull << (code % 64));
     } else if (type == EV_ABS && code <= ABS_MAX) {
         abs_value[code] = value;
+    } else if (type == EV_SW && code < 64) {
+        if (value)
+            sw_state |= 1ull << code;
+        else
+            sw_state &= ~(1ull << code);
     }
     DeviceState* st = state_of(this);
     if (!st || st->dev != this)
