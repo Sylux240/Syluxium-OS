@@ -20,6 +20,10 @@ void publish();       // sysfs files; enables tickless idle (all CPUs online)
 
 bool tickless_enabled();
 void idle(u64 expected_ns); // interrupts off on entry; returns after an interrupt, interrupts on
+
+// A deeper idle state the firmware lists in ACPI _CST, entered by reading an
+// I/O port (AMD's core C6 "CC6"). Used on AMD CPUs (Intel uses MWAIT).
+void set_io_cstate(u16 port, u32 latency_us, int acpi_type);
 void tick(Cpu* cpu);        // from the scheduler tick (not while tickless)
 
 } // namespace cpupower

@@ -1,0 +1,15 @@
+[Desktop Entry]
+X-TDE-ServiceTypes=application/x-zip,application/x-tar,application/x-tgz,application/x-tbz,application/x-txz,application/x-tlz,application/x-tlzma,application/x-tarz,application/x-7z,application/x-rar,application/x-gzip,application/x-bzip2,application/x-xz,application/x-lzma
+Actions=extractHere;extractTo;
+X-TDE-Priority=TopLevel
+Type=Service
+
+[Desktop Action extractHere]
+Name=Extract Here
+Icon=application-x-tar
+Exec=syluxium-archive extract-here %F
+
+[Desktop Action extractTo]
+Name=Extract All...
+Icon=application-x-tar
+Exec=syluxium-archive extract-to %F

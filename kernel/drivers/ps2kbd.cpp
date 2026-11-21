@@ -12,7 +12,7 @@
 #include <arch/x86_64/percpu.hpp>
 #include <boot/limine_requests.hpp>
 #include <drivers/input/input.hpp>
-#include <drivers/input/touchpad.hpp>
+#include <drivers/input/ps2_touchpad.hpp>
 #include <lib/string.hpp>
 #include <drivers/ps2kbd.hpp>
 #include <drivers/tty.hpp>
@@ -75,38 +75,7 @@ input::Device g_mouse;
 bool g_have_mouse = false;
 bool g_extended = false;
 
-// Synaptics touchpads in absolute mode (6-byte packets, finger count/width
-// in "W"); the TrackPoint behind it arrives as pass-through packets.
-bool g_synaptics = false;
-input::TouchpadMouse g_touchpad;
-u8 g_syn[6];
-int g_syn_len = 0;
 void mouse_packet(u8 flags, u8 b1, u8 b2, u8 b3);
-
-void synaptics_byte(u8 b) {
-    // Sync: byte 0 is 10xx0xxx, byte 3 is 11xx0xxx.
-    if ((g_syn_len == 0 && (b & 0xC8) != 0x80) || (g_syn_len == 3 && (b & 0xC8) != 0xC0)) {
-        g_syn_len = 0;
-        return;
-    }
-    g_syn[g_syn_len++] = b;
-    if (g_syn_len < 6)
-        return;
-    g_syn_len = 0;
-    const u8* p = g_syn;
-    u32 w = ((p[0] & 0x30) >> 2) | ((p[0] & 0x04) >> 1) | ((p[3] & 0x04) >> 2);
-    if (w == 3) { // TrackPoint pass-through: an embedded 3-byte PS/2 packet
-        mouse_packet(p[1], p[4], p[5], 0);
-        return;
-    }
-    i32 x = ((p[3] & 0x10) << 8) | ((p[1] & 0x0F) << 8) | p[4];
-    i32 y = ((p[3] & 0x20) << 7) | ((p[1] & 0xF0) << 4) | p[5];
-    u32 z = p[2];
-    bool button = (p[0] & 0x01) || ((p[0] ^ p[3]) & 0x01); // left button, or the clickpad's click
-    int fingers = z < 25 ? 0 : w == 0 ? 2 : w == 1 ? 3 : 1;
-    input::TouchpadMouse::Finger f[1] = {{x, y}}; // Synaptics' y already grows upwards
-    g_touchpad.frame(f, fingers, button);
-}
 
 // Mouse packet assembly.
 u8 g_packet[4];
@@ -136,8 +105,8 @@ void keyboard_byte(u8 sc) {
 }
 
 void mouse_byte(u8 b) {
-    if (g_synaptics) {
-        synaptics_byte(b);
+    if (ps2pad::active()) {
+        ps2pad::byte(b);
         return;
     }
     if (g_packet_len == 0 && !(b & 0x08))
@@ -149,23 +118,26 @@ void mouse_byte(u8 b) {
     mouse_packet(g_packet[0], g_packet[1], g_packet[2], g_packet_size == 4 ? g_packet[3] : 0);
 }
 
+// Pointer motion and buttons (bit 0 left, 1 right, 2 middle); dy grows downwards.
+void stick_report(u8 buttons, i32 dx, i32 dy) {
+    if (dx) g_mouse.report(input::EV_REL, input::REL_X, dx);
+    if (dy) g_mouse.report(input::EV_REL, input::REL_Y, dy);
+    static const u16 codes[3] = {input::BTN_LEFT, input::BTN_RIGHT, input::BTN_MIDDLE};
+    for (int i = 0; i < 3; i++)
+        if ((buttons ^ g_buttons) & (1 << i))
+            g_mouse.report(input::EV_KEY, codes[i], (buttons >> i) & 1);
+    g_buttons = buttons & 7;
+    g_mouse.sync();
+}
+
 void mouse_packet(u8 flags, u8 b1, u8 b2, u8 b3) {
     if (flags & 0xC0)
         return; // overflow: drop the packet
     i32 dx = b1 - ((flags & 0x10) ? 256 : 0);
     i32 dy = b2 - ((flags & 0x20) ? 256 : 0);
     i32 wheel = static_cast<i8>(static_cast<i8>(b3 << 4) >> 4);
-
-    if (dx) g_mouse.report(input::EV_REL, input::REL_X, dx);
-    if (dy) g_mouse.report(input::EV_REL, input::REL_Y, -dy); // PS/2: up is positive
     if (wheel) g_mouse.report(input::EV_REL, input::REL_WHEEL, -wheel);
-    u8 buttons = flags & 7;
-    static const u16 codes[3] = {input::BTN_LEFT, input::BTN_RIGHT, input::BTN_MIDDLE};
-    for (int i = 0; i < 3; i++)
-        if ((buttons ^ g_buttons) & (1 << i))
-            g_mouse.report(input::EV_KEY, codes[i], (buttons >> i) & 1);
-    g_buttons = buttons;
-    g_mouse.sync();
+    stick_report(flags & 7, dx, -dy); // PS/2: up is positive
 }
 
 // The interrupt handler and the polling fallback both drain the
@@ -237,53 +209,6 @@ void flush_output() {
     }
 }
 
-// "Special command" encoding: four set-resolution commands carry 8 bits.
-void synaptics_encode(u8 arg) {
-    for (int shift = 6; shift >= 0; shift -= 2) {
-        mouse_cmd(0xE8);
-        mouse_cmd((arg >> shift) & 3);
-    }
-}
-
-bool synaptics_query(u8 q, u8 out[3]) {
-    synaptics_encode(q);
-    if (!mouse_cmd(0xE9)) // status request returns the answer
-        return false;
-    return read_byte(&out[0]) && read_byte(&out[1]) && read_byte(&out[2]);
-}
-
-// Detect a Synaptics touchpad and switch it to absolute mode with W.
-bool synaptics_init() {
-    if (strstr(boot::cmdline(), "psmouse=basic"))
-        return false;
-    u8 id[3];
-    if (!synaptics_query(0x00, id) || id[1] != 0x47)
-        return false; // not a Synaptics pad
-    u8 caps[3] = {};
-    synaptics_query(0x02, caps);
-    bool pass_through = caps[2] & 0x80;
-    u8 res[3] = {};
-    i32 upm = 60;
-    if (synaptics_query(0x08, res) && (res[1] & 0x80) && res[0])
-        upm = res[0];
-    synaptics_encode(0xC1); // absolute, 80 packets/s, W mode
-    if (!mouse_cmd(0xF3) || !mouse_cmd(0x14)) // the mode byte is committed by "set sample rate 20"
-        return false;
-    if (pass_through) { // wake the TrackPoint behind it: "enable" through the pass-through port
-        synaptics_encode(0xF4);
-        mouse_cmd(0xF3);
-        mouse_cmd(0x28);
-    }
-    klog::info("PS/2: Synaptics touchpad (version %u.%u, caps %02x%02x%02x, %d units/mm%s): absolute mode",
-               id[2] & 0x0F, id[0], caps[0], caps[1], caps[2], upm, pass_through ? ", TrackPoint pass-through" : "");
-    static bool registered = false; // init_mouse runs again after the USB handoff
-    if (!registered) {
-        g_touchpad.init("SynPS/2 Synaptics TouchPad", input::BUS_I8042, 2, 7, upm);
-        registered = true;
-    }
-    return true;
-}
-
 bool init_mouse() {
     controller_cmd(0xA8); // enable the aux port
     flush_output();
@@ -306,10 +231,9 @@ bool init_mouse() {
 
     if (!mouse_cmd(0xF6)) // defaults
         return false;
-    if (synaptics_init()) {
-        g_synaptics = true;
+    static const ps2pad::Port port = {mouse_cmd, read_byte, stick_report};
+    if (ps2pad::probe(port))
         return mouse_cmd(0xF4); // start streaming
-    }
     // IntelliMouse handshake: sample rates 200, 100, 80 unlock the wheel (ID 3).
     static const u8 rates[] = {200, 100, 80};
     for (u8 rate : rates) {

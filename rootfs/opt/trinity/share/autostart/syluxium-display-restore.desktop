@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Display settings
+Comment=Re-applies the screen resolution chosen in Display Settings
+Exec=syluxium-display --restore
+NoDisplay=true
+X-TDE-autostart-phase=1

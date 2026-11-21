@@ -11,7 +11,7 @@
 #include <core/log.hpp>
 #include <drivers/input/input.hpp>
 #include <drivers/ps2kbd.hpp>
-#include <drivers/usb/hid_parser.hpp>
+#include <drivers/usb/hid_device.hpp>
 #include <drivers/usb/usb.hpp>
 #include <lib/format.hpp>
 #include <lib/string.hpp>
@@ -22,8 +22,8 @@ namespace usb::hid {
 
 namespace {
 
-constexpr u8 REQ_SET_IDLE = 0x0A, REQ_SET_PROTOCOL = 0x0B;
-constexpr u16 PROTOCOL_BOOT = 0, PROTOCOL_REPORT = 1;
+constexpr u8 REQ_GET_REPORT = 0x01, REQ_SET_REPORT = 0x09, REQ_SET_IDLE = 0x0A, REQ_SET_PROTOCOL = 0x0B;
+constexpr u16 PROTOCOL_BOOT = 0;
 
 void name_device(input::Device& in, Device* d, const char* suffix) {
     snprintf(in.name, sizeof(in.name), "%s%s%s", d->product_name, suffix[0] ? " " : "", suffix);
@@ -32,56 +32,32 @@ void name_device(input::Device& in, Device* d, const char* suffix) {
     in.product = d->product;
 }
 
-// Linux names the extra devices of a multi-application interface after the application.
-const char* suffix_for(u32 app, int count) {
-    if (count <= 1)
-        return "";
-    switch (app) {
-    case GD_MOUSE: return "Mouse";
-    case GD_KEYBOARD: return "Keyboard";
-    case GD_KEYPAD: return "Keypad";
-    case GD_SYSTEM_CONTROL: return "System Control";
-    case CONSUMER_CONTROL: return "Consumer Control";
-    case GD_GAMEPAD: case GD_JOYSTICK: return "Gamepad";
-    case DG_PEN: return "Pen";
-    case DG_TOUCHSCREEN: return "Touchscreen";
-    default: return "";
-    }
-}
-
 // ---- report protocol ----
 
-class ReportDevice final : public EventSink {
+// Feature reports through class requests on the interface.
+class UsbFeatures final : public FeatureIo {
 public:
-    void event(int app, u16 type, u16 code, i32 value) override {
-        hid.devices[app].report(type, code, value);
-        // Keyboard keys also go to the text console (codes below BTN_MISC are keys).
-        if (hid.is_keyboard[app] && type == input::EV_KEY && code < input::BTN_MISC)
-            ps2kbd::console_key(code, value != 0);
+    UsbFeatures(Device* d, u8 intf) : m_dev(d), m_intf(intf) {}
+    long get_feature(u8 id, u8* buf, u32 len) override {
+        return m_dev->control(0xA1, REQ_GET_REPORT, static_cast<u16>((3 << 8) | id), m_intf, buf,
+                              static_cast<u16>(len));
+    }
+    long set_feature(u8 id, const u8* buf, u32 len) override {
+        return m_dev->control(0x21, REQ_SET_REPORT, static_cast<u16>((3 << 8) | id), m_intf, const_cast<u8*>(buf),
+                              static_cast<u16>(len));
     }
 
-    HidInput hid;
-    char name[48] = {};
-    u8 logged = 0;
+private:
+    Device* m_dev;
+    u8 m_intf;
 };
 
-void report_received(void* ctx, const u8* data, u32 length) {
-    auto* r = static_cast<ReportDevice*>(ctx);
-    if (r->logged < 2) { // real-hardware diagnostics: do reports arrive, and what do they look like?
-        r->logged++;
-        char hex[3 * 16 + 1] = {};
-        for (u32 i = 0; i < length && i < 16; i++)
-            snprintf(hex + 3 * i, 4, "%02x ", data[i]);
-        klog::info("usb-hid: %s: report of %u bytes: %s", r->name, length, hex);
-    }
-    r->hid.process(data, length);
-}
+void report_received(void* ctx, const u8* data, u32 length) { static_cast<HidDevice*>(ctx)->report(data, length); }
 
 void report_disconnect(void* ctx) {
-    auto* r = static_cast<ReportDevice*>(ctx);
-    for (int i = 0; i < r->hid.device_count; i++)
-        if (r->hid.device_used[i])
-            input::unregister_device(&r->hid.devices[i]);
+    auto* r = static_cast<HidDevice*>(ctx);
+    r->unregister_devices();
+    // The touchpad's TouchpadMouse (if any) is kept: tiny, and an open evdev file may still point at it.
     delete r;
 }
 
@@ -221,14 +197,21 @@ bool probe(Device* d, const Interface& intf) {
                    intf.number, n);
     }
 
-    auto* r = new ReportDevice;
-    int usable = n > 0 ? r->hid.init(raw, static_cast<usize>(n), r) : 0;
+    auto* r = new HidDevice;
+    int usable = n > 0 ? r->parse(raw, static_cast<usize>(n)) : 0;
     u8 raw_copy[256] = {};
     if (n > 0)
         memcpy(raw_copy, raw, n < 256 ? static_cast<usize>(n) : 256);
     kfree(raw);
     if (!usable) {
         delete r;
+        // Vendor-defined only (usage page 0xFFxx, e.g. the firmware/config
+        // interface of Apple's internal keyboard): nothing to input, by design.
+        if (n >= 3 && raw_copy[0] == 0x06 && raw_copy[2] == 0xFF && !boot_capable) {
+            klog::info("usb-hid: %s if%u: vendor-defined interface (no input), not used", d->product_name,
+                       intf.number);
+            return false;
+        }
         // Logged with the descriptor, so a device we misread can be fixed.
         klog::warn("usb-hid: %s if%u: report descriptor not usable (%ld bytes)%s", d->product_name, intf.number, n,
                    boot_capable ? ", using boot protocol" : "");
@@ -258,16 +241,11 @@ bool probe(Device* d, const Interface& intf) {
         delete r;
         return false;
     }
+    char tag[8];
+    snprintf(tag, sizeof(tag), "if%u", intf.number);
+    UsbFeatures features(d, intf.number);
+    int named = r->register_devices(d->product_name, tag, input::BUS_USB, d->vendor, d->product, &features);
     HidInput& hid = r->hid;
-    int named = 0;
-    for (int i = 0; i < hid.device_count; i++) {
-        if (!hid.device_used[i])
-            continue;
-        name_device(hid.devices[i], d, suffix_for(hid.desc.applications[i], usable));
-        input::register_device(&hid.devices[i]);
-        named++;
-    }
-    snprintf(r->name, sizeof(r->name), "%s if%u", d->product_name, intf.number);
     d->add_binding(report_disconnect, r);
     u32 length = hid.max_report_bytes();
     if (length < ep->max_packet)

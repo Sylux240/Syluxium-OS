@@ -1,6 +1,7 @@
 #include <core/watchdog.hpp>
 #include <core/bootlog.hpp>
 #include <power/cpupower.hpp>
+#include <drivers/i2c/i2c_hid.hpp>
 #include <acpi/acpi.hpp>
 #include <acpi/power.hpp>
 #include <acpi/devices.hpp>
@@ -512,6 +513,7 @@ void kernel_main_thread(void*) {
     splash::stage(62, "Starting services");
     acpi::start_interpreter(); // AML: power button, battery, lid (after PCI)
     linuxkpi::acpi_ready();    // GPU probes that needed ACPI methods (_ROM)
+    i2c_hid::init();           // I2C touchpads (ACPI-described, after the interpreter)
     ps2kbd::late_init(); // after the USB handoff (firmware PS/2 emulation off)
     u64 reclaimed = pmm::reclaim_bootloader_memory();
     klog::ok("Reclaimed %lu KiB of bootloader memory", reclaimed / KiB);

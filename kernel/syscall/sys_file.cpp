@@ -9,6 +9,7 @@
 #include <fs/pipe.hpp>
 #include <fs/ramfs.hpp>
 #include <fs/poll.hpp>
+#include <fs/procfs.hpp>
 #include <fs/vfs.hpp>
 #include <lib/format.hpp>
 #include <lib/string.hpp>
@@ -1409,6 +1410,8 @@ long fill_statfs(Inode* n, u64 user_buf) {
     Inode::FsStats st{};
     if (long r = n->statfs(&st); r < 0)
         return r;
+    if (sysfs::contains(n))
+        st.type = 0x62656572; // SYSFS_MAGIC
     LinuxStatfs out{};
     out.f_type = static_cast<i64>(st.type);
     out.f_bsize = out.f_frsize = static_cast<i64>(st.block_size);

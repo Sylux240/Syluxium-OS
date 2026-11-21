@@ -16,15 +16,22 @@ namespace {
 constexpr u32 MSR_MPERF = 0xE7, MSR_APERF = 0xE8, MSR_PLATFORM_INFO = 0xCE, MSR_PERF_CTL = 0x199,
               MSR_MISC_ENABLE = 0x1A0, MSR_TURBO_RATIO = 0x1AD, MSR_ENERGY_PERF_BIAS = 0x1B0,
               MSR_PM_ENABLE = 0x770, MSR_HWP_CAPABILITIES = 0x771, MSR_HWP_REQUEST = 0x774,
-              MSR_AMD_CPPC_CAP1 = 0xC00102B0, MSR_AMD_CPPC_ENABLE = 0xC00102B1, MSR_AMD_CPPC_REQ = 0xC00102B3;
+              MSR_AMD_CPPC_CAP1 = 0xC00102B0, MSR_AMD_CPPC_ENABLE = 0xC00102B1, MSR_AMD_CPPC_REQ = 0xC00102B3,
+              MSR_AMD_PSTATE_LIMIT = 0xC0010061, MSR_AMD_PSTATE_CTL = 0xC0010062, MSR_AMD_PSTATE_DEF = 0xC0010064;
 
-enum class Driver { None, Hwp, Cppc, Legacy };
+// AmdPstate: Zen without CPPC (Ryzen 1000-3000, many laptops whose firmware
+// leaves CPPC off): the hardware P-states P0 (fastest) .. Pn, picked by load.
+enum class Driver { None, Hwp, Cppc, Legacy, AmdPstate };
 
 bool g_detected = false;
 Driver g_driver = Driver::None;
 bool g_intel = false, g_amd = false;
 bool g_aperf = false;
 bool g_mwait_deep = false;
+bool g_deep_idle_ok = false; // the APIC timer and TSC keep running in deep C-states (ARAT + invariant TSC)
+bool g_idle_hlt = false;     // idle=hlt
+u16 g_io_cstate_port = 0;
+u64 g_io_cstate_min_ns = 0;
 u32 g_mwait_hint = 0;
 const char* g_cstate_name = "C1 (hlt)";
 bool g_tickless = false;
@@ -33,9 +40,38 @@ u32 g_min_khz = 0, g_max_khz = 0, g_base_khz = 0;
 // Legacy governor ratios (x 100 MHz).
 u32 g_min_ratio = 0, g_base_ratio = 0, g_turbo_ratio = 0;
 bool g_epp = false;
+// AMD hardware P-states: frequency of each (kHz), P0 first.
+u32 g_amd_pstate_khz[8] = {};
+u32 g_amd_pstates = 0;
 constexpr u32 EPP_BALANCE_PERFORMANCE = 0x80;
 
 u32 tsc_khz() { return static_cast<u32>(clock::tsc_frequency_hz() / 1000); }
+
+// Zen P-state definitions: frequency = FID / DID x 200 MHz (DID in 1/8 steps).
+void detect_amd_pstates() {
+    u64 limit;
+    if (!arch::rdmsr_safe(MSR_AMD_PSTATE_LIMIT, &limit)) {
+        klog::info("CPU power: AMD P-state registers not available (virtual machine?)");
+        return;
+    }
+    u32 max_index = (limit >> 4) & 7;
+    for (u32 i = 0; i <= max_index; i++) {
+        u64 def;
+        if (!arch::rdmsr_safe(MSR_AMD_PSTATE_DEF + i, &def) || !(def >> 63))
+            break;
+        u32 fid = def & 0xFF, did = (def >> 8) & 0x3F;
+        if (!fid || !did)
+            break;
+        g_amd_pstate_khz[g_amd_pstates++] = fid * 200000 / did;
+    }
+    u64 ctl;
+    if (g_amd_pstates >= 2 && arch::rdmsr_safe(MSR_AMD_PSTATE_CTL, &ctl)) {
+        g_driver = Driver::AmdPstate;
+        g_max_khz = g_amd_pstate_khz[0];
+        g_min_khz = g_amd_pstate_khz[g_amd_pstates - 1];
+        g_base_khz = g_max_khz;
+    }
+}
 
 void detect() {
     auto v = arch::cpuid(0);
@@ -59,6 +95,7 @@ void detect() {
     u32 ext_max = arch::cpuid(0x80000000).eax;
     bool invariant_tsc = ext_max >= 0x80000007 && (arch::cpuid(0x80000007).edx & (1u << 8));
 
+    g_deep_idle_ok = arat && invariant_tsc;
     // Deep idle through MWAIT (Intel lists its C-states in leaf 5).
     bool monitor = l1.ecx & (1u << 3);
     if (g_intel && monitor && max_leaf >= 5 && arat && invariant_tsc) {
@@ -106,6 +143,8 @@ void detect() {
             g_base_khz = g_base_ratio * 100000;
         }
     }
+    if (g_driver == Driver::None && g_amd && family >= 0x17)
+        detect_amd_pstates();
     g_detected = true;
 }
 
@@ -147,6 +186,10 @@ void setup_this_cpu() {
         arch::wrmsr(MSR_PERF_CTL, static_cast<u64>(g_base_ratio) << 8);
         cpu->cur_ratio = g_base_ratio;
         break;
+    case Driver::AmdPstate:
+        arch::wrmsr_safe(MSR_AMD_PSTATE_CTL, 0);
+        cpu->cur_ratio = 0; // P-state index
+        break;
     case Driver::None:
         break;
     }
@@ -163,15 +206,17 @@ bool gen_cpufreq(genfs::TextBuffer& out, const void* ctx) {
     u32 cpu_index = static_cast<u32>(reinterpret_cast<uptr>(ctx) >> 8);
     u32 field = static_cast<u32>(reinterpret_cast<uptr>(ctx) & 0xFF);
     Cpu* cpu = percpu::get(cpu_index);
+    bool ondemand = g_driver == Driver::Legacy || g_driver == Driver::AmdPstate;
     const char* driver = g_driver == Driver::Hwp    ? "intel_pstate"
                          : g_driver == Driver::Cppc ? "amd-pstate-epp"
+                         : g_driver == Driver::AmdPstate ? "acpi-cpufreq"
                                                     : "syluxium-ondemand";
-    const char* governor = g_driver == Driver::Legacy ? "ondemand" : "powersave";
+    const char* governor = ondemand ? "ondemand" : "powersave";
     u32 lo = g_min_khz ? g_min_khz : tsc_khz(), hi = g_max_khz ? g_max_khz : tsc_khz();
     switch (field) {
     case 0: out.printf("%s\n", driver); break;
     case 1: out.printf("%s\n", governor); break;
-    case 2: out.printf("%s\n", g_driver == Driver::Legacy ? "ondemand" : "performance powersave"); break;
+    case 2: out.printf("%s\n", ondemand ? "ondemand" : "performance powersave"); break;
     case 3: out.printf("%u\n", lo); break;
     case 4: out.printf("%u\n", hi); break;
     case 5: out.printf("%u\n", lo); break;
@@ -190,6 +235,7 @@ void init_cpu() {
     if (!g_detected) {
         detect();
         if (strstr(boot::cmdline(), "idle=hlt")) {
+            g_idle_hlt = true;
             g_mwait_deep = false;
             g_cstate_name = "C1 (hlt, idle=hlt)";
         }
@@ -217,6 +263,7 @@ void publish() {
     const char* driver = g_driver == Driver::Hwp    ? "Intel HWP (hardware P-states)"
                          : g_driver == Driver::Cppc ? "AMD CPPC"
                          : g_driver == Driver::Legacy ? "SpeedStep, load-based governor"
+                         : g_driver == Driver::AmdPstate ? "AMD P-states, load-based governor"
                                                       : "firmware-controlled";
     if (g_min_khz)
         klog::ok("CPU power: %s, %u-%u MHz; idle %s, %s", driver, g_min_khz / 1000, g_max_khz / 1000,
@@ -228,7 +275,45 @@ void publish() {
 
 bool tickless_enabled() { return g_tickless; }
 
+void set_io_cstate(u16 port, u32 latency_us, int acpi_type) {
+    if (!g_amd || g_idle_hlt || g_mwait_deep || !g_deep_idle_ok || !port)
+        return;
+    if (acpi_type != 2 || latency_us > 1000)
+        return; // C3 and deeper would need bus-master handling; not worth the risk
+    // Only when the CPU will likely sleep well beyond the exit latency.
+    g_io_cstate_min_ns = static_cast<u64>(latency_us) * 1000 * 10;
+    if (g_io_cstate_min_ns < 200'000)
+        g_io_cstate_min_ns = 200'000;
+    __atomic_store_n(&g_io_cstate_port, port, __ATOMIC_RELEASE);
+    static char name[40];
+    snprintf(name, sizeof(name), "ACPI C2 (I/O port %#x, %u us)", port, latency_us);
+    g_cstate_name = name;
+    klog::ok("CPU power: idle CPUs use %s", name);
+}
+
 void idle(u64 expected_ns) {
+    u16 io_port = __atomic_load_n(&g_io_cstate_port, __ATOMIC_ACQUIRE);
+    if (io_port && expected_ns >= g_io_cstate_min_ns) {
+        // Like Linux's acpi_idle: the port read enters the C-state with
+        // interrupts off; a pending interrupt still wakes the core.
+        if (!this_cpu()->need_resched) {
+            u64 before = clock::now_ns();
+            arch::inb(io_port);
+            // A port that doesn't actually stop the core would make idle CPUs
+            // spin: after many instant returns in a row, fall back to hlt.
+            static u32 instant = 0;
+            if (clock::now_ns() - before < 20000) { // 20 us: a real C-state lasts until the next interrupt
+                if (++instant == 2000) {
+                    __atomic_store_n(&g_io_cstate_port, 0, __ATOMIC_RELEASE);
+                    g_cstate_name = "C1 (hlt; the ACPI C2 port did not idle)";
+                }
+            } else {
+                instant = 0;
+            }
+        }
+        asm volatile("sti" ::: "memory");
+        return;
+    }
     if (g_mwait_deep && expected_ns >= 2'000'000) {
         Cpu* cpu = this_cpu();
         // Arm the monitor on need_resched, then sti; mwait (sti's one
@@ -262,6 +347,16 @@ void tick(Cpu* cpu) {
         }
         if (!g_aperf)
             cpu->cur_khz = ratio * 100000;
+    } else if (g_driver == Driver::AmdPstate) {
+        // ondemand over the hardware P-states: P0 above 80% load.
+        u32 slowest = g_amd_pstates - 1;
+        u32 index = load >= 80 ? 0 : slowest - slowest * load / 80;
+        if (index != cpu->cur_ratio) {
+            arch::wrmsr_safe(MSR_AMD_PSTATE_CTL, index);
+            cpu->cur_ratio = index;
+        }
+        if (!g_aperf)
+            cpu->cur_khz = g_amd_pstate_khz[index];
     }
     if (g_aperf) {
         // Effective frequency while running: base clock x APERF/MPERF.

@@ -1,13 +1,18 @@
 #!/bin/bash
-# Display Settings: choose the screen resolution. Until GPU drivers arrive,
-# the firmware sets the mode at boot: the choice goes into the boot loader's
-# configuration (Limine "resolution:") and takes effect after a restart.
+# Display Settings: screen resolution and refresh rate.
+#   With a GPU driver (X's modesetting driver, xrandr lists modes): changed
+#   at once, kept only if confirmed within 15 seconds (like Windows), and
+#   restored at every login (syluxium-display --restore, from autostart).
+#   With the firmware framebuffer only: the choice goes into the boot
+#   loader's configuration (Limine "resolution:") and applies after a restart.
 #   syluxium-display            graphical
-#   syluxium-display --set WxH  set it directly (no restart)
+#   syluxium-display --set WxH  boot resolution directly (root, no restart)
+#   syluxium-display --restore  re-apply the saved live mode (login)
 export PATH=/opt/trinity/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 TITLE="Display Settings"
 SYS=/sys/class/graphics/fb0
 CONF=/boot/efi/boot/limine/limine.conf
+SAVED="$HOME/.config/syluxium/display"
 
 set_resolution() {
     local res=$1
@@ -19,13 +24,80 @@ set_resolution() {
     ' "$CONF" > "$CONF.new" && mv "$CONF.new" "$CONF" && sync
 }
 
+# xrandr: "OUTPUT MODE RATE" of the current mode, and every "MODE RATE" pair.
+xr_output() { xrandr --query 2>/dev/null | awk '$2 == "connected" { print $1; exit }'; }
+xr_current() {
+    xrandr --query 2>/dev/null | awk -v out="$1" '
+        $1 == out { on = 1; next }
+        on && /^[^ ]/ { exit }
+        on { for (i = 2; i <= NF; i++) if ($i ~ /\*/) { r = $i; gsub(/[*+]/, "", r); print $1, r; exit } }'
+}
+xr_modes() {
+    xrandr --query 2>/dev/null | awk -v out="$1" '
+        $1 == out { on = 1; next }
+        on && /^[^ ]/ { exit }
+        on && $1 ~ /^[0-9]+x[0-9]+/ { for (i = 2; i <= NF; i++) { r = $i; gsub(/[*+]/, "", r); if (r ~ /^[0-9.]+$/) print $1, r } }'
+}
+
 if [ "$1" = "--set" ]; then
     [ "$(id -u)" = 0 ] || { echo "must be root" >&2; exit 1; }
     set_resolution "$2"
     exit $?
 fi
-[ "$(id -u)" = 0 ] || exec tdesudo -c "$0" -- "$@"
 
+if [ "$1" = "--restore" ]; then
+    [ -f "$SAVED" ] || exit 0
+    read -r out mode rate < "$SAVED"
+    [ -n "$out" ] && [ -n "$mode" ] && xrandr --output "$out" --mode "$mode" ${rate:+--rate "$rate"} 2>/dev/null
+    exit 0
+fi
+
+out=$(xr_output)
+if [ -n "$out" ] && [ "$(xr_modes "$out" | wc -l)" -gt 1 ]; then
+    # ---- live change (GPU driver) ----
+    read -r cur_mode cur_rate <<< "$(xr_current "$out")"
+    items=()
+    while read -r m r; do
+        items+=("$m @ $r Hz")
+    done < <(xr_modes "$out")
+    current="$cur_mode @ $cur_rate Hz"
+    choice=$(kdialog --title "$TITLE" --combobox "Screen resolution and refresh rate ($out):" \
+             "${items[@]}" --default "$current") || exit 0
+    [ "$choice" = "$current" ] && exit 0
+    mode=${choice%% @*}
+    rate=${choice#*@ }
+    rate=${rate% Hz}
+    if ! xrandr --output "$out" --mode "$mode" --rate "$rate"; then
+        kdialog --title "$TITLE" --error "The screen could not be set to $choice."
+        exit 1
+    fi
+    # Keep it only if the user can see and confirm it.
+    kdialog --title "$TITLE" --yesno "Do you want to keep these display settings?
+
+They go back to the previous ones in 15 seconds." &
+    ask=$!
+    for _ in $(seq 150); do
+        kill -0 "$ask" 2>/dev/null || break
+        sleep 0.1
+    done
+    if kill -0 "$ask" 2>/dev/null; then
+        kill "$ask" 2>/dev/null
+        answer=1
+    else
+        wait "$ask"
+        answer=$?
+    fi
+    if [ "$answer" = 0 ]; then
+        mkdir -p "$(dirname "$SAVED")"
+        echo "$out $mode $rate" > "$SAVED"
+    else
+        xrandr --output "$out" --mode "$cur_mode" --rate "$cur_rate"
+    fi
+    exit 0
+fi
+
+# ---- firmware framebuffer: the boot loader sets the mode ----
+[ "$(id -u)" = 0 ] || exec tdesudo -c "$0" -- "$@"
 current=$(sed 's/^U://; s/p.*//' "$SYS/mode" 2>/dev/null)
 modes=()
 while read -r line; do

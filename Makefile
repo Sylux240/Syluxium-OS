@@ -62,6 +62,8 @@ TRINITY_PKGS := dbus tdebase-trinity-bin twin-trinity kicker-trinity kdesktop-tr
 DEBIAN_PKGS  := bash busybox hello ncurses-base pciutils pci.ids netbase alsa-utils xserver-xorg-core xserver-xorg-video-fbdev xserver-xorg-input-evdev xinit x11-xserver-utils x11-xkb-utils xterm twm xfonts-base sudo libpam-runtime libpam-modules login fdisk e2fsprogs dosfstools xdotool firefox-esr \
                 wine wine64 iw wpasupplicant wireless-regdb hostapd fonts-wine xcape gparted python3 python3-gi python3-gi-cairo fonts-inter gir1.2-gtk-3.0 librsvg2-common cups cups-bsd dpkg apt debconf libc-bin coreutils trinity-keyring ca-certificates \
                 libgl1-mesa-dri libglx-mesa0 libegl-mesa0 mesa-utils
+# Right-click "Extract Here" for .7z (zip and tar are handled without it).
+DEBIAN_PKGS  += 7zip
 DEBIAN_ROOT  := $(BUILD)/rootfs-debian
 DEBIAN_STAMP := $(DEBIAN_ROOT)/.fetched
 DEBIAN_CONFIGURED := $(DEBIAN_ROOT)/.configured

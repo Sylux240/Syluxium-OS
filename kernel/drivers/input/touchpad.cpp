@@ -24,9 +24,38 @@ void TouchpadMouse::init(const char* name, u16 bustype, u16 vendor, u16 product,
     m_dev.props = 1u << INPUT_PROP_POINTER;
     m_upm = units_per_mm > 0 ? units_per_mm : 40;
     register_device(&m_dev);
+    m_registered = true;
 }
 
-void TouchpadMouse::frame(const Finger* fingers, int count, bool button) {
+void TouchpadMouse::set_area(i32 x_min, i32 x_max, i32 y_min, i32 y_max, bool clickpad) {
+    m_x_min = x_min;
+    m_x_max = x_max;
+    m_y_min = y_min;
+    m_y_max = y_max;
+    m_clickpad = clickpad && x_max > x_min && y_max > y_min;
+}
+
+// Windows' precision touchpad convention: the right half of the bottom
+// strip (15% of the height, at least 8 mm) is the right button.
+bool TouchpadMouse::in_right_button_area(const Finger& f) const {
+    if (!m_clickpad)
+        return false;
+    i32 strip = (m_y_max - m_y_min) * 15 / 100;
+    if (strip < 8 * m_upm)
+        strip = 8 * m_upm;
+    return f.x > m_x_min + (m_x_max - m_x_min) / 2 && f.y < m_y_min + strip;
+}
+
+void TouchpadMouse::button(u16 code, bool down) {
+    m_dev.report(EV_KEY, code, down ? 1 : 0);
+    m_dev.sync();
+}
+
+void TouchpadMouse::frame(const Finger* fingers, int positions, int count, bool button) {
+    if (positions > count)
+        positions = count;
+    if (count > 0 && positions <= 0)
+        return; // fingers without any position: nothing to track
     u64 now = clock::now_ns();
     bool synced = false;
     auto emit = [&](u16 type, u16 code, i32 value) {
@@ -34,10 +63,14 @@ void TouchpadMouse::frame(const Finger* fingers, int count, bool button) {
         synced = true;
     };
 
-    // Physical click: right button when two or more fingers are down.
+    // Physical click: right button with two or more fingers down, or in a
+    // clickpad's right-button corner.
     if (button != m_button) {
-        if (button)
-            m_button_code = count >= 2 ? BTN_RIGHT : BTN_LEFT;
+        if (button) {
+            m_button_code = BTN_LEFT;
+            if (count >= 2 || (count == 1 && in_right_button_area(fingers[0])))
+                m_button_code = BTN_RIGHT;
+        }
         emit(EV_KEY, m_button_code, button ? 1 : 0);
         m_button = button;
         if (button)
@@ -45,20 +78,20 @@ void TouchpadMouse::frame(const Finger* fingers, int count, bool button) {
     }
 
     i32 cx = 0, cy = 0;
-    for (int i = 0; i < count; i++) {
+    for (int i = 0; i < positions; i++) {
         cx += fingers[i].x;
         cy += fingers[i].y;
     }
-    if (count) {
-        cx /= count;
-        cy /= count;
+    if (positions) {
+        cx /= positions;
+        cy /= positions;
     }
 
     if (count == 0) {
         // Lift: was it a tap? Short, little movement, no physical click.
         if (m_last_count > 0 && !m_touch_clicked && now - m_touch_start < 180'000'000 &&
             m_touch_travel < 2 * m_upm) {
-            u16 code = m_touch_max_fingers >= 2 ? BTN_RIGHT : BTN_LEFT;
+            u16 code = m_touch_max_fingers >= 3 ? BTN_MIDDLE : m_touch_max_fingers == 2 ? BTN_RIGHT : BTN_LEFT;
             emit(EV_KEY, code, 1);
             m_dev.sync();
             emit(EV_KEY, code, 0);

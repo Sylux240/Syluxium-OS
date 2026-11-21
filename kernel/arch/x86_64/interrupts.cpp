@@ -139,6 +139,49 @@ void dump_frame(const Frame* f) {
 
 } // namespace interrupts
 
+// ---- MSR access that survives a #GP ----
+// The faulting instruction (rdmsr/wrmsr, 2 bytes) is found by its address;
+// the handler sets RSI = 1 and resumes after it.
+extern "C" char rdmsr_safe_insn[], wrmsr_safe_insn[];
+
+namespace arch {
+
+bool rdmsr_safe(u32 msr, u64* value) {
+    u32 lo = 0, hi = 0;
+    u64 fault = 0;
+    asm volatile(".globl rdmsr_safe_insn\nrdmsr_safe_insn:\n\trdmsr"
+                 : "=a"(lo), "=d"(hi), "+S"(fault)
+                 : "c"(msr)
+                 : "memory");
+    *value = fault ? 0 : (static_cast<u64>(hi) << 32) | lo;
+    return !fault;
+}
+
+bool wrmsr_safe(u32 msr, u64 value) {
+    u64 fault = 0;
+    asm volatile(".globl wrmsr_safe_insn\nwrmsr_safe_insn:\n\twrmsr"
+                 : "+S"(fault)
+                 : "c"(msr), "a"(static_cast<u32>(value)), "d"(static_cast<u32>(value >> 32))
+                 : "memory");
+    return !fault;
+}
+
+} // namespace arch
+
+namespace {
+
+bool fixup_msr_fault(interrupts::Frame* frame) {
+    if (frame->vector != 13 || (frame->cs & 3))
+        return false;
+    if (frame->rip != reinterpret_cast<u64>(rdmsr_safe_insn) && frame->rip != reinterpret_cast<u64>(wrmsr_safe_insn))
+        return false;
+    frame->rsi = 1;
+    frame->rip += 2;
+    return true;
+}
+
+} // namespace
+
 // Called from isr_common with interrupts disabled.
 extern "C" void isr_dispatch(interrupts::Frame* frame) {
     using namespace interrupts;
@@ -151,6 +194,8 @@ extern "C" void isr_dispatch(interrupts::Frame* frame) {
 
     if (Handler h = g_handlers[vector]) {
         h(frame);
+    } else if (vector < 32 && fixup_msr_fault(frame)) {
+        // rdmsr_safe/wrmsr_safe: resumed after the instruction
     } else if (vector < 32) {
         if ((frame->cs & 3) && g_user_fault_hook)
             g_user_fault_hook(frame); // kills the process, or queues a signal for its handler

@@ -12,6 +12,7 @@
 #include <core/log.hpp>
 #include <dev/device.hpp>
 #include <drivers/pci/pci.hpp>
+#include <drivers/input/touchpad.hpp>
 #include <drivers/usb/usb.hpp>
 #include <lib/errno.hpp>
 #include <lib/format.hpp>
@@ -902,6 +903,7 @@ void register_driver() {
     // The USB input layer's decoders are checked first (no hardware needed).
     usb::hid::run_selftest();
     usb::xpad::run_selftest();
+    input::run_touchpad_selftest();
     dev::register_driver(&g_driver);
 }
 

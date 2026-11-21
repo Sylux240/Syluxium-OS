@@ -8,6 +8,8 @@
 #include <acpi/devices.hpp>
 #include <acpi/ec.hpp>
 #include <acpi/power.hpp>
+#include <drivers/input/input.hpp>
+#include <power/cpupower.hpp>
 #include <block/block.hpp>
 #include <core/log.hpp>
 #include <fs/ext2.hpp>
@@ -18,10 +20,13 @@
 #include <proc/process.hpp>
 #include <proc/signal.hpp>
 #include <sched/sched.hpp>
+#include <sched/sync.hpp>
+#include <time/clock.hpp>
 
 #include <arch/x86_64/cpu.hpp>
 #include <uacpi/event.h>
 #include <uacpi/sleep.h>
+#include <uacpi/namespace.h>
 #include <uacpi/notify.h>
 #include <uacpi/uacpi.h>
 #include <uacpi/utilities.h>
@@ -75,12 +80,18 @@ uacpi_status power_button_notify(uacpi_handle, uacpi_namespace_node*, uacpi_u64 
 }
 
 // ---- battery / AC adapter / lid ----
+//
+// Like Linux's /sys/class/power_supply: one directory per battery (BATn)
+// and adapter (AC), with the attributes and "uevent" properties upower and
+// TDE's hardware library (tdepowersave's battery icon) read, and a
+// "subsystem" link so libudev classifies them.
 
 constexpr int MAX_BATTERIES = 4;
 uacpi_namespace_node* g_batteries[MAX_BATTERIES];
 int g_battery_count = 0;
 uacpi_namespace_node* g_ac = nullptr;
 uacpi_namespace_node* g_lid = nullptr;
+sched::Mutex g_battery_lock; // AML evaluation results are cached under it
 
 u64 package_int(uacpi_object_array& a, usize i) {
     u64 v = 0;
@@ -89,100 +100,222 @@ u64 package_int(uacpi_object_array& a, usize i) {
     return v;
 }
 
+void package_string(uacpi_object_array& a, usize i, char* out, usize size) {
+    out[0] = 0;
+    uacpi_data_view v;
+    if (i < a.count && uacpi_object_get_string_or_buffer(a.objects[i], &v) == UACPI_STATUS_OK && v.length) {
+        usize n = 0;
+        for (; n < v.length && n + 1 < size && v.const_text[n]; n++)
+            out[n] = (v.const_text[n] >= 32 && v.const_text[n] < 127) ? v.const_text[n] : '?';
+        out[n] = 0;
+        while (n && out[n - 1] == ' ')
+            out[--n] = 0;
+    }
+}
+
 struct BatteryState {
     bool present = false;
-    u64 design = 0, full = 0, now = 0, rate = 0, voltage = 0;
-    u32 state = 0; // _BST bit 0 discharging, bit 1 charging
+    u64 design = 0, full = 0, now = 0, rate = 0, voltage = 0, design_voltage = 0, warning = 0, low = 0;
+    u64 cycles = 0;
+    u32 state = 0;     // _BST bit 0 discharging, bit 1 charging, bit 2 critical
     bool watts = true; // capacity unit: mWh (true) or mAh
+    bool rechargeable = true;
+    char model[24] = {}, serial[24] = {}, technology[12] = {}, manufacturer[24] = {};
+    u64 info_time = 0, status_time = 0; // clock::now_ns() of the last _BIX / _BST
 };
+BatteryState g_battery_cache[MAX_BATTERIES];
 
-bool read_battery(uacpi_namespace_node* node, BatteryState* s) {
+constexpr u64 UNKNOWN = 0xFFFFFFFF;
+
+// Reads (or reuses: power managers poll every second) a battery's state.
+// Static information is re-read every 30 s, the status every 2 s.
+const BatteryState& read_battery(int i) {
+    BatteryState& s = g_battery_cache[i];
+    uacpi_namespace_node* node = g_batteries[i];
+    u64 now = clock::now_ns();
+    bool fresh_info = s.info_time && now - s.info_time < 30'000'000'000ull;
+    bool fresh_status = s.status_time && now - s.status_time < 2'000'000'000ull;
+    if (fresh_info && fresh_status)
+        return s;
     u64 sta = 0x1F;
     uacpi_eval_simple_integer(node, "_STA", &sta);
-    s->present = sta & 0x10;
-    if (!s->present)
-        return true;
-    // _BIX (ACPI 4+) has the same fields one later than _BIF.
-    uacpi_object* info = nullptr;
-    usize shift = 1;
-    if (uacpi_eval_simple(node, "_BIX", &info) != UACPI_STATUS_OK) {
-        shift = 0;
-        if (uacpi_eval_simple(node, "_BIF", &info) != UACPI_STATUS_OK)
+    bool was_present = s.present;
+    s.present = sta & 0x10;
+    if (!s.present)
+        return s;
+    if (!fresh_info || !was_present) {
+        // _BIX (ACPI 4+): one revision field before _BIF's first five; strings further on.
+        uacpi_object* info = nullptr;
+        bool bix = uacpi_eval_simple(node, "_BIX", &info) == UACPI_STATUS_OK;
+        if (!bix && uacpi_eval_simple(node, "_BIF", &info) != UACPI_STATUS_OK)
             info = nullptr;
-    }
-    if (info) {
-        uacpi_object_array a;
-        if (uacpi_object_get_package(info, &a) == UACPI_STATUS_OK) {
-            s->watts = package_int(a, 0 + shift) == 0;
-            s->design = package_int(a, 1 + shift);
-            s->full = package_int(a, 2 + shift);
-            s->voltage = package_int(a, 4 + shift);
+        if (info) {
+            uacpi_object_array a;
+            if (uacpi_object_get_package(info, &a) == UACPI_STATUS_OK) {
+                usize shift = bix ? 1 : 0, strings = bix ? 16 : 9;
+                s.watts = package_int(a, 0 + shift) == 0;
+                s.design = package_int(a, 1 + shift);
+                s.full = package_int(a, 2 + shift);
+                s.rechargeable = package_int(a, 3 + shift) != 0;
+                s.design_voltage = package_int(a, 4 + shift);
+                s.warning = package_int(a, 5 + shift);
+                s.low = package_int(a, 6 + shift);
+                s.cycles = bix ? package_int(a, 8) : 0;
+                package_string(a, strings, s.model, sizeof(s.model));
+                package_string(a, strings + 1, s.serial, sizeof(s.serial));
+                package_string(a, strings + 2, s.technology, sizeof(s.technology));
+                package_string(a, strings + 3, s.manufacturer, sizeof(s.manufacturer));
+            }
+            uacpi_object_unref(info);
         }
-        uacpi_object_unref(info);
+        if (s.design == UNKNOWN)
+            s.design = 0;
+        if (s.full == UNKNOWN || s.full == 0)
+            s.full = s.design;
+        if (s.design_voltage == UNKNOWN)
+            s.design_voltage = 0;
+        if (s.cycles == UNKNOWN)
+            s.cycles = 0;
+        s.info_time = now;
     }
     uacpi_object* st = nullptr;
     if (uacpi_eval_simple(node, "_BST", &st) == UACPI_STATUS_OK) {
         uacpi_object_array a;
         if (uacpi_object_get_package(st, &a) == UACPI_STATUS_OK) {
-            s->state = static_cast<u32>(package_int(a, 0));
-            s->rate = package_int(a, 1);
-            s->now = package_int(a, 2);
+            s.state = static_cast<u32>(package_int(a, 0));
+            s.rate = package_int(a, 1);
+            s.now = package_int(a, 2);
+            s.voltage = package_int(a, 3);
+            if (s.rate == UNKNOWN)
+                s.rate = 0;
+            if (s.voltage == UNKNOWN || s.voltage == 0)
+                s.voltage = s.design_voltage;
+            if (s.now == UNKNOWN)
+                s.now = 0;
+            if (s.rate > 0x7FFFFFFF) // some firmware reports a negative rate while discharging
+                s.rate = static_cast<u64>(-static_cast<i64>(static_cast<i32>(s.rate)));
         }
         uacpi_object_unref(st);
     }
-    if (s->full == 0xFFFFFFFF || s->full == 0)
-        s->full = s->design;
-    return true;
+    s.status_time = now;
+    return s;
 }
 
 const char* status_text(const BatteryState& s) {
     if (s.state & 2) return "Charging";
     if (s.state & 1) return "Discharging";
-    return s.now >= s.full * 98 / 100 ? "Full" : "Not charging";
+    return s.full && s.now >= s.full * 95 / 100 ? "Full" : "Not charging";
 }
+
+u64 capacity_percent(const BatteryState& s) {
+    u64 cap = s.full ? s.now * 100 / s.full : 0;
+    return cap > 100 ? 100 : cap;
+}
+
+const char* capacity_level(const BatteryState& s) {
+    if (s.state & 4 || (s.low && s.now <= s.low)) return "Critical";
+    if (s.warning && s.now <= s.warning) return "Low";
+    if (s.full && s.now >= s.full * 95 / 100) return "Full";
+    return "Normal";
+}
+
+enum BatteryField {
+    F_PRESENT, F_STATUS, F_CAPACITY, F_NOW, F_FULL, F_FULL_DESIGN, F_RATE, F_VOLTAGE, F_UEVENT, F_VOLTAGE_DESIGN,
+    F_TECHNOLOGY, F_MANUFACTURER, F_MODEL, F_SERIAL, F_LEVEL, F_CYCLES, F_ALARM, F_COUNT
+};
 
 bool gen_battery(genfs::TextBuffer& out, const void* ctx) {
     int i = static_cast<int>(reinterpret_cast<uptr>(ctx) >> 8);
     int field = static_cast<int>(reinterpret_cast<uptr>(ctx) & 0xFF);
-    BatteryState s;
-    if (i >= g_battery_count || !read_battery(g_batteries[i], &s))
+    if (i >= g_battery_count)
         return false;
-    u64 cap = s.full ? s.now * 100 / s.full : 0;
-    if (cap > 100)
-        cap = 100;
-    const char* unit = s.watts ? "energy" : "charge";
+    LockGuard guard(g_battery_lock);
+    const BatteryState& s = read_battery(i);
+    // Linux units: µWh/µW for mWh batteries, µAh/µA for mAh ones, µV.
+    const char* cap = s.watts ? "ENERGY" : "CHARGE";
+    const char* tech = !strncmp(s.technology, "LI", 2) || !strncmp(s.technology, "Li", 2) ? "Li-ion"
+                       : !strncmp(s.technology, "NiMH", 4)                               ? "NiMH"
+                                                                                         : "Unknown";
     switch (field) {
-    case 0: out.printf("%d\n", s.present ? 1 : 0); break;
-    case 1: out.printf("%s\n", status_text(s)); break;
-    case 2: out.printf("%lu\n", cap); break;
-    case 3: out.printf("%lu\n", s.now * 1000); break;  // µWh / µAh
-    case 4: out.printf("%lu\n", s.full * 1000); break;
-    case 5: out.printf("%lu\n", s.design * 1000); break;
-    case 6: out.printf("%lu\n", s.rate * 1000); break; // µW / µA
-    case 7: out.printf("%lu\n", s.voltage * 1000); break;
-    case 8:
-        out.printf("POWER_SUPPLY_NAME=BAT%d\nPOWER_SUPPLY_TYPE=Battery\nPOWER_SUPPLY_PRESENT=%d\n"
-                   "POWER_SUPPLY_STATUS=%s\nPOWER_SUPPLY_CAPACITY=%lu\nPOWER_SUPPLY_%s_NOW=%lu\n"
-                   "POWER_SUPPLY_%s_FULL=%lu\nPOWER_SUPPLY_%s_FULL_DESIGN=%lu\n",
-                   i, s.present ? 1 : 0, status_text(s), cap, s.watts ? "ENERGY" : "CHARGE", s.now * 1000,
-                   s.watts ? "ENERGY" : "CHARGE", s.full * 1000, s.watts ? "ENERGY" : "CHARGE", s.design * 1000);
+    case F_PRESENT: out.printf("%d\n", s.present ? 1 : 0); break;
+    case F_STATUS: out.printf("%s\n", s.present ? status_text(s) : "Unknown"); break;
+    case F_CAPACITY: out.printf("%lu\n", capacity_percent(s)); break;
+    case F_NOW: out.printf("%lu\n", s.now * 1000); break;
+    case F_FULL: out.printf("%lu\n", s.full * 1000); break;
+    case F_FULL_DESIGN: out.printf("%lu\n", s.design * 1000); break;
+    case F_RATE: out.printf("%lu\n", s.rate * 1000); break;
+    case F_VOLTAGE: out.printf("%lu\n", s.voltage * 1000); break;
+    case F_VOLTAGE_DESIGN: out.printf("%lu\n", s.design_voltage * 1000); break;
+    case F_TECHNOLOGY: out.printf("%s\n", tech); break;
+    case F_MANUFACTURER: out.printf("%s\n", s.manufacturer); break;
+    case F_MODEL: out.printf("%s\n", s.model); break;
+    case F_SERIAL: out.printf("%s\n", s.serial); break;
+    case F_LEVEL: out.printf("%s\n", s.present ? capacity_level(s) : "Unknown"); break;
+    case F_CYCLES: out.printf("%lu\n", s.cycles); break;
+    case F_ALARM: out.printf("%lu\n", s.warning * 1000); break;
+    case F_UEVENT:
+        out.printf("POWER_SUPPLY_NAME=BAT%d\nPOWER_SUPPLY_TYPE=Battery\nPOWER_SUPPLY_PRESENT=%d\n", i,
+                   s.present ? 1 : 0);
+        if (!s.present)
+            break;
+        out.printf("POWER_SUPPLY_STATUS=%s\nPOWER_SUPPLY_TECHNOLOGY=%s\nPOWER_SUPPLY_CYCLE_COUNT=%lu\n"
+                   "POWER_SUPPLY_VOLTAGE_MIN_DESIGN=%lu\nPOWER_SUPPLY_VOLTAGE_NOW=%lu\nPOWER_SUPPLY_%s_NOW=%lu\n"
+                   "POWER_SUPPLY_%s_FULL_DESIGN=%lu\nPOWER_SUPPLY_%s_FULL=%lu\nPOWER_SUPPLY_%s_NOW=%lu\n"
+                   "POWER_SUPPLY_CAPACITY=%lu\nPOWER_SUPPLY_CAPACITY_LEVEL=%s\nPOWER_SUPPLY_MODEL_NAME=%s\n"
+                   "POWER_SUPPLY_MANUFACTURER=%s\nPOWER_SUPPLY_SERIAL_NUMBER=%s\n",
+                   status_text(s), tech, s.cycles, s.design_voltage * 1000, s.voltage * 1000,
+                   s.watts ? "POWER" : "CURRENT", s.rate * 1000, cap, s.design * 1000, cap, s.full * 1000, cap,
+                   s.now * 1000, capacity_percent(s), capacity_level(s), s.model, s.manufacturer, s.serial);
         break;
+    default: return false;
     }
-    (void)unit;
     return true;
 }
 
-bool gen_ac(genfs::TextBuffer& out, const void*) {
+bool ac_online() {
     u64 on = 1;
+    LockGuard guard(g_battery_lock);
     uacpi_eval_simple_integer(g_ac, "_PSR", &on);
-    out.printf("%lu\n", on ? 1ul : 0ul);
+    return on != 0;
+}
+
+bool gen_ac(genfs::TextBuffer& out, const void*) {
+    out.printf("%d\n", ac_online() ? 1 : 0);
     return true;
+}
+
+bool gen_ac_uevent(genfs::TextBuffer& out, const void*) {
+    out.printf("POWER_SUPPLY_NAME=AC\nPOWER_SUPPLY_TYPE=Mains\nPOWER_SUPPLY_ONLINE=%d\n", ac_online() ? 1 : 0);
+    return true;
+}
+
+input::Device g_lid_switch;
+
+bool lid_closed() {
+    u64 open = 1;
+    uacpi_eval_simple_integer(g_lid, "_LID", &open);
+    return !open;
+}
+
+uacpi_status lid_notify(uacpi_handle, uacpi_namespace_node*, uacpi_u64 value) {
+    if (value == 0x80) { // lid status changed
+        bool closed = lid_closed();
+        g_lid_switch.report(input::EV_SW, input::SW_LID, closed ? 1 : 0);
+        g_lid_switch.sync();
+        klog::info("ACPI: lid %s", closed ? "closed" : "opened");
+    }
+    return UACPI_STATUS_OK;
 }
 
 bool gen_lid(genfs::TextBuffer& out, const void*) {
     u64 open = 1;
     uacpi_eval_simple_integer(g_lid, "_LID", &open);
     out.printf("state:      %s\n", open ? "open" : "closed");
+    return true;
+}
+
+bool link_power_supply_subsystem(char* out, usize size, const void*) {
+    snprintf(out, size, "../../../class/power_supply");
     return true;
 }
 
@@ -206,29 +339,136 @@ uacpi_iteration_decision found_power_button(void*, uacpi_namespace_node* node, u
     return UACPI_ITERATION_DECISION_CONTINUE;
 }
 
+// Battery/adapter events (0x80 status, 0x81 information changed): drop the cache.
+uacpi_status battery_notify(uacpi_handle, uacpi_namespace_node*, uacpi_u64) {
+    for (int i = 0; i < g_battery_count; i++)
+        g_battery_cache[i].info_time = g_battery_cache[i].status_time = 0;
+    return UACPI_STATUS_OK;
+}
+
+// ---- processor idle states (_CST) ----
+
+// The first processor object with a _CST: its deepest I/O-port C2 state
+// goes to cpupower (AMD's CC6; Intel CPUs idle through MWAIT instead).
+uacpi_iteration_decision find_cst(void* user, uacpi_namespace_node* node, uacpi_u32) {
+    auto* out = static_cast<uacpi_namespace_node**>(user);
+    uacpi_object* cst = nullptr;
+    if (uacpi_eval_simple(node, "_CST", &cst) != UACPI_STATUS_OK || !cst)
+        return UACPI_ITERATION_DECISION_CONTINUE;
+    uacpi_object_unref(cst);
+    *out = node;
+    return UACPI_ITERATION_DECISION_BREAK;
+}
+
+void detect_cstates() {
+    uacpi_namespace_node* cpu = nullptr;
+    uacpi_namespace_for_each_child(uacpi_namespace_root(), find_cst, nullptr,
+                                   static_cast<uacpi_object_type_bits>(UACPI_OBJECT_PROCESSOR_BIT | UACPI_OBJECT_DEVICE_BIT),
+                                   UACPI_MAX_DEPTH_ANY, &cpu);
+    if (!cpu)
+        return;
+    uacpi_object* cst = nullptr;
+    if (uacpi_eval_simple(cpu, "_CST", &cst) != UACPI_STATUS_OK || !cst)
+        return;
+    uacpi_object_array list;
+    u16 best_port = 0;
+    u32 best_latency = 0;
+    int best_type = 0, count = 0;
+    if (uacpi_object_get_package(cst, &list) == UACPI_STATUS_OK) {
+        for (usize i = 1; i < list.count; i++) { // [0] is the count
+            uacpi_object_array e;
+            if (uacpi_object_get_package(list.objects[i], &e) != UACPI_STATUS_OK || e.count < 4)
+                continue;
+            count++;
+            uacpi_data_view reg;
+            if (uacpi_object_get_buffer(e.objects[0], &reg) != UACPI_STATUS_OK || reg.length < 15)
+                continue;
+            const u8* b = reg.const_bytes;
+            // Generic Register descriptor: 0x82, length, space, width, offset, access size, address.
+            if (b[0] != 0x82 || b[3] != 1 /* SystemIO */)
+                continue;
+            u64 addr = 0;
+            for (int k = 0; k < 8; k++)
+                addr |= static_cast<u64>(b[7 + k]) << (8 * k);
+            int type = static_cast<int>(package_int(e, 1));
+            u32 latency = static_cast<u32>(package_int(e, 2));
+            if (type == 2 && addr && addr < 0x10000 && (!best_port || latency >= best_latency)) {
+                best_port = static_cast<u16>(addr);
+                best_latency = latency;
+                best_type = type;
+            }
+        }
+    }
+    uacpi_object_unref(cst);
+    const char* path = uacpi_namespace_node_generate_absolute_path(cpu);
+    klog::info("ACPI: %s lists %d idle state(s)%s", path ? path : "processor", count,
+               best_port ? ", one entered through an I/O port" : "");
+    if (path)
+        uacpi_free_absolute_path(path);
+    if (best_port)
+        cpupower::set_io_cstate(best_port, best_latency, best_type);
+}
+
 void publish_power_supplies() {
-    static const char* const fields[] = {"present", "status", "capacity", "energy_now", "energy_full",
-                                         "energy_full_design", "power_now", "voltage_now", "uevent"};
     for (int i = 0; i < g_battery_count; i++) {
+        uacpi_install_notify_handler(g_batteries[i], battery_notify, nullptr);
+        bool watts = true;
+        {
+            LockGuard guard(g_battery_lock);
+            const BatteryState& s = read_battery(i);
+            watts = !s.present || s.watts;
+        }
+        const char* names[F_COUNT] = {"present", "status", "capacity", watts ? "energy_now" : "charge_now",
+                                      watts ? "energy_full" : "charge_full",
+                                      watts ? "energy_full_design" : "charge_full_design",
+                                      watts ? "power_now" : "current_now", "voltage_now", "uevent",
+                                      "voltage_min_design", "technology", "manufacturer", "model_name",
+                                      "serial_number", "capacity_level", "cycle_count", "alarm"};
         char dir[64], path[96];
         snprintf(dir, sizeof(dir), "/sys/class/power_supply/BAT%d", i);
         vfs::mkdir_p(dir);
         snprintf(path, sizeof(path), "%s/type", dir);
         genfs::static_file(path, "Battery\n");
-        for (int f = 0; f < 9; f++) {
-            snprintf(path, sizeof(path), "%s/%s", dir, fields[f]);
+        snprintf(path, sizeof(path), "%s/subsystem", dir);
+        vfs::add_node(path, new genfs::GeneratedLink(link_power_supply_subsystem, nullptr));
+        for (int f = 0; f < F_COUNT; f++) {
+            snprintf(path, sizeof(path), "%s/%s", dir, names[f]);
             vfs::add_node(path, new genfs::GeneratedFile(gen_battery,
                                                          reinterpret_cast<const void*>(static_cast<uptr>((i << 8) | f))));
         }
     }
     if (g_ac) {
+        uacpi_install_notify_handler(g_ac, battery_notify, nullptr);
         vfs::mkdir_p("/sys/class/power_supply/AC");
         genfs::static_file("/sys/class/power_supply/AC/type", "Mains\n");
         vfs::add_node("/sys/class/power_supply/AC/online", new genfs::GeneratedFile(gen_ac, nullptr));
+        vfs::add_node("/sys/class/power_supply/AC/uevent", new genfs::GeneratedFile(gen_ac_uevent, nullptr));
+        vfs::add_node("/sys/class/power_supply/AC/subsystem",
+                      new genfs::GeneratedLink(link_power_supply_subsystem, nullptr));
     }
     if (g_lid) {
+        // Like Linux's ACPI button driver: a "Lid Switch" input device (EV_SW
+        // SW_LID, 1 = closed) that power managers watch.
+        const char name[] = "Lid Switch";
+        memcpy(g_lid_switch.name, name, sizeof(name));
+        g_lid_switch.bustype = input::BUS_HOST;
+        g_lid_switch.product = 0x0005;
+        g_lid_switch.set_sw(input::SW_LID);
+        if (lid_closed())
+            g_lid_switch.sw_state = 1ull << input::SW_LID;
+        input::register_device(&g_lid_switch);
+        uacpi_install_notify_handler(g_lid, lid_notify, nullptr);
         vfs::mkdir_p("/proc/acpi/button/lid/LID0");
         vfs::add_node("/proc/acpi/button/lid/LID0/state", new genfs::GeneratedFile(gen_lid, nullptr));
+    }
+    for (int i = 0; i < g_battery_count; i++) {
+        LockGuard guard(g_battery_lock);
+        const BatteryState& s = read_battery(i);
+        if (s.present)
+            klog::info("ACPI: battery BAT%d: %s %s, %lu%%, %s (%lu/%lu m%sh, design %lu)", i, s.manufacturer,
+                       s.model, capacity_percent(s), status_text(s), s.now, s.full, s.watts ? "W" : "A", s.design);
+        else
+            klog::info("ACPI: battery BAT%d: not inserted", i);
     }
 }
 
@@ -263,6 +503,7 @@ void start_interpreter() {
     uacpi_find_devices("ACPI0003", found_ac, nullptr);
     uacpi_find_devices("PNP0C0D", found_lid, nullptr);
     publish_power_supplies();
+    detect_cstates();
     // What power managers (TDE's tdepowersave) look for to know ACPI is
     // there; no sleep states are offered until resume works.
     vfs::mkdir_p("/proc/acpi");
