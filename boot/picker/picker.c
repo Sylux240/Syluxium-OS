@@ -297,6 +297,14 @@ static void register_boot_entry(void)
 
 static EFI_STATUS limine(int entry)
 {
+    if (entry == -2) {
+        /* Esc: Limine's own menu, waiting for a choice (no countdown that
+         * would start the default entry while the menu is hard to see). */
+        static const CHAR16 force[] = {'m', 'e', 'n', 'u', '-', 'f', 'o', 'r', 'c', 'e', 0};
+        u32 attrs = EFI_VARIABLE_BOOTSERVICE_ACCESS | EFI_VARIABLE_RUNTIME_ACCESS;
+        RT->SetVariable(L"LoaderConfigTimeoutOneShot", &LOADER_GUID, attrs, sizeof(force), force);
+        entry = -1;
+    }
     if (entry >= 0) {
         /* "menu-hidden": boot the one-shot entry without showing the menu. */
         CHAR16 name[64], zero[] = {'m', 'e', 'n', 'u', '-', 'h', 'i', 'd', 'd', 'e', 'n', 0};
@@ -606,7 +614,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
             activity = 1;
             if (key.ScanCode == 4 || key.ScanCode == 1) SEL = (SEL + NENTRIES - 1) % NENTRIES, dirty = 1; /* left/up */
             else if (key.ScanCode == 3 || key.ScanCode == 2) SEL = (SEL + 1) % NENTRIES, dirty = 1;     /* right/down */
-            else if (key.ScanCode == 0x17) { BS->CloseEvent(tick); return limine(-1); }               /* Esc */
+            else if (key.ScanCode == 0x17) { BS->CloseEvent(tick); return limine(-2); }               /* Esc */
             else if (key.UnicodeChar == '\r' || key.UnicodeChar == ' ') boot(SEL), dirty = 1;
             else if (key.UnicodeChar >= '1' && key.UnicodeChar < '1' + NENTRIES) SEL = key.UnicodeChar - '1', boot(SEL), dirty = 1;
         }
