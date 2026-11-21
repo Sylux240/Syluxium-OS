@@ -2,6 +2,15 @@
 # Install Syluxium from the running (live) system onto a disk.
 #   syluxium-install --disk /dev/sdX --user NAME --password PASS
 #                    [--fullname "Full Name"] [--hostname NAME] [--progress CMD]
+#                    [--timezone Europe/Berlin] [--keyboard us] [--autologin]
+#                    [--remove "package ..."]   (software left out; apt removes it
+#                                                and whatever depends on it)
+#                    [--mode erase|free|manual] [--root PART] [--esp PART] [--format-esp]
+#   erase  (default) the whole disk: GPT, BIOS boot + EFI + ext4 root
+#   free   the largest free space on the disk: an ext4 root there (plus an EFI
+#          partition if the disk has none); other systems stay untouched
+#   manual --root PART is formatted ext4; --esp PART is the EFI partition
+#          (shared with other systems unless --format-esp)
 # Everything on the disk is erased: GPT with a BIOS boot partition (for
 # Limine on BIOS PCs), a FAT32 EFI system partition and an ext4 root. Boots with UEFI and BIOS (Limine). --progress CMD is run as
 # "CMD <step> <text>" after each step (the graphical installer's progress bar).
@@ -10,6 +19,8 @@ export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 BOOT=/usr/lib/syluxium/boot
 TARGET=/mnt/syluxium-target
 DISK= USERNAME= PASSWORD= FULLNAME= HOSTNAME_NEW=syluxium PROGRESS=
+TIMEZONE= KEYBOARD= AUTOLOGIN= REMOVE=
+MODE=erase ROOT= ESP= FORMAT_ESP=
 while [ $# -gt 0 ]; do
     case "$1" in
         --disk) DISK=$2; shift ;;
@@ -18,33 +29,84 @@ while [ $# -gt 0 ]; do
         --fullname) FULLNAME=$2; shift ;;
         --hostname) HOSTNAME_NEW=$2; shift ;;
         --progress) PROGRESS=$2; shift ;;
+        --timezone) TIMEZONE=$2; shift ;;
+        --keyboard) KEYBOARD=$2; shift ;;
+        --autologin) AUTOLOGIN=1 ;;
+        --remove) REMOVE=$2; shift ;;
+        --mode) MODE=$2; shift ;;
+        --root) ROOT=$2; shift ;;
+        --esp) ESP=$2; shift ;;
+        --format-esp) FORMAT_ESP=1 ;;
         *) echo "unknown option $1" >&2; exit 2 ;;
     esac
     shift
 done
 [ "$(id -u)" = 0 ] || { echo "syluxium-install: must run as root" >&2; exit 1; }
-[ -b "$DISK" ] && [ -n "$USERNAME" ] && [ -n "$PASSWORD" ] || { echo "usage: see the top of $0" >&2; exit 2; }
+[ -n "$USERNAME" ] && [ -n "$PASSWORD" ] || { echo "usage: see the top of $0" >&2; exit 2; }
+case "$MODE" in
+    erase|free) [ -b "$DISK" ] || { echo "--disk: not a disk: $DISK" >&2; exit 2; } ;;
+    manual) [ -b "$ROOT" ] && [ -b "$ESP" ] || { echo "--mode manual needs --root and --esp partitions" >&2; exit 2; }
+            DISK=/dev/$(basename "$(readlink -f "/sys/class/block/$(basename "$ROOT")/..")") ;;
+    *) echo "unknown --mode $MODE" >&2; exit 2 ;;
+esac
 echo "$USERNAME" | grep -Eq '^[a-z_][a-z0-9_-]{0,31}$' || { echo "invalid user name: $USERNAME" >&2; exit 2; }
 [ -n "$FULLNAME" ] || FULLNAME=$USERNAME
 
-step() { echo "[install] $1/9 $2"; [ -z "$PROGRESS" ] || $PROGRESS "$1" "$2" || true; }
+step() { echo "[install] $1/10 $2"; [ -z "$PROGRESS" ] || $PROGRESS "$1" "$2" || true; }
 part() { case "$DISK" in *[0-9]) echo "${DISK}p$1" ;; *) echo "${DISK}$1" ;; esac; }
 
 step 1 "Preparing $DISK"
-for m in $(awk -v d="$DISK" 'index($1, d) == 1 {print $2}' /proc/mounts | sort -r); do umount "$m"; done
+if [ "$MODE" = erase ]; then
+    for m in $(awk -v d="$DISK" 'index($1, d) == 1 {print $2}' /proc/mounts | sort -r); do umount "$m"; done
+else
+    for m in $(awk -v r="$ROOT" -v e="$ESP" '$1 == r || $1 == e {print $2}' /proc/mounts | sort -r); do umount "$m"; done
+fi
+ESP_SHARED=
 
 step 2 "Creating partitions"
-sfdisk --quiet --wipe always --label gpt "$DISK" <<PARTS
+case "$MODE" in
+erase)
+    sfdisk --quiet --wipe always --label gpt "$DISK" <<PARTS
 size=1MiB, type=21686148-6449-6E6F-744E-656564454649, name="BIOS boot"
 size=512MiB, type=uefi, name="EFI system"
 type=linux, name="Syluxium"
 PARTS
-sleep 1
-ESP=$(part 2) ROOT=$(part 3)
+    sleep 1
+    ESP=$(part 2) ROOT=$(part 3)
+    FORMAT_ESP=1 ;;
+free)
+    label=$(sfdisk -d "$DISK" 2>/dev/null | awk '/^label:/ {print $2}')
+    [ -n "$label" ] || { echo "$DISK has no partition table: use the erase mode" >&2; exit 1; }
+    # An existing EFI system partition on this disk is shared (Windows', ...).
+    ESP=$(sfdisk -d "$DISK" | awk -F'[ ,:=]+' 'tolower($0) ~ /type=(c12a7328-f81f-11d2-ba4b-00a0c93ec93b|ef)(,|$)/ {print $1; exit}')
+    before=$(sfdisk -d "$DISK" | grep -c '^/dev/')
+    # The largest free region (sfdisk -F: start end sectors size).
+    region=$(sfdisk -F "$DISK" | awk '$1 ~ /^[0-9]+$/ {print $1, $3}' | sort -k2 -n | tail -1)
+    [ -n "$region" ] || { echo "no free space on $DISK" >&2; exit 1; }
+    set -- $region; fstart=$1 fsize=$2
+    [ "$fsize" -ge $((20 * 1024 * 1024 * 2)) ] || { echo "the free space on $DISK is smaller than 20 GB" >&2; exit 1; }
+    if [ -z "$ESP" ]; then
+        if [ "$label" = gpt ]; then t=uefi; else t=ef; fi
+        echo "start=$fstart, size=$((512 * 2048)), type=$t" | sfdisk --quiet --append "$DISK"
+        fstart=$((fstart + 512 * 2048)); fsize=$((fsize - 512 * 2048))
+        FORMAT_ESP=1
+    fi
+    if [ "$label" = gpt ]; then t=linux; else t=83; fi
+    echo "start=$fstart, size=$fsize, type=$t" | sfdisk --quiet --append "$DISK"
+    sleep 1
+    # The new partitions are the highest numbers.
+    n=$(sfdisk -d "$DISK" | grep -c '^/dev/')
+    ROOT=$(part "$n")
+    [ -n "$ESP" ] || ESP=$(part $((n - 1)))
+    [ -n "$FORMAT_ESP" ] || ESP_SHARED=1 ;;
+manual)
+    [ -n "$FORMAT_ESP" ] || ESP_SHARED=1 ;;
+esac
 [ -b "$ESP" ] && [ -b "$ROOT" ] || { echo "partitions $ESP / $ROOT did not appear" >&2; exit 1; }
+echo "[install] root $ROOT, EFI $ESP${ESP_SHARED:+ (shared with other systems)}"
 
 step 3 "Formatting"
-mkfs.vfat -F 32 -n SYLUXEFI "$ESP" > /dev/null
+[ -z "$FORMAT_ESP" ] || mkfs.vfat -F 32 -n SYLUXEFI "$ESP" > /dev/null
 mkfs.ext4 -q -F -L Syluxium "$ROOT"
 UUID=$(dumpe2fs -h "$ROOT" 2>/dev/null | awk '/^Filesystem UUID:/ {print $3}')
 [ -n "$UUID" ] || { echo "could not read the new file system's UUID" >&2; exit 1; }
@@ -59,6 +121,7 @@ for entry in /*; do
 done
 mkdir -p "$TARGET"/{proc,sys,dev,run,mnt,media,tmp,boot/efi}
 chmod 1777 "$TARGET/tmp"
+rm -f "$TARGET/boot/logs"; rmdir "$TARGET/boot/logs-stick" 2>/dev/null || true  # the live stick's log folder
 rm -rf "$TARGET/home/"* "$TARGET/root/.ICEauthority" "$TARGET/root/.trinity/socket-"* 2>/dev/null || true
 
 step 5 "Creating your account"
@@ -72,11 +135,74 @@ step 6 "Setting the computer name"
 echo "$HOSTNAME_NEW" > "$TARGET/etc/hostname"
 sed -i "s/^127\.0\.1\.1.*/127.0.1.1\t$HOSTNAME_NEW/" "$TARGET/etc/hosts"
 
-step 7 "Installing the boot loader"
+# Settings chosen in the installer.
+if [ -n "$TIMEZONE" ] && [ -f "/usr/share/zoneinfo/$TIMEZONE" ]; then
+    ln -sfn "/usr/share/zoneinfo/$TIMEZONE" "$TARGET/etc/localtime"
+    echo "$TIMEZONE" > "$TARGET/etc/timezone"
+fi
+if [ -n "$KEYBOARD" ]; then
+    echo "$KEYBOARD" | grep -Eq '^[a-z]{2,8}(\([a-z0-9_]+\))?$' || { echo "invalid keyboard layout: $KEYBOARD" >&2; exit 2; }
+    layout=${KEYBOARD%%(*} variant=
+    case "$KEYBOARD" in *\(*) variant=${KEYBOARD#*(}; variant=${variant%)} ;; esac
+    mkdir -p "$TARGET/etc/X11/xorg.conf.d"
+    cat > "$TARGET/etc/X11/xorg.conf.d/00-keyboard.conf" <<KBD
+Section "InputClass"
+    Identifier "keyboard layout (chosen in the installer)"
+    MatchIsKeyboard "on"
+    Option "XkbLayout" "$layout"
+    Option "XkbVariant" "$variant"
+EndSection
+KBD
+    printf 'XKBMODEL="pc105"\nXKBLAYOUT="%s"\nXKBVARIANT="%s"\n' "$layout" "$variant" > "$TARGET/etc/default/keyboard"
+fi
+if [ -n "$AUTOLOGIN" ]; then
+    sed -i "s/^#\?AutoLoginEnable=.*/AutoLoginEnable=true/; s/^#\?AutoLoginUser=.*/AutoLoginUser=$USERNAME/" \
+        "$TARGET/etc/trinity/tdm/tdmrc"
+fi
+
+step 7 "Removing the software you left out"
+if [ -n "$REMOVE" ]; then
+    for p in $REMOVE; do
+        echo "$p" | grep -Eq '^[a-z0-9][a-z0-9.+-]*$' || { echo "invalid package name: $p" >&2; exit 2; }
+    done
+    # apt inside the new system: it also removes whatever depends on these.
+    # /proc and /dev for the package scripts; nothing is downloaded.
+    mount -t proc proc "$TARGET/proc" && mount --bind /dev "$TARGET/dev" || true
+    installed=$(chroot "$TARGET" dpkg-query -W -f '${binary:Package}\n' $REMOVE 2>/dev/null | tr '\n' ' ')
+    # Never let a removal take the desktop with it: simulate first, and keep
+    # everything if apt would also remove one of these.
+    protected=" kdesktop-trinity kicker-trinity twin-trinity tdm-trinity tdebase-trinity-bin tdelibs14-trinity xserver-xorg-core xinit python3 python3-gi apt dpkg bash sudo login passwd "
+    if [ -n "$installed" ]; then
+        would=$(chroot "$TARGET" apt-get -s -q --no-download purge $installed 2>/dev/null | awk '$1 == "Purg" || $1 == "Remv" {print $2}')
+        blocked=
+        for p in $would; do case "$protected" in *" $p "*) blocked="$blocked $p" ;; esac; done
+        if [ -n "$blocked" ]; then
+            echo "[install] warning: leaving $installed installed (removing it would also remove:$blocked)"
+        else
+            DEBIAN_FRONTEND=noninteractive chroot "$TARGET" apt-get -y -q --no-download purge $installed \
+                || echo "[install] warning: removing $installed failed; it stays installed"
+        fi
+    fi
+    umount "$TARGET/dev" "$TARGET/proc" 2>/dev/null || true
+fi
+
+step 8 "Installing the boot loader"
 mount -t vfat "$ESP" "$TARGET/boot/efi"
 mkdir -p "$TARGET/boot/efi/EFI/BOOT" "$TARGET/boot/efi/boot/limine"
 # Graphical boot picker first; Limine next to it (the picker starts it).
-if [ -f "$BOOT/picker.efi" ]; then
+if [ -n "$ESP_SHARED" ]; then
+    # Another system's EFI partition: our own folder, nothing of theirs is
+    # replaced. The picker adds its firmware boot entry (and puts it first)
+    # the first time it runs; until then, choose this disk in the
+    # computer's boot menu once.
+    mkdir -p "$TARGET/boot/efi/EFI/Syluxium"
+    cp "$BOOT/picker.efi" "$TARGET/boot/efi/EFI/Syluxium/BOOTX64.EFI"
+    cp "$BOOT/BOOTX64.EFI" "$TARGET/boot/efi/EFI/Syluxium/limine.efi"
+    [ -e "$TARGET/boot/efi/EFI/BOOT/BOOTX64.EFI" ] || {
+        cp "$BOOT/picker.efi" "$TARGET/boot/efi/EFI/BOOT/BOOTX64.EFI"
+        cp "$BOOT/BOOTX64.EFI" "$TARGET/boot/efi/EFI/BOOT/limine.efi"; }
+    touch "$TARGET/boot/efi/EFI/Syluxium/register-boot-entry"
+elif [ -f "$BOOT/picker.efi" ]; then
     cp "$BOOT/picker.efi" "$TARGET/boot/efi/EFI/BOOT/BOOTX64.EFI"
     cp "$BOOT/BOOTX64.EFI" "$TARGET/boot/efi/EFI/BOOT/limine.efi"
 else
@@ -105,6 +231,11 @@ interface_help_hidden: yes
     path: boot():/boot/syluxium.elf
     cmdline: root=UUID=$UUID
 
+/Syluxium (safe mode: no ACPI interpreter, no power saving)
+    protocol: limine
+    path: boot():/boot/syluxium.elf
+    cmdline: root=UUID=$UUID desktop acpi=noaml nohz=off idle=hlt
+
 /Syluxium (GPU test)
     protocol: limine
     path: boot():/boot/syluxium.elf
@@ -115,13 +246,14 @@ interface_help_hidden: yes
     path: boot():/boot/syluxium.elf
     cmdline: root=UUID=$UUID recovery
 CONF
-"$BOOT/limine" bios-install "$DISK" > /dev/null
+# BIOS boot: only on a whole disk of our own (it rewrites the boot code).
+[ "$MODE" != erase ] || "$BOOT/limine" bios-install "$DISK" > /dev/null
 
-step 8 "Saving"
+step 9 "Saving"
 sync
 umount "$TARGET/boot/efi"
 umount "$TARGET"
 sync
 
-step 9 "Done"
+step 10 "Done"
 echo "[install] Syluxium is installed on $DISK (root UUID $UUID)."

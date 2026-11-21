@@ -171,12 +171,13 @@ typedef struct {
 } EFI_LOADED_IMAGE;
 
 #define EFI_FILE_MODE_READ 0x1ULL
+#define EFI_FILE_MODE_WRITE 0x2ULL
 #define EFI_FILE_DIRECTORY 0x10ULL
 typedef struct EFI_FILE {
     u64 Revision;
     EFI_STATUS(EFIAPI *Open)(struct EFI_FILE *, struct EFI_FILE **, const CHAR16 *name, u64 mode, u64 attrs);
     EFI_STATUS(EFIAPI *Close)(struct EFI_FILE *);
-    void *Delete;
+    EFI_STATUS(EFIAPI *Delete)(struct EFI_FILE *);
     EFI_STATUS(EFIAPI *Read)(struct EFI_FILE *, UINTN *size, void *buffer);
     void *Write, *GetPosition, *SetPosition, *GetInfo, *SetInfo, *Flush;
 } EFI_FILE;

@@ -200,6 +200,95 @@ static void other_systems(void)
     BS->FreePool(h);
 }
 
+/* The picker's own folder (\EFI\BOOT, or \EFI\Syluxium on an EFI partition
+ * shared with another system): Limine is next to it. */
+static CHAR16 SELF_PATH[128], SELF_DIR[128];
+static void find_self(void)
+{
+    EFI_DEVICE_PATH *n = SELF->FilePath;
+    UINTN len = 0, i, cut = 0;
+    for (; n && !(n->Type == 0x7f && n->SubType == 0xff); n = (EFI_DEVICE_PATH *)((u8 *)n + (n->Length[0] | n->Length[1] << 8))) {
+        if (n->Type != 4 || n->SubType != 4) continue;
+        const CHAR16 *p = (const CHAR16 *)((u8 *)n + 4);
+        UINTN plen = ((n->Length[0] | n->Length[1] << 8) - 4) / 2;
+        if (len && SELF_PATH[len - 1] != '\\' && p[0] != '\\' && len < 127) SELF_PATH[len++] = '\\';
+        for (i = 0; i < plen && p[i] && len < 127; i++) SELF_PATH[len++] = p[i] == '/' ? '\\' : p[i];
+    }
+    SELF_PATH[len] = 0;
+    for (i = 0; i < len; i++) if (SELF_PATH[i] == '\\') cut = i;
+    if (!len || SELF_PATH[0] != '\\') {
+        static const CHAR16 def[] = {'\\', 'E', 'F', 'I', '\\', 'B', 'O', 'O', 'T', 0};
+        memcpy(SELF_DIR, def, sizeof(def));
+        return;
+    }
+    memcpy(SELF_DIR, SELF_PATH, cut * 2);
+    SELF_DIR[cut] = 0;
+}
+static void self_file(CHAR16 *out, const char *name)
+{
+    UINTN n = wlen(SELF_DIR), i;
+    memcpy(out, SELF_DIR, n * 2);
+    out[n++] = '\\';
+    for (i = 0; name[i] && n < 127; i++) out[n++] = (u8)name[i];
+    out[n] = 0;
+}
+
+/* Installed next to another system (shared EFI partition), the installer
+ * leaves "register-boot-entry" in our folder: add a "Syluxium" firmware boot
+ * entry for this picker, first in the boot order, then remove the marker. */
+static const EFI_GUID GLOBAL_GUID = {0x8be4df61, 0x93ca, 0x11d2, {0xaa, 0x0d, 0x00, 0xe0, 0x98, 0x03, 0x2b, 0x8c}};
+static void register_boot_entry(void)
+{
+    CHAR16 marker[128], name[9] = {'B', 'o', 'o', 't', 0, 0, 0, 0, 0};
+    static const char hex[] = "0123456789ABCDEF";
+    u16 order[128], num = 0xFFFF;
+    UINTN osize = sizeof(order), i, k;
+    self_file(marker, "register-boot-entry");
+    if (!SELF_PATH[0] || !file_exists(SELF->DeviceHandle, marker)) return;
+    EFI_DEVICE_PATH *dp = file_path(SELF->DeviceHandle, SELF_PATH), *n;
+    if (!dp) return;
+    UINTN dplen = 0;
+    for (n = dp;; n = (EFI_DEVICE_PATH *)((u8 *)n + (n->Length[0] | n->Length[1] << 8))) {
+        dplen += n->Length[0] | n->Length[1] << 8;
+        if (n->Type == 0x7f && n->SubType == 0xff) break;
+    }
+    static const CHAR16 desc[] = {'S', 'y', 'l', 'u', 'x', 'i', 'u', 'm', 0};
+    UINTN size = 4 + 2 + sizeof(desc) + dplen;
+    u8 *opt = alloc(size);
+    if (!opt) return;
+    *(u32 *)opt = 1; /* LOAD_OPTION_ACTIVE */
+    *(u16 *)(opt + 4) = (u16)dplen;
+    memcpy(opt + 6, desc, sizeof(desc));
+    memcpy(opt + 6 + sizeof(desc), dp, dplen);
+    if (RT->GetVariable(L"BootOrder", &GLOBAL_GUID, 0, &osize, order) != EFI_SUCCESS) osize = 0;
+    /* Reuse our earlier entry, else the first free Boot#### number. */
+    for (k = 0; k < 0x100 && num == 0xFFFF; k++) {
+        u8 buf[512];
+        UINTN bs = sizeof(buf);
+        for (i = 0; i < 4; i++) name[4 + i] = hex[(k >> (12 - 4 * i)) & 15];
+        EFI_STATUS st = RT->GetVariable(name, &GLOBAL_GUID, 0, &bs, buf);
+        if (st == EFI_SUCCESS && bs > 6 + sizeof(desc) && !memcmp(buf + 6, desc, sizeof(desc))) num = (u16)k;
+    }
+    for (k = 0; k < 0x100 && num == 0xFFFF; k++) {
+        u8 buf[8];
+        UINTN bs = sizeof(buf);
+        for (i = 0; i < 4; i++) name[4 + i] = hex[(k >> (12 - 4 * i)) & 15];
+        if (RT->GetVariable(name, &GLOBAL_GUID, 0, &bs, buf) == EFI_ERR(14) /* not found */) num = (u16)k;
+    }
+    if (num == 0xFFFF) return;
+    for (i = 0; i < 4; i++) name[4 + i] = hex[(num >> (12 - 4 * i)) & 15];
+    u32 attrs = 7; /* non-volatile, boot services, runtime */
+    if (RT->SetVariable(name, &GLOBAL_GUID, attrs, size, opt) != EFI_SUCCESS) return;
+    u16 neworder[129];
+    UINTN m = 0;
+    neworder[m++] = num;
+    for (i = 0; i < osize / 2 && m < 129; i++) if (order[i] != num) neworder[m++] = order[i];
+    RT->SetVariable(L"BootOrder", &GLOBAL_GUID, attrs, m * 2, neworder);
+    EFI_FILE *root = volume_root(SELF->DeviceHandle), *f;
+    if (root && root->Open(root, &f, marker, EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE, 0) == EFI_SUCCESS) f->Delete(f);
+    if (root) root->Close(root);
+}
+
 static EFI_STATUS limine(int entry)
 {
     if (entry >= 0) {
@@ -210,7 +299,10 @@ static EFI_STATUS limine(int entry)
         RT->SetVariable(L"LoaderEntryOneShot", &LOADER_GUID, attrs, (wlen(name) + 1) * 2, name);
         RT->SetVariable(L"LoaderConfigTimeoutOneShot", &LOADER_GUID, attrs, sizeof(zero), zero);
     }
-    return start(SELF->DeviceHandle, L"\\EFI\\BOOT\\limine.efi");
+    CHAR16 path[128];
+    self_file(path, "limine.efi");
+    if (!file_exists(SELF->DeviceHandle, path)) return start(SELF->DeviceHandle, L"\\EFI\\BOOT\\limine.efi");
+    return start(SELF->DeviceHandle, path);
 }
 
 /* ---- drawing ---- */
@@ -449,6 +541,8 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     ST = st, BS = st->BootServices, RT = st->RuntimeServices, IMAGE = image;
     BS->SetWatchdogTimer(0, 0, 0, 0);
     if (BS->HandleProtocol(image, &LIMG_GUID, (void **)&SELF)) return EFI_ERR(1);
+    find_self();
+    register_boot_entry();
     limine_entries();
     if (!NENTRIES) return limine(-1); /* no configuration: Limine knows what to do */
     connect_all();
