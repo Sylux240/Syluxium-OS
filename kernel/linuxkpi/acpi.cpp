@@ -3,6 +3,7 @@
 //    the VFCT table on UEFI machines
 //  - ACPI companions of PCI devices and method evaluation: on Optimus
 //    laptops the NVIDIA chip's video BIOS only comes from its _ROM method
+#include <acpi/acpi.hpp>
 #include <acpi/devices.hpp>
 #include <lib/format.hpp>
 #include <lib/string.hpp>
@@ -15,6 +16,10 @@
 
 // The table with signature `sig`, instance 1, 2, ... (kept mapped), or null.
 extern "C" void* lkpi_acpi_find_table(const char* sig, unsigned instance) {
+    // GPU drivers probe before uACPI starts (AMD APUs' video BIOS is only in
+    // VFCT): the tables the kernel found at boot then.
+    if (!acpi::interpreter_ready())
+        return const_cast<acpi::SdtHeader*>(acpi::find_table(sig, instance ? instance - 1 : 0));
     uacpi_table tbl;
     if (uacpi_table_find_by_signature(sig, &tbl) != UACPI_STATUS_OK)
         return nullptr;

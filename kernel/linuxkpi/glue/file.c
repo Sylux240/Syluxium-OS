@@ -269,7 +269,7 @@ char *strndup_user(const char __user *s, long n)
  * gave, or whatever the driver's fault handler inserts. */
 #include <linux/mm.h>
 #define LKPI_VMA_SHIFT 36
-#define LKPI_MAX_VMAS 4096
+#define LKPI_MAX_VMAS 16384 /* Mesa keeps most buffer objects mapped */
 
 struct lkpi_vma {
 	struct vm_area_struct vma;
@@ -285,6 +285,8 @@ struct lkpi_vma {
 #define LKPI_PTE_UC 0x4ULL
 static struct lkpi_vma *lkpi_vmas[LKPI_MAX_VMAS];
 static DEFINE_SPINLOCK(lkpi_vmas_lock);
+static int lkpi_vmas_next; /* where the search for a free slot starts */
+static int lkpi_vmas_used;
 
 static u64 prot_bits(pgprot_t prot)
 {
@@ -319,12 +321,26 @@ long lkpi_file_mmap(struct file *f, unsigned long offset, unsigned long len, boo
 		return -ENOMEM;
 	}
 	spin_lock(&lkpi_vmas_lock);
-	for (id = 0; id < LKPI_MAX_VMAS && lkpi_vmas[id]; id++)
-		;
-	if (id < LKPI_MAX_VMAS)
+	for (int n = 0; n < LKPI_MAX_VMAS; n++) {
+		id = (lkpi_vmas_next + n) % LKPI_MAX_VMAS;
+		if (!lkpi_vmas[id])
+			break;
+	}
+	if (lkpi_vmas[id]) {
+		id = LKPI_MAX_VMAS;
+	} else {
 		lkpi_vmas[id] = m;
+		lkpi_vmas_next = id + 1;
+		lkpi_vmas_used++;
+	}
 	spin_unlock(&lkpi_vmas_lock);
 	if (id == LKPI_MAX_VMAS) {
+		static bool told;
+		if (!told) {
+			told = true;
+			pr_err("mmap: all %d driver mappings in use (%s[%d]); GPU programs will report out of memory\n",
+			       LKPI_MAX_VMAS, current->comm, current->pid);
+		}
 		kvfree(m->pages);
 		kfree(m);
 		return -ENOMEM;
@@ -340,9 +356,14 @@ long lkpi_file_mmap(struct file *f, unsigned long offset, unsigned long len, boo
 	m->vma.lkpi = m;
 	r = f->f_op->mmap(f, &m->vma);
 	if (r) {
+		static int logged;
+		if (logged++ < 30)
+			pr_warn("mmap: %s[%d]: driver refused a mapping (offset %#lx, %lu bytes): %d\n", current->comm,
+				current->pid, offset, len, r);
 		fput(m->vma.vm_file);
 		spin_lock(&lkpi_vmas_lock);
 		lkpi_vmas[id] = NULL;
+		lkpi_vmas_used--;
 		spin_unlock(&lkpi_vmas_lock);
 		kvfree(m->pages);
 		kfree(m);
@@ -366,6 +387,7 @@ void lkpi_vma_ref(unsigned long off, int delta)
 		m->refs += delta;
 		if (m->refs <= 0) {
 			lkpi_vmas[id] = NULL;
+			lkpi_vmas_used--;
 			last = true;
 		}
 	}
@@ -429,6 +451,12 @@ long lkpi_vma_phys(unsigned long off, u64 *phys)
 	} else
 		ret |= VM_FAULT_SIGBUS;
 	mutex_unlock(&m->lock);
+	if (ret & (VM_FAULT_SIGBUS | VM_FAULT_OOM)) {
+		static int logged;
+		if (logged++ < 30)
+			pr_warn("mmap: %s[%d]: driver fault failed at page %lu of a %lu-page mapping (%#x)\n", current->comm,
+				current->pid, pg, m->npages, ret);
+	}
 	return (ret & (VM_FAULT_SIGBUS | VM_FAULT_OOM)) ? -EFAULT : 0;
 }
 

@@ -16,8 +16,14 @@ void usleep_range(unsigned long min_us, unsigned long max_us);
 #define cpu_relax() __builtin_ia32_pause()
 void schedule(void);
 long schedule_timeout(long timeout);
-#define schedule_timeout_interruptible(t) schedule_timeout(t)
-#define schedule_timeout_uninterruptible(t) schedule_timeout(t)
+/* These set the sleeping state first, as Linux's do: a bare schedule_timeout()
+ * in TASK_RUNNING returns at once with the whole timeout left, and callers
+ * loop "while (left) left = schedule_timeout_uninterruptible(left)" (i915's
+ * panel power-cycle wait spun there forever, panel off: a black MacBook Air). */
+#define schedule_timeout_interruptible(t) ({ set_current_state(TASK_INTERRUPTIBLE); schedule_timeout(t); })
+#define schedule_timeout_uninterruptible(t) ({ set_current_state(TASK_UNINTERRUPTIBLE); schedule_timeout(t); })
+#define schedule_timeout_killable(t) ({ set_current_state(TASK_KILLABLE); schedule_timeout(t); })
+#define schedule_timeout_idle(t) ({ set_current_state(TASK_IDLE); schedule_timeout(t); })
 #define cond_resched() do { } while (0)
 
 LKPI_EXTERN_C_END
