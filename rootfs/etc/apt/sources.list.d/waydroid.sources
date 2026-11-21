@@ -1,0 +1,7 @@
+# Android apps (Waydroid): its own repository, for waydroid and the gbinder
+# library only (see /etc/apt/preferences.d/waydroid).
+Types: deb
+URIs: https://repo.waydro.id
+Suites: trixie
+Components: main
+Signed-By: /usr/share/keyrings/waydroid.gpg

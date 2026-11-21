@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Android Apps
+GenericName=Android
+Comment=Run Android apps in a window
+Exec=syluxium-android
+Icon=android
+Terminal=false
+Categories=Utility;System;

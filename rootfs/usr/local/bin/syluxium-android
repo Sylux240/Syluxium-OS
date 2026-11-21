@@ -1,0 +1,49 @@
+#!/bin/bash
+# Android Apps: Android (Waydroid) in a window on the desktop. Starts only
+# when launched: sets Android up the first time (syluxium-android-setup),
+# starts the container (root, via sudo), then a Wayland compositor as an X
+# window (weston, kiosk shell) with Android's home screen in it. Closing the
+# window stops the Android session; X and the desktop are never touched.
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+HELPER="sudo -n /usr/local/sbin/syluxium-android-container"
+LOG="$HOME/.cache/syluxium-android.log"
+SOCKET=syluxium-android
+mkdir -p "$HOME/.cache"
+exec >> "$LOG" 2>&1
+echo "=== $(date) ==="
+
+fail() {
+    echo "error: $*"
+    if command -v kdialog >/dev/null; then kdialog --title "Android Apps" --error "$*"
+    elif command -v xmessage >/dev/null; then xmessage -center "Android Apps: $*"; fi
+    exit 1
+}
+
+case "$($HELPER status)" in
+not-set-up) syluxium-android-setup || exit 0 ;;
+esac
+$HELPER start || fail "The Android container didn't start (see /var/log/waydroid-container.log)."
+
+export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
+mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
+
+# The nested compositor: one X window holding Android.
+weston --backend=x11-backend.so --shell=kiosk-shell.so --socket="$SOCKET" \
+       --width=1280 --height=800 --idle-time=0 &
+WESTON=$!
+for _ in $(seq 50); do [ -S "$XDG_RUNTIME_DIR/$SOCKET" ] && break; sleep 0.1; done
+[ -S "$XDG_RUNTIME_DIR/$SOCKET" ] || fail "The Android window (weston) didn't start."
+export WAYLAND_DISPLAY=$SOCKET
+
+waydroid session start &
+SESSION=$!
+for _ in $(seq 300); do
+    waydroid status 2>/dev/null | grep -q 'Session:.*RUNNING' && break
+    kill -0 $WESTON 2>/dev/null || break
+    sleep 0.5
+done
+waydroid show-full-ui &
+
+wait $WESTON                     # the window was closed
+waydroid session stop
+kill $SESSION 2>/dev/null

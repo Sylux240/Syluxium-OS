@@ -1,0 +1,131 @@
+#!/usr/bin/env python3
+"""Set up Android apps: downloads the Android system (LineageOS, about
+1 GB) the first time, with a progress window. Run by syluxium-android when
+Android isn't set up yet; the images aren't part of the installed system."""
+import os
+import re
+import subprocess
+import threading
+
+import gi
+
+gi.require_version("Gtk", "3.0")
+from gi.repository import GLib, Gtk  # noqa: E402
+
+HELPER = ["sudo", "-n", "/usr/local/sbin/syluxium-android-container"]
+
+
+class Setup(Gtk.Window):
+    def __init__(self):
+        super().__init__(title="Set up Android apps")
+        self.set_default_size(460, 200)
+        self.set_border_width(16)
+        self.set_position(Gtk.WindowPosition.CENTER)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        self.add(box)
+        title = Gtk.Label(xalign=0)
+        title.set_markup("<b>Android apps need the Android system first</b>")
+        box.pack_start(title, False, False, 0)
+        self.text = Gtk.Label(xalign=0, wrap=True)
+        self.text.set_text("Syluxium downloads it once (about 1 GB, LineageOS without Google apps) "
+                           "and keeps it on this computer. You need an internet connection.")
+        box.pack_start(self.text, False, False, 0)
+        self.bar = Gtk.ProgressBar(show_text=True)
+        self.bar.set_text("")
+        box.pack_start(self.bar, False, False, 0)
+        buttons = Gtk.Box(spacing=8)
+        buttons.set_halign(Gtk.Align.END)
+        self.cancel = Gtk.Button(label="Cancel")
+        self.cancel.connect("clicked", lambda *_: self.quit(1))
+        self.start = Gtk.Button(label="Download")
+        self.start.connect("clicked", self.begin)
+        buttons.pack_start(self.cancel, False, False, 0)
+        buttons.pack_start(self.start, False, False, 0)
+        box.pack_end(buttons, False, False, 0)
+        self.connect("delete-event", lambda *_: self.quit(1))
+        self.proc = None
+        self.result = 1
+        self.pulse_id = None
+
+    def quit(self, code):
+        if self.proc and self.proc.poll() is None:
+            self.proc.terminate()
+        self.result = code
+        Gtk.main_quit()
+        return True
+
+    def begin(self, *_):
+        self.start.set_sensitive(False)
+        self.text.set_text("Downloading the Android system...")
+        self.pulse_id = GLib.timeout_add(150, self.pulse)
+        threading.Thread(target=self.run, daemon=True).start()
+
+    def pulse(self):
+        self.bar.pulse()
+        return True
+
+    def run(self):
+        try:
+            self.proc = subprocess.Popen(HELPER + ["init"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        except OSError as e:
+            GLib.idle_add(self.done, False, str(e))
+            return
+        buf = b""
+        last = ""
+        while True:
+            chunk = self.proc.stdout.read(256)
+            if not chunk:
+                break
+            buf += chunk
+            # waydroid redraws its progress line with \r
+            parts = re.split(rb"[\r\n]", buf)
+            buf = parts.pop()
+            for p in parts:
+                line = p.decode(errors="replace").strip()
+                if line:
+                    last = line
+                    GLib.idle_add(self.progress, line)
+        rc = self.proc.wait()
+        GLib.idle_add(self.done, rc == 0, last)
+
+    def progress(self, line):
+        # "[Downloading] 123.45 MB/812.34 MB    5432.10 kbps(approx.)"
+        m = re.search(r"([\d.]+)\s*MB\s*/\s*([\d.]+)\s*MB", line)
+        if m:
+            if self.pulse_id:
+                GLib.source_remove(self.pulse_id)
+                self.pulse_id = None
+            done, total = float(m.group(1)), float(m.group(2))
+            if total > 0:
+                self.bar.set_fraction(min(done / total, 1.0))
+                self.bar.set_text("%.0f of %.0f MB" % (done, total))
+        elif "Validating" in line or "Extracting" in line:
+            self.text.set_text(line.strip("[] "))
+        return False
+
+    def done(self, ok, last):
+        if self.pulse_id:
+            GLib.source_remove(self.pulse_id)
+            self.pulse_id = None
+        if ok:
+            self.bar.set_fraction(1.0)
+            self.bar.set_text("Done")
+            self.text.set_text("Android is set up. Android apps start now.")
+            self.result = 0
+            GLib.timeout_add(1500, lambda: self.quit(0))
+        else:
+            self.text.set_text("The download didn't finish: %s\nCheck the internet connection and try again." % last)
+            self.start.set_label("Try again")
+            self.start.set_sensitive(True)
+        return False
+
+
+def main():
+    w = Setup()
+    w.show_all()
+    Gtk.main()
+    return w.result
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

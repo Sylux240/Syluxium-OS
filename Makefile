@@ -64,6 +64,10 @@ DEBIAN_PKGS  := bash busybox hello ncurses-base pciutils pci.ids netbase alsa-ut
                 libgl1-mesa-dri libglx-mesa0 libegl-mesa0 mesa-utils
 # Right-click "Extract Here" for .7z (zip and tar are handled without it).
 DEBIAN_PKGS  += 7zip
+# Android apps (Waydroid): its own repository for waydroid and gbinder; the
+# Android images are fetched on demand (syluxium-android-setup).
+WAYDROID_REPO := https://repo.waydro.id|trixie|main
+DEBIAN_PKGS  += waydroid python3-gbinder lxc weston
 DEBIAN_ROOT  := $(BUILD)/rootfs-debian
 DEBIAN_STAMP := $(DEBIAN_ROOT)/.fetched
 DEBIAN_CONFIGURED := $(DEBIAN_ROOT)/.configured
@@ -347,7 +351,7 @@ $(TESTS_DIR)/winbox32.exe: $(TESTS_DIR)/winhello32.exe
 
 $(DEBIAN_STAMP): tools/debian-fetch.py Makefile
 	@echo "  DEB   $(DEBIAN_PKGS) (+ dependencies, Debian $(DEBIAN_SUITE))"
-	@python3 tools/debian-fetch.py --suite $(DEBIAN_SUITE) --out $(DEBIAN_ROOT) --cache deps/debian --dpkg-db --exclude $(DEBIAN_EXCLUDE) --repo "$(TRINITY_REPO)" $(DEBIAN_PKGS) $(TRINITY_PKGS)
+	@python3 tools/waydroid-index.py deps/debian $(DEBIAN_SUITE) && python3 tools/debian-fetch.py --suite $(DEBIAN_SUITE) --out $(DEBIAN_ROOT) --cache deps/debian --dpkg-db --exclude $(DEBIAN_EXCLUDE) --repo "$(TRINITY_REPO)" --repo "$(WAYDROID_REPO)" $(DEBIAN_PKGS) $(TRINITY_PKGS)
 	@touch $@
 
 # Debian's install scripts, run once per package set (fake root, no sudo).

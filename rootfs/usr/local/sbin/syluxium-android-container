@@ -1,0 +1,72 @@
+#!/bin/bash
+# Android apps (Waydroid): the root side. Run through sudo by
+# syluxium-android and syluxium-android-setup (see /etc/sudoers.d/syluxium-android).
+#   syluxium-android-container init     fetch the Android images (progress on stdout)
+#   syluxium-android-container start    start the Android container (if not running)
+#   syluxium-android-container stop     stop it
+#   syluxium-android-container status   "running" / "stopped" / "not-set-up"
+# Nothing here runs at boot: Android only starts when its launcher is used.
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+LXC=/var/lib/waydroid/lxc/waydroid
+LOG=/var/log/waydroid-container.log
+PIDFILE=/run/syluxium-android-container.pid
+
+set_up() { [ -f /var/lib/waydroid/waydroid.cfg ] && [ -f "$LXC/config" ]; }
+
+# Syluxium's kernel: the container shares the host's network (no network
+# namespaces yet), and there is no seccomp or AppArmor to load.
+adapt_config() {
+    local c="$LXC/config"
+    [ -f "$c" ] || return 0
+    sed -i -e '/^lxc\.net\./d' -e '/^lxc\.seccomp/d' -e '/^lxc\.apparmor/d' "$c"
+    {
+        echo "# Syluxium: host network, no seccomp/AppArmor"
+        echo "lxc.net.0.type = none"
+        echo "lxc.apparmor.profile = unconfined"
+    } >> "$c"
+    # Waydroid's own network setup (bridge, dnsmasq, NAT) isn't used.
+    if [ -f /var/lib/waydroid/waydroid.cfg ]; then
+        grep -q '^\[properties\]' /var/lib/waydroid/waydroid.cfg || echo '[properties]' >> /var/lib/waydroid/waydroid.cfg
+    fi
+}
+
+running() { [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; }
+
+case "$1" in
+init)
+    mkdir -p /var/lib/waydroid
+    # Vanilla LineageOS images (no Google apps); waydroid prints its download progress.
+    waydroid init -s VANILLA -f 2>&1
+    rc=$?
+    adapt_config
+    exit $rc
+    ;;
+start)
+    set_up || { echo "not set up" >&2; exit 2; }
+    running && exit 0
+    adapt_config
+    mkdir -p /run/dbus
+    [ -S /run/dbus/system_bus_socket ] || dbus-daemon --system --fork
+    # The container manager: on the system bus, starts LXC when a session asks.
+    setsid waydroid container start >> "$LOG" 2>&1 < /dev/null &
+    echo $! > "$PIDFILE"
+    for _ in $(seq 50); do
+        waydroid status 2>/dev/null | grep -q 'Container:' && break
+        sleep 0.2
+    done
+    exit 0
+    ;;
+stop)
+    waydroid container stop >> "$LOG" 2>&1
+    running && kill "$(cat "$PIDFILE")" 2>/dev/null
+    rm -f "$PIDFILE"
+    exit 0
+    ;;
+status)
+    if ! set_up; then echo not-set-up; elif running; then echo running; else echo stopped; fi
+    ;;
+*)
+    echo "usage: $0 init|start|stop|status" >&2
+    exit 1
+    ;;
+esac
