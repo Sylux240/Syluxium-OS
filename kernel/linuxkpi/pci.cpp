@@ -200,6 +200,28 @@ bool lkpi_match(const dev::Driver* drv, const dev::Device* d) {
     const char* name = static_cast<const pci_driver*>(drv->ctx)->name;
     if (name && !strcmp(name, "bochs-drm") && !strstr(boot::cmdline(), "bochsdrm"))
         return false;
+    // "gpudrv=i915,nouveau": only these GPU drivers bind (machines with two
+    // GPUs, e.g. an Optimus laptop: test one driver at a time).
+    const char* list = (d->class_code >> 16) == 0x03 ? strstr(boot::cmdline(), "gpudrv=") : nullptr;
+    if (list) {
+        list += 7;
+        usize n = name ? strlen(name) : 0;
+        bool listed = false;
+        for (const char* p = list; n && *p && *p != ' ';) {
+            if (!strncmp(p, name, n) && (p[n] == ',' || p[n] == ' ' || p[n] == 0)) {
+                listed = true;
+                break;
+            }
+            while (*p && *p != ',' && *p != ' ')
+                p++;
+            if (*p == ',')
+                p++;
+        }
+        if (!listed) {
+            klog::info("linuxkpi: gpudrv= doesn't list %s: not binding %s", name ? name : "?", d->bus_id);
+            return false;
+        }
+    }
     return true;
 }
 
