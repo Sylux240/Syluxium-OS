@@ -612,6 +612,20 @@ long sys_rt_sigprocmask(SYSCALL_ARGS) {
     return 0;
 }
 
+// rt_sigpending(set, sigsetsize): the blocked signals waiting for this thread
+// (its own and the process's), as Linux reports them (sudo asks).
+long sys_rt_sigpending(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    if (a1 != sizeof(u64))
+        return -err::INVAL;
+    sched::Thread* t = sched::current();
+    Process* p = proc::current();
+    u64 pending = __atomic_load_n(&t->sig_pending, __ATOMIC_RELAXED);
+    if (p)
+        pending |= __atomic_load_n(&p->sig_pending, __ATOMIC_RELAXED);
+    return uaccess::put(reinterpret_cast<u64*>(a0), pending & t->sigmask);
+}
+
 // stack_t on x86_64: { void* ss_sp; int ss_flags; size_t ss_size; }
 long sys_sigaltstack(SYSCALL_ARGS) {
     SYSCALL_UNUSED;
@@ -1134,6 +1148,7 @@ void register_process() {
     set(324, sys_membarrier, "membarrier");
     set(13, sys_rt_sigaction, "rt_sigaction");
     set(14, sys_rt_sigprocmask, "rt_sigprocmask");
+    set(127, sys_rt_sigpending, "rt_sigpending");
     set(24, sys_sched_yield, "sched_yield");
     set(39, sys_getpid, "getpid");
     set(60, sys_exit, "exit");

@@ -68,13 +68,15 @@ activeFont=Inter,10,-1,5,63,0,0,0,0,0
 
 # Windows-style keys: Win key or Ctrl+Esc = Start menu (the Win key alone
 # sends Alt+F1 through xcape: autostart/syluxium-winkey.desktop), Win+R = Run,
-# Win+D = show the desktop, Win+L = lock, Ctrl+Alt+Del and
-# Ctrl+Shift+Esc = Task Manager (Win+E = System: apps/khotkeys/syluxium_winkeys.khotkeys).
+# Win+D = show the desktop, Win+L = lock (Win+E = System:
+# apps/khotkeys/syluxium_winkeys.khotkeys; Ctrl+Alt+Del and Ctrl+Shift+Esc =
+# Syluxium's Task Manager: apps/khotkeys/syluxium_taskmgr.khotkeys, so the
+# desktop's own "Show Taskmanager" key, which opens KSysGuard, is off).
 [Global Shortcuts]
 Popup Launch Menu=Alt+F1;Ctrl+Escape
 Run Command=Alt+F2;Win+R
 Toggle Showing Desktop=Win+D
-Show Taskmanager=Ctrl+Alt+Delete;Ctrl+Shift+Escape
+Show Taskmanager=none
 Lock Session=Ctrl+Alt+L;Win+L
 Log Out=none
 Log Out Without Confirmation=none

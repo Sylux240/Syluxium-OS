@@ -213,6 +213,11 @@ long resolve_parent(const char* path, Inode* cwd, Inode** parent, const char** n
     usize name_len = total - name_start;
     if (name_len == 0)
         return -err::EXIST; // "/" itself
+    // "dir/." and "dir/..": always there (tar's mkdir("./") must not make a
+    // child literally named "." -- dpkg's rm -rf of tmp.ci then failed).
+    if ((name_len == 1 && path[name_start] == '.') ||
+        (name_len == 2 && path[name_start] == '.' && path[name_start + 1] == '.'))
+        return -err::EXIST;
     if (name_len > MAX_NAME)
         return -err::NAMETOOLONG;
 

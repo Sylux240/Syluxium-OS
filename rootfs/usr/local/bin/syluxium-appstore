@@ -1,0 +1,1361 @@
+#!/usr/bin/python3
+"""Syluxium App Store: browse, search, install and remove software from
+Debian's and the desktop's package repositories (through apt), see and
+install updates, and install downloaded .deb packages.
+
+    syluxium-appstore                    the store
+    syluxium-appstore --updates          the store, on the Updates page
+    syluxium-appstore --search TEXT      the store, searching for TEXT
+    syluxium-appstore --deb FILE.deb     the package installer for one file
+                                         (what opening a .deb does)
+"""
+import glob
+import os
+import re
+import subprocess
+import sys
+import threading
+import time
+sys.path.insert(0, "/usr/local/lib/syluxium/python")
+from syluxium_sys import *  # noqa: F401,F403
+from gi.repository import Gdk, GdkPixbuf  # noqa: E402
+
+TITLE = "Syluxium App Store"
+LISTS = "/var/lib/apt/lists"
+DPKG_STATUS = "/var/lib/dpkg/status"
+LOGFILE = os.path.expanduser("~/.local/state/syluxium-appstore.log")
+os.makedirs(os.path.dirname(LOGFILE), exist_ok=True)
+ENV = dict(os.environ, DEBIAN_FRONTEND="noninteractive", LC_ALL="C.UTF-8")
+APT_OPTS = ["-y", "-o", "APT::Status-Fd=1", "-o", "Dpkg::Options::=--force-confdef",
+            "-o", "Dpkg::Options::=--force-confold",
+            # A connection that goes quiet gives up after a minute (not two).
+            "-o", "Acquire::http::Timeout=60", "-o", "Acquire::https::Timeout=60"]
+STALL_SECONDS = 60
+
+# ---- what the store shows ----
+CATEGORIES = [  # (title, icon, Debian sections)
+    ("Internet", "applications-internet", {"web", "net", "mail", "news", "comm"}),
+    ("Office", "applications-office", {"editors", "text", "tex"}),
+    ("Graphics", "applications-graphics", {"graphics"}),
+    ("Music and Video", "applications-multimedia", {"sound", "video"}),
+    ("Games", "applications-games", {"games"}),
+    ("Developer Tools", "applications-development",
+     {"devel", "vcs", "interpreters", "python", "perl", "rust", "golang", "haskell", "javascript", "java",
+      "ruby", "ocaml", "php", "lisp", "database", "gnu-r"}),
+    ("Science and Education", "applications-science", {"science", "math", "electronics", "hamradio", "education"}),
+    ("Desktop Programs", "preferences-desktop", {"tde", "gnome", "kde", "xfce"}),
+    ("System Tools", "applications-utilities",
+     {"admin", "utils", "shells", "x11", "otherosfs", "kernel", "misc", "httpd", "fonts"}),
+]
+# Libraries, documentation and the like: found by searching, not listed.
+TECHNICAL = {"libs", "libdevel", "doc", "debug", "oldlibs", "introspection", "metapackages", "tasks", "cli-mono",
+             "gnustep", "zope", "embedded", "debian-installer", "localization"}
+
+# Featured software: (group, [(package, name, icon)]).
+FEATURED = [
+    ("Web Browsers", [("firefox-esr", "Firefox", "firefox-esr"), ("chromium", "Chromium", "chromium"),
+                      ("falkon", "Falkon", "falkon"), ("epiphany-browser", "Web", "org.gnome.Epiphany")]),
+    ("Office", [("libreoffice", "LibreOffice", "libreoffice-startcenter"),
+                ("libreoffice-writer", "LibreOffice Writer", "libreoffice-writer"),
+                ("libreoffice-calc", "LibreOffice Calc", "libreoffice-calc"), ("abiword", "AbiWord", "abiword"),
+                ("gnumeric", "Gnumeric", "gnumeric"), ("atril", "Document Viewer", "atril"),
+                ("thunderbird", "Thunderbird", "thunderbird")]),
+    ("Music and Video", [("vlc", "VLC media player", "vlc"), ("mpv", "mpv", "mpv"),
+                         ("audacious", "Audacious", "audacious"), ("audacity", "Audacity", "audacity"),
+                         ("strawberry", "Strawberry", "strawberry"), ("amarok-trinity", "Amarok", "amarok"),
+                         ("k3b-trinity", "K3b disc burner", "k3b")]),
+    ("Graphics", [("gimp", "GIMP", "gimp"), ("inkscape", "Inkscape", "inkscape"), ("krita", "Krita", "krita"),
+                  ("kolourpaint-trinity", "KolourPaint", "kolourpaint"), ("digikam-trinity", "digiKam", "digikam")]),
+    ("Games", [("supertuxkart", "SuperTuxKart", "supertuxkart"), ("supertux", "SuperTux", "supertux"),
+               ("frozen-bubble", "Frozen Bubble", "frozen-bubble"), ("aisleriot", "Solitaire", "gnome-aisleriot"),
+               ("gnome-mines", "Mines", "org.gnome.Mines"), ("pingus", "Pingus", "pingus"),
+               ("neverball", "Neverball", "neverball"), ("wesnoth", "Battle for Wesnoth", "wesnoth"),
+               ("luanti", "Luanti", "luanti"), ("openttd", "OpenTTD", "openttd"),
+               ("tdegames-trinity", "Games collection", "applications-games")]),
+    ("Developer Tools", [("git", "Git", "git"), ("build-essential", "C/C++ compilers", "applications-development"),
+                         ("geany", "Geany", "geany"), ("codeblocks", "Code::Blocks", "codeblocks"),
+                         ("thonny", "Thonny (Python)", "thonny"), ("vim", "Vim", "vim"), ("emacs", "Emacs", "emacs"),
+                         ("gdb", "GDB debugger", "utilities-terminal"), ("cmake", "CMake", "cmake"),
+                         ("python3-pip", "pip (Python packages)", "applications-development")]),
+    ("Internet", [("filezilla", "FileZilla", "filezilla"), ("transmission-gtk", "Transmission", "transmission"),
+                  ("hexchat", "HexChat", "hexchat"), ("pidgin", "Pidgin", "pidgin"),
+                  ("konversation-trinity", "Konversation", "konversation"), ("ktorrent-trinity", "KTorrent", "ktorrent")]),
+    ("Utilities", [("htop", "htop", "htop"), ("fastfetch", "fastfetch", "utilities-terminal"),
+                   ("hello", "GNU Hello", "utilities-terminal")]),
+]
+NAMES = {p: n for _, items in FEATURED for p, n, _ in items}
+ICONS = {p: i for _, items in FEATURED for p, _, i in items}
+
+# Packages Syluxium is built from: removing them breaks the desktop.
+PROTECTED = re.compile(r"^(tdebase-|twin|kicker|kdesktop|konqueror|kcontrol|ksmserver|tdm-|tdelibs|xserver-|xorg|"
+                       r"libc6$|libc-bin|dpkg$|apt$|bash$|busybox|python3(\.\d+)?$|python3-gi|sudo$|login$|dbus|"
+                       r"base-files|coreutils|libgtk-3|gir1\.2-gtk|mesa|libgl1)")
+
+
+def debrand(text):
+    """The desktop's own name doesn't show (Syluxium's desktop is built from it)."""
+    text = text.replace("Trinity Desktop Environment", "Syluxium desktop").replace("non-TDE", "other")
+    text = re.sub(r"(?<=\w)-trinity\b", "", text)
+    text = re.sub(r"https?://\S*trinitydesktop\.org\S*", "the Syluxium desktop repository", text)
+    text = re.sub(r"\b[Tt]rinity\b", "Syluxium", text)
+    return re.sub(r"(?<![\w-])TDE(?![\w-])", "Syluxium", text)
+
+
+def display_name(pkg):
+    if pkg in NAMES:
+        return NAMES[pkg]
+    name = pkg[:-8] if pkg.endswith("-trinity") else pkg
+    return name[:1].upper() + name[1:]
+
+
+def net_bytes():
+    """{interface: (received, sent)} from /proc/net/dev, without the loopback."""
+    out = {}
+    for line in read("/proc/net/dev").splitlines()[2:]:
+        name, _, rest = line.partition(":")
+        v = rest.split()
+        if len(v) >= 9 and name.strip() != "lo":
+            out[name.strip()] = (int(v[0]), int(v[8]))
+    return out
+
+
+def human_kb(k):
+    return human(k * 1024) if k else ""
+
+
+# ---- the catalog: apt's package lists and dpkg's database ----
+class Package:
+    __slots__ = ("name", "version", "section", "size", "summary", "homepage", "installed", "candidate_newer")
+
+    def __init__(self, name):
+        self.name, self.version, self.section, self.size = name, "", "", 0
+        self.summary, self.homepage, self.installed, self.candidate_newer = "", "", "", False
+
+
+def version_newer(a, b):
+    """dpkg's comparison: is version a newer than b?"""
+    try:
+        return subprocess.run(["dpkg", "--compare-versions", a, "gt", b]).returncode == 0
+    except OSError:
+        return False
+
+
+def installed_packages():
+    out, name, ok, ver = {}, None, False, ""
+    try:
+        text = open(DPKG_STATUS, errors="replace").read()
+    except OSError:
+        return out
+    for stanza in text.split("\n\n"):
+        name = ver = None
+        ok = False
+        for line in stanza.split("\n"):
+            if line.startswith("Package: "):
+                name = line[9:].strip()
+            elif line.startswith("Status: "):
+                ok = line.endswith(" installed")
+            elif line.startswith("Version: "):
+                ver = line[9:].strip()
+        if name and ok:
+            out[name] = ver or ""
+    return out
+
+
+def load_catalog():
+    pkgs = {}
+    files = [f for f in glob.glob(f"{LISTS}/*_Packages") if "binary-i386" not in f]
+    for path in files:
+        try:
+            text = open(path, errors="replace").read()
+        except OSError:
+            continue
+        for stanza in text.split("\n\n"):
+            if not stanza.startswith("Package: "):
+                stanza = stanza.lstrip("\n")
+                if not stanza.startswith("Package: "):
+                    continue
+            p = None
+            fields = {}
+            for line in stanza.split("\n"):
+                if not line or line[0] == " ":
+                    continue
+                k, _, v = line.partition(": ")
+                if k in ("Package", "Version", "Section", "Installed-Size", "Description", "Homepage", "Architecture"):
+                    fields[k] = v
+            if fields.get("Architecture") not in (None, "amd64", "all"):
+                continue
+            name = fields.get("Package")
+            if not name:
+                continue
+            p = pkgs.get(name)
+            if p and p.version and not version_newer_fast(fields.get("Version", ""), p.version):
+                continue
+            p = p or Package(name)
+            p.version = fields.get("Version", "")
+            p.section = fields.get("Section", "misc").split("/")[-1]
+            try:
+                p.size = int(fields.get("Installed-Size", "0"))
+            except ValueError:
+                p.size = 0
+            p.summary = debrand(fields.get("Description", ""))
+            p.homepage = fields.get("Homepage", "")
+            pkgs[name] = p
+    return pkgs
+
+
+def version_newer_fast(a, b):
+    # Two repositories rarely carry the same package; when they do, ask dpkg.
+    return a != b and version_newer(a, b)
+
+
+def upgradable():
+    """{package: (installed version, new version)}; held packages never update."""
+    up, held = {}, set()
+    try:
+        held = set(subprocess.run(["apt-mark", "showhold"], capture_output=True, text=True, env=ENV).stdout.split())
+        out = subprocess.run(["apt", "list", "--upgradable"], capture_output=True, text=True, env=ENV).stdout
+    except OSError:
+        return up
+    for line in out.splitlines():
+        m = re.match(r"([^/]+)/\S+ (\S+) \S+ \[upgradable from: (\S+)\]", line)
+        if m and m.group(1) not in held:
+            up[m.group(1)] = (m.group(3), m.group(2))
+    return up
+
+
+def long_description(pkg):
+    out = subprocess.run(["apt-cache", "show", "--no-all-versions", pkg], capture_output=True, text=True,
+                         env=ENV).stdout
+    desc, info, inside = [], {}, False
+    for line in out.split("\n"):
+        if line.startswith(("Description:", "Description-en:")):
+            inside = True
+            continue
+        if inside and line.startswith(" "):
+            desc.append("" if line.strip() == "." else line[1:])
+            continue
+        inside = False
+        k, _, v = line.partition(": ")
+        if k in ("Maintainer", "Depends", "Download-Size") and v:
+            info[k] = v
+    return debrand("\n".join(desc)).strip(), info
+
+
+# ---- doing things as root: sudo with the user's own password ----
+class Admin:
+    def __init__(self, parent):
+        self.parent = parent
+        self.password = None
+
+    def ready(self):
+        """On the main thread, before an operation: can we run commands as root?"""
+        if os.geteuid() == 0 or self.password is not None:
+            return True
+        if subprocess.run(["sudo", "-n", "true"], capture_output=True).returncode == 0:
+            self.password = ""
+            self.nopass = True
+            return True
+        user = os.environ.get("USER") or os.environ.get("LOGNAME") or "you"
+        for attempt in range(3):
+            d = Gtk.Dialog(title="Administrator Permission", transient_for=self.parent, modal=True)
+            d.add_buttons("Cancel", Gtk.ResponseType.CANCEL, "OK", Gtk.ResponseType.OK)
+            d.set_default_response(Gtk.ResponseType.OK)
+            box = d.get_content_area()
+            box.set_spacing(8)
+            for m in ("set_margin_start", "set_margin_end", "set_margin_top"):
+                getattr(box, m)(12)
+            row = Gtk.Box(spacing=12)
+            row.pack_start(Gtk.Image.new_from_icon_name("dialog-password", Gtk.IconSize.DIALOG), False, False, 0)
+            row.pack_start(label("Installing and removing software changes the computer for everyone.\n"
+                                 f"Type the password of {user} (an administrator) to continue."
+                                 + ("\n\nThat password was not right. Try again." if attempt else ""),
+                                 wrap=True), True, True, 0)
+            box.add(row)
+            entry = Gtk.Entry(visibility=False, activates_default=True)
+            box.add(entry)
+            d.show_all()
+            r = d.run()
+            pw = entry.get_text()
+            d.destroy()
+            if r != Gtk.ResponseType.OK:
+                return False
+            p = subprocess.run(["sudo", "-S", "-k", "-p", "", "true"], input=pw + "\n", capture_output=True,
+                               text=True)
+            if p.returncode == 0:
+                self.password = pw
+                return True
+            if "not in the sudoers" in p.stderr or "may not run sudo" in p.stderr:
+                message(self.parent, "Only administrators can install software.",
+                        f"{user} is not an administrator. Ask an administrator to install it, or change the "
+                        "account type in User Accounts.", Gtk.MessageType.WARNING)
+                return False
+        return False
+
+    def popen(self, cmd):
+        if os.geteuid() == 0:
+            return subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=ENV,
+                                    stdin=subprocess.DEVNULL)
+        full = ["sudo", "-S", "-p", "", "env", "DEBIAN_FRONTEND=noninteractive", "LC_ALL=C.UTF-8"] + cmd
+        p = subprocess.Popen(full, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.PIPE,
+                             text=True, env=ENV)
+        try:
+            p.stdin.write((self.password or "") + "\n")
+            p.stdin.close()
+        except OSError:
+            pass
+        return p
+
+
+def confirm_plan(parent, name, pkg, res, catalog=None):
+    """Show what installing takes (the other packages, the download) and ask."""
+    extra = [p for p in res["install"] if p != pkg]
+    removed = res["remove"]
+    d = Gtk.MessageDialog(transient_for=parent, modal=True, message_type=Gtk.MessageType.QUESTION,
+                          text=f"Install {name}?")
+    lines = []
+    if extra:
+        names = ", ".join(display_name(p) for p in extra[:25]) + (f" and {len(extra) - 25} more" if len(extra) > 25 else "")
+        lines.append(f"It needs {len(extra)} more package{'s' if len(extra) != 1 else ''}, which will be "
+                     f"installed too:\n{names}")
+    if res["upgrade"]:
+        lines.append(f"{len(res['upgrade'])} installed package{'s' if len(res['upgrade']) != 1 else ''} will be "
+                     "updated.")
+    if removed:
+        lines.append("These will be removed: " + ", ".join(display_name(p) for p in removed[:15]))
+    lines.append(f"Download: {human(res['download']) if res['download'] else 'nothing'}")
+    if catalog:
+        disk = sum(catalog[p].size for p in res["install"] if p in catalog)
+        if disk:
+            lines.append(f"Space needed: {human_kb(disk)}")
+    d.format_secondary_text("\n\n".join(lines))
+    d.add_button("_Cancel", Gtk.ResponseType.CANCEL)
+    d.add_button("_Install", Gtk.ResponseType.OK)
+    d.set_default_response(Gtk.ResponseType.OK)
+    r = d.run()
+    d.destroy()
+    return r == Gtk.ResponseType.OK
+
+
+# ---- running apt with a progress bar ----
+class Runner:
+    """apt as a child process read from the GTK main loop (no worker thread):
+    progress, status and the log on the window."""
+
+    def __init__(self, admin, progress, status, details):
+        self.admin, self.progress, self.status, self.details = admin, progress, status, details
+        self.busy = False
+        self.downloading = False
+        self.stopped = False
+        # Stopping is offered only while downloading: nothing on the computer
+        # has changed yet then (stopping dpkg halfway would break packages).
+        self.stop_btn = Gtk.Button.new_with_mnemonic("_Stop")
+        self.stop_btn.set_no_show_all(True)
+        self.stop_btn.connect("clicked", lambda *_: self.stop())
+        GLib.timeout_add_seconds(5, self._watch)
+
+    def _watch(self):
+        # Stalled: hardly a byte received for a minute (apt itself goes on
+        # trying file after file for a long time when the connection is gone).
+        rx = sum(r for r, _t in net_bytes().values())
+        now = time.monotonic()
+        if not (self.busy and self.downloading) or rx - getattr(self, "watch_rx", 0) > 16384:
+            self.watch_rx, self.watch_time = rx, now
+        elif now - self.watch_time > STALL_SECONDS and not self.stopped:
+            self.status.set_text("The download has not moved for a minute. Is the computer still connected "
+                                 "to the Internet? You can stop it and try again later.")
+        return True
+
+    def stop(self):
+        if not (self.busy and self.downloading):
+            return
+        self.stopped = True
+        self.stop_btn.set_sensitive(False)
+        self.status.set_text("Stopping the download...")
+        try:
+            # apt-get and the download helpers it started.
+            k = self.admin.popen(["sh", "-c", "pkill -TERM -x apt-get; pkill -TERM -f /usr/lib/apt/methods/"])
+            GLib.child_watch_add(GLib.PRIORITY_DEFAULT, k.pid, lambda *_: None)
+        except OSError:
+            pass
+
+    def log(self, text):
+        # Also kept in a file, for when something goes wrong.
+        try:
+            with open(LOGFILE, "a") as f:
+                f.write(text)
+        except OSError:
+            pass
+        buf = self.details.get_buffer()
+        buf.insert(buf.get_end_iter(), debrand(text))
+        self.details.scroll_to_mark(buf.get_insert(), 0, False, 0, 0)
+        buf.place_cursor(buf.get_end_iter())
+
+    def start(self, cmd, what, done, recover=False, new=()):
+        """Run cmd as root; done(ok, output) afterwards.
+        recover: if it fails, finish what dpkg left half done (dpkg --configure -a,
+        apt-get -f install) so no package stays half installed; packages in `new`
+        (not installed before) that still can't be set up are taken off again.
+        The output then ends with "RECOVERY: ok", "RECOVERY: rolled back" or
+        "RECOVERY: failed"."""
+        if self.busy or not self.admin.ready():
+            return False
+        self.busy = True
+        self.stopped = False
+        self.progress.set_fraction(0)
+        self.progress.set_text(what)
+        self.status.set_text(what)
+        self._drive(self._steps(cmd, done, recover, set(new)))
+        return True
+
+    # The steps run as a generator: each `yield cmd` runs a command and
+    # resumes with (exit code, output) when it has finished.
+    def _drive(self, gen, result=None):
+        try:
+            cmd = gen.send(result)
+        except StopIteration:
+            return
+        self._exec(cmd, lambda rc, out: self._drive(gen, (rc, out)))
+
+    def _steps(self, cmd, done, recover, new):
+        rc, out = yield cmd
+        if rc != 0 and self.stopped:
+            out += "STOPPED\n"
+        if rc != 0 and recover:
+            self.status.set_text("That did not work. Making sure nothing is left half installed...")
+            self.progress.set_text("Repairing...")
+            r1, o1 = yield ["dpkg", "--configure", "-a"]
+            r2, o2 = yield ["apt-get"] + APT_OPTS + ["-f", "install"]
+            broken = audit_names((yield ["dpkg", "--audit"])[1])
+            fine = r1 == 0 and r2 == 0 and not broken
+            result = "ok" if fine else "failed"
+            gone = [b for b in broken if b.split(":")[0] in new]
+            if not fine and gone:
+                # New software whose setup keeps failing: take it off again.
+                yield ["dpkg", "--remove", "--force-remove-reinstreq"] + gone
+                yield ["apt-get"] + APT_OPTS + ["-f", "install"]
+                if not audit_names((yield ["dpkg", "--audit"])[1]):
+                    result = "rolled back"
+            out += o1 + o2 + f"RECOVERY: {result}\n"
+            self.log({"ok": "Repair finished: every package is fully installed.\n",
+                      "rolled back": "The new software could not be set up and was removed again; "
+                                     "everything else is as it was.\n",
+                      "failed": "Repair did not finish: some packages are still broken.\n"}[result])
+        self._finish(done, rc == 0, out)
+
+    def _exec(self, cmd, then):
+        self.log("$ " + " ".join(cmd) + "\n")
+        try:
+            p = self.admin.popen(cmd)
+        except OSError as e:
+            self.log(f"{e}\n")
+            GLib.idle_add(lambda: then(1, str(e)) and False)
+            return
+        fd = p.stdout.fileno()
+        os.set_blocking(fd, False)
+        state = {"lines": [], "partial": b"", "pulsing": True, "eof": False, "status": None, "done": False}
+
+        def feed(chunk):
+            data = state["partial"] + chunk
+            *complete, state["partial"] = data.split(b"\n")
+            for raw in complete:
+                self._line(raw.decode("utf-8", "replace") + "\n", state)
+
+        def drain():
+            while not state["eof"]:
+                try:
+                    chunk = os.read(fd, 65536)
+                except BlockingIOError:
+                    return
+                except OSError:
+                    chunk = b""
+                if not chunk:
+                    state["eof"] = True
+                else:
+                    feed(chunk)
+
+        def finish():
+            # Done when the command has exited -- even if a helper it left
+            # behind (an apt download method) still holds the pipe open.
+            if state["done"] or state["status"] is None:
+                return
+            state["done"] = True
+            drain()
+            if state["partial"]:
+                self._line(state["partial"].decode("utf-8", "replace") + "\n", state)
+            GLib.source_remove(state["watch"]) if not state["eof"] else None
+            p.stdout.close()
+            then(p.returncode, "".join(state["lines"]))
+
+        def on_data(_fd, _cond):
+            drain()
+            if state["eof"]:
+                finish()
+                return False
+            return True
+
+        def exited(_pid, status):
+            # GLib reaped the child: the exit code comes from its status.
+            p.returncode = os.waitstatus_to_exitcode(status)
+            state["status"] = status
+            finish()
+        state["watch"] = GLib.io_add_watch(fd, GLib.PRIORITY_DEFAULT, GLib.IOCondition.IN | GLib.IOCondition.HUP |
+                                           GLib.IOCondition.ERR, on_data)
+        GLib.child_watch_add(GLib.PRIORITY_DEFAULT, p.pid, exited)
+
+    def _line(self, line, state):
+        state["lines"].append(line)
+        # APT::Status-Fd lines: dlstatus:<n>:<percent>:<text>, pmstatus:<pkg>:<percent>:<text>
+        m = re.match(r"(dl|pm)status:[^:]*:([\d.]+):(.*)", line)
+        if m:
+            state["pulsing"] = False
+            if self.downloading != (m.group(1) == "dl"):
+                self.downloading = m.group(1) == "dl"
+                self.stop_btn.set_visible(self.downloading)
+            pct = float(m.group(2)) / 100
+            frac = pct * 0.4 if m.group(1) == "dl" else 0.4 + pct * 0.6
+            self.progress.set_fraction(frac)
+            self.progress.set_text(f"{debrand(m.group(3).strip())} ({frac * 100:.0f}%)")
+            return
+        if line.startswith(("pmconffile", "dlstatus", "pmerror", "media-change")):
+            return
+        self.log(line)
+        if state["pulsing"]:
+            self.progress.pulse()
+
+    def _finish(self, done, ok, out):
+        self.busy = False
+        self.downloading = False
+        self.stop_btn.hide()
+        self.stop_btn.set_sensitive(True)
+        self.progress.set_fraction(1.0 if ok else 0.0)
+        self.progress.set_text("Done" if ok else "Failed")
+        done(ok, out)
+
+
+def audit_names(out):
+    """The packages `dpkg --audit` lists as not fully installed."""
+    return [m.group(1) for m in re.finditer(r"(?m)^ (\S+)\s", out)]
+
+
+# ---- what apt would do: simulated first, so the user sees it ----
+def plan(args):
+    """apt's plan for "apt-get <args>", without changing anything:
+    {ok, install: [new packages], upgrade: [...], remove: [...], download: bytes, problems: [lines]}"""
+    p = subprocess.run(["apt-get", "-s", "-o", "Debug::NoLocking=1"] + args, capture_output=True, text=True,
+                       env=ENV)
+    res = {"ok": p.returncode == 0, "install": [], "upgrade": [], "remove": [], "download": 0, "problems": []}
+    unmet = False
+    for line in (p.stdout + p.stderr).splitlines():
+        if line.startswith("Inst "):
+            f = line.split()
+            (res["upgrade"] if len(f) > 2 and f[2].startswith("[") else res["install"]).append(f[1])
+        elif line.startswith("Remv "):
+            res["remove"].append(line.split()[1])
+        elif "unmet dependencies" in line:
+            unmet = True
+        elif unmet and line.startswith(" "):
+            res["problems"].append(debrand(line.strip()))
+        elif line.startswith("E: "):
+            res["problems"].append(debrand(line[3:].strip()))
+    if res["ok"]:
+        uris = subprocess.run(["apt-get", "--print-uris", "-qq", "-o", "Debug::NoLocking=1"] + args,
+                              capture_output=True, text=True, env=ENV).stdout
+        for line in uris.splitlines():
+            f = line.split()
+            if len(f) >= 3 and f[2].isdigit():
+                res["download"] += int(f[2])
+    return res
+
+
+def plan_problem_text(res):
+    probs = res["problems"]
+    if any("held broken" in p or "Depends:" in p or "PreDepends:" in p for p in probs):
+        lines = [p for p in probs if "Depends" in p or "Conflicts" in p or "Breaks" in p][:6]
+        return ("It needs other software that cannot be installed on Syluxium (or that conflicts with "
+                "installed software), so nothing was changed.\n\n" + "\n".join(lines))
+    return error_text("\n".join("E: " + p for p in probs))
+
+
+def repair_note(out):
+    if "RECOVERY: ok" in out:
+        return "\n\nSyluxium cleaned up afterwards: no package was left half installed."
+    if "RECOVERY: rolled back" in out:
+        return ("\n\nIt could not be set up, so Syluxium removed it again: the computer is as it was "
+                "before.")
+    if "RECOVERY: failed" in out:
+        return ("\n\nSome packages are still not fully installed. Click \u201cRepair\u201d in the App Store, or "
+                "use Syluxium Update, when you are connected to the Internet.")
+    return ""
+
+
+def error_text(out):
+    if "STOPPED" in out:
+        return "The download was stopped. Nothing on the computer was changed."
+    errs = [debrand(l[3:].strip()) for l in out.splitlines() if l.startswith("E: ")]
+    if any("Could not get lock" in e or "Unable to acquire" in e for e in errs):
+        return "Another program is installing software right now. Try again when it has finished."
+    if any("Failed to fetch" in e or "Temporary failure resolving" in e for e in errs) or \
+            "Temporary failure resolving" in out:
+        return "The software could not be downloaded. Are you connected to the Internet?"
+    if any("Unable to locate package" in e for e in errs):
+        return "That software is not in the catalog. Refresh the catalog and try again."
+    return errs[-1] if errs else "See Details for what went wrong."
+
+
+def log_area():
+    progress = Gtk.ProgressBar(show_text=True)
+    details = Gtk.TextView(editable=False, monospace=True, cursor_visible=False)
+    details.set_wrap_mode(Gtk.WrapMode.CHAR)
+    exp = Gtk.Expander(label="Details")
+    sw = Gtk.ScrolledWindow(shadow_type=Gtk.ShadowType.IN)
+    sw.set_size_request(-1, 130)
+    sw.add(details)
+    exp.add(sw)
+    return progress, details, exp
+
+
+# ---- icons: the desktop's icon theme (crystal), then GTK's ----
+class Icons:
+    def __init__(self):
+        self.theme = Gtk.IconTheme()
+        self.theme.set_search_path(["/opt/trinity/share/icons", "/usr/share/icons", "/usr/share/pixmaps"])
+        self.theme.set_custom_theme("crystalsvg")
+        self.fallback = Gtk.IconTheme.get_default()
+        self.cache = {}
+
+    def get(self, names, size):
+        key = (tuple(names), size)
+        if key in self.cache:
+            return self.cache[key]
+        pix = None
+        for theme in (self.theme, self.fallback):
+            for n in names:
+                if n and theme.has_icon(n):
+                    try:
+                        pix = theme.load_icon(n, size, Gtk.IconLookupFlags.FORCE_SIZE)
+                        break
+                    except GLib.Error:
+                        pass
+            if pix:
+                break
+        self.cache[key] = pix
+        return pix
+
+    def for_package(self, pkg, section_icon, size=32):
+        base = pkg[:-8] if pkg.endswith("-trinity") else pkg
+        return self.get([ICONS.get(pkg), base, pkg, section_icon, "package"], size)
+
+
+def category_of(section):
+    for title, icon, sections in CATEGORIES:
+        if section in sections:
+            return title, icon
+    return None, "package"
+
+
+# ---------------------------------------------------------------------------
+# The store window
+# ---------------------------------------------------------------------------
+class Store:
+    def __init__(self, page=None, search=None):
+        self.win = window(TITLE, 900, 640, "system-software-install")
+        self.icons = Icons()
+        self.admin = Admin(self.win)
+        self.pkgs, self.installed = {}, {}
+        self.upgradable = {}
+        self.current = None  # the package in the details pane
+        accel = Gtk.AccelGroup()
+        self.win.add_accel_group(accel)
+        accel.connect(Gdk.KEY_f, Gdk.ModifierType.CONTROL_MASK, 0, lambda *_: self.search.grab_focus() or True)
+
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        self.win.add(outer)
+        outer.pack_start(self.banner(), False, False, 0)
+
+        paned = Gtk.Paned()
+        outer.pack_start(paned, True, True, 0)
+        paned.pack1(self.sidebar(), False, False)
+        self.stack = Gtk.Stack()
+        paned.pack2(self.stack, True, False)
+        paned.set_position(200)
+        self.stack.add_named(self.loading_page(), "loading")
+        self.stack.add_named(self.empty_page(), "empty")
+        self.featured_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, margin=12)
+        fsw = Gtk.ScrolledWindow()
+        fsw.add(self.featured_box)
+        self.stack.add_named(fsw, "featured")
+        self.stack.add_named(self.list_page(), "list")
+
+        bottom = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4, margin=8)
+        self.status = label("", xalign=0)
+        self.progress, self.details, exp = log_area()
+        row = Gtk.Box(spacing=8)
+        row.pack_start(self.status, True, True, 0)
+        row.pack_start(self.progress, False, False, 0)
+        self.progress.set_size_request(260, -1)
+        bottom.pack_start(row, False, False, 0)
+        bottom.pack_start(exp, False, False, 0)
+        outer.pack_start(bottom, False, False, 0)
+        self.runner = Runner(self.admin, self.progress, self.status, self.details)
+        row.pack_start(self.runner.stop_btn, False, False, 0)
+
+        self.win.show_all()
+        self.show_details(None)
+        self.update_all.hide()
+        self.stack.set_visible_child_name("loading")
+        self.start_page, self.start_search = page, search
+        self.reload()
+
+    # ---- layout ----
+    def banner(self):
+        ev = Gtk.EventBox()
+        css = Gtk.CssProvider()
+        css.load_from_data(b"""
+            .store-banner { background-image: linear-gradient(to right, #0a246a, #3a6ea5); }
+            .store-banner label { color: white; }
+            .store-tile { background-color: #ffffff; border: 1px solid #c8c4b8; border-radius: 4px; }
+            .store-group { color: #1c3f94; }
+        """)
+        Gtk.StyleContext.add_provider_for_screen(self.win.get_screen(), css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+        ev.get_style_context().add_class("store-banner")
+        box = Gtk.Box(spacing=10, margin=10)
+        img = Gtk.Image.new_from_pixbuf(self.icons.get(["system-software-install", "package"], 48))
+        box.pack_start(img, False, False, 0)
+        texts = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        texts.pack_start(label(TITLE, bold=True, size="x-large"), False, False, 0)
+        texts.pack_start(label("Thousands of free programs, ready to install."), False, False, 0)
+        box.pack_start(texts, True, True, 0)
+        self.search = Gtk.SearchEntry(placeholder_text="Search for programs")
+        self.search.set_size_request(260, -1)
+        self.search.set_valign(Gtk.Align.CENTER)
+        self.search.connect("activate", lambda *_: self.do_search())
+        self.search.connect("search-changed", lambda *_: len(self.search.get_text()) >= 3 and self.do_search())
+        box.pack_end(self.search, False, False, 0)
+        refresh = Gtk.Button(label="Refresh catalog")
+        refresh.set_valign(Gtk.Align.CENTER)
+        refresh.set_tooltip_text("Download the newest list of programs and updates")
+        refresh.connect("clicked", lambda *_: self.refresh_catalog())
+        box.pack_end(refresh, False, False, 0)
+        ev.add(box)
+        return ev
+
+    def sidebar(self):
+        self.side = Gtk.ListStore(GdkPixbuf.Pixbuf, str, str)  # icon, title, key
+        view = Gtk.TreeView(model=self.side, headers_visible=False)
+        col = Gtk.TreeViewColumn()
+        ic, tx = Gtk.CellRendererPixbuf(), Gtk.CellRendererText(ypad=4)
+        col.pack_start(ic, False), col.pack_start(tx, True)
+        col.add_attribute(ic, "pixbuf", 0), col.add_attribute(tx, "markup", 1)
+        view.append_column(col)
+        for title, icon, key in [("Featured", "package_favourite", "featured"),
+                                 ("Installed", "system-file-manager", "installed"),
+                                 ("Updates", "system-software-update", "updates")] + \
+                [(t, i, "cat:" + t) for t, i, _ in CATEGORIES]:
+            self.side.append([self.icons.get([icon, "package"], 22), GLib.markup_escape_text(title), key])
+        self.side_view = view
+        view.get_selection().connect("changed", self.on_side)
+        sw = Gtk.ScrolledWindow(shadow_type=Gtk.ShadowType.IN)
+        sw.set_margin_start(8), sw.set_margin_top(8)
+        sw.add(view)
+        return sw
+
+    def loading_page(self):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, valign=Gtk.Align.CENTER)
+        sp = Gtk.Spinner()
+        sp.start()
+        box.pack_start(sp, False, False, 0)
+        box.pack_start(label("Loading the catalog...", xalign=0.5), False, False, 0)
+        return box
+
+    def empty_page(self):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, valign=Gtk.Align.CENTER, margin=40)
+        box.pack_start(Gtk.Image.new_from_pixbuf(self.icons.get(["system-software-update", "package"], 64)),
+                       False, False, 0)
+        box.pack_start(label("The catalog of programs has not been downloaded yet.", bold=True, xalign=0.5),
+                       False, False, 0)
+        box.pack_start(label("Syluxium downloads the list of programs from the Internet. Connect to the "
+                             "Internet, then click Download catalog.", wrap=True, xalign=0.5), False, False, 0)
+        b = self.empty_button = Gtk.Button(label="Download catalog")
+        b.set_halign(Gtk.Align.CENTER)
+        b.connect("clicked", lambda *_: self.refresh_catalog())
+        box.pack_start(b, False, False, 0)
+        return box
+
+    def list_page(self):
+        paned = Gtk.Paned(orientation=Gtk.Orientation.VERTICAL)
+        top = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        top.set_margin_top(8), top.set_margin_end(8)
+        self.list_title = label("", bold=True, size="large")
+        bar = Gtk.Box(spacing=8)
+        bar.pack_start(self.list_title, True, True, 0)
+        self.update_all = Gtk.Button(label="Install all updates")
+        self.update_all.connect("clicked", lambda *_: self.install_updates())
+        bar.pack_end(self.update_all, False, False, 0)
+        top.pack_start(bar, False, False, 0)
+        # icon, markup, size text, status, package name, size (sorting)
+        self.rows = Gtk.ListStore(GdkPixbuf.Pixbuf, str, str, str, str, int)
+        self.view = Gtk.TreeView(model=self.rows)
+        self.view.set_enable_search(False)
+        col = Gtk.TreeViewColumn("Program")
+        ic, tx = Gtk.CellRendererPixbuf(xpad=4, ypad=2), Gtk.CellRendererText(ellipsize=Pango.EllipsizeMode.END)
+        col.pack_start(ic, False), col.pack_start(tx, True)
+        col.add_attribute(ic, "pixbuf", 0), col.add_attribute(tx, "markup", 1)
+        col.set_expand(True), col.set_sort_column_id(4)
+        self.view.append_column(col)
+        c = Gtk.TreeViewColumn("Size", Gtk.CellRendererText(xalign=1.0), text=2)
+        c.set_sort_column_id(5)
+        self.view.append_column(c)
+        c = Gtk.TreeViewColumn("Status", Gtk.CellRendererText(), text=3)
+        c.set_sort_column_id(3)
+        self.view.append_column(c)
+        self.view.get_selection().connect("changed", self.on_row)
+        sw = Gtk.ScrolledWindow(shadow_type=Gtk.ShadowType.IN)
+        sw.add(self.view)
+        top.pack_start(sw, True, True, 0)
+        paned.pack1(top, True, False)
+        paned.pack2(self.details_pane(), False, False)
+        paned.set_position(300)
+        return paned
+
+    def details_pane(self):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        box.set_margin_top(6), box.set_margin_end(8)
+        head = Gtk.Box(spacing=10)
+        self.d_icon = Gtk.Image()
+        head.pack_start(self.d_icon, False, False, 0)
+        names = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        self.d_name = label("", bold=True, size="large")
+        self.d_info = label("", xalign=0)
+        self.d_info.set_selectable(True)
+        names.pack_start(self.d_name, False, False, 0)
+        names.pack_start(self.d_info, False, False, 0)
+        head.pack_start(names, True, True, 0)
+        self.d_remove = Gtk.Button.new_with_mnemonic("_Remove")
+        self.d_install = Gtk.Button.new_with_mnemonic("_Install")
+        self.d_remove.connect("clicked", lambda *_: self.remove(self.current))
+        self.d_install.connect("clicked", lambda *_: self.install(self.current))
+        for b in (self.d_install, self.d_remove):
+            b.set_valign(Gtk.Align.CENTER)
+            head.pack_end(b, False, False, 0)
+        box.pack_start(head, False, False, 0)
+        self.d_text = Gtk.TextView(editable=False, cursor_visible=False, wrap_mode=Gtk.WrapMode.WORD)
+        self.d_text.set_left_margin(6), self.d_text.set_right_margin(6)
+        sw = Gtk.ScrolledWindow(shadow_type=Gtk.ShadowType.IN)
+        sw.set_size_request(-1, 150)
+        sw.add(self.d_text)
+        box.pack_start(sw, True, True, 0)
+        self.show_details(None)
+        return box
+
+    # ---- loading ----
+    def reload(self, then=None):
+        def work():
+            pkgs, inst = load_catalog(), installed_packages()
+            up = upgradable() if pkgs else {}
+            try:
+                audit = subprocess.run(["dpkg", "--audit"], capture_output=True, text=True, env=ENV).stdout.strip()
+            except OSError:
+                audit = ""
+            GLib.idle_add(lambda: (self.loaded(pkgs, inst, up, then), self.check_audit(audit)) and False)
+        threading.Thread(target=work, daemon=True).start()
+
+    def loaded(self, pkgs, inst, up, then):
+        self.pkgs, self.installed, self.upgradable = pkgs, inst, up
+        self.show_update_count()
+        self.build_featured()
+        if not pkgs:
+            self.stack.set_visible_child_name("empty")
+            self.empty_button.grab_focus()
+            self.status.set_text("The catalog has not been downloaded yet.")
+            return
+        self.status.set_text(f"{len(pkgs):,} programs and packages in the catalog, {len(inst):,} installed.")
+        if then:
+            then()
+        elif self.start_search:
+            self.search.set_text(self.start_search)
+            self.do_search()
+            self.start_search = None
+        elif self.start_page:
+            self.select_side(self.start_page)
+            self.start_page = None
+        elif self.side_view.get_selection().count_selected_rows() == 0:
+            self.select_side("featured")
+        else:
+            self.on_side(self.side_view.get_selection())
+
+    def check_audit(self, audit):
+        # An installation that was cut off (power, connection): offer to finish it.
+        if not audit or self.runner.busy or getattr(self, "audit_asked", False):
+            return
+        self.audit_asked = True
+        if message(self.win, "Some software was not completely installed.",
+                   "An earlier installation was interrupted. Finish it now? (This may need the Internet.)",
+                   Gtk.MessageType.WARNING, Gtk.ButtonsType.YES_NO) == Gtk.ResponseType.YES:
+            self.repair()
+
+    def show_update_count(self):
+        it = self.side.get_iter_first()
+        while it:
+            if self.side[it][2] == "updates":
+                n = len(self.upgradable)
+                self.side[it][1] = f"<b>Updates ({n})</b>" if n else "Updates"
+            it = self.side.iter_next(it)
+
+    def select_side(self, key):
+        for r in self.side:
+            if r[2] == key:
+                self.side_view.get_selection().select_iter(r.iter)
+                self.on_side(self.side_view.get_selection())
+                return
+
+    # ---- pages ----
+    def on_side(self, sel):
+        model, it = sel.get_selected()
+        if not it or not self.pkgs:
+            return
+        key = model[it][2]
+        if key == "featured":
+            self.stack.set_visible_child_name("featured")
+            return
+        if key == "installed":
+            names = [n for n in self.installed if n in self.pkgs]
+            self.fill("Installed programs", [n for n in names if self.pkgs[n].section not in TECHNICAL])
+        elif key == "updates":
+            self.fill("Updates" if self.upgradable else "Syluxium is up to date", sorted(self.upgradable),
+                      updates=True)
+        else:
+            title = key[4:]
+            sections = next(s for t, _, s in CATEGORIES if t == title)
+            self.fill(title, [n for n, p in self.pkgs.items() if p.section in sections])
+
+    def do_search(self):
+        q = self.search.get_text().strip().lower()
+        if not q or not self.pkgs:
+            return
+        words = q.split()
+        hits = []
+        for n, p in self.pkgs.items():
+            hay = (n + " " + display_name(n) + " " + p.summary).lower()
+            if all(w in hay for w in words):
+                # Best first: the name itself, then programs, then libraries & co.
+                score = (0 if q in (n, display_name(n).lower()) else 1 if n.startswith(words[0]) else 2,
+                         1 if p.section in TECHNICAL else 0, n)
+                hits.append((score, n))
+        hits.sort()
+        self.side_view.get_selection().unselect_all()
+        self.fill(f"Search results for “{q}” ({len(hits)})", [n for _, n in hits[:2000]], keep_order=True)
+
+    def fill(self, title, names, updates=False, keep_order=False):
+        self.list_title.set_text(title)
+        self.update_all.set_visible(updates and bool(self.upgradable))
+        self.rows.set_sort_column_id(Gtk.TREE_SORTABLE_UNSORTED_SORT_COLUMN_ID, Gtk.SortType.ASCENDING)
+        self.view.set_model(None)
+        self.rows.clear()
+        if not keep_order:
+            names = sorted(names, key=lambda n: display_name(n).lower())
+        for n in names:
+            p = self.pkgs.get(n)
+            if not p:
+                continue
+            _cat, icon = category_of(p.section)
+            summary = GLib.markup_escape_text(p.summary)
+            name = GLib.markup_escape_text(display_name(n))
+            if updates and n in self.upgradable:
+                old, new = self.upgradable[n]
+                status = "Update available"
+                summary = GLib.markup_escape_text(f"{debrand(old)} → {debrand(new)}")
+            else:
+                status = "Installed" if n in self.installed else ""
+                if n in self.installed and n in self.upgradable:
+                    status = "Update available"
+            self.rows.append([self.icons.for_package(n, icon), f"<b>{name}</b>\n<small>{summary}</small>",
+                              human_kb(p.size), status, n, p.size])
+        self.view.set_model(self.rows)
+        self.stack.set_visible_child_name("list")
+        if len(self.rows):
+            self.view.get_selection().select_path(Gtk.TreePath(0))
+        else:
+            self.show_details(None)
+
+    def build_featured(self):
+        for c in self.featured_box.get_children():
+            self.featured_box.remove(c)
+        self.featured_box.pack_start(label("Featured programs", bold=True, size="large"), False, False, 0)
+        self.featured_box.pack_start(label("Popular free programs, picked for Syluxium. Click one to read "
+                                           "about it and install it.", wrap=True), False, False, 4)
+        for group, items in FEATURED:
+            items = [i for i in items if i[0] in self.pkgs]
+            if not items:
+                continue
+            g = label(group, bold=True)
+            g.get_style_context().add_class("store-group")
+            self.featured_box.pack_start(g, False, False, 6)
+            flow = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, homogeneous=True, max_children_per_line=4,
+                               column_spacing=8, row_spacing=8)
+            for pkg, name, _icon in items:
+                flow.add(self.tile(pkg, name))
+            self.featured_box.pack_start(flow, False, False, 0)
+        self.featured_box.show_all()
+
+    def tile(self, pkg, name):
+        p = self.pkgs[pkg]
+        b = Gtk.Button()
+        b.set_relief(Gtk.ReliefStyle.NONE)
+        b.get_style_context().add_class("store-tile")
+        box = Gtk.Box(spacing=8, margin=6)
+        box.pack_start(Gtk.Image.new_from_pixbuf(self.icons.for_package(pkg, category_of(p.section)[1], 48)),
+                       False, False, 0)
+        texts = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        texts.pack_start(label(name, bold=True), False, False, 0)
+        s = label(p.summary, wrap=True)
+        s.set_max_width_chars(24)
+        s.set_lines(2)
+        s.set_ellipsize(Pango.EllipsizeMode.END)
+        texts.pack_start(s, False, False, 0)
+        texts.pack_start(label("Installed" if pkg in self.installed else human_kb(p.size)), False, False, 0)
+        box.pack_start(texts, True, True, 0)
+        b.add(box)
+        b.set_size_request(190, -1)
+        b.connect("clicked", lambda *_: self.open_package(pkg))
+        return b
+
+    def open_package(self, pkg):
+        self.side_view.get_selection().unselect_all()
+        self.fill(display_name(pkg), [pkg])
+
+    # ---- details ----
+    def on_row(self, sel):
+        model, it = sel.get_selected()
+        self.show_details(model[it][4] if it else None)
+
+    def show_details(self, pkg):
+        self.current = pkg
+        p = self.pkgs.get(pkg) if pkg else None
+        if not p:
+            self.d_name.set_text("")
+            self.d_info.set_text("")
+            self.d_icon.clear()
+            self.d_text.get_buffer().set_text("")
+            self.d_install.hide(), self.d_remove.hide()
+            return
+        self.d_icon.set_from_pixbuf(self.icons.for_package(pkg, category_of(p.section)[1], 48))
+        self.d_name.set_text(display_name(pkg))
+        inst = self.installed.get(pkg)
+        info = f"Version {debrand(p.version)}"
+        if inst and inst != p.version:
+            info += f" (installed: {debrand(inst)})"
+        if p.size:
+            info += f"   •   {human_kb(p.size)} on disk"
+        cat, _ = category_of(p.section)
+        if cat:
+            info += f"   •   {cat}"
+        self.d_info.set_text(info)
+        self.d_install.set_label("_Update" if inst and pkg in self.upgradable else "_Install")
+        self.d_install.set_visible(not inst or pkg in self.upgradable)
+        self.d_remove.set_visible(bool(inst))
+        self.d_install.set_sensitive(not self.runner.busy)
+        self.d_remove.set_sensitive(not self.runner.busy and not PROTECTED.match(pkg))
+        buf = self.d_text.get_buffer()
+        buf.set_text(p.summary + "\n\n")
+
+        def work():
+            desc, extra = long_description(pkg)
+            GLib.idle_add(lambda: self.current == pkg and self.set_long(p, desc, extra) and False)
+        threading.Thread(target=work, daemon=True).start()
+
+    def set_long(self, p, desc, extra):
+        buf = self.d_text.get_buffer()
+        text = p.summary + "\n\n" + (desc or "")
+        if p.homepage:
+            text += f"\n\nWebsite: {p.homepage}"
+        if extra.get("Download-Size"):
+            text += f"\nDownload size: {extra['Download-Size']}"
+        buf.set_text(text)
+        return False
+
+    # ---- actions ----
+    def busy(self, on):
+        self.d_install.set_sensitive(not on)
+        self.d_remove.set_sensitive(not on and not (self.current and PROTECTED.match(self.current)))
+        self.update_all.set_sensitive(not on)
+
+    def after(self, ok, out, success, pkg=None):
+        self.busy(False)
+        if not ok and pkg and "RECOVERY: ok" in out:
+            # The repair finished the job (a setup script that failed the
+            # first time worked the second): it did happen after all.
+            inst = pkg in installed_packages()
+            if inst == success.endswith("was installed."):
+                ok = True
+                self.log_note(f"{display_name(pkg)}: finished by the repair step.\n")
+        if ok:
+            self.status.set_text(success)
+        else:
+            self.status.set_text("That did not work." + (" Nothing was left half installed." if "RECOVERY: ok" in out
+                                                          else ""))
+            message(self.win, "The operation could not be completed.", error_text(out) + repair_note(out),
+                    Gtk.MessageType.ERROR)
+
+        def again():
+            if pkg and self.current != pkg:
+                return
+            sel = self.side_view.get_selection()
+            if sel.count_selected_rows():
+                self.on_side(sel)
+            elif pkg:
+                self.fill(display_name(pkg), [pkg])
+        self.reload(again)
+
+    def log_note(self, text):
+        self.runner.log(text)
+
+    def planned(self, args, then):
+        """Simulate "apt-get <args>" in the background, then then(plan) on the main thread."""
+        self.busy(True)
+        self.status.set_text("Checking what is needed...")
+        self.progress.pulse()
+
+        def work():
+            res = plan(args)
+            GLib.idle_add(lambda: (self.busy(False), then(res)) and False)
+        threading.Thread(target=work, daemon=True).start()
+
+    def install(self, pkg):
+        if not pkg or self.runner.busy:
+            return
+        name = display_name(pkg)
+
+        def go(res):
+            self.status.set_text("")
+            if not res["ok"]:
+                message(self.win, f"{name} cannot be installed.", plan_problem_text(res), Gtk.MessageType.ERROR)
+                return
+            if not confirm_plan(self.win, name, pkg, res, self.pkgs):
+                return
+            if self.runner.start(["apt-get"] + APT_OPTS + ["install", pkg], f"Installing {name}...",
+                                 lambda ok, out: self.after(ok, out, f"{name} was installed.", pkg), recover=True,
+                                 new=res["install"]):
+                self.busy(True)
+        self.planned(["install", pkg], go)
+
+    def remove(self, pkg):
+        if not pkg or self.runner.busy:
+            return
+        name = display_name(pkg)
+        gone = plan(["remove", pkg])["remove"]
+        bad = [g for g in gone if PROTECTED.match(g)]
+        if bad:
+            message(self.win, f"{name} cannot be removed.", "Syluxium needs it (or something that depends on it: "
+                    + ", ".join(display_name(b) for b in bad[:5]) + ").", Gtk.MessageType.WARNING)
+            return
+        others = [display_name(g) for g in gone if g != pkg]
+        text = f"Remove {name} from this computer?"
+        sub = ("These programs need it and will be removed too:\n" + ", ".join(others[:20]) +
+               (" and more" if len(others) > 20 else "")) if others else "You can install it again later."
+        if message(self.win, text, sub, Gtk.MessageType.QUESTION, Gtk.ButtonsType.YES_NO) != Gtk.ResponseType.YES:
+            return
+        if self.runner.start(["apt-get"] + APT_OPTS + ["remove", pkg], f"Removing {name}...",
+                             lambda ok, out: self.after(ok, out, f"{name} was removed.", pkg), recover=True):
+            self.busy(True)
+
+    def install_updates(self):
+        names = sorted(self.upgradable)
+        if not names or self.runner.busy:
+            return
+
+        def go(res):
+            if not res["ok"]:
+                message(self.win, "The updates cannot be installed.", plan_problem_text(res), Gtk.MessageType.ERROR)
+                return
+            if not confirm_plan(self.win, f"{len(names)} updates", None, res, self.pkgs):
+                return
+            if self.runner.start(["apt-get"] + APT_OPTS + ["install", "--only-upgrade"] + names,
+                                 f"Installing {len(names)} updates...",
+                                 lambda ok, out: self.after(ok, out, "The updates were installed."), recover=True):
+                self.busy(True)
+        self.planned(["install", "--only-upgrade"] + names, go)
+
+    def repair(self):
+        """Finish installations that were interrupted (power cut, lost connection)."""
+        if self.runner.start(["dpkg", "--configure", "-a"], "Repairing...",
+                             lambda ok, out: self.after(ok, out, "Every package is fully installed."), recover=True):
+            self.busy(True)
+
+    def refresh_catalog(self):
+        if self.runner.start(["apt-get", "update"], "Downloading the catalog...", self.catalog_done):
+            self.busy(True)
+
+    def catalog_done(self, ok, out):
+        self.busy(False)
+        if not ok or "Failed to fetch" in out:
+            self.status.set_text("The catalog could not be downloaded completely.")
+            message(self.win, "The catalog could not be downloaded.", error_text(out), Gtk.MessageType.WARNING)
+        else:
+            self.status.set_text("The catalog is up to date.")
+        self.stack.set_visible_child_name("loading")
+        self.reload()
+
+
+# ---------------------------------------------------------------------------
+# The package installer: one downloaded .deb file
+# ---------------------------------------------------------------------------
+class DebInstaller:
+    def __init__(self, path):
+        self.path = os.path.abspath(path)
+        self.win = window("Software Installer", 560, 420, "system-software-install")
+        self.admin = Admin(self.win)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, margin=12)
+        self.win.add(box)
+        info = self.read_info()
+        head = Gtk.Box(spacing=12)
+        head.pack_start(Gtk.Image.new_from_pixbuf(Icons().get(["application-x-deb", "package"], 48)), False, False, 0)
+        texts = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        if not info:
+            texts.pack_start(label("This file is not a software package Syluxium can install.", bold=True,
+                                   wrap=True), False, False, 0)
+            texts.pack_start(label(os.path.basename(self.path), xalign=0), False, False, 0)
+            head.pack_start(texts, True, True, 0)
+            box.pack_start(head, False, False, 0)
+            close = Gtk.Button(label="Close")
+            close.connect("clicked", lambda *_: self.win.destroy())
+            row = Gtk.Box()
+            row.pack_end(close, False, False, 0)
+            box.pack_end(row, False, False, 0)
+            self.win.show_all()
+            return
+        self.pkg = info.get("Package", "")
+        installed = installed_packages().get(self.pkg)
+        texts.pack_start(label(f"Do you want to install {display_name(self.pkg)}?", bold=True, size="large",
+                               wrap=True), False, False, 0)
+        texts.pack_start(label(debrand(info.get("Description", "").split("\n")[0]), wrap=True), False, False, 0)
+        head.pack_start(texts, True, True, 0)
+        box.pack_start(head, False, False, 0)
+
+        grid = Gtk.Grid(column_spacing=12, row_spacing=3)
+        rows = [("File", os.path.basename(self.path)), ("Package", debrand(self.pkg)),
+                ("Version", debrand(info.get("Version", ""))),
+                ("Publisher", debrand(info.get("Maintainer", ""))),
+                ("Size", human_kb(int(info.get("Installed-Size", "0") or 0)) or "unknown")]
+        if installed:
+            rows.append(("Installed now", debrand(installed)))
+        if info.get("Depends"):
+            deps = [re.split(r"[ (]", d.strip())[0] for d in info["Depends"].split(",")]
+            rows.append(("Needs", debrand(", ".join(deps[:8]) + (" ..." if len(deps) > 8 else ""))))
+        for i, (k, v) in enumerate(rows):
+            grid.attach(label(k + ":", xalign=0), 0, i, 1, 1)
+            val = label(v, wrap=True)
+            val.set_selectable(True)
+            grid.attach(val, 1, i, 1, 1)
+        box.pack_start(grid, False, False, 0)
+        self.plan_label = label("Checking what else it needs...", wrap=True)
+        self.plan_label.set_selectable(True)
+        box.pack_start(self.plan_label, False, False, 0)
+        box.pack_start(label("Only install software from publishers you trust.", wrap=True), False, False, 0)
+        self.progress, self.details, exp = log_area()
+        box.pack_start(self.progress, False, False, 0)
+        box.pack_start(exp, True, True, 0)
+        self.status = label("", xalign=0)
+        row = Gtk.Box(spacing=6)
+        row.pack_start(self.status, True, True, 0)
+        self.reinstall = installed == info.get("Version")
+        self.install_btn = Gtk.Button.new_with_mnemonic("_Reinstall" if self.reinstall else
+                                      "_Install" if not installed else "_Install this version")
+        self.close_btn = Gtk.Button(label="Cancel")
+        self.install_btn.connect("clicked", lambda *_: self.install())
+        self.close_btn.connect("clicked", lambda *_: self.win.destroy())
+        row.pack_end(self.close_btn, False, False, 0)
+        row.pack_end(self.install_btn, False, False, 0)
+        box.pack_end(row, False, False, 0)
+        self.runner = Runner(self.admin, self.progress, self.status, self.details)
+        row.pack_end(self.runner.stop_btn, False, False, 0)
+        self.win.show_all()
+        self.progress.set_text("")
+        self.check()
+
+    def cmd_args(self):
+        return (["--reinstall"] if self.reinstall else []) + ["install", self.path]
+
+    def check(self):
+        """apt's plan for this file (simulated): which packages it pulls in, or why it can't be installed."""
+        self.install_btn.set_sensitive(False)
+
+        def work():
+            res = plan(self.cmd_args())
+            GLib.idle_add(lambda: self.checked(res) and False)
+        threading.Thread(target=work, daemon=True).start()
+
+    def checked(self, res):
+        if not res["ok"]:
+            self.plan_label.set_markup("<b>This package cannot be installed.</b>\n" +
+                                       GLib.markup_escape_text(plan_problem_text(res)))
+            self.status.set_text("Nothing was changed.")
+            return False
+        self.new = res["install"]
+        extra = [p for p in res["install"] if p != self.pkg]
+        text = (f"It also needs {len(extra)} package{'s' if len(extra) != 1 else ''} from the catalog, "
+                "installed with it: " + ", ".join(display_name(p) for p in extra[:20]) +
+                (" ..." if len(extra) > 20 else "") + "." if extra else "It needs nothing else.")
+        if res["remove"]:
+            text += "\nThese will be removed: " + ", ".join(display_name(p) for p in res["remove"][:10]) + "."
+        if res["download"]:
+            text += f"\nDownload: {human(res['download'])} (needs the Internet)."
+        self.plan_label.set_text(text)
+        self.install_btn.set_sensitive(True)
+        return False
+
+    def read_info(self):
+        try:
+            out = subprocess.run(["dpkg-deb", "-f", self.path], capture_output=True, text=True, env=ENV)
+        except OSError:
+            return None
+        if out.returncode != 0:
+            return None
+        info, key = {}, None
+        for line in out.stdout.split("\n"):
+            if line.startswith(" ") and key:
+                info[key] += "\n" + line[1:]
+            elif ":" in line:
+                key, _, v = line.partition(":")
+                info[key] = v.strip()
+        return info if "Package" in info else None
+
+    def install(self):
+        cmd = ["apt-get"] + APT_OPTS + self.cmd_args()
+        if self.runner.start(cmd, f"Installing {display_name(self.pkg)}...", self.done, recover=True,
+                             new=self.new):
+            self.install_btn.set_sensitive(False)
+            self.close_btn.set_sensitive(False)
+
+    def done(self, ok, out):
+        self.close_btn.set_sensitive(True)
+        self.close_btn.set_label("Close")
+        if not ok and "RECOVERY: ok" in out and self.pkg in installed_packages():
+            ok = True  # the repair step finished the job
+        if ok:
+            self.status.set_text(f"{display_name(self.pkg)} was installed.")
+            self.install_btn.hide()
+        else:
+            self.status.set_text("The installation did not work." + (
+                " The computer is as it was before." if "RECOVERY: rolled back" in out or "RECOVERY: ok" in out
+                else ""))
+            self.install_btn.set_sensitive(True)
+            message(self.win, "The software could not be installed.", error_text(out) + repair_note(out),
+                    Gtk.MessageType.ERROR)
+
+
+def main(argv):
+    if len(argv) > 2 and argv[1] == "--deb":
+        DebInstaller(argv[2])
+    elif len(argv) > 1 and argv[1].endswith(".deb") and os.path.exists(argv[1]):
+        DebInstaller(argv[1])
+    elif len(argv) > 1 and argv[1] == "--updates":
+        Store(page="updates")
+    elif len(argv) > 2 and argv[1] == "--search":
+        Store(search=argv[2])
+    else:
+        Store()
+    Gtk.main()
+
+
+if __name__ == "__main__":
+    main(sys.argv)

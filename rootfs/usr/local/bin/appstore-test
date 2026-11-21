@@ -1,0 +1,137 @@
+#!/bin/sh
+# Test aid (needs the Internet: QEMU's user networking): start the desktop,
+# log in, then use the App Store as the logged-in user: download the
+# catalog, search for "hello", install and remove it, then open a downloaded
+# .deb (cowsay, which needs another package) the way the file manager does
+# and install it. Results go to the console ("APPSTORE ...").
+#   appstore-test [deb]    deb: only the .deb part
+say() { echo "APPSTORE $*" > /dev/console; }
+startdesktop > /dev/null 2>&1 &
+export DISPLAY=:0
+for i in $(seq 1 120); do
+    XAUTHORITY="$(ls /var/run/xauth/A:0-* 2>/dev/null | head -1)"
+    [ -n "$XAUTHORITY" ] && [ -S /tmp/.X11-unix/X0 ] && break
+    sleep 1
+done
+export XAUTHORITY
+sleep 10
+xdotool key Return    # log in (the login screen's user has no password)
+for i in $(seq 1 120); do pidof kicker > /dev/null && break; sleep 1; done
+sleep 15
+say "desktop up"
+# Run a program as the logged-in user, with the session's environment.
+session=
+for i in $(seq 1 60); do
+    for p in /proc/[0-9]*; do
+        grep -q "^Uid:[[:space:]]*1000[[:space:]]" "$p/status" 2>/dev/null && grep -qa "DISPLAY=" "$p/environ" 2>/dev/null \
+            && session=${p#/proc/} && break
+    done
+    [ -n "$session" ] && break; sleep 1
+done
+say "session process: $session ($(cat /proc/$session/comm 2>/dev/null)) $(tr '\0' ' ' < /proc/$session/environ | grep -o 'XAUTHORITY=[^ ]*')"
+asuser() {
+    env -i XAUTHORITY=/home/syluxium/.Xauthority $(tr '\0' '\n' < /proc/"$session"/environ | grep -v '[[:space:]]') \
+        python3 -c "import os, sys; os.setgroups([27, 1000]); os.setgid(1000); os.setuid(1000); os.execvp(sys.argv[1], sys.argv[1:])" "$@"
+}
+win() { for i in $(seq 1 ${2:-60}); do w=$(xdotool search --name "$1" 2>/dev/null | head -1); [ -n "$w" ] && echo "$w" && return; sleep 1; done; }
+waitfor() { for i in $(seq 1 ${2:-300}); do eval "$1" && return 0; sleep 1; done; return 1; }
+
+if [ "$1" = deb ]; then
+    apt-get update > /dev/null 2>&1   # only the .deb part
+else
+rm -rf /var/lib/apt/lists/*_Packages /var/lib/apt/lists/*Release* 2>/dev/null
+asuser syluxium-appstore > /tmp/appstore.log 2>&1 &
+w=$(win "Syluxium App Store")
+[ -n "$w" ] && say "store open" || { say "store did NOT open"; cat /tmp/appstore.log > /dev/console; tr '\0' '\n' < /proc/"$session"/environ > /dev/console; }
+xdotool windowmove "$w" 60 20 windowactivate "$w"
+sleep 4
+say "stage empty"
+sleep 4
+xdotool key Return       # "Download catalog" (it has the keyboard)
+d=$(win "Administrator Permission" 20)
+[ -n "$d" ] && say "password asked" || say "no password dialog"
+say "stage password"
+sleep 4
+xdotool windowactivate --sync "$d" 2>/dev/null; xdotool key Return   # the user's (empty) password
+waitfor 'ls /var/lib/apt/lists/*_Packages > /dev/null 2>&1' 400 && say "catalog downloaded" || say "catalog NOT downloaded"
+sleep 25
+say "stage featured"
+sleep 4
+xdotool windowactivate --sync "$w"
+xdotool key ctrl+f
+xdotool type hello
+xdotool key Return
+sleep 5
+say "stage search"
+sleep 3
+xdotool key alt+i        # Install: apt's plan is shown first
+sleep 8
+say "stage confirm-install"
+sleep 3
+xdotool key alt+i
+waitfor 'dpkg -s hello 2>/dev/null | grep -q "install ok installed"' 300 && say "hello installed: $(hello)" || say "hello NOT installed"
+sleep 2
+say "stage installed"
+sleep 8
+xdotool windowactivate --sync "$w"
+xdotool key alt+r
+sleep 3
+say "stage remove-confirm"
+sleep 3
+xdotool key alt+y
+waitfor '! dpkg -s hello 2>/dev/null | grep -q "install ok installed"' 120 && say "hello removed" || say "hello NOT removed"
+sleep 6
+say "stage removed"
+sleep 3
+# A big program with many dependencies.
+xdotool windowactivate --sync "$w"
+xdotool key ctrl+f ctrl+a
+xdotool type gimp
+xdotool key Return
+sleep 5
+xdotool key alt+i
+sleep 10
+say "stage confirm-big"
+sleep 3
+xdotool key alt+i
+sleep 20
+say "stage installing-big"
+# Done when neither apt nor dpkg has run for 15 seconds (the repair after a failure included).
+idle=0
+for i in $(seq 1 900); do
+    if pidof apt-get dpkg > /dev/null; then idle=0; else idle=$((idle + 1)); fi
+    [ $idle -ge 15 ] && break
+    sleep 1
+done
+grep -a -i -B3 -A3 "error\|warning" /home/syluxium/.local/state/syluxium-appstore.log | grep -v "^dlstatus\|^pmstatus" | head -40 > /dev/console
+dpkg -s gimp 2>/dev/null | grep -q "install ok installed" && say "gimp installed ($(dpkg -l | grep -c '^ii') packages now)" || {
+    say "gimp NOT installed"; grep -v "^Selecting\|^Preparing\|^Unpacking\|^(Reading" /var/log/apt/term.log | tail -60 > /dev/console; }
+say "dpkg audit: $(dpkg --audit | wc -l) lines"
+sleep 8
+say "stage big-done"
+sleep 3
+fi
+# A downloaded .deb, opened like a double-click in the file manager.
+cd /tmp && apt-get download cowsay > /dev/null 2>&1
+deb=$(ls /tmp/cowsay_*.deb 2>/dev/null | head -1)
+mkdir -p /home/syluxium/Downloads && cp "$deb" /home/syluxium/Downloads/ && chown -R 1000:1000 /home/syluxium/Downloads
+say "deb file: $(basename "$deb")"
+asuser tdetradertest application/x-deb Application 2>&1 | grep -i "name\|preference" | head -8 > /dev/console
+asuser kfmclient exec "/home/syluxium/Downloads/$(basename "$deb")" > /tmp/kfm.log 2>&1 &
+i=$(win "Software Installer" 60)
+[ -n "$i" ] && say "installer opened from the file manager" || say "installer did NOT open"
+xdotool windowmove "$i" 300 120 windowactivate "$i"
+sleep 4
+say "stage deb"
+sleep 3
+xdotool windowactivate --sync "$i"; xdotool key alt+i
+d=$(win "Administrator Permission" 10); [ -n "$d" ] && { xdotool windowactivate --sync "$d"; xdotool key Return; }
+sleep 5
+say "stage deb-installing"
+waitfor 'dpkg -s cowsay 2>/dev/null | grep -q "install ok installed"' 300 && say "cowsay installed: $(/usr/games/cowsay -f default moo | head -1)" || say "cowsay NOT installed"
+dpkg -s libtext-charwidth-perl 2>/dev/null | grep -q "install ok installed" && say "dependency libtext-charwidth-perl installed too"
+sleep 5
+say "stage deb-done"
+sleep 3
+cat /tmp/appstore.log /tmp/kfm.log > /dev/console 2>/dev/null
+say "TEST DONE"

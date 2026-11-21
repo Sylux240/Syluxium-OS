@@ -1,0 +1,6 @@
+# Syluxium's default programs for file types (for freedesktop.org programs;
+# the desktop's file manager goes by each program's InitialPreference).
+[Default Applications]
+application/vnd.debian.binary-package=syluxium-debinstaller.desktop
+application/x-debian-package=syluxium-debinstaller.desktop
+application/x-deb=syluxium-debinstaller.desktop

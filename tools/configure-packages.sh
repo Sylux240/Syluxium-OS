@@ -6,7 +6,8 @@
 # Services are not started (policy-rc.d). Files the scripts gave to other
 # users are listed in /var/lib/syluxium/ownership (applied at boot, since
 # the image is packed as root), then everything is handed back to root so
-# the build can copy it.
+# the build can copy it. Setuid/setgid modes are kept (and listed in
+# /var/lib/syluxium/modes, since changing a file's owner clears them).
 # Usage: configure-packages.sh <rootfs> <log>
 set -e
 R=$(realpath "$1")
@@ -42,7 +43,9 @@ unshare --map-root-user --map-auto --mount --pid --fork sh -c '
     # Who owns what (other than root), then everything back to root.
     chroot "$R" /usr/bin/python3 -c "
 import os
+import stat
 out = open(\"/var/lib/syluxium/ownership\", \"w\")
+modes = open(\"/var/lib/syluxium/modes\", \"w\")
 for top in (\"/etc\", \"/var\", \"/usr\", \"/opt\", \"/srv\", \"/home\"):
     for d, dirs, files in os.walk(top):
         for n in dirs + files:
@@ -50,8 +53,12 @@ for top in (\"/etc\", \"/var\", \"/usr\", \"/opt\", \"/srv\", \"/home\"):
             st = os.lstat(p)
             if st.st_uid or st.st_gid:
                 out.write(f\"{st.st_uid} {st.st_gid} {p}\n\")
+            if not stat.S_ISLNK(st.st_mode) and st.st_mode & 0o6000:
+                modes.write(f\"{stat.S_IMODE(st.st_mode):o} {p}\n\")
 "
     for d in etc var usr opt srv home root; do [ -e "$R/$d" ] && chown -hR 0:0 "$R/$d"; done
+    # chown clears the setuid/setgid bits (sudo, passwd, su, pkexec, ...): put them back.
+    while read -r mode path; do chmod "$mode" "$R$path"; done < "$R/var/lib/syluxium/modes"
     umount -l "$R/dev" "$R/proc" 2>/dev/null || true
     exit $status
 ' sh "$R" > "$LOG" 2>&1 || echo "  warning: some install scripts failed (see $LOG)"
