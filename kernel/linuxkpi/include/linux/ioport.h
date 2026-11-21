@@ -34,14 +34,18 @@ struct resource { resource_size_t start, end; const char *name; unsigned long fl
 #define resource_contains(r1, r2) ((r1)->start <= (r2)->start && (r1)->end >= (r2)->end)
 #define resource_overlaps(r1, r2) ((r1)->start <= (r2)->end && (r1)->end >= (r2)->start)
 
-/* Region reservations: nothing else claims device memory here; callers get
- * a placeholder resource (simpledrm's devm_request_mem_region gets NULL and
- * uses the device's own resource, see lkpi_extras.h). */
+/* Region reservations: nothing else claims device memory here, so every
+ * request succeeds and gets a resource describing the range (i915 checks
+ * the stolen-memory request; simpledrm maps what it gets). */
 extern struct resource lkpi_dummy_resource;
-#define request_region(start, n, name) (&lkpi_dummy_resource)
+struct resource *lkpi_request_region(resource_size_t start, resource_size_t n, const char *name, unsigned long flags);
+#define request_region(start, n, name) lkpi_request_region(start, n, name, IORESOURCE_IO)
 #define release_region(start, n) do { } while (0)
-#define request_mem_region(start, n, name) (&lkpi_dummy_resource)
+#define request_mem_region(start, n, name) lkpi_request_region(start, n, name, IORESOURCE_MEM)
+#define request_mem_region_muxed(start, n, name) lkpi_request_region(start, n, name, IORESOURCE_MEM)
 #define release_mem_region(start, n) do { } while (0)
+#define devm_request_mem_region(dev, start, n, name) lkpi_request_region(start, n, name, IORESOURCE_MEM)
+#define devm_request_region(dev, start, n, name) lkpi_request_region(start, n, name, IORESOURCE_IO)
 #define request_resource(root, new) 0
 #define release_resource(r) 0
 #define insert_resource(parent, new) 0

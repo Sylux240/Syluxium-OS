@@ -347,3 +347,21 @@ int lkpi_kstrtobool_from_user(const char __user *s, size_t count, bool *res)
 	}
 	return -EINVAL;
 }
+
+/* glue/fbdev.c: only a GPU driver's console framebuffer takes the console. */
+bool lkpi_boot_fb_taken_by_gpu(void)
+{
+	return boot_fb.taken;
+}
+
+struct resource *lkpi_request_region(resource_size_t start, resource_size_t n, const char *name, unsigned long flags)
+{
+	struct resource *r = kzalloc(sizeof(*r), GFP_KERNEL);
+	if (!r)
+		return NULL;
+	r->start = start;
+	r->end = start + n - 1;
+	r->name = name;
+	r->flags = flags | IORESOURCE_BUSY;
+	return r;
+}

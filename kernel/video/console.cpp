@@ -385,6 +385,39 @@ void init(video::Framebuffer& fb) {
     clear();
 }
 
+// Another framebuffer takes over (a GPU driver's console framebuffer):
+// keep the text, redraw it there. Rows that no longer fit scroll away.
+void rebind(video::Framebuffer& fb) {
+    u32 cols = min(fb.width() / g_font->width, MAX_COLS);
+    u32 rows = min(fb.height() / g_font->height, MAX_ROWS);
+    if (!g_fb || !cols || !rows) {
+        init(fb);
+        return;
+    }
+    if (g_cy >= rows) { // keep the bottom (cursor) part on screen
+        u32 shift = g_cy - rows + 1;
+        for (u32 r = 0; r + shift < g_rows && r < MAX_ROWS; r++)
+            for (u32 c = 0; c < MAX_COLS; c++)
+                g_cells[r][c] = g_cells[r + shift][c];
+        g_cy -= shift;
+    }
+    g_fb = &fb;
+    g_cols = cols;
+    g_rows = rows;
+    g_top = 0;
+    g_bottom = g_rows - 1;
+    if (g_cx >= g_cols)
+        g_cx = g_cols - 1;
+    for (int i = 0; i < 16; i++)
+        g_palette[i] = fb.color(palette_rgb[i]);
+    if (!g_graphics) {
+        g_fb->fill_rect(0, 0, g_fb->width(), g_fb->height(), g_palette[DEFAULT_BG]);
+        g_cursor_drawn = false;
+        redraw_rows(0, g_rows - 1);
+        show_cursor();
+    }
+}
+
 bool ready() { return g_fb != nullptr; }
 
 void set_graphics(bool graphics) {

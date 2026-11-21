@@ -594,6 +594,17 @@ int lkpi_vsnprintf(char* buf, size_t size, const char* fmt, va_list args) {
                         o.put(sep);
                     hex2(o, p[i], false);
                 }
+            } else if (ext == 'V' && p) {
+                // %pV: a nested format + its arguments (struct va_format)
+                fmt++;
+                struct VaFormat { const char* fmt; va_list* va; }; // Linux struct va_format
+                auto* vf = reinterpret_cast<const VaFormat*>(p);
+                char nested[480];
+                va_list copy;
+                va_copy(copy, *vf->va);
+                lkpi_vsnprintf(nested, sizeof(nested), vf->fmt, copy);
+                va_end(copy);
+                o.puts(nested);
             } else if (ext == 'e') {
                 fmt++;
                 sylux_snprintf_long(piece, sizeof(piece), "error %ld", reinterpret_cast<long>(p));
@@ -689,7 +700,13 @@ int vprintk(const char* fmt, va_list args) {
     char level = strip_level(&fmt);
     char buf[512];
     int n = lkpi_vsnprintf(buf, sizeof(buf), fmt, args);
-    log_at(level, buf);
+    // The level can also arrive as an argument (printk("%s...", KERN_DEBUG, ...)).
+    const char* text = buf;
+    if (buf[0] == '\001' && buf[1]) {
+        level = buf[1];
+        text = buf + 2;
+    }
+    log_at(level, const_cast<char*>(text));
     return n;
 }
 
@@ -1464,6 +1481,30 @@ extern "C" void lkpi_display_released(void) {
     splash::finish();
     console::set_graphics(true);
 }
+
+// glue/fbdev.c: the GPU driver's console framebuffer (DRM fbdev emulation)
+// is up: the kernel console moves there and shows again.
+namespace {
+video::Framebuffer g_gpu_console_fb;
+void* g_gpu_console_vaddr = nullptr;
+} // namespace
+extern "C" void lkpi_console_attach(void* vaddr, u32 width, u32 height, u32 pitch, u32 red_shift, u32 green_shift,
+                                    u32 blue_shift) {
+    if (!g_gpu_console_fb.init(vaddr, width, height, pitch, 32, static_cast<u8>(red_shift),
+                               static_cast<u8>(green_shift), static_cast<u8>(blue_shift)))
+        return;
+    g_gpu_console_vaddr = vaddr;
+    console::rebind(g_gpu_console_fb);
+    console::set_graphics(false);
+    klog::info("linuxkpi: kernel console on the GPU driver's framebuffer (%ux%u)", width, height);
+}
+extern "C" void lkpi_console_detach(void* vaddr) {
+    if (vaddr != g_gpu_console_vaddr)
+        return;
+    console::set_graphics(true); // nowhere safe to draw until another framebuffer comes
+    g_gpu_console_vaddr = nullptr;
+}
+extern "C" bool lkpi_console_text_mode(void) { return !console::graphics(); }
 
 // The GPU driver failed and the firmware framebuffer is back: show the
 // console again (it reports what happened).
