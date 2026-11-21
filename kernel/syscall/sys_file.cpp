@@ -1667,6 +1667,54 @@ long sys_ok(SYSCALL_ARGS) { SYSCALL_UNUSED; return 0; }
 
 } // namespace
 
+// flock: advisory whole-file locks. Accepted for open descriptors (single
+// writers in practice: Xorg, Mesa's shader cache, dpkg lock their files).
+long sys_flock(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    constexpr u32 LOCK_SH = 1, LOCK_EX = 2, LOCK_UN = 8, LOCK_NB = 4;
+    FileRef f(proc::current(), static_cast<int>(a0));
+    if (!f)
+        return -err::BADF;
+    u32 op = static_cast<u32>(a1) & ~LOCK_NB;
+    if (op != LOCK_SH && op != LOCK_EX && op != LOCK_UN)
+        return -err::INVAL;
+    return 0;
+}
+
+// kcmp: whether two processes share a resource (Mesa/Xorg ask whether two
+// descriptors are the same open file). 0 = same, 1/2 = ordered different.
+long sys_kcmp(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    constexpr int KCMP_FILE = 0, KCMP_VM = 1, KCMP_EPOLL_TFD = 7;
+    int type = static_cast<int>(a2);
+    if (type < KCMP_FILE || type >= KCMP_EPOLL_TFD)
+        return -err::INVAL;
+    LockGuard guard(proc::table_lock());
+    Process* p1 = proc::find(static_cast<int>(a0));
+    Process* p2 = proc::find(static_cast<int>(a1));
+    if (!p1 || !p2)
+        return -err::SRCH;
+    Process* self = proc::current();
+    if (self->cred.euid != 0 && (p1->cred.ruid != self->cred.ruid || p2->cred.ruid != self->cred.ruid))
+        return -err::PERM;
+    const void* x;
+    const void* y;
+    if (type == KCMP_FILE) {
+        u64 i1 = a3, i2 = a4;
+        if (i1 >= proc::MAX_FDS || i2 >= proc::MAX_FDS || !p1->fds[i1] || !p2->fds[i2])
+            return -err::BADF;
+        x = p1->fds[i1];
+        y = p2->fds[i2];
+    } else if (type == KCMP_VM) {
+        x = p1->mem;
+        y = p2->mem;
+    } else { // files, fs, sighand, io, sysvsem: shared exactly when it's one process
+        x = p1;
+        y = p2;
+    }
+    return x == y ? 0 : reinterpret_cast<uptr>(x) < reinterpret_cast<uptr>(y) ? 1 : 2;
+}
+
 void register_file() {
     set(0, sys_read, "read");
     set(1, sys_write, "write");
@@ -1687,6 +1735,8 @@ void register_file() {
     set(32, sys_dup, "dup");
     set(33, sys_dup2, "dup2");
     set(72, sys_fcntl, "fcntl");
+    set(73, sys_flock, "flock");
+    set(312, sys_kcmp, "kcmp");
     set(74, sys_sync, "fsync");
     set(75, sys_sync, "fdatasync");
     set(165, sys_mount, "mount");

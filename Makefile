@@ -328,7 +328,7 @@ $(DEBIAN_CONFIGURED): $(DEBIAN_STAMP) tools/configure-packages.sh
 # huge (GPU firmware), so only the files our drivers load are kept.
 FIRMWARE_REPO  := http://deb.debian.org/debian|$(DEBIAN_SUITE)|non-free-firmware
 FIRMWARE_PKGS  := firmware-mediatek firmware-realtek firmware-intel-graphics firmware-amd-graphics firmware-nvidia-graphics
-FIRMWARE_FILES := mediatek/mt7601u.bin rtlwifi/rtl8188eufw.bin rtlwifi/rtl8723bu_nic.bin rtl_bt/rtl8723b_fw.bin \
+FIRMWARE_FILES = mediatek/mt7601u.bin rtlwifi/rtl8188eufw.bin rtlwifi/rtl8723bu_nic.bin rtl_bt/rtl8723b_fw.bin \
                   $(I915_FIRMWARE)
 # i915: display microcontroller (DMC) firmware for Skylake..Alder Lake, GuC/HuC
 # where i915 loads them by default (Alder Lake; Tiger/Rocket Lake run without).
