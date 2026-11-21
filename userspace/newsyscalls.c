@@ -12,6 +12,7 @@
 #include <sys/mman.h>
 #include <sys/personality.h>
 #include <sys/syscall.h>
+#include <sys/uio.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -187,6 +188,37 @@ static void test_posix_timers(void) {
     timer_delete(t);
 }
 
+// process_vm_readv / writev on a child.
+static void test_process_vm(void) {
+    static char secret[64] = "nothing yet";
+    int p[2];
+    if (pipe(p) < 0)
+        return;
+    pid_t c = fork();
+    if (c == 0) {
+        strcpy(secret, "child's secret");
+        (void)!write(p[1], "x", 1);
+        pause();
+        _exit(0);
+    }
+    char x;
+    (void)!read(p[0], &x, 1);
+    char buf[64] = {0};
+    struct iovec l = {buf, sizeof(buf)}, r = {secret, sizeof(secret)};
+    check(process_vm_readv(c, &l, 1, &r, 1, 0) == (ssize_t)sizeof(secret) && strcmp(buf, "child's secret") == 0,
+          "process_vm_readv reads another process's memory");
+    char news[64] = "written by the parent";
+    struct iovec l2 = {news, sizeof(news)};
+    check(process_vm_writev(c, &l2, 1, &r, 1, 0) == (ssize_t)sizeof(news), "process_vm_writev");
+    memset(buf, 0, sizeof(buf));
+    check(process_vm_readv(c, &l, 1, &r, 1, 0) > 0 && strcmp(buf, "written by the parent") == 0,
+          "process_vm_writev's data is there");
+    kill(c, SIGKILL);
+    waitpid(c, NULL, 0);
+    close(p[0]);
+    close(p[1]);
+}
+
 int main(int argc, char** argv) {
     if (argc > 1 && strcmp(argv[1], "addrs") == 0) {
         int local;
@@ -202,6 +234,7 @@ int main(int argc, char** argv) {
     test_mlock();
     test_aslr();
     test_posix_timers();
+    test_process_vm();
     printf("newsyscalls: %d failed\n", fails);
     return fails;
 }

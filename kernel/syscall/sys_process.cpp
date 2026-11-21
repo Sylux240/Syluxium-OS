@@ -1285,6 +1285,83 @@ long sys_futex_waitv(SYSCALL_ARGS) {
     return futex::waitv(req, n, deadline);
 }
 
+// process_vm_readv / process_vm_writev(pid, local_iov, liovcnt, remote_iov,
+// riovcnt, flags): copy between this process and another one's memory
+// (Wine's ReadProcessMemory / WriteProcessMemory, debuggers). Allowed for
+// root and for processes of the same user.
+long process_vm_rw(u64 pid_arg, u64 local_iov, u64 liovcnt, u64 remote_iov, u64 riovcnt, u64 flags, bool write) {
+    struct IoVec {
+        u64 base, len;
+    };
+    if (flags || liovcnt > 1024 || riovcnt > 1024)
+        return -err::INVAL;
+    if (!liovcnt || !riovcnt)
+        return 0;
+    auto* liov = static_cast<IoVec*>(kmalloc(liovcnt * sizeof(IoVec)));
+    auto* riov = static_cast<IoVec*>(kmalloc(riovcnt * sizeof(IoVec)));
+    auto* bounce = static_cast<u8*>(kmalloc(64 * KiB));
+    long result = 0;
+    proc::Memory* mem = nullptr;
+    if (!liov || !riov || !bounce) {
+        result = -err::NOMEM;
+    } else if (uaccess::copy_from(liov, reinterpret_cast<const void*>(local_iov), liovcnt * sizeof(IoVec)) < 0 ||
+               uaccess::copy_from(riov, reinterpret_cast<const void*>(remote_iov), riovcnt * sizeof(IoVec)) < 0) {
+        result = -err::FAULT;
+    } else {
+        LockGuard guard(proc::table_lock());
+        Process* target = proc::find_visible(static_cast<int>(pid_arg), proc::current());
+        const proc::Cred& c = proc::cred();
+        if (!target || target->state == proc::State::Zombie || !target->mem)
+            result = -err::SRCH;
+        else if (c.euid != 0 && (c.ruid != target->cred.ruid || c.ruid != target->cred.euid))
+            result = -err::PERM;
+        else {
+            mem = target->mem;
+            mem->get();
+        }
+    }
+    u64 total = 0;
+    if (mem) {
+        u64 li = 0, loff = 0, ri = 0, roff = 0;
+        while (li < liovcnt && ri < riovcnt) {
+            u64 lleft = liov[li].len - loff, rleft = riov[ri].len - roff;
+            if (!lleft) { li++; loff = 0; continue; }
+            if (!rleft) { ri++; roff = 0; continue; }
+            usize n = static_cast<usize>(min<u64>(min<u64>(lleft, rleft), 64 * KiB));
+            u64 laddr = liov[li].base + loff, raddr = riov[ri].base + roff;
+            usize done;
+            if (write) {
+                if (uaccess::copy_from(bounce, reinterpret_cast<const void*>(laddr), n) < 0) {
+                    result = -err::FAULT;
+                    break;
+                }
+                done = mem->write_remote(raddr, bounce, n) == 0 ? n : 0;
+            } else {
+                done = mem->read_remote(raddr, bounce, n);
+                if (done && uaccess::copy_to(reinterpret_cast<void*>(laddr), bounce, done) < 0) {
+                    result = -err::FAULT;
+                    break;
+                }
+            }
+            total += done;
+            if (done < n)
+                break; // the remote range ends (unmapped): a partial transfer
+            loff += n;
+            roff += n;
+        }
+        mem->put();
+    }
+    kfree(liov);
+    kfree(riov);
+    kfree(bounce);
+    if (total)
+        return static_cast<long>(total);
+    return result ? result : (mem ? -err::FAULT : result);
+}
+
+long sys_process_vm_readv(SYSCALL_ARGS) { SYSCALL_UNUSED; return process_vm_rw(a0, a1, a2, a3, a4, a5, false); }
+long sys_process_vm_writev(SYSCALL_ARGS) { SYSCALL_UNUSED; return process_vm_rw(a0, a1, a2, a3, a4, a5, true); }
+
 void register_process() {
     set(135, sys_personality, "personality");
     set(149, sys_mlock_ok, "mlock");
@@ -1363,6 +1440,8 @@ void register_process() {
     set(186, sys_gettid, "gettid");
     set(202, sys_futex, "futex");
     set(449, sys_futex_waitv, "futex_waitv");
+    set(310, sys_process_vm_readv, "process_vm_readv");
+    set(311, sys_process_vm_writev, "process_vm_writev");
     set(203, sys_sched_setaffinity, "sched_setaffinity");
     set(204, sys_sched_getaffinity, "sched_getaffinity");
     set(218, sys_set_tid_address, "set_tid_address");
