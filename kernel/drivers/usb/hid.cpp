@@ -209,13 +209,26 @@ bool probe(Device* d, const Interface& intf) {
 
     auto* r = new ReportDevice;
     int usable = n > 0 ? r->hid.init(raw, static_cast<usize>(n), r) : 0;
+    u8 raw_copy[256] = {};
+    if (n > 0)
+        memcpy(raw_copy, raw, n < 256 ? static_cast<usize>(n) : 256);
     kfree(raw);
     if (!usable) {
         delete r;
-        if (!boot_capable) {
-            klog::warn("usb-hid: %s: report descriptor not usable", d->product_name);
-            return false;
+        // Logged with the descriptor, so a device we misread can be fixed.
+        klog::warn("usb-hid: %s if%u: report descriptor not usable (%ld bytes)%s", d->product_name, intf.number, n,
+                   boot_capable ? ", using boot protocol" : "");
+        if (n > 0) {
+            char hex[3 * 48 + 1];
+            for (long off = 0; off < n && off < 256; off += 48) {
+                int len = 0;
+                for (long i = off; i < n && i < off + 48; i++)
+                    len += snprintf(hex + len, sizeof(hex) - len, "%02x ", raw_copy[i]);
+                klog::info("usb-hid:   %s", hex);
+            }
         }
+        if (!boot_capable)
+            return false;
         d->control(0x21, REQ_SET_IDLE, 0, intf.number, nullptr, 0);
         if (d->open_endpoint(*ep) != 0)
             return false;

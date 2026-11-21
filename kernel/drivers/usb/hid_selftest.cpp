@@ -67,6 +67,18 @@ constexpr u8 MOUSE5[] = {
     0x05, 0x0C, 0x0A, 0x38, 0x02, 0x95, 0x01, 0x81, 0x06, 0xC0, 0xC0,
 };
 
+// Wireless receiver: a 12-bit mouse under report ID 2, then a vendor section
+// with a 64-bit field (more than a field can hold): the field is skipped, the
+// mouse must still be decoded with the descriptor (not boot protocol).
+constexpr u8 WIRELESS[] = {
+    0x05, 0x01, 0x09, 0x02, 0xA1, 0x01, 0x85, 0x02, 0x09, 0x01, 0xA1, 0x00, 0x05, 0x09, 0x19, 0x01,
+    0x29, 0x03, 0x15, 0x00, 0x25, 0x01, 0x95, 0x03, 0x75, 0x01, 0x81, 0x02, 0x95, 0x01, 0x75, 0x05,
+    0x81, 0x01, 0x05, 0x01, 0x16, 0x01, 0xF8, 0x26, 0xFF, 0x07, 0x75, 0x0C, 0x95, 0x02, 0x09, 0x30,
+    0x09, 0x31, 0x81, 0x06, 0xC0, 0xC0,
+    0x06, 0x00, 0xFF, 0x09, 0x01, 0xA1, 0x01, 0x85, 0x10, 0x75, 0x40, 0x95, 0x01, 0x15, 0x00, 0x26,
+    0xFF, 0x00, 0x09, 0x01, 0x81, 0x00, 0xC0,
+};
+
 struct Recorder : EventSink {
     struct Ev {
         int app;
@@ -196,6 +208,14 @@ void run_selftest() {
         expect(c->rec.has(1, EV_KEY, KEY_VOLUMEUP, 0), "keyboard + media", "volume up released");
         delete c;
     }
+    { // Wireless receiver: an unusable vendor field must not cost the mouse its descriptor.
+        Case* c = load("wireless mouse", WIRELESS, sizeof(WIRELESS), 1);
+        const u8 r[] = {0x02, 0x00, 0xFD, 0x0F, 0x00}; // dx -3, dy 0 (12-bit fields share a byte)
+        c->hid.process(r, sizeof(r));
+        expect(c->rec.has(0, EV_REL, REL_X, -3) && !c->rec.has(0, EV_REL, REL_Y, 15),
+               "wireless mouse", "left movement stays horizontal");
+        delete c;
+    }
     { // 5-button mouse with 12-bit axes and horizontal scrolling.
         Case* c = load("5-button mouse", MOUSE5, sizeof(MOUSE5), 1);
         input::Device& d = c->hid.devices[0];
@@ -221,7 +241,7 @@ void run_selftest() {
 
     if (g_failures)
         panic("HID self-test: %d check(s) failed", g_failures);
-    klog::ok("HID self-test: tablet, joystick, gamepad, keyboard + media keys, 5-button mouse map like Linux");
+    klog::ok("HID self-test: tablet, joystick, gamepad, keyboard + media keys, 5-button and wireless mice map like Linux");
 }
 
 } // namespace usb::hid

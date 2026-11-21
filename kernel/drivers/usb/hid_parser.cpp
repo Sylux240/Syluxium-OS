@@ -80,12 +80,23 @@ struct Parser {
     }
 
     long main_item(ReportKind kind, u32 flags) {
-        u32 bits = g.report_size * g.report_count;
         u32& offset = bit_offset[static_cast<int>(kind)][g.report_id];
-        if (g.report_size == 0 || g.report_size > 32 || g.report_count > 4096)
-            return -err::INVAL;
-        if (out->field_count >= ReportDescriptor::MAX_FIELDS)
-            return -err::INVAL;
+        u32 bits = g.report_count <= 4096 && g.report_size <= 256 ? g.report_size * g.report_count : 0;
+        // A field we can't use (huge vendor blobs, too many fields or usages)
+        // is skipped, but its bits still count, so the fields after it stay
+        // where they are: one odd vendor section must not cost the device its
+        // whole descriptor (wireless receivers then fall back to boot protocol,
+        // which many ignore: 12-bit X/Y read as bytes made the pointer jump).
+        auto skip = [&] {
+            offset += bits;
+            if (kind == ReportKind::Input && offset > out->max_input_bits)
+                out->max_input_bits = offset;
+            reset_locals();
+            return 0L;
+        };
+        if (g.report_size == 0 || g.report_size > 32 || g.report_count > 4096 ||
+            out->field_count >= ReportDescriptor::MAX_FIELDS)
+            return skip();
         Field& f = out->fields[out->field_count];
         f.kind = kind;
         f.report_id = g.report_id;
@@ -103,7 +114,7 @@ struct Parser {
         f.usage_min = have_min ? resolve(usage_min) : 0;
         f.usage_max = have_max ? resolve(usage_max) : f.usage_min;
         if (have_min && have_max && f.usage_max < f.usage_min)
-            return -err::INVAL;
+            return skip();
 
         // Explicit usage list; for variable fields a usage range expands into one too.
         int n = usage_count;
@@ -115,7 +126,7 @@ struct Parser {
                 usages[i] = resolve(usages[i]);
         }
         if (out->usage_count + n > ReportDescriptor::MAX_USAGES)
-            return -err::INVAL;
+            return skip();
         for (int i = 0; i < n; i++)
             out->usages[out->usage_count++] = usages[i];
         f.usage_count = static_cast<u16>(n);
