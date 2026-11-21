@@ -22,6 +22,7 @@ adapt_config() {
     {
         echo "# Syluxium: host network, no seccomp/AppArmor"
         echo "lxc.net.0.type = none"
+        echo "lxc.net.0.link = host" # (Waydroid's waydroid-net.sh skips itself unless the link is waydroid0)
         echo "lxc.apparmor.profile = unconfined"
         echo "lxc.cgroup.relative = 1" # (our cgroup, not init's: there's no init process)
     } >> "$c"
