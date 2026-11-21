@@ -971,6 +971,13 @@ int mii_ethtool_set_link_ksettings(struct mii_if_info* mii, const struct ethtool
 	return -EOPNOTSUPP;
 }
 
+static void lkpi_dummy_setup(struct net_device* dev) { }
+
+struct net_device* alloc_netdev_dummy(int sizeof_priv)
+{
+	return alloc_netdev(sizeof_priv, "dummy#", NET_NAME_UNKNOWN, lkpi_dummy_setup);
+}
+
 /* The old ethtool interface (usbnet drivers): speed from what both ends offer. */
 void mii_ethtool_gset(struct mii_if_info* mii, struct ethtool_cmd* ecmd)
 {

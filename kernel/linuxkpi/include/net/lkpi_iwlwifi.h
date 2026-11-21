@@ -41,9 +41,6 @@ struct pci_bus;
 #define HWEIGHT32(w) __builtin_popcount((u32)(w))
 #define csum_unfold(x) ((__wsum)(x))
 
-/* A net_device that exists only to own NAPI contexts. */
-static inline void lkpi_dummy_netdev_setup(struct net_device *dev) { }
-#define alloc_netdev_dummy(priv) alloc_netdev(priv, "dummy%d", 0, lkpi_dummy_netdev_setup)
 
 
 #include <linux/tcp.h>
@@ -54,15 +51,6 @@ static inline void lkpi_dummy_netdev_setup(struct net_device *dev) { }
 #define __le32_to_cpup(p) le32_to_cpu(*(const __le32 *)(p))
 #define __le16_to_cpup(p) le16_to_cpu(*(const __le16 *)(p))
 
-static inline int atomic_dec_if_positive(atomic_t *v)
-{
-    int c = atomic_read(v);
-    do {
-        if (c <= 0)
-            break;
-    } while (!atomic_try_cmpxchg(v, &c, c - 1));
-    return c - 1;
-}
 
 /* MSI-X (one interrupt per RX queue) isn't offered: iwlwifi falls back to
  * MSI and a single RX queue. CPU masks only matter for MSI-X affinity. */
