@@ -1,0 +1,92 @@
+#!/bin/sh
+# Test aid: App Store failures must leave a working system. Starts the
+# desktop and logs in, then (1) installs a big program and pulls the network
+# cable halfway through the download ("QMON set_link ..." asks the test
+# harness to do it through the QEMU monitor), (2) installs a .deb whose
+# install script fails. After each: dpkg --audit must be empty.
+# Results go to the console ("APPSTORE ...").
+say() { echo "APPSTORE $*" > /dev/console; }
+startdesktop > /dev/null 2>&1 &
+export DISPLAY=:0
+for i in $(seq 1 120); do
+    XAUTHORITY="$(ls /var/run/xauth/A:0-* 2>/dev/null | head -1)"
+    [ -n "$XAUTHORITY" ] && [ -S /tmp/.X11-unix/X0 ] && break
+    sleep 1
+done
+export XAUTHORITY
+sleep 10
+xdotool key Return
+for i in $(seq 1 120); do pidof kicker > /dev/null && break; sleep 1; done
+sleep 15
+session=
+for i in $(seq 1 60); do
+    for p in /proc/[0-9]*; do
+        grep -q "^Uid:[[:space:]]*1000[[:space:]]" "$p/status" 2>/dev/null && grep -qa "DISPLAY=" "$p/environ" 2>/dev/null \
+            && session=${p#/proc/} && break
+    done
+    [ -n "$session" ] && break; sleep 1
+done
+asuser() {
+    env -i XAUTHORITY=/home/syluxium/.Xauthority $(tr '\0' '\n' < /proc/"$session"/environ | grep -v '[[:space:]]') \
+        python3 -c "import os, sys; os.setgroups([27, 1000]); os.setgid(1000); os.setuid(1000); os.execvp(sys.argv[1], sys.argv[1:])" "$@"
+}
+win() { for i in $(seq 1 ${2:-60}); do w=$(xdotool search --name "$1" 2>/dev/null | head -1); [ -n "$w" ] && echo "$w" && return; sleep 1; done; }
+aptidle() {   # neither apt nor dpkg for 15 s
+    idle=0
+    for i in $(seq 1 ${1:-600}); do
+        if pidof apt-get dpkg > /dev/null; then idle=0; else idle=$((idle + 1)); fi
+        [ $idle -ge 15 ] && return
+        sleep 1
+    done
+}
+apt-get update > /dev/null 2>&1 && say "catalog ready"
+
+# (1) The network goes away during the download.
+asuser syluxium-appstore --search libreoffice-writer > /tmp/appstore.log 2>&1 &
+w=$(win "Syluxium App Store")
+xdotool windowmove "$w" 60 20 windowactivate --sync "$w"
+sleep 12
+xdotool key alt+i
+sleep 12
+say "stage fail-confirm"
+sleep 3
+xdotool key alt+i
+d=$(win "Administrator Permission" 10); [ -n "$d" ] && { xdotool windowactivate --sync "$d"; xdotool key Return; }
+sleep 4
+for nic in e1000e.0 e1000.0 virtio-net-pci.0 net0; do echo "QMON set_link $nic off" > /dev/console; done
+say "network cable pulled"
+aptidle 600
+sleep 3
+say "stage fail-network"
+sleep 4
+for nic in e1000e.0 e1000.0 virtio-net-pci.0 net0; do echo "QMON set_link $nic on" > /dev/console; done
+dpkg -s libreoffice-writer 2>/dev/null | grep -q "install ok installed" && say "writer installed anyway (download finished first)" || say "writer not installed (download cut)"
+say "audit after network drop: $(dpkg --audit | wc -l) lines"
+xdotool key Return   # close the error box
+pkill -f syluxium-appstore
+
+# (2) A package whose install script fails.
+mkdir -p /tmp/bad/DEBIAN /tmp/bad/usr/share/doc/syluxium-badpkg
+printf 'Package: syluxium-badpkg\nVersion: 1.0\nArchitecture: all\nMaintainer: Test <test@example.com>\nDepends: sl\nDescription: test package whose setup fails\n' > /tmp/bad/DEBIAN/control
+printf '#!/bin/sh\necho "this setup fails on purpose"\nexit 1\n' > /tmp/bad/DEBIAN/postinst
+chmod 755 /tmp/bad/DEBIAN/postinst
+echo hi > /tmp/bad/usr/share/doc/syluxium-badpkg/README
+dpkg-deb --build /tmp/bad /home/syluxium/badpkg.deb > /dev/null && chown 1000:1000 /home/syluxium/badpkg.deb
+asuser syluxium-appstore --deb /home/syluxium/badpkg.deb > /tmp/appstore2.log 2>&1 &
+i=$(win "Software Installer")
+xdotool windowmove "$i" 300 120 windowactivate --sync "$i"
+sleep 6
+say "stage bad-deb"
+sleep 3
+xdotool key alt+i
+sleep 2
+d=$(win "Administrator Permission" 5); [ -n "$d" ] && { xdotool windowactivate --sync "$d"; xdotool key Return; }
+aptidle 300
+sleep 3
+say "stage bad-deb-result"
+sleep 3
+say "badpkg state: $(dpkg-query -W -f='${Status}' syluxium-badpkg 2>&1)"
+say "audit after failing script: $(dpkg --audit | wc -l) lines"
+apt-get -s install hello > /dev/null 2>&1 && say "apt still works" || say "apt is BROKEN"
+cat /tmp/appstore.log /tmp/appstore2.log > /dev/console 2>/dev/null
+say "TEST DONE"

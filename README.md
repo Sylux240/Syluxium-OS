@@ -159,7 +159,8 @@ Legend: ✅ done · 🟡 partly done · ⬜ to do
      need the GPU drivers
 - 🟡 Personalize: themes, colors, wallpapers, icons (TDE Appearance & Themes); XP restyling of the dialogs to do
 - 🟡 Control Panel: TDE Control Center with XP category names; full restyle to do
-- 🟡 Task Manager with End Task (KSysGuard on Ctrl+Alt+Del / Ctrl+Shift+Esc); Windows-style front end to do
+- ✅ Task Manager (Ctrl+Alt+Del / Ctrl+Shift+Esc): Applications (End Task, Switch To), Processes
+     (End Process, priority), Performance and Networking graphs, XP style
 - ✅ System page: Syluxium version, processor, memory, graphics, storage
 - ✅ Device Manager: every device by category, driver and status, problem devices flagged
 - ✅ Computer Management (Event Viewer, Services, Local Users, Device Manager, Disk Management)
@@ -179,7 +180,8 @@ Legend: ✅ done · 🟡 partly done · ⬜ to do
 **Packages and system**
 - 🟡 Installer: graphical wizard (disk, computer name, user) → GPT + ext4 + Limine (UEFI/BIOS);
      package and settings choices to do
-- 🟡 Package installer: build-time Debian fetcher done; App Store + double-click .deb on the device to do
+- ✅ App Store: Debian and desktop packages by category, search, featured programs, install/remove
+     with dependencies (apt), updates; double-click a .deb to install it
 - ✅ Packages' install scripts run (real dpkg database; apt works)
 - ✅ Accounts: graphical login, User Accounts (add/remove users, passwords), administrator prompts
 - 🟡 Security: NX, kernel W^X, guard pages, per-user permissions done; ASLR, SMEP/SMAP to do
@@ -188,4 +190,4 @@ Legend: ✅ done · 🟡 partly done · ⬜ to do
 - ✅ Updates (Syluxium Update: Debian and Trinity through apt) and a Recovery boot entry
      (repair disks and packages, reset settings or passwords, root prompt)
 
-Tally: 39 done · 19 partly done · 1 to do.
+Tally: 41 done · 17 partly done · 1 to do.
