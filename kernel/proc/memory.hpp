@@ -78,6 +78,7 @@ public:
     long map(uptr addr, usize len, u32 prot, u32 flags, vfs::Inode* file, u64 offset, u64 file_bytes,
              uptr* out);
     long unmap(uptr addr, usize len);
+    long discard(uptr addr, usize len); // madvise(MADV_DONTNEED): drop the pages, keep the mappings
     // mremap: shrink, grow in place, or (MREMAP_MAYMOVE) move the pages to a
     // new range by moving their page-table entries (nothing is copied).
     long remap(uptr old_addr, usize old_len, usize new_len, u32 flags, uptr new_addr, uptr* out);

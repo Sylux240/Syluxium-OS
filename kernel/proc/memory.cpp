@@ -363,6 +363,32 @@ bool Memory::mapping_at(uptr addr, vfs::Inode** file, usize* len) {
     return false;
 }
 
+// madvise(MADV_DONTNEED): the pages go, the mappings stay. The next touch
+// faults them in again: zeros for private anonymous memory, the file's
+// data for private file mappings (their private copies are dropped), the
+// same shared pages for shared ones. Allocators count on it: Chromium's
+// PartitionAlloc hands out discarded pages as calloc() memory.
+long Memory::discard(uptr addr, usize len) {
+    if ((addr & (PAGE_SIZE - 1)) || addr + len < addr)
+        return -err::INVAL;
+    if (len == 0)
+        return 0;
+    uptr end = align_up<uptr>(addr + len, PAGE_SIZE);
+    LockGuard guard(m_lock);
+    bool gap = false;
+    uptr covered = addr;
+    for (Vma* v = m_vmas.front(); v; v = m_vmas.next_of(v)) {
+        if (v->end <= addr || v->start >= end)
+            continue;
+        if (v->start > covered)
+            gap = true;
+        uptr s = max(v->start, addr), e = min(v->end, end);
+        unmap_pages(s, e, v->kind != VMA_DEVICE);
+        covered = e;
+    }
+    return gap || covered < end ? -err::NOMEM : 0; // Linux: ENOMEM for a range with holes (the rest is done)
+}
+
 long Memory::unmap(uptr addr, usize len) {
     if ((addr & (PAGE_SIZE - 1)) || len == 0)
         return -err::INVAL;

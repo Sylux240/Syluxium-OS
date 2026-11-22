@@ -106,6 +106,19 @@ assert os.pread(fd, 4096, 4096) == bytes(4096)
 assert os.fstat(fd).st_size == 4 * 4096
 m[6000] = 7
 assert os.pread(fd, 1, 6000) == b"\x07"'
+# madvise(MADV_DONTNEED): private anonymous memory reads zeros afterwards
+# (Chromium's allocator hands it out as calloc memory), shared memory keeps
+# its data, a private file mapping shows the file again.
+check "madvise(MADV_DONTNEED) semantics"    python3 -c 'import mmap
+a = mmap.mmap(-1, 3 * 4096, mmap.MAP_PRIVATE | mmap.MAP_ANONYMOUS)
+a[:] = b"x" * len(a); a.madvise(mmap.MADV_DONTNEED, 4096, 4096)
+assert a[0:1] == b"x" and a[4096:8192] == bytes(4096) and a[8192:8193] == b"x", "private"
+s = mmap.mmap(-1, 4096, mmap.MAP_SHARED | mmap.MAP_ANONYMOUS)
+s[:4] = b"keep"; s.madvise(mmap.MADV_DONTNEED); assert s[:4] == b"keep", "shared"
+open("/tmp/madv", "wb").write(b"file" * 1024)
+fd = open("/tmp/madv", "rb")
+f = mmap.mmap(fd.fileno(), 4096, mmap.MAP_PRIVATE, mmap.PROT_READ | mmap.PROT_WRITE)
+f[:4] = b"COPY"; f.madvise(mmap.MADV_DONTNEED); assert f[:4] == b"file", "file"'
 # Terminal emulators on VTE (xfce4-terminal) read the pty in packet mode.
 # (In a session of its own: closing the master hangs up the slave's group.)
 check "pty packet mode (TIOCPKT)"           setsid python3 -c 'import os, fcntl, struct
