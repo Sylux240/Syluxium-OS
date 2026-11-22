@@ -468,6 +468,10 @@ long map_create(const u8* a) {
     m->value_size = vs;
     m->max_entries = max ? max : 1;
     m->flags = flags;
+    // Linux: device maps are read-only for programs, and say so in their flags
+    // (Android's bpfloader compares the flags it reads back).
+    if (type == DEVMAP || type == DEVMAP_HASH)
+        m->flags |= 0x80; // BPF_F_RDONLY_PROG
     copy_name(m->name, a + 28);
     if (!keyless) {
         if (long r = m->setup(); r < 0) {

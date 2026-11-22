@@ -547,10 +547,15 @@ long sys_socket(SYSCALL_ARGS) {
             return -EPROTONOSUPPORT;
         // Route (0) is answered; uevent listeners (15) just hear nothing;
         // generic netlink (16: nl80211 & co.) goes to the LinuxKPI.
+        // Netfilter (12) and the old NFLOG protocol (5) answer only packet
+        // logging setup (Android's netd won't start without its NFLOG
+        // listener), which never logs anything: no netfilter yet.
         // Protocols whose users wait for answers (audit: PAM/login, sock_diag,
         // ...) are refused, as by a kernel built without them: libaudit
         // then quietly skips auditing instead of timing out.
-        if (protocol != 0 && protocol != 15 && protocol != 16)
+        // Socket diagnostics (4) list no sockets and announce no destroyed ones
+        // (Android's system_server crashes without its listener).
+        if (protocol != 0 && protocol != 4 && protocol != 5 && protocol != 12 && protocol != 15 && protocol != 16)
             return -EPROTONOSUPPORT;
         s = create_netlink(type, protocol);
         break;

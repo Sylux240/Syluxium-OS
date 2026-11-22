@@ -29,6 +29,7 @@ namespace {
 
 constexpr int NETLINK_ROUTE = 0;
 constexpr int NETLINK_GENERIC = 16;
+constexpr int NETLINK_SOCK_DIAG = 4, NETLINK_NFLOG = 5, NETLINK_NETFILTER = 12;
 constexpr u16 NLMSG_ERROR = 2, NLMSG_DONE = 3;
 constexpr u16 NLM_F_REQUEST = 0x1, NLM_F_MULTI = 0x2, NLM_F_ACK = 0x4, NLM_F_DUMP = 0x300;
 constexpr u16 RTM_NEWLINK = 16, RTM_DELLINK = 17, RTM_GETLINK = 18, RTM_SETLINK = 19, RTM_NEWADDR = 20,
@@ -756,17 +757,46 @@ public:
             lkpi_genl_rcv(portid, data, len); // replies arrive through lkpi_sylux_netlink_deliver()
             return static_cast<isize>(len);
         }
-        if (protocol != NETLINK_ROUTE)
+        if (protocol != NETLINK_ROUTE && protocol != NETLINK_NETFILTER && protocol != NETLINK_NFLOG &&
+            protocol != NETLINK_SOCK_DIAG)
             return static_cast<isize>(len);
         for (usize pos = 0; pos + sizeof(NlMsgHdr) <= len;) {
             NlMsgHdr h;
             memcpy(&h, data + pos, sizeof(h));
             if (h.len < sizeof(h) || pos + h.len > len)
                 break;
-            handle(h, data + pos + sizeof(h), h.len - sizeof(h));
+            if (protocol == NETLINK_ROUTE)
+                handle(h, data + pos + sizeof(h), h.len - sizeof(h));
+            else
+                handle_netfilter(h);
             pos += align4(h.len);
         }
         return static_cast<isize>(len);
+    }
+
+    // Netfilter: packet logging setup (NFULNL, subsystem 4) is accepted and
+    // never logs anything; everything else (nftables rules, conntrack, ...)
+    // is refused, so firewall tools don't believe rules were applied.
+    void handle_netfilter(const NlMsgHdr& h) {
+        if (!(h.flags & NLM_F_REQUEST) || h.type < 16)
+            return;
+        constexpr u16 NFNL_SUBSYS_ULOG = 4;
+        // sock_diag: dumps (SOCK_DIAG_BY_FAMILY) find no sockets; SOCK_DESTROY finds nothing to destroy.
+        constexpr u16 SOCK_DESTROY = 21;
+        long result = 0;
+        if (protocol == NETLINK_SOCK_DIAG)
+            result = h.type == SOCK_DESTROY ? -err::NOENT : 0;
+        else if (protocol == NETLINK_NETFILTER && (h.type >> 8) != NFNL_SUBSYS_ULOG)
+            result = -93; // EPROTONOSUPPORT
+        if (result == 0 && !(h.flags & NLM_F_ACK) && (h.flags & NLM_F_DUMP) != NLM_F_DUMP)
+            return;
+        auto* b = new Builder(h.seq, portid);
+        if (result == 0 && (h.flags & NLM_F_DUMP) == NLM_F_DUMP)
+            b->done(NLM_F_MULTI);
+        else
+            b->error(static_cast<i32>(result), h);
+        queue(b->take());
+        delete b;
     }
 
     // Answer one rtnetlink request.

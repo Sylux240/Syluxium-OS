@@ -103,6 +103,24 @@ long sys_clock_getres(SYSCALL_ARGS) {
     return uaccess::put(reinterpret_cast<Timespec*>(a1), Timespec{0, 1});
 }
 
+// settimeofday(tv, tz): only the timezone part is accepted (and has no
+// effect: the kernel keeps UTC, as Linux mostly does). Setting the clock is
+// refused, also for root: programs in containers (Android) would change the
+// host's time.
+long sys_settimeofday(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    if (a0)
+        return -err::PERM;
+    if (a1) {
+        i32 tz[2];
+        if (long r = uaccess::copy_from(tz, reinterpret_cast<const void*>(a1), sizeof(tz)); r < 0)
+            return r;
+        if (tz[0] < -15 * 60 || tz[0] > 15 * 60)
+            return -err::INVAL;
+    }
+    return 0;
+}
+
 long sys_gettimeofday(SYSCALL_ARGS) {
     SYSCALL_UNUSED;
     if (!a0)
@@ -500,6 +518,7 @@ void register_time() {
     set(38, sys_setitimer, "setitimer");
     set(35, sys_nanosleep, "nanosleep");
     set(96, sys_gettimeofday, "gettimeofday");
+    set(164, sys_settimeofday, "settimeofday");
     set(201, sys_time, "time");
     set(228, sys_clock_gettime, "clock_gettime");
     set(229, sys_clock_getres, "clock_getres");
