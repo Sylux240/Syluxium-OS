@@ -259,6 +259,8 @@ extern "C" int aperture_remove_conflicting_pci_devices(struct pci_dev* pdev, con
 // A pci_dev for function `f` (bound or not: drivers also look at bridges
 // and sibling functions).
 void fill_pdev(pci_dev* pdev, pci::Function* f, dev::Device* d) {
+    pdev->error_state = 1; /* pci_channel_io_normal */
+    pdev->dma_mask = ~0ull;
     pdev->vendor = f->vendor_id;
     pdev->device = f->device_id;
     pdev->subsystem_vendor = d ? d->subsystem_vendor : 0;

@@ -27,6 +27,8 @@ LKPI_IO_REP(32, u32, 0)
 #endif
 
 /* Device IDs of the SSB and BCMA buses (linux/mod_devicetable.h). */
+#ifndef LKPI_SSB_DEVICE_ID
+#define LKPI_SSB_DEVICE_ID
 struct ssb_device_id {
     __u16 vendor;
     __u16 coreid;
@@ -37,6 +39,7 @@ struct ssb_device_id {
 #define SSB_ANY_VENDOR 0xFFFF
 #define SSB_ANY_ID 0xFFFF
 #define SSB_ANY_REV 0xFF
+#endif
 
 struct bcma_device_id {
     __u16 manuf;

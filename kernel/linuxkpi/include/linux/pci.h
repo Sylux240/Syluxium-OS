@@ -24,7 +24,7 @@ LKPI_EXTERN_C_BEGIN
 
 struct pci_driver;
 
-struct pci_bus { unsigned char number; struct pci_bus *parent; struct pci_dev *self; unsigned char max_bus_speed, cur_bus_speed; };
+struct pci_bus { unsigned char number; struct pci_bus *parent; struct pci_dev *self; unsigned char max_bus_speed, cur_bus_speed; struct resource busn_res; /* busn_res appended */ };
 
 struct pci_dev {
     struct device dev;
@@ -54,6 +54,9 @@ struct pci_dev {
     int cfg_size;                 /* appended: 256, or 4096 for PCI Express */
     unsigned int pme_poll:1;      /* appended */
     unsigned int state_saved:1;   /* appended */
+    struct pci_bus* subordinate;  /* appended: the bus behind a bridge (none known: NULL) */
+    unsigned int error_state;     /* appended: pci_channel_io_normal (1) */
+    u64 dma_mask;                 /* appended: as set by dma_set_mask (for messages) */
 };
 
 struct pci_driver {
