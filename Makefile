@@ -413,7 +413,7 @@ $(WHOST): userspace/whost/syluxium-wayland-host.c $(WHOST_GEN)/xdg-shell-protoco
 	@clang --target=x86_64-linux-gnu --sysroot=$(SHELL_SYSROOT) --gcc-install-dir=$(SHELL_SYSROOT)/usr/lib/gcc/x86_64-linux-gnu/14 \
 	    -std=gnu11 -O2 -Wall -Wno-unused-parameter -DWLR_USE_UNSTABLE -I$(WHOST_GEN) \
 	    $$($(SHELL_PKGCONFIG) --cflags wlroots-0.18 xcb xcb-render xcb-xfixes xcb-xinput xcb-randr xkbcommon pixman-1 libdrm) \
-	    $< -o $@ -fuse-ld=lld -Wl,--as-needed $$($(SHELL_PKGCONFIG) --libs wlroots-0.18 wayland-server xcb xcb-render xcb-xfixes xcb-xinput xcb-randr xkbcommon pixman-1 libdrm) -ldl
+	    $< -o $@ -fuse-ld=lld -Wl,--as-needed $$($(SHELL_PKGCONFIG) --libs wlroots-0.18 wayland-server xcb xcb-render xcb-xfixes xcb-xinput xcb-randr xkbcommon pixman-1 libdrm) -ldl -lm
 
 $(SHELL_GLSYNC): userspace/shell/glsync.c
 	@echo "  SO    $<"

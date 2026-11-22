@@ -40,6 +40,7 @@
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
+#include <math.h>
 
 #include <xcb/xcb.h>
 #include <xcb/render.h>
@@ -209,6 +210,10 @@ static struct {
 	struct wlr_output *test_out;
 	bool test_presented;
 	char gpu_desc[160];             /* the rendering path, for the diagnostics */
+	double scale;                   /* the X session's scale (XSETTINGS), pixels per Wayland unit */
+	char scale_desc[96];
+	xcb_window_t xsettings_owner;
+	int cursor_size;
 	struct view *pointer_view;      /* under the pointer */
 	struct view *focused;           /* has the X keyboard focus */
 	const char *socket;
@@ -280,6 +285,8 @@ static xcb_atom_t XdndAware;
 static struct wlr_data_source *dnd_wayland_source(void);
 static bool w_drag_motion(uint32_t time);
 static bool w_drag_button_release(uint32_t time);
+static void scale_changed(void);
+static void read_scale(void);
 
 static xcb_atom_t intern(const char *name) {
 	xcb_intern_atom_reply_t *r = xcb_intern_atom_reply(S.x, xcb_intern_atom(S.x, 0, strlen(name), name), NULL);
@@ -350,9 +357,10 @@ static xcb_cursor_t make_cursor(const uint32_t *argb, int w, int h, int stride_p
 }
 
 static xcb_cursor_t theme_cursor(const char *name) {
-	struct wlr_xcursor *xc = S.xcursor ? wlr_xcursor_manager_get_xcursor(S.xcursor, name, 1) : NULL;
+	float sc = S.scale > 0 ? S.scale : 1;
+	struct wlr_xcursor *xc = S.xcursor ? wlr_xcursor_manager_get_xcursor(S.xcursor, name, sc) : NULL;
 	if (!xc && strcmp(name, "default"))
-		xc = S.xcursor ? wlr_xcursor_manager_get_xcursor(S.xcursor, "default", 1) : NULL;
+		xc = S.xcursor ? wlr_xcursor_manager_get_xcursor(S.xcursor, "default", sc) : NULL;
 	if (!xc || xc->image_count == 0)
 		return XCB_NONE;
 	struct wlr_xcursor_image *im = xc->images[0];
@@ -489,16 +497,26 @@ static struct view *view_by_output_name(const char *name) {
 	return NULL;
 }
 
+/* Pixels (X) from Wayland units of a window, and back (HiDPI). */
+static int px(struct view *v, double units) {
+	return (int)lround(units * v->scale);
+}
+static int units(struct view *v, double pixels) {
+	return (int)lround(pixels / v->scale);
+}
+
 static void view_render_resize(struct view *v, int w, int h) {
 	if (w < 1) w = 1;
 	if (h < 1) h = 1;
-	if (!v->output || (w == v->w && h == v->h))
+	bool rescale = v->output && v->output->scale != (float)v->scale;
+	if (!v->output || (w == v->w && h == v->h && !rescale))
 		return;
 	v->w = w; v->h = h;
-	wlr_scene_rect_set_size(v->bg, w, h);
+	wlr_scene_rect_set_size(v->bg, (int)ceil(w / v->scale), (int)ceil(h / v->scale));
 	struct wlr_output_state st;
 	wlr_output_state_init(&st);
 	wlr_output_state_set_custom_mode(&st, w, h, 0);
+	wlr_output_state_set_scale(&st, v->scale);
 	if (!wlr_scene_output_build_state(v->sout, &st, NULL) || !wlr_output_commit_state(v->output, &st))
 		diag("resizing the window of %s to %dx%d failed", v->toplevel && v->toplevel->app_id ?
 			v->toplevel->app_id : "a popup", w, h);
@@ -517,13 +535,13 @@ static void view_update_size_hints(struct view *v) {
 	uint32_t hints[18] = {0};
 	if (v->min_w > 0 || v->min_h > 0) {
 		hints[0] |= 16;  /* PMinSize */
-		hints[5] = v->min_w > 0 ? v->min_w : 1;
-		hints[6] = v->min_h > 0 ? v->min_h : 1;
+		hints[5] = v->min_w > 0 ? px(v, v->min_w) : 1;
+		hints[6] = v->min_h > 0 ? px(v, v->min_h) : 1;
 	}
 	if (v->max_w > 0 || v->max_h > 0) {
 		hints[0] |= 32;  /* PMaxSize */
-		hints[7] = v->max_w > 0 ? v->max_w : 32767;
-		hints[8] = v->max_h > 0 ? v->max_h : 32767;
+		hints[7] = v->max_w > 0 ? px(v, v->max_w) : 32767;
+		hints[8] = v->max_h > 0 ? px(v, v->max_h) : 32767;
 	}
 	set_prop(v->frame, XCB_ATOM_WM_NORMAL_HINTS, XCB_ATOM_WM_SIZE_HINTS, 32, 18, hints);
 }
@@ -688,9 +706,10 @@ static void popup_unconstrain(struct view *v) {
 	}
 	struct wlr_box geo;
 	wlr_xdg_surface_get_geometry(top ? top->xdg : v->xdg, &geo);
-	box.x = wa.x - ox + geo.x;
-	box.y = wa.y - oy + geo.y;
-	box.width = wa.width; box.height = wa.height;
+	struct view *u = top ? top : v;
+	box.x = units(u, wa.x - ox) + geo.x;
+	box.y = units(u, wa.y - oy) + geo.y;
+	box.width = units(u, wa.width); box.height = units(u, wa.height);
 	wlr_xdg_popup_unconstrain_from_box(v->popup, &box);
 }
 
@@ -702,8 +721,8 @@ static bool popup_screen_pos(struct view *v, int *x, int *y) {
 	struct wlr_box geo;
 	wlr_xdg_surface_get_geometry(top->xdg, &geo);
 	wlr_xdg_popup_get_toplevel_coords(v->popup, 0, 0, &tx, &ty);
-	*x = ox + tx - geo.x;
-	*y = oy + ty - geo.y;
+	*x = ox + px(top, tx - geo.x);
+	*y = oy + px(top, ty - geo.y);
 	return true;
 }
 
@@ -905,7 +924,8 @@ static bool child_window_ok(xcb_window_t w) {
 static bool view_map_x(struct view *v) {
 	struct wlr_box geo;
 	wlr_xdg_surface_get_geometry(v->xdg, &geo);
-	int w = geo.width > 0 ? geo.width : 1, h = geo.height > 0 ? geo.height : 1;
+	v->scale = S.scale;
+	int w = geo.width > 0 ? px(v, geo.width) : 1, h = geo.height > 0 ? px(v, geo.height) : 1;
 	int x = 0, y = 0;
 	bool popup = v->kind == VIEW_POPUP;
 	if (popup && !popup_screen_pos(v, &x, &y))
@@ -1002,11 +1022,12 @@ static bool view_map_x(struct view *v) {
 	x_after_blocking();
 
 	v->w = w; v->h = h;
-	wlr_scene_rect_set_size(v->bg, w, h);
+	wlr_scene_rect_set_size(v->bg, (int)ceil(w / v->scale), (int)ceil(h / v->scale));
 	struct wlr_output_state st;
 	wlr_output_state_init(&st);
 	wlr_output_state_set_enabled(&st, true);
 	wlr_output_state_set_custom_mode(&st, w, h, 0);
+	wlr_output_state_set_scale(&st, v->scale);
 	bool ok = wlr_scene_output_build_state(v->sout, &st, NULL) && wlr_output_commit_state(out, &st);
 	wlr_output_state_finish(&st);
 	if (!ok)
@@ -1094,7 +1115,7 @@ static void handle_commit(struct wl_listener *l, void *data) {
 			if (xdg->client->shell->version >= 4) {
 				struct wlr_box wa;
 				work_area(&wa);
-				wlr_xdg_toplevel_set_bounds(t, wa.width, wa.height);
+				wlr_xdg_toplevel_set_bounds(t, (int)(wa.width / S.scale), (int)(wa.height / S.scale));
 			}
 			if (xdg->client->shell->version >= 5)
 				wlr_xdg_toplevel_set_wm_capabilities(t, WLR_XDG_TOPLEVEL_WM_CAPABILITIES_WINDOW_MENU |
@@ -1117,17 +1138,19 @@ static void handle_commit(struct wl_listener *l, void *data) {
 		view_update_size_hints(v);
 		/* The program's own size, once it has seen our latest one. */
 		int32_t d = (int32_t)(xdg->current.configure_serial - v->size_serial);
-		if ((v->size_serial == 0 || d >= 0) && (geo.width != v->w || geo.height != v->h) &&
-		    geo.width > 0 && geo.height > 0) {
-			uint32_t vals[2] = { geo.width, geo.height };
+		int pw = px(v, geo.width), ph = px(v, geo.height);
+		if ((v->size_serial == 0 || d >= 0) && (pw != v->w || ph != v->h) && geo.width > 0 && geo.height > 0 &&
+		    (units(v, v->w) != geo.width || units(v, v->h) != geo.height)) {
+			uint32_t vals[2] = { pw, ph };
 			xcb_configure_window(S.x, v->frame, XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT, vals);
 			xcb_flush(S.x);
-			view_render_resize(v, geo.width, geo.height);
+			view_render_resize(v, pw, ph);
 		}
 	} else {
 		int x, y;
 		if (popup_screen_pos(v, &x, &y)) {
-			uint32_t vals[4] = { x, y, geo.width > 0 ? geo.width : 1, geo.height > 0 ? geo.height : 1 };
+			v->scale = root_view(v) ? root_view(v)->scale : S.scale;
+			uint32_t vals[4] = { x, y, geo.width > 0 ? px(v, geo.width) : 1, geo.height > 0 ? px(v, geo.height) : 1 };
 			xcb_configure_window(S.x, v->frame, XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y |
 				XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT, vals);
 			xcb_flush(S.x);
@@ -1551,7 +1574,7 @@ static void pointer_motion(struct pointer_dev *p, uint32_t time, double nx, doub
 		S.pointer_view = v;
 		apply_cursor(v);
 	}
-	double lx = nx * v->output->width, ly = ny * v->output->height, sx, sy;
+	double lx = nx * v->output->width / v->scale, ly = ny * v->output->height / v->scale, sx, sy;
 	struct wlr_scene_node *n = wlr_scene_node_at(&v->scene->tree.node, lx, ly, &sx, &sy);
 	struct wlr_surface *surface = NULL;
 	if (n && n->type == WLR_SCENE_NODE_BUFFER) {
@@ -2705,7 +2728,7 @@ static void x_event(xcb_generic_event_t *e) {
 			break;
 		if (ev->width != v->w || ev->height != v->h) {
 			/* the user (or xfwm4) resized the window */
-			v->size_serial = wlr_xdg_toplevel_set_size(v->toplevel, ev->width, ev->height);
+			v->size_serial = wlr_xdg_toplevel_set_size(v->toplevel, units(v, ev->width), units(v, ev->height));
 			view_render_resize(v, ev->width, ev->height);
 		}
 		break;
@@ -2735,6 +2758,10 @@ static void x_event(xcb_generic_event_t *e) {
 					outgoing_incr_next(o);
 					break;
 				}
+		}
+		if (ev->window && ev->window == S.xsettings_owner) {
+			scale_changed();
+			break;
 		}
 		struct view *v = view_by_window(ev->window);
 		if (v && v->frame == ev->window && ev->atom == A._NET_WM_STATE && v->kind == VIEW_TOPLEVEL) {
@@ -2920,6 +2947,119 @@ static bool x_setup(void) {
 	return true;
 }
 
+/* The X session's scale, from XSETTINGS (xfsettingsd): Gdk/WindowScalingFactor
+ * (Xfce's "Window Scaling", whole numbers) and Xft/DPI (fonts; a DPI of 144
+ * is 1.5). The larger of the two, to 1/8. SYLUXIUM_WAYLAND_HOST_SCALE overrides. */
+static bool xsettings_int(const uint8_t *d, size_t len, const char *want, int32_t *out) {
+	if (len < 12)
+		return false;
+	bool big = d[0] == 1;  /* MSBFirst */
+#define RD32(o) (big ? (uint32_t)d[o] << 24 | d[(o) + 1] << 16 | d[(o) + 2] << 8 | d[(o) + 3] : \
+	(uint32_t)d[(o) + 3] << 24 | d[(o) + 2] << 16 | d[(o) + 1] << 8 | d[o])
+#define RD16(o) (big ? (uint16_t)(d[o] << 8 | d[(o) + 1]) : (uint16_t)(d[(o) + 1] << 8 | d[o]))
+	uint32_t n = RD32(8);
+	size_t o = 12;
+	for (uint32_t i = 0; i < n && o + 8 <= len; i++) {
+		uint8_t type = d[o];
+		uint16_t nlen = RD16(o + 2);
+		size_t name = o + 4;
+		o = name + ((nlen + 3) & ~3u) + 4;  /* name, padding, last-change serial */
+		if (o > len)
+			return false;
+		if (type == 0) {
+			if (o + 4 > len)
+				return false;
+			if (nlen == strlen(want) && memcmp(d + name, want, nlen) == 0) {
+				*out = (int32_t)RD32(o);
+				return true;
+			}
+			o += 4;
+		} else if (type == 1) {
+			if (o + 4 > len)
+				return false;
+			o += 4 + ((RD32(o) + 3) & ~3u);
+		} else if (type == 2) {
+			o += 8;
+		} else {
+			return false;
+		}
+	}
+	return false;
+#undef RD32
+#undef RD16
+}
+
+static void read_scale(void) {
+	int32_t factor = 1, dpi = 0;
+	char sel[32];
+	snprintf(sel, sizeof(sel), "_XSETTINGS_S%d", 0);
+	xcb_get_selection_owner_reply_t *o = xcb_get_selection_owner_reply(S.x,
+		xcb_get_selection_owner(S.x, intern(sel)), NULL);
+	xcb_window_t owner = o ? o->owner : 0;
+	free(o);
+	if (owner && owner != S.xsettings_owner) {
+		uint32_t m = XCB_EVENT_MASK_PROPERTY_CHANGE | XCB_EVENT_MASK_STRUCTURE_NOTIFY;
+		xcb_change_window_attributes(S.x, owner, XCB_CW_EVENT_MASK, &m);
+	}
+	S.xsettings_owner = owner;
+	if (owner) {
+		xcb_get_property_reply_t *r = xcb_get_property_reply(S.x, xcb_get_property(S.x, 0, owner,
+			intern("_XSETTINGS_SETTINGS"), XCB_GET_PROPERTY_TYPE_ANY, 0, 65536), NULL);
+		if (r) {
+			xsettings_int(xcb_get_property_value(r), xcb_get_property_value_length(r), "Gdk/WindowScalingFactor", &factor);
+			xsettings_int(xcb_get_property_value(r), xcb_get_property_value_length(r), "Xft/DPI", &dpi);
+			free(r);
+		}
+	}
+	x_after_blocking();
+	double by_dpi = dpi > 0 ? dpi / 1024.0 / 96.0 : 1;
+	double scale = factor > 1 ? factor : 1;
+	if (by_dpi > scale + 0.05)
+		scale = by_dpi;
+	scale = round(scale * 8) / 8;
+	const char *e = getenv("SYLUXIUM_WAYLAND_HOST_SCALE");
+	if (e && atof(e) >= 0.5 && atof(e) <= 4)
+		scale = atof(e);
+	if (scale < 1)
+		scale = 1;
+	S.scale = scale;
+	snprintf(S.scale_desc, sizeof(S.scale_desc), "scale %.3g (window scaling %d, font DPI %.0f)", scale, (int)factor,
+		dpi > 0 ? dpi / 1024.0 : 96.0);
+}
+
+/* The session's scale changed (Xfce settings): windows keep their size on
+ * the screen and get the new scale. */
+static void scale_changed(void) {
+	double old = S.scale;
+	read_scale();
+	if (S.scale == old)
+		return;
+	diag("scale changed: %s", S.scale_desc);
+	if (S.xcursor)
+		wlr_xcursor_manager_load(S.xcursor, S.scale);
+	xcb_cursor_t def = theme_cursor("default");
+	if (def) {
+		S.cursor_default = def;
+		set_current_cursor(def, false);
+	}
+	if (S.screen_output) {
+		struct wlr_output_state st;
+		wlr_output_state_init(&st);
+		wlr_output_state_set_scale(&st, S.scale);
+		wlr_output_commit_state(S.screen_output, &st);
+		wlr_output_state_finish(&st);
+	}
+	dismiss_popups();
+	struct view *v;
+	wl_list_for_each(v, &S.views, link)
+		if (v->kind == VIEW_TOPLEVEL && v->x_mapped) {
+			v->scale = S.scale;
+			view_render_resize(v, v->w, v->h);
+			v->size_serial = wlr_xdg_toplevel_set_size(v->toplevel, units(v, v->w), units(v, v->h));
+			view_update_size_hints(v);
+		}
+}
+
 /* The cursor theme and size the X desktop uses (Xcursor.* resources). */
 static void cursor_theme(char *theme, size_t tlen, int *size) {
 	*size = 24;
@@ -2964,6 +3104,7 @@ static void make_screen_output(void) {
 	wlr_output_state_init(&st);
 	wlr_output_state_set_enabled(&st, true);
 	wlr_output_state_set_custom_mode(&st, S.screen->width_in_pixels, S.screen->height_in_pixels, 0);
+	wlr_output_state_set_scale(&st, S.scale);
 	wlr_output_commit_state(o, &st);
 	wlr_output_state_finish(&st);
 	wlr_output_create_global(o, S.display);
@@ -3153,9 +3294,11 @@ int main(int argc, char **argv) {
 	char theme[128];
 	int csize;
 	cursor_theme(theme, sizeof(theme), &csize);
+	S.cursor_size = csize;
+	read_scale();
 	S.xcursor = wlr_xcursor_manager_create(theme[0] ? theme : NULL, csize);
 	if (S.xcursor)
-		wlr_xcursor_manager_load(S.xcursor, 1);
+		wlr_xcursor_manager_load(S.xcursor, S.scale);
 	S.cursor_default = theme_cursor("default");
 	uint32_t blank = 0;
 	S.cursor_hidden = make_cursor(&blank, 1, 1, 1, 0, 0);
@@ -3198,9 +3341,9 @@ int main(int argc, char **argv) {
 		diag("socket %s is in use (another host is running?)", S.socket);
 		return 2;
 	}
-	diag("started on %s as WAYLAND_DISPLAY=%s: %s; screen %dx%d at %.1f Hz, cursor theme %s %d",
+	diag("started on %s as WAYLAND_DISPLAY=%s: %s; screen %dx%d at %.1f Hz, %s, cursor theme %s %d",
 		dpy, S.socket, S.gpu_desc, S.screen->width_in_pixels, S.screen->height_in_pixels, 1e9 / S.frame_ns,
-		theme[0] ? theme : "default", csize);
+		S.scale_desc, theme[0] ? theme : "default", csize);
 	/* tell the starter we are ready */
 	if (getenv("SYLUXIUM_WAYLAND_HOST_READY_FD")) {
 		int fd = atoi(getenv("SYLUXIUM_WAYLAND_HOST_READY_FD"));
