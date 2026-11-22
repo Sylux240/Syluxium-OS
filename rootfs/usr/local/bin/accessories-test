@@ -31,7 +31,7 @@ done
 export XAUTHORITY
 sleep 10
 xdotool key Return    # log in (the login screen's user has no password)
-for i in $(seq 1 120); do pidof kicker > /dev/null && break; sleep 1; done
+for i in $(seq 1 120); do pidof kicker > /dev/null || pidof xfce4-panel > /dev/null && break; sleep 1; done
 sleep 15
 say "desktop up"
 # The session's environment (D-Bus session bus, X authority), to run things as the user.
@@ -55,7 +55,7 @@ os.execvp(sys.argv[1], sys.argv[1:])' "$@" ) < /dev/null >> $LOG 2>&1
 }
 place() { for i in $(seq 1 30); do w=$(xdotool search --onlyvisible --name "$1" 2>/dev/null | head -1); [ -n "$w" ] && xdotool windowmove "$w" "$2" "$3" && return 0; sleep 0.5; done; say "no window '$1'"; return 1; }
 
-phase=${ACCTEST_PHASES:-"notify apps snip gtk netconn mdns menu store craft"}
+phase=${ACCTEST_PHASES:-"notify apps snip term gtk xfconf netconn mdns menu store craft"}
 for p in $phase; do case $p in
 notify)
     say "env: $(echo "$env" | tr '\n' ' ' | cut -c1-300)"
@@ -99,6 +99,26 @@ term)
     xdotool type --delay 50 'echo typed ok; tty'; xdotool key Return; sleep 2
     shot term
     pkill xfce4-terminal; sleep 1 ;;
+xfconf)
+    # Personalize's Xfce settings, as its window applies them: taskbar 50 %,
+    # background windows 75 %, no shadows, lavender accent, another wallpaper.
+    asuser python3 -c '
+import importlib.machinery as m, glob
+P = m.SourceFileLoader("p", "/usr/local/bin/syluxium-personalize").load_module()
+x = P.Xfconf()
+print("XFCONF ok", x.ok, "panels", x.panels(), "alpha before", x.panel_alpha())
+x.set_panel_alpha(0.5); x.set_windows(75, False)
+name = P.accent_theme("#b9a3e3"); P.set_gtk_settings_theme(name); x.set_theme(name)
+walls = sorted(glob.glob("/usr/share/syluxium/dusk/*.jpg") + glob.glob("/opt/trinity/share/wallpapers/*.jpg"))
+print("XFCONF wallpaper", walls[0], x.set_wallpaper(walls[0]))
+print("XFCONF after: alpha", x.panel_alpha(), "inactive", x.inactive_opacity(), "shadows", x.shadows(),
+      "theme", x.get("xsettings", "/Net/ThemeName"))
+'
+    say "$(grep XFCONF $LOG | tr '\n' '|')"
+    asuser galculator & asuser syluxium-personalize &
+    place "galculator" 40 60; place "Personalize" 420 40
+    sleep 6
+    shot xfconf ;;
 gtk)
     # Files, Terminal, Code Editor, Personalize; the desktop's defaults.
     say "defaults: dir=$(asuser xdg-mime query default inode/directory; tail -1 $LOG) text=$(asuser xdg-mime query default text/plain; tail -1 $LOG) x-terminal-emulator=$(readlink -f /usr/bin/x-terminal-emulator) x-www-browser=$(readlink -f /usr/bin/x-www-browser)"
@@ -111,7 +131,7 @@ gtk)
     asuser syluxium-personalize &
     place "Personalize" 560 300
     sleep 8
-    for prog in thunar xfce4-terminal mousepad syluxium-personalize; do pgrep -f "$prog" > /dev/null && say "$prog running" || say "$prog NOT running"; done
+    for prog in thunar xfce4-terminal mousepad syluxium-personalize; do pgrep -if "$prog" > /dev/null && say "$prog running" || say "$prog NOT running"; done
     shot gtk
     pkill thunar; pkill xfce4-terminal; pkill mousepad; pkill -f syluxium-personalize; sleep 2 ;;
 netconn)
