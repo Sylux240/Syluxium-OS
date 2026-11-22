@@ -132,7 +132,7 @@ dgpufg)
     say "dgpufg: cli gpus exit $?: $(tail -n 3 /tmp/apptest-dgpufg-cli.out | tr '\n' ' ' | cut -c1-300)"
     # From the menu entry, as a user would start it: the window, or the error dialog.
     t0=$(date +%s)
-    gtk-launch dgpufg > /tmp/apptest-dgpufg.out 2>&1 &
+    exo-open /usr/share/applications/dgpufg.desktop > /tmp/apptest-dgpufg.out 2>&1 &
     if w=$(window "dGPUFG" 60); then
         say "dgpufg: window '$(xdotool getwindowname "$w")' after $(( $(date +%s) - t0 )) s"
     else
@@ -142,13 +142,13 @@ dgpufg)
     if [ -z "$keep" ]; then sleep 6; pkill -f dgpufg; xdotool search --name "dGPUFG" windowkill 2>/dev/null; fi
     ;;
 qt)       fetch "KeePassXC-*.AppImage" KeePassXC.AppImage && chmod +x "$D/KeePassXC.AppImage" &&
-          run_app qt "$D/KeePassXC.AppImage" "KeePassXC" ;;
+          run_app qt "$D/KeePassXC.AppImage" "KeePassXC$" ;;
 gtk)      fetch "xournalpp-*.AppImage" Xournalpp.AppImage && chmod +x "$D/Xournalpp.AppImage" &&
-          run_app gtk "$D/Xournalpp.AppImage" "Xournal" ;;
+          run_app gtk "$D/Xournalpp.AppImage" "Xournal\\+\\+" ;;
 electron) fetch "Obsidian-*.AppImage" Obsidian.AppImage && chmod +x "$D/Obsidian.AppImage" &&
-          run_app electron "$D/Obsidian.AppImage" "Obsidian" ;;
+          run_app electron "$D/Obsidian.AppImage" "Obsidian$" ;;
 nofuse)   fetch "KeePassXC-*.AppImage" KeePassXC.AppImage && chmod +x "$D/KeePassXC.AppImage" &&
-          APPIMAGE_EXTRACT_AND_RUN=1 run_app nofuse "$D/KeePassXC.AppImage" "KeePassXC" ;;
+          APPIMAGE_EXTRACT_AND_RUN=1 run_app nofuse "$D/KeePassXC.AppImage" "KeePassXC$" ;;
 noexec)
     fetch "KeePassXC-*.AppImage" Downloaded.AppImage || continue
     syluxium-appimage "$D/Downloaded.AppImage" > /tmp/apptest-noexec.out 2>&1 &
@@ -160,7 +160,7 @@ noexec)
     else
         say "noexec: FAIL no question"
     fi
-    if w=$(window "KeePassXC" 90); then
+    if w=$(window "KeePassXC$" 90); then
         say "noexec: PASS started after Run; executable now: $([ -x "$D/Downloaded.AppImage" ] && echo yes || echo no)"
     else
         say "noexec: FAIL no window after Run"
@@ -174,7 +174,7 @@ open)
     chmod +x "$D/Opened.AppImage"
     # exo-open: GIO's default program for the file's type, as Thunar does.
     exo-open "$D/Opened.AppImage" > /tmp/apptest-open.out 2>&1 &
-    if w=$(window "Xournal" 90); then say "open: PASS window from exo-open"; else say "open: FAIL no window from exo-open: $(head -c 300 /tmp/apptest-open.out)"; fi
+    if w=$(window "Xournal\\+\\+" 90); then say "open: PASS window from exo-open"; else say "open: FAIL no window from exo-open: $(head -c 300 /tmp/apptest-open.out)"; fi
     sleep 3
     finish "$D/Opened.AppImage" $!
     ;;

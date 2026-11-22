@@ -77,6 +77,10 @@ if [ ! -c /dev/fuse ] || ! { command -v fusermount3 || command -v fusermount; } 
 fi
 
 export APPIMAGE_SILENT_INSTALL=1   # AppImageLauncher-style integration prompts stay quiet
+# GTK AppImages bundle input-method modules (uim, listed for every locale)
+# whose data isn't on the system: uim exits the program at start (Xournal++).
+# Without an input-method framework configured, GTK's own module.
+[ -z "$GTK_IM_MODULE" ] && export GTK_IM_MODULE=gtk-im-context-simple
 err=$(mktemp "${TMPDIR:-/tmp}/appimage-err.XXXXXX")
 trap 'rm -f "$err"' EXIT
 # Run it with stderr shown as usual and kept in $err (stdout untouched).
