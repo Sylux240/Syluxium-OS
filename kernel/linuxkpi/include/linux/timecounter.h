@@ -10,6 +10,14 @@
 
 #include <linux/types.h>
 
+/* Linux 7.x dropped the const from the counter (read() and timecounter.cc):
+ * drivers imported from 7.4 define LKPI_V7_CYCLECOUNTER (net/lkpi_netdrv.h). */
+#ifdef LKPI_V7_CYCLECOUNTER
+#define LKPI_CC_CONST
+#else
+#define LKPI_CC_CONST const
+#endif
+
 /* simplify initialization of mask field */
 #define CYCLECOUNTER_MASK(bits) (u64)((bits) < 64 ? ((1ULL<<(bits))-1) : -1)
 
@@ -28,7 +36,7 @@
  * @shift:		cycle to nanosecond divisor (power of two)
  */
 struct cyclecounter {
-	u64 (*read)(const struct cyclecounter *cc);
+	u64 (*read)(LKPI_CC_CONST struct cyclecounter *cc);
 	u64 mask;
 	u32 mult;
 	u32 shift;
@@ -53,7 +61,7 @@ struct cyclecounter {
  * @frac:		accumulated fractional nanoseconds
  */
 struct timecounter {
-	const struct cyclecounter *cc;
+	LKPI_CC_CONST struct cyclecounter *cc;
 	u64 cycle_last;
 	u64 nsec;
 	u64 mask;
@@ -100,7 +108,7 @@ static inline void timecounter_adjtime(struct timecounter *tc, s64 delta)
  * the time stamp counter by the number of elapsed nanoseconds.
  */
 extern void timecounter_init(struct timecounter *tc,
-			     const struct cyclecounter *cc,
+			     LKPI_CC_CONST struct cyclecounter *cc,
 			     u64 start_tstamp);
 
 /**

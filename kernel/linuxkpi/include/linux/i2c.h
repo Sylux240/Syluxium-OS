@@ -56,11 +56,15 @@ static inline u8 i2c_8bit_addr_from_msg(const struct i2c_msg *msg) { return (msg
 #define I2C_LOCK_ROOT_ADAPTER 0x01
 #define I2C_LOCK_SEGMENT 0x02
 struct i2c_adapter;
+union i2c_smbus_data;
 struct i2c_algorithm {
 	int (*master_xfer)(struct i2c_adapter *adap, struct i2c_msg *msgs, int num);
 	int (*xfer)(struct i2c_adapter *adap, struct i2c_msg *msgs, int num);
 	u32 (*functionality)(struct i2c_adapter *adap);
 	int (*master_xfer_atomic)(struct i2c_adapter *adap, struct i2c_msg *msgs, int num);
+	/* appended: native SMBus controllers (else SMBus is emulated over master_xfer) */
+	int (*smbus_xfer)(struct i2c_adapter *adap, u16 addr, unsigned short flags, char read_write, u8 command,
+			  int size, union i2c_smbus_data *data);
 };
 struct i2c_adapter {
 	struct module *owner;
@@ -111,3 +115,57 @@ struct i2c_driver {
 #define i2c_add_driver(drv) 0
 #define i2c_del_driver(drv) do { } while (0)
 #define to_i2c_client(d) container_of(d, struct i2c_client, dev)
+
+/* ---- SMBus (appended): glue/i2c_smbus.c, emulated over i2c_transfer unless
+ * the adapter has a native smbus_xfer (as Linux's drivers/i2c/i2c-core-smbus.c) ---- */
+#define I2C_SMBUS_READ 1
+#define I2C_SMBUS_WRITE 0
+#define I2C_SMBUS_QUICK 0
+#define I2C_SMBUS_BYTE 1
+#define I2C_SMBUS_BYTE_DATA 2
+#define I2C_SMBUS_WORD_DATA 3
+#define I2C_SMBUS_PROC_CALL 4
+#define I2C_SMBUS_BLOCK_DATA 5
+#define I2C_SMBUS_I2C_BLOCK_BROKEN 6
+#define I2C_SMBUS_BLOCK_PROC_CALL 7
+#define I2C_SMBUS_I2C_BLOCK_DATA 8
+#define I2C_CLIENT_PEC 0x04
+#define I2C_CLIENT_TEN 0x10
+union i2c_smbus_data {
+	__u8 byte;
+	__u16 word;
+	__u8 block[I2C_SMBUS_BLOCK_MAX + 2]; /* block[0] is the length */
+};
+s32 i2c_smbus_xfer(struct i2c_adapter *adapter, u16 addr, unsigned short flags, char read_write, u8 command,
+		   int protocol, union i2c_smbus_data *data);
+s32 __i2c_smbus_xfer(struct i2c_adapter *adapter, u16 addr, unsigned short flags, char read_write, u8 command,
+		     int protocol, union i2c_smbus_data *data);
+s32 i2c_smbus_read_byte(const struct i2c_client *client);
+s32 i2c_smbus_write_byte(const struct i2c_client *client, u8 value);
+s32 i2c_smbus_read_byte_data(const struct i2c_client *client, u8 command);
+s32 i2c_smbus_write_byte_data(const struct i2c_client *client, u8 command, u8 value);
+s32 i2c_smbus_read_word_data(const struct i2c_client *client, u8 command);
+s32 i2c_smbus_write_word_data(const struct i2c_client *client, u8 command, u16 value);
+s32 i2c_smbus_read_block_data(const struct i2c_client *client, u8 command, u8 *values);
+s32 i2c_smbus_write_block_data(const struct i2c_client *client, u8 command, u8 length, const u8 *values);
+s32 i2c_smbus_read_i2c_block_data(const struct i2c_client *client, u8 command, u8 length, u8 *values);
+s32 i2c_smbus_write_i2c_block_data(const struct i2c_client *client, u8 command, u8 length, const u8 *values);
+static inline s32 i2c_smbus_read_word_swapped(const struct i2c_client *client, u8 command)
+{
+	s32 v = i2c_smbus_read_word_data(client, command);
+	return v < 0 ? v : (s32)swab16((u16)v);
+}
+static inline s32 i2c_smbus_write_word_swapped(const struct i2c_client *client, u8 command, u16 value)
+{
+	return i2c_smbus_write_word_data(client, command, swab16(value));
+}
+static inline u32 i2c_get_functionality(struct i2c_adapter *adap)
+{
+	if (adap->algo->functionality)
+		return adap->algo->functionality(adap);
+	return I2C_FUNC_I2C | I2C_FUNC_SMBUS_EMUL;
+}
+static inline int i2c_check_functionality(struct i2c_adapter *adap, u32 func)
+{
+	return (func & i2c_get_functionality(adap)) == func;
+}

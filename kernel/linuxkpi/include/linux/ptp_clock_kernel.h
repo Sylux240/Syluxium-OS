@@ -199,6 +199,9 @@ struct ptp_clock_info {
 	int (*verify)(struct ptp_clock_info *ptp, unsigned int pin,
 		      enum ptp_pin_function func, unsigned int chan);
 	long (*do_aux_work)(struct ptp_clock_info *ptp);
+	/* appended: Linux 7.x */
+	unsigned int supported_perout_flags;
+	unsigned int supported_extts_flags;
 };
 
 struct ptp_clock;
