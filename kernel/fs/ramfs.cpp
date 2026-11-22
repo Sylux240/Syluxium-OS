@@ -224,23 +224,40 @@ RegularFile::~RegularFile() {
 }
 
 u64 RegularFile::page(u64 index, bool allocate) {
-    LockGuard guard(m_pages_lock);
-    if (index >= m_slots) {
-        if (!allocate)
-            return 0;
-        u64 slots = max<u64>(index + 1, max<u64>(m_slots * 2, 16));
+    // The slot table grows outside the lock: a large one is vmalloc memory,
+    // and freeing that needs a TLB shootdown, which can't wait with
+    // interrupts off (a big memfd faulting in: Android's ART heap).
+    for (;;) {
+        u64 slots;
+        {
+            LockGuard guard(m_pages_lock);
+            if (index < m_slots) {
+                if (!m_pages[index] && allocate)
+                    m_pages[index] = pmm::alloc_page(true);
+                return m_pages[index];
+            }
+            if (!allocate)
+                return 0;
+            slots = max<u64>(index + 1, max<u64>(m_slots * 2, 16));
+        }
         auto* grown = static_cast<u64*>(kzalloc(slots * sizeof(u64)));
         if (!grown)
             return 0;
-        if (m_pages)
-            memcpy(grown, m_pages, m_slots * sizeof(u64));
-        kfree(m_pages);
-        m_pages = grown;
-        m_slots = slots;
+        u64* old = nullptr;
+        {
+            LockGuard guard(m_pages_lock);
+            if (m_slots < slots) { // (nobody grew it meanwhile)
+                if (m_pages)
+                    memcpy(grown, m_pages, m_slots * sizeof(u64));
+                old = m_pages;
+                m_pages = grown;
+                m_slots = slots;
+                grown = nullptr;
+            }
+        }
+        kfree(grown);
+        kfree(old);
     }
-    if (!m_pages[index] && allocate)
-        m_pages[index] = pmm::alloc_page(true);
-    return m_pages[index];
 }
 
 void RegularFile::free_pages_from(u64 first) {

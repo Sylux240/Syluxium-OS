@@ -16,7 +16,7 @@ constexpr u32 PROT_NONE = 0, PROT_READ = 1, PROT_WRITE = 2, PROT_EXEC = 4;
 constexpr u32 MAP_SHARED = 0x01, MAP_PRIVATE = 0x02, MAP_FIXED = 0x10, MAP_ANONYMOUS = 0x20,
               MAP_GROWSDOWN = 0x100, MAP_DENYWRITE = 0x800, MAP_EXECUTABLE = 0x1000,
               MAP_NORESERVE = 0x4000, MAP_POPULATE = 0x8000, MAP_STACK = 0x20000,
-              MAP_FIXED_NOREPLACE = 0x100000;
+              MAP_FIXED_NOREPLACE = 0x100000, MAP_32BIT = 0x40;
 
 constexpr uptr USER_MIN      = 0x10000;            // keep NULL-ish addresses unmapped
 constexpr uptr MMAP_TOP      = 0x7ff000000000;     // mmap() allocates downwards from here
@@ -132,7 +132,7 @@ private:
     Vma* find(uptr addr);
     Vma* find_heap();
     bool overlaps(uptr start, uptr end);
-    uptr find_gap(usize len);
+    uptr find_gap(usize len, uptr top = 0, uptr bottom = USER_MIN); // top 0: mmap_top()
     Vma* split(Vma* v, uptr at);
     void merge_adjacent(uptr start, uptr end); // rejoin anonymous neighbours split by mprotect
     void remove_range(uptr start, uptr end);

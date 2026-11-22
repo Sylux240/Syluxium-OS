@@ -186,8 +186,9 @@ void Memory::insert(Vma* v) {
 }
 
 // Highest free gap of `len` bytes below the mmap area's top.
-uptr Memory::find_gap(usize len) {
-    uptr top = mmap_top();
+uptr Memory::find_gap(usize len, uptr top, uptr bottom) {
+    if (!top)
+        top = mmap_top();
     for (Vma* v = m_vmas.back(); v; v = m_vmas.prev_of(v)) {
         if (v->start >= top)
             continue;
@@ -195,7 +196,7 @@ uptr Memory::find_gap(usize len) {
             return top - len;
         top = min(top, v->start);
     }
-    return top >= USER_MIN + len ? top - len : 0;
+    return top >= bottom + len ? top - len : 0;
 }
 
 Vma* Memory::split(Vma* v, uptr at) {
@@ -269,8 +270,14 @@ long Memory::map(uptr addr, usize len, u32 prot, u32 flags, vfs::Inode* file, u6
         }
     } else {
         addr = align_down<uptr>(addr, PAGE_SIZE);
-        if (!addr || addr < USER_MIN || addr + len > mmap_top() || overlaps(addr, addr + len))
-            addr = find_gap(len);
+        if (!addr || addr < USER_MIN || addr + len > mmap_top() || overlaps(addr, addr + len)) {
+            // MAP_32BIT (x86_64): in the second gigabyte, as Linux places it.
+            // 64-bit ART keeps its Java heap there: object references are 32 bits.
+            if ((flags & MAP_32BIT) && !m_compat)
+                addr = find_gap(len, 0x80000000, 0x40000000);
+            else
+                addr = find_gap(len);
+        }
         if (!addr)
             return -err::NOMEM;
     }
