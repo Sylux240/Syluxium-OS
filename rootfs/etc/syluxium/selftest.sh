@@ -60,6 +60,11 @@ check "/proc/<pid>/cmdline"                 sh -c 'sleep 3 & p=$!; tr "\\0" " " 
 check "/proc/<pid>/fd lists open files"     sh -c 'exec 7</etc/hostname; [ "$(readlink /proc/$$/fd/7)" = /etc/hostname ]'
 check "free / uptime work"                  sh -c 'free >/dev/null && uptime >/dev/null'
 check "/sys/devices/system/cpu/online"      sh -c 'grep -q "^0" /sys/devices/system/cpu/online'
+# Terminal emulators on VTE (xfce4-terminal) read the pty in packet mode.
+# (In a session of its own: closing the master hangs up the slave's group.)
+check "pty packet mode (TIOCPKT)"           setsid python3 -c 'import os, fcntl, struct
+m, s = os.openpty(); fcntl.ioctl(m, 0x5420, struct.pack("i", 1)); os.write(s, b"hi")
+d = os.read(m, 16); assert d == b"\0hi", d'
 
 # --- threads and pipes under stress (1 s each part): futex handoffs (a
 # lost wakeup hangs it: the program's own watchdog fails it), both pipe ends
