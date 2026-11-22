@@ -128,7 +128,7 @@ keep=; [ -n "$want_keep" ] && [ "$p" = "$lastapp" ] && keep=1
 case $p in
 dgpufg)
     say "dgpufg: $(cat /opt/apps/dgpufg/GLIBC-MISMATCH 2>/dev/null || echo 'glibc ok')"
-    /usr/local/bin/dgpufg cli gpus > /tmp/apptest-dgpufg-cli.out 2>&1
+    SYLUXIUM_APPIMAGE_NOGUI=1 /usr/local/bin/dgpufg cli gpus > /tmp/apptest-dgpufg-cli.out 2>&1
     say "dgpufg: cli gpus exit $?: $(tail -n 3 /tmp/apptest-dgpufg-cli.out | tr '\n' ' ' | cut -c1-300)"
     # From the menu entry, as a user would start it: the window, or the error dialog.
     t0=$(date +%s)
