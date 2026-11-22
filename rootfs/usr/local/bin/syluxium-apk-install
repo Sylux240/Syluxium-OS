@@ -99,8 +99,8 @@ def gui(path):
         listing.add(label("  Use nothing special (no permissions)."))
     for text, sensitive in described:
         row = Gtk.Box(spacing=8, margin_start=6, margin_top=2, margin_bottom=2)
-        icon = Gtk.Image.new_from_icon_name("dialog-warning" if sensitive else "emblem-default",
-                                            Gtk.IconSize.MENU)
+        icon = Gtk.Image.new_from_icon_name("dialog-warning", Gtk.IconSize.MENU) if sensitive else Gtk.Image()
+        icon.set_size_request(16, 16)
         row.pack_start(icon, False, False, 0)
         row.pack_start(label(text, bold=sensitive, wrap=True), True, True, 0)
         listing.add(row)

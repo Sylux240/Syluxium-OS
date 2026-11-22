@@ -119,7 +119,8 @@ class AndroidPage:
         self.list_stack.add_named(msg, "message")
         paned.pack1(self.list_stack, True, False)
         paned.pack2(self.details(), False, False)
-        paned.set_position(260)
+        paned.set_position(230)
+        self.paned = paned
         outer.pack_start(paned, True, True, 0)
         return outer
 
@@ -148,13 +149,13 @@ class AndroidPage:
         box.pack_start(head, False, False, 0)
         self.shots = Gtk.Box(spacing=6)
         ssw = Gtk.ScrolledWindow(vscrollbar_policy=Gtk.PolicyType.NEVER)
-        ssw.set_size_request(-1, 170)
+        ssw.set_size_request(-1, 112)
         ssw.add(self.shots)
         box.pack_start(ssw, False, False, 0)
         self.d_text = Gtk.TextView(editable=False, cursor_visible=False, wrap_mode=Gtk.WrapMode.WORD)
         self.d_text.set_left_margin(6), self.d_text.set_right_margin(6)
         sw = Gtk.ScrolledWindow(shadow_type=Gtk.ShadowType.IN)
-        sw.set_size_request(-1, 120)
+        sw.set_size_request(-1, 70)
         sw.add(self.d_text)
         box.pack_start(sw, True, True, 0)
         self.show_app(None)
@@ -164,13 +165,14 @@ class AndroidPage:
     def activate(self):
         """The page was opened: load the catalog (download it if missing or old)."""
         self.installed = installed()
+        self.show_app(self.current)  # (the window's show_all() showed every button)
         if not self.apps:
             self.apps = self.catalog.load()
             self.fill_categories()
         age = self.catalog.age()
         if not self.apps:
-            self.show_message("Android apps come from F-Droid's catalog, which is downloaded from the Internet "
-                              "(about 70 MB, checked against F-Droid's signature).", button=True)
+            # First visit: fetch the catalog right away (the page is useless without it).
+            self.refresh(force=True)
             return
         self.fill()
         if age is None or age > CATALOG_MAX_AGE:
@@ -188,7 +190,8 @@ class AndroidPage:
             return
         self.loading = True
         if not self.apps:
-            self.show_message("Downloading F-Droid's catalog...", spinning=True)
+            self.show_message("Downloading F-Droid's catalog of Android apps (about 70 MB, checked against "
+                              "F-Droid's signature)...", spinning=True)
         self.store.status.set_text("Checking F-Droid's catalog...")
         progress = self.store.progress
 
@@ -370,7 +373,7 @@ class AndroidPage:
         if self.current != pkg:
             return False
         try:
-            pix = GdkPixbuf.Pixbuf.new_from_file_at_size(path, -1, 160)
+            pix = GdkPixbuf.Pixbuf.new_from_file_at_size(path, -1, 100)
         except GLib.Error:
             return False
         img = Gtk.Image.new_from_pixbuf(pix)
