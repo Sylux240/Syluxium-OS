@@ -30,18 +30,20 @@ grep -qw shellbench /proc/cmdline && sed -i 's/^plugins = autostart /plugins = a
 fps=$(tr ' ' '\n' < /proc/cmdline | sed -n 's/^shellfps=\{0,1\}//p' | head -1)
 grep -qw "shellfps\(=full\)\{0,1\}" /proc/cmdline && \
     printf "fpstest = sh -c 'sleep 20; shell-fps-test 30 900 600 %s'\n" "$fps" >> "$CONF"
+# shellscene=<name>: a test scene (scene-test) once the desktop is up.
+scene=$(tr ' ' '\n' < /proc/cmdline | sed -n 's/^shellscene=//p' | head -1)
+[ -n "$scene" ] && printf "scenetest = sh -c 'sleep 15; scene-test %s'\n" "$scene" >> "$CONF"
 PRELOAD=
 if grep -qs "simple-framebuffer" /sys/class/drm/card0/device/uevent; then
     # Drawn on the processor (llvmpipe): each frame must be finished before
     # the display copies it (libsyluxium-glsync.so, see userspace/shell/glsync.c),
     # or half-drawn parts stay on the screen. (shellnosync: without, for tests)
     grep -qw shellnosync /proc/cmdline || PRELOAD="env LD_PRELOAD=/usr/lib/syluxium/libsyluxium-glsync.so"
-    # Window shadows cost more than they're worth here.
-    sed -i 's/^\(plugins = .*\) winshadows/\1/' "$CONF"
 elif ! grep -qs "^blur *= *false" "$SET"; then
     sed -i 's/^plugins = autostart /plugins = autostart blur /' "$CONF"
 fi
 chown -R "$U" "$HOME_/.config/syluxium-shell"
 exec su "$U" -s /bin/bash -c "export XDG_RUNTIME_DIR=$RT XDG_SESSION_TYPE=wayland LIBSEAT_BACKEND=seatd \
-    WLR_RENDERER_ALLOW_SOFTWARE=1 GDK_BACKEND=wayland,x11 MOZ_ENABLE_WAYLAND=1 $SYLUXIUM_SHELL_ENV; \
+    WLR_RENDERER_ALLOW_SOFTWARE=1 GDK_BACKEND=wayland,x11 MOZ_ENABLE_WAYLAND=1 \
+    XDG_CONFIG_DIRS=/etc/xdg/syluxium:/etc/xdg XDG_CURRENT_DESKTOP=XFCE XDG_MENU_PREFIX=xfce- $SYLUXIUM_SHELL_ENV; \
     cd ~; exec dbus-run-session $PRELOAD wayfire $SYLUXIUM_WAYFIRE_ARGS -c $CONF" > $LOG 2>&1
