@@ -117,7 +117,7 @@ static EFI_STATUS start(EFI_HANDLE dev, const CHAR16 *path)
 
 /* ---- boot entries ---- */
 enum { K_SYLUXIUM, K_CONSOLE, K_SAFE, K_WINDOWS, K_LINUX, K_MACOS, K_EFI };
-struct entry { char title[64]; char label[24]; int kind; EFI_HANDLE dev; CHAR16 path[96]; };
+struct entry { char title[128]; char label[24]; int kind; EFI_HANDLE dev; CHAR16 path[96]; };
 static struct entry ENTRIES[12];
 static int NENTRIES, DEFAULT, TIMEOUT = 5;
 
@@ -307,8 +307,8 @@ static EFI_STATUS limine(int entry)
     }
     if (entry >= 0) {
         /* "menu-hidden": boot the one-shot entry without showing the menu. */
-        CHAR16 name[64], zero[] = {'m', 'e', 'n', 'u', '-', 'h', 'i', 'd', 'd', 'e', 'n', 0};
-        a2w(name, ENTRIES[entry].title, 64);
+        CHAR16 name[128], zero[] = {'m', 'e', 'n', 'u', '-', 'h', 'i', 'd', 'd', 'e', 'n', 0};
+        a2w(name, ENTRIES[entry].title, 128);
         u32 attrs = EFI_VARIABLE_BOOTSERVICE_ACCESS | EFI_VARIABLE_RUNTIME_ACCESS;
         RT->SetVariable(L"LoaderEntryOneShot", &LOADER_GUID, attrs, (wlen(name) + 1) * 2, name);
         RT->SetVariable(L"LoaderConfigTimeoutOneShot", &LOADER_GUID, attrs, sizeof(zero), zero);
@@ -610,11 +610,11 @@ static void text_menu(void)
         ST->ConOut->ClearScreen(ST->ConOut);
         text_out("\r\n  Syluxium boot menu\r\n\r\n");
         for (int i = 0; i < NENTRIES; i++) {
-            char line[96] = "    1. ";
+            char line[140] = "    1. ";
             line[2] = i == sel ? '>' : ' ';
             line[4] = (char)('1' + i);
             UINTN n = 7;
-            for (const char *t = ENTRIES[i].title; *t && n < 92; t++) line[n++] = *t;
+            for (const char *t = ENTRIES[i].title; *t && n < 136; t++) line[n++] = *t;
             line[n++] = '\r', line[n++] = '\n', line[n] = 0;
             text_out(line);
         }
