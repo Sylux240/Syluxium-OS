@@ -190,6 +190,11 @@ bool cmdline_word(const char* w) {
     return false;
 }
 
+} // namespace
+// For Linux code: is `w` a whole word on the kernel command line?
+extern "C" bool lkpi_cmdline_word(const char* w) { return cmdline_word(w); }
+namespace {
+
 // Linux drivers with a native Syluxium driver behind them: if the Linux one
 // fails, the native one gets the device ("<name>=native" skips the Linux one).
 bool has_native_fallback(const char* name) { return name && (!strcmp(name, "r8169") || !strcmp(name, "e1000e")); }
