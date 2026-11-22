@@ -150,8 +150,9 @@ qt)       fetch "KeePassXC-*.AppImage" KeePassXC.AppImage && chmod +x "$D/KeePas
           run_app qt "$D/KeePassXC.AppImage" "KeePassXC$" ;;
 gtk)      fetch "xournalpp-*.AppImage" Xournalpp.AppImage && chmod +x "$D/Xournalpp.AppImage" &&
           run_app gtk "$D/Xournalpp.AppImage" "Xournal\\+\\+" ;;
-electron) fetch "Obsidian-*.AppImage" Obsidian.AppImage && chmod +x "$D/Obsidian.AppImage" &&
-          run_app electron "$D/Obsidian.AppImage" "Obsidian$" ;;
+electron) # run from the stick itself: a 138 MB copy in Downloads would sit in the disk cache too
+          stick && o=$(ls $S/Obsidian-*.AppImage | head -n 1) && chmod +x "$o" &&
+          run_app electron "$o" "Obsidian$" ;;
 nofuse)   fetch "KeePassXC-*.AppImage" KeePassXC.AppImage && chmod +x "$D/KeePassXC.AppImage" &&
           APPIMAGE_EXTRACT_AND_RUN=1 run_app nofuse "$D/KeePassXC.AppImage" "KeePassXC$" ;;
 integrate)
