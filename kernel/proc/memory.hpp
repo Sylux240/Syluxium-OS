@@ -79,6 +79,10 @@ public:
     // The file-backed mapping that starts exactly at `addr` (shmdt): its file and length.
     bool mapping_at(uptr addr, vfs::Inode** file, usize* len);
     long protect(uptr addr, usize len, u32 prot);
+    // madvise(MADV_DONTNEED): drop the range's pages. Private memory reads
+    // back as zeros (anonymous) or the file's data; shared memory keeps its
+    // contents and faults back in.
+    long discard(uptr addr, usize len);
     long brk(uptr new_end);  // returns the (possibly unchanged) break
     void set_brk_base(uptr base) { m_brk_base = m_brk = base; }
 
@@ -115,6 +119,7 @@ public:
 
     // Where exec put the argument and environment strings (/proc/<pid>/cmdline, environ).
     uptr arg_start = 0, arg_end = 0, env_start = 0, env_end = 0;
+    uptr start_stack = 0; // the initial stack pointer (/proc/<pid>/stat field 28: bionic finds its main thread's stack by it)
 
 private:
     Vma* find(uptr addr);
@@ -122,6 +127,7 @@ private:
     bool overlaps(uptr start, uptr end);
     uptr find_gap(usize len);
     Vma* split(Vma* v, uptr at);
+    void merge_adjacent(uptr start, uptr end); // rejoin anonymous neighbours split by mprotect
     void remove_range(uptr start, uptr end);
     void insert(Vma* v);
     bool populate(Vma* v, uptr page);

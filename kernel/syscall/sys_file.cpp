@@ -388,12 +388,66 @@ long sys_pwrite64(SYSCALL_ARGS) {
     return do_write(f.get(), a1, a2, static_cast<i64>(a3));
 }
 
+// readv/writev on a socket: one message, as Linux does. Per-iovec writes
+// would turn each piece into its own datagram (liblog writes a header, a
+// priority, a tag and a message with one writev; logd drops a lone header).
+long vectored_socket(File* f, const KIoVec* iov, u64 count, bool write) {
+    if (write ? !can_write(f) : !can_read(f))
+        return -err::BADF;
+    usize total = 0;
+    for (u64 i = 0; i < count; i++) {
+        if (iov[i].len > 0x7ffff000 - total)
+            return -err::INVAL;
+        total += iov[i].len;
+    }
+    constexpr usize MAX_MSG = 256 * 1024; // larger ones go in pieces, like a stream
+    usize n = min(total, MAX_MSG);
+    u8* k = static_cast<u8*>(kmalloc(n ? n : 1));
+    if (!k)
+        return -err::NOMEM;
+    long r = 0;
+    if (write) {
+        usize pos = 0;
+        for (u64 i = 0; i < count && pos < n && r >= 0; i++) {
+            usize part = min<usize>(iov[i].len, n - pos);
+            if (part)
+                r = uaccess::copy_from(k + pos, reinterpret_cast<const void*>(iov[i].base), part);
+            pos += part;
+        }
+        if (r >= 0)
+            r = f->inode->write_file(f, 0, k, n);
+    } else {
+        r = f->inode->read_file(f, 0, k, n);
+        usize pos = 0;
+        for (u64 i = 0; r > 0 && i < count && pos < static_cast<usize>(r); i++) {
+            usize part = min<usize>(iov[i].len, static_cast<usize>(r) - pos);
+            if (long e = part ? uaccess::copy_to(reinterpret_cast<void*>(iov[i].base), k + pos, part) : 0; e < 0) {
+                r = e;
+                break;
+            }
+            pos += part;
+        }
+    }
+    kfree(k);
+    return r;
+}
+
 long vectored(u64 fd, u64 user_iov, u64 count, bool write) {
     FileRef f(proc::current(), static_cast<long>(fd));
     if (!f)
         return -err::BADF;
     if (count > 1024)
         return -err::INVAL;
+    if ((f->inode->mode & S_IFMT) == S_IFSOCK) {
+        auto* iov = static_cast<KIoVec*>(kmalloc(sizeof(KIoVec) * (count ? count : 1)));
+        if (!iov)
+            return -err::NOMEM;
+        long r = count ? uaccess::copy_from(iov, reinterpret_cast<const void*>(user_iov), sizeof(KIoVec) * count) : 0;
+        if (r >= 0)
+            r = vectored_socket(f.get(), iov, count, write);
+        kfree(iov);
+        return r;
+    }
     long total = 0;
     for (u64 i = 0; i < count; i++) {
         IoVec v;
@@ -2048,6 +2102,15 @@ long sys_kcmp(SYSCALL_ARGS) {
         y = p2;
     }
     return x == y ? 0 : reinterpret_cast<uptr>(x) < reinterpret_cast<uptr>(y) ? 1 : 2;
+}
+
+long socket_vectored(u64 fd, const KIoVec* iov, u64 count, bool write, bool* is_socket) {
+    *is_socket = false;
+    FileRef f(proc::current(), static_cast<long>(fd));
+    if (!f || (f->inode->mode & S_IFMT) != S_IFSOCK)
+        return 0;
+    *is_socket = true;
+    return vectored_socket(f.get(), iov, count, write);
 }
 
 void register_file() {

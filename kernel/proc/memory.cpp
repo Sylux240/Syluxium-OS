@@ -97,6 +97,7 @@ Memory* Memory::fork() {
     // just made copy-on-write: flush them everywhere this space is running.
     vmm::shootdown(0, ~usize(0) >> 1, m_as);
     child->arg_start = arg_start;
+    child->start_stack = start_stack;
     child->arg_end = arg_end;
     child->env_start = env_start;
     child->env_end = env_end;
@@ -441,7 +442,54 @@ long Memory::protect(uptr addr, usize len, u32 prot) {
         }
         vmm::shootdown(v->start, (v->end - v->start) / PAGE_SIZE, m_as);
     }
+    merge_adjacent(addr, end);
     return 0;
+}
+
+long Memory::discard(uptr addr, usize len) {
+    if (addr & (PAGE_SIZE - 1))
+        return -err::INVAL;
+    len = align_up<usize>(len, PAGE_SIZE);
+    uptr end = addr + len;
+    if (end < addr)
+        return -err::INVAL;
+    LockGuard guard(m_lock);
+    bool gap = false;
+    uptr covered = addr;
+    for (Vma* v = m_vmas.front(); v; v = m_vmas.next_of(v)) {
+        if (v->end <= addr || v->start >= end)
+            continue;
+        uptr s = max(v->start, addr), e = min(v->end, end);
+        if (s > covered)
+            gap = true;
+        covered = e;
+        unmap_pages(s, e, v->kind != VMA_DEVICE);
+    }
+    return gap || covered < end ? -err::NOMEM : 0;
+}
+
+// Linux merges neighbouring mappings that became alike again (protection put
+// back). Programs rely on it: bionic's atexit table toggles single pages
+// read-only, then mremap()s the whole table, which must be one mapping.
+// Only private anonymous memory is merged (no file offsets to line up).
+void Memory::merge_adjacent(uptr start, uptr end) {
+    auto mergeable = [](const Vma* a, const Vma* b) {
+        return a->end == b->start && a->prot == b->prot && a->kind == VMA_NORMAL && b->kind == VMA_NORMAL &&
+               !a->file && !b->file;
+    };
+    for (Vma* v = m_vmas.front(); v;) {
+        Vma* n = m_vmas.next_of(v);
+        if (!n || v->start > end)
+            break;
+        if (n->end >= start && mergeable(v, n)) {
+            v->end = n->end;
+            m_vmas.remove(n);
+            dev_untrack(n);
+            delete n;
+            continue; // v may take its next neighbour too
+        }
+        v = n;
+    }
 }
 
 long Memory::brk(uptr new_end) {

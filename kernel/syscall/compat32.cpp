@@ -413,6 +413,24 @@ struct IoVec32 { u32 base, len; };
 long vectored32(u64 fd, u64 user_iov, u64 count, bool write) {
     if (count > 1024)
         return -err::INVAL;
+    {
+        // Sockets: one message (see socket_vectored).
+        auto* iov = static_cast<KIoVec*>(kmalloc(sizeof(KIoVec) * (count ? count : 1)));
+        if (!iov)
+            return -err::NOMEM;
+        long r = 0;
+        for (u64 i = 0; i < count && r >= 0; i++) {
+            IoVec32 v;
+            r = uaccess::get(&v, uptr<IoVec32>(user_iov) + i);
+            iov[i] = KIoVec{v.base, v.len};
+        }
+        bool is_socket = false;
+        if (r >= 0)
+            r = socket_vectored(fd, iov, count, write, &is_socket);
+        kfree(iov);
+        if (is_socket || r < 0)
+            return r;
+    }
     long total = 0;
     for (u64 i = 0; i < count; i++) {
         IoVec32 v;

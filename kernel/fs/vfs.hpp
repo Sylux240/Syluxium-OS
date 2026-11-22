@@ -155,6 +155,11 @@ public:
     // A "magic" symlink (/proc/<pid>/ns/*): readlink shows its text, but lookups
     // and open() take the link inode itself instead of following it.
     virtual bool magic_link() const { return false; }
+    // A symlink that leads to an inode rather than a path (/proc/<pid>/exe,
+    // /proc/<pid>/fd/N): following it jumps there, as Linux's nd_jump_link
+    // does, so a deleted file or a memfd can still be reopened or executed.
+    // Null: follow the text readlink gives.
+    virtual Inode* jump_target() { return nullptr; }
 
     // An open file description referring to this inode was created / closed for good.
     virtual void on_open(File* f) {}

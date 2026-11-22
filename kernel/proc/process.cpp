@@ -547,6 +547,7 @@ long do_clone(interrupts::Frame* frame, u64 flags, u64 new_sp, u64 parent_tid, u
 
     memcpy(child->name, parent->name, sizeof(child->name));
     memcpy(child->exe_path, parent->exe_path, sizeof(child->exe_path));
+    child->exe_inode = parent->exe_inode;
     memcpy(child->cwd_path, parent->cwd_path, sizeof(child->cwd_path));
     child->cwd = parent->cwd;
     child->root = parent->root;
@@ -643,11 +644,13 @@ long do_clone(interrupts::Frame* frame, u64 flags, u64 new_sp, u64 parent_tid, u
 namespace {
 
 long exec_impl(interrupts::Frame* frame, const char* path, const char* const* argv, const char* const* envp,
-               int depth) {
+               int depth, vfs::Inode* given = nullptr) {
     Process* p = current();
-    vfs::Inode* inode;
-    if (long r = vfs::resolve(path, p->cwd, true, &inode); r < 0)
-        return r;
+    vfs::Inode* inode = given;
+    if (!inode) {
+        if (long r = vfs::resolve(path, p->cwd, true, &inode); r < 0)
+            return r;
+    }
     if (!vfs::is_reg(inode->mode))
         return -err::ACCES;
     if (long r = permission(inode, MAY_EXEC); r < 0)
@@ -749,6 +752,7 @@ long exec_impl(interrupts::Frame* frame, const char* path, const char* const* ar
     snprintf(p->name, sizeof(p->name), "%s", basename(path));
     // /proc/self/exe is the real file (symlinks resolved), as on Linux:
     // programs find their own install directory through it.
+    p->exe_inode = inode;
     if (vfs::canonical_path(path, p->cwd_path, p->exe_path, sizeof(p->exe_path)) < 0)
         snprintf(p->exe_path, sizeof(p->exe_path), "%s", path);
     snprintf(t->name, sizeof(t->name), "%s", p->name);
@@ -776,6 +780,11 @@ long exec_impl(interrupts::Frame* frame, const char* path, const char* const* ar
 
 long do_execve(interrupts::Frame* frame, const char* path, const char* const* argv, const char* const* envp) {
     return exec_impl(frame, path, argv, envp, 0);
+}
+
+long do_execve_inode(interrupts::Frame* frame, vfs::Inode* inode, const char* path, const char* const* argv,
+                     const char* const* envp) {
+    return exec_impl(frame, path, argv, envp, 0, inode);
 }
 
 // ---- wait4 -----------------------------------------------------------------

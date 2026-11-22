@@ -169,10 +169,14 @@ long resolve_impl(const char* path, Inode* cwd, bool follow_last, Inode** out, i
         if (!next)
             return -err::NOENT;
         next = cross_down(next);
-        if (is_lnk(next->mode) && !next->magic_link() && (!last || follow_last || trailing_slash)) {
-            long r = follow(next, node, &next, depth);
-            if (r < 0)
-                return r;
+        if (is_lnk(next->mode) && (!last || follow_last || trailing_slash)) {
+            if (Inode* jump = next->jump_target()) {
+                next = jump;
+            } else if (!next->magic_link()) {
+                long r = follow(next, node, &next, depth);
+                if (r < 0)
+                    return r;
+            }
         }
         node = next;
     }

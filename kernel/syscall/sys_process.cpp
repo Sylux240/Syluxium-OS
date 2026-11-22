@@ -376,6 +376,61 @@ long sys_execve(SYSCALL_ARGS) {
     return r;
 }
 
+// execveat(dirfd, path, argv, envp, flags): execve with the path relative to
+// dirfd, or (AT_EMPTY_PATH, empty path) the file dirfd itself: fexecve, which
+// LXC uses to re-run itself from a memfd.
+long sys_execveat(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    constexpr long AT_FDCWD = -100;
+    constexpr u32 AT_SYMLINK_NOFOLLOW = 0x100, AT_EMPTY_PATH = 0x1000;
+    int dirfd = static_cast<int>(a0);
+    u32 flags = static_cast<u32>(a4);
+    if (flags & ~(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH))
+        return -err::INVAL;
+    char* path = static_cast<char*>(kmalloc(4096));
+    if (!path)
+        return -err::NOMEM;
+    long r = uaccess::string_from(reinterpret_cast<const char*>(a1), path, 4096);
+    StringVector argv, envp;
+    if (r >= 0)
+        r = argv.copy_from_user(a2);
+    if (r >= 0)
+        r = envp.copy_from_user(a3);
+    if (r >= 0) {
+        if (path[0] == '/' || (path[0] && dirfd == static_cast<int>(AT_FDCWD))) {
+            r = proc::do_execve(frame, path, argv.get(), envp.get());
+        } else if (!path[0] && !(flags & AT_EMPTY_PATH)) {
+            r = -err::NOENT;
+        } else if (vfs::File* f = proc::fd_get(proc::current(), dirfd)) {
+            if (!path[0]) {
+                char name[300];
+                if (f->path)
+                    snprintf(name, sizeof(name), "%s", f->path);
+                else
+                    snprintf(name, sizeof(name), "/dev/fd/%d", dirfd);
+                r = proc::do_execve_inode(frame, f->inode, name, argv.get(), envp.get());
+            } else if (!vfs::is_dir(f->inode->mode) || !f->path) {
+                r = vfs::is_dir(f->inode->mode) ? -err::NOENT : -err::NOTDIR;
+            } else {
+                // Relative to the directory: by its absolute path.
+                char* full = static_cast<char*>(kmalloc(8192));
+                if (!full) {
+                    r = -err::NOMEM;
+                } else {
+                    snprintf(full, 8192, "%s/%s", f->path, path);
+                    r = proc::do_execve(frame, full, argv.get(), envp.get());
+                    kfree(full);
+                }
+            }
+            vfs::file_put(f);
+        } else {
+            r = -err::BADF;
+        }
+    }
+    kfree(path);
+    return r;
+}
+
 // waitid(idtype, id, siginfo*, options, rusage*): wait with the child's
 // status in a siginfo (CLD_EXITED/KILLED/DUMPED, pid, uid, status).
 long sys_waitid(SYSCALL_ARGS) {
@@ -1453,6 +1508,7 @@ void register_process() {
     set(57, sys_fork, "fork");
     set(58, sys_vfork, "vfork");
     set(59, sys_execve, "execve");
+    set(322, sys_execveat, "execveat");
     set(61, sys_wait4, "wait4");
     set(62, sys_kill, "kill");
     set(130, sys_rt_sigsuspend, "rt_sigsuspend");

@@ -74,6 +74,7 @@ struct Process {
     vfs::Inode* ctty = nullptr; // controlling terminal (what /dev/tty opens); nullptr = the console
     char name[64] = {};
     char exe_path[256] = {};
+    vfs::Inode* exe_inode = nullptr; // the program file (kept alive by its mappings): /proc/<pid>/exe
 
     Memory* mem = nullptr;
     bool compat = false;  // a 32-bit (ia32) program: compat syscalls, 32-bit signal frames, < 4 GiB
@@ -165,6 +166,10 @@ int wait(Process* p);
 // System call implementations.
 long do_clone(interrupts::Frame* frame, u64 flags, u64 new_sp, u64 parent_tid, u64 child_tid, u64 tls);
 long do_execve(interrupts::Frame* frame, const char* path, const char* const* argv, const char* const* envp);
+// execveat: run an inode already found (an fd's file, e.g. a memfd); `path`
+// names it for argv-less uses (/proc/self/exe, "#!" scripts).
+long do_execve_inode(interrupts::Frame* frame, vfs::Inode* inode, const char* path, const char* const* argv,
+                     const char* const* envp);
 long do_wait4(int pid, int* status_out, int options, u32* uid_out = nullptr);
 
 // End the whole current process (all threads) with a wait() status word

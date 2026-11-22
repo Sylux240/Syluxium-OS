@@ -321,7 +321,7 @@ bool gen_stat(TextBuffer& out, const void* ctx) {
                "%lu %lu %lu %lu %d\n",
                d->tid ? d->tid : s.pid, s.name, s.state, s.ppid, s.pgid, s.sid, 0x0501 /* tty: console */, -1,
                0u, 0ul, 0ul, 0ul, 0ul, s.utime, s.stime, 0l, 0l, 20l, 0l, s.threads, 0l, s.start_ticks, s.vsize,
-               s.rss, ~0ul, 0ul, 0ul, 0ul, 0ul, 0ul, s.sig_pending, s.sig_blocked, 0ul, 0ul, 0ul, 0ul, 0ul, 17,
+               s.rss, ~0ul, 0ul, 0ul, s.mem ? s.mem->start_stack : 0, 0ul, 0ul, s.sig_pending, s.sig_blocked, 0ul, 0ul, 0ul, 0ul, 0ul, 17,
                s.cpu, 0u, 0u, 0ul, 0ul, 0l, 0ul, 0ul, 0ul, s.mem ? s.mem->arg_start : 0, s.mem ? s.mem->arg_end : 0,
                s.mem ? s.mem->env_start : 0, s.mem ? s.mem->env_end : 0, 0);
     release(s);
@@ -437,6 +437,17 @@ bool link_exe(char* out, usize size, const void* ctx) {
     return true;
 }
 
+// /proc/<pid>/exe: opens and executes the program file itself (LXC re-runs
+// itself from a memfd and checks that it did through this link).
+class ExeLink : public GeneratedLink {
+public:
+    explicit ExeLink(const PidDir* dir) : GeneratedLink(link_exe, dir), m_dir(dir) {}
+    vfs::Inode* jump_target() override;
+
+private:
+    const PidDir* m_dir;
+};
+
 bool link_cwd(char* out, usize size, const void* ctx) {
     auto* d = static_cast<const PidDir*>(ctx);
     Snapshot s;
@@ -463,7 +474,7 @@ public:
         LockGuard guard(m_lock);
         if (!m_links[fd]) {
             auto* ctx = new LinkCtx{m_pid, fd};
-            m_links[fd] = new GeneratedLink(fd_target, ctx);
+            m_links[fd] = new FdLink(fd_target, ctx);
         }
         return m_links[fd];
     }
@@ -490,6 +501,25 @@ public:
 private:
     struct LinkCtx {
         int pid, fd;
+    };
+
+    // Regular files and directories are reopened by inode (memfds, deleted
+    // files, other mount namespaces); sockets, pipes and devices by their text.
+    class FdLink : public GeneratedLink {
+    public:
+        FdLink(Target target, const LinkCtx* ctx) : GeneratedLink(target, ctx), m_c(ctx) {}
+        vfs::Inode* jump_target() override {
+            const LinkCtx* c = m_c;
+            LockGuard guard(proc::table_lock());
+            Process* p = proc::find(c->pid);
+            if (!p || !p->fds[c->fd])
+                return nullptr;
+            vfs::Inode* inode = p->fds[c->fd]->inode;
+            return inode && (vfs::is_reg(inode->mode) || vfs::is_dir(inode->mode)) ? inode : nullptr;
+        }
+
+    private:
+        const LinkCtx* m_c;
     };
 
     bool fd_open(int fd) {
@@ -636,6 +666,12 @@ private:
     NsFile* m_files[COUNT];
 };
 
+vfs::Inode* ExeLink::jump_target() {
+    LockGuard guard(proc::table_lock());
+    Process* p = proc::find(m_dir->pid);
+    return p ? p->exe_inode : nullptr;
+}
+
 PidDir::PidDir(int p, int t) : pid(p), tid(t) {
     ino = vfs::next_ino();
     mode = vfs::S_IFDIR | 0555;
@@ -650,7 +686,7 @@ PidDir::PidDir(int p, int t) : pid(p), tid(t) {
     add("cmdline", new GeneratedFile(gen_cmdline, this));
     add("environ", new GeneratedFile(gen_environ, this, 0400));
     add("maps", new GeneratedFile(gen_maps, this));
-    add("exe", new GeneratedLink(link_exe, this));
+    add("exe", new ExeLink(this));
     add("cwd", new GeneratedLink(link_cwd, this));
     add("fd", new FdDir(pid));
     add("ns", new NsDir(pid));
