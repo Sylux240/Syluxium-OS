@@ -5,6 +5,8 @@
 // bottom.
 
 #include <boot/limine_requests.hpp>
+#include <core/bootlog.hpp>
+#include <core/log.hpp>
 #include <lib/string.hpp>
 #include <sched/sched.hpp>
 #include <sched/sync.hpp>
@@ -33,6 +35,8 @@ volatile u32 g_target = 8;        // percent the bar moves towards
 u32 g_shown = 0;                  // percent drawn, in 1/16 steps (smooth)
 const char* volatile g_text = "Loading kernel";
 const char* g_text_drawn = nullptr;
+volatile u64 g_stage_ms = 0;      // when the boot last moved on (stall detector)
+constexpr u64 STALL_MS = 45'000;  // no boot stage for this long: show the details
 
 u32 mix(u32 a, u32 b, u32 t256) { // a -> b by t/256
     u32 r = ((a >> 16 & 255) * (256 - t256) + (b >> 16 & 255) * t256) >> 8;
@@ -130,8 +134,29 @@ void dismiss() {
 void animate(void*) {
     u32 frame = 0;
     while (g_active) {
-        if (g_verbose || (g_deadline_ms && clock::now_ms() >= g_deadline_ms)) {
+        if (g_verbose) {
+            // In the log: whoever reads it later knows the screen switched
+            // to text here, and at which stage (a boot that only gets on
+            // after Esc is pressed shows up this way).
+            klog::info("splash: boot details shown (Esc) at \"%s\", %u%%", g_text, g_target);
             dismiss();
+            return;
+        }
+        if (g_deadline_ms && clock::now_ms() >= g_deadline_ms) {
+            klog::info("splash: X didn't take the screen in time; boot details shown");
+            dismiss();
+            return;
+        }
+        // Stall detector: the boot sat at one stage (before the desktop
+        // starts) for 45 s. Show the details on screen, as Esc does, and
+        // record what every thread was doing; the log reaches the stick as
+        // soon as it is mounted (or with the next save).
+        if (!g_deadline_ms && g_stage_ms && clock::now_ms() - g_stage_ms > STALL_MS) {
+            klog::warn("splash: boot stuck at \"%s\" (%u%%) for %u s; showing boot details, every thread's "
+                       "state follows", g_text, g_target, static_cast<unsigned>(STALL_MS / 1000));
+            dismiss();
+            sched::dump_threads();
+            bootlog::save();
             return;
         }
         {
@@ -174,11 +199,13 @@ void show(video::Framebuffer& fb) {
 }
 
 void start_animation() {
+    g_stage_ms = clock::now_ms();
     if (g_active)
         sched::spawn("splash", animate, nullptr, -1, true);
 }
 
 void stage(u32 percent, const char* text) {
+    g_stage_ms = clock::now_ms();
     if (percent > g_target)
         g_target = percent > 100 ? 100 : percent;
     if (text)
