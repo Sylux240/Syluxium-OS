@@ -71,6 +71,20 @@ dfd = struct.unpack("IIi", bytearray(fcntl.ioctl(fd, 0xC00C642D, struct.pack("II
 a = mmap.mmap(dfd, size, mmap.MAP_SHARED, mmap.PROT_READ | mmap.PROT_WRITE)
 b = mmap.mmap(fd, size, mmap.MAP_SHARED, mmap.PROT_READ | mmap.PROT_WRITE, offset=off)
 a[100:104] = b"Slx!"; assert b[100:104] == b"Slx!", b[100:104]'
+# mincore: Mesa's EGL checks with it that a display pointer is real memory
+# (every EGL program failed without it). Touched page in memory, untouched
+# one not, an unmapped range ENOMEM.
+check "mincore (Mesa's EGL pointer check)"  python3 -c 'import ctypes, errno
+libc = ctypes.CDLL(None, use_errno=True)
+libc.mmap.restype = ctypes.c_void_p
+libc.mmap.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_long]
+a = libc.mmap(None, 3 * 4096, 3, 0x22, -1, 0)
+ctypes.memset(a, 1, 1)
+v = (ctypes.c_ubyte * 3)()
+assert libc.mincore(ctypes.c_void_p(a), 3 * 4096, v) == 0, ctypes.get_errno()
+assert v[0] == 1 and v[2] == 0, list(v)
+libc.munmap(ctypes.c_void_p(a), 3 * 4096)
+assert libc.mincore(ctypes.c_void_p(a), 4096, v) == -1 and ctypes.get_errno() == errno.ENOMEM, ctypes.get_errno()'
 # Terminal emulators on VTE (xfce4-terminal) read the pty in packet mode.
 # (In a session of its own: closing the master hangs up the slave's group.)
 check "pty packet mode (TIOCPKT)"           setsid python3 -c 'import os, fcntl, struct

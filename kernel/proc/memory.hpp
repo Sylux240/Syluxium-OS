@@ -83,6 +83,9 @@ public:
     // all other pages may be copied on write (after fork).
     bool shared_at(uptr addr);
     long protect(uptr addr, usize len, u32 prot);
+    // mincore: one byte per page of [addr, addr + len) (1 = in memory);
+    // -ENOMEM if part of the range isn't mapped. `out` is a kernel buffer.
+    long residency(uptr addr, usize len, u8* out);
     long brk(uptr new_end);  // returns the (possibly unchanged) break
     void set_brk_base(uptr base) { m_brk_base = m_brk = base; }
 
