@@ -122,8 +122,10 @@ DEBIAN_I386_PKGS  := hello busybox bash
 # Wine (9-wine): libwine links the multimedia/hardware libraries below only
 # from optional Unix-side modules (winegstreamer, winepulse, gphoto2, wpcap,
 # capi, opencl); without them those modules don't load and the rest
-# of Wine works. FFmpeg + GStreamer alone would add ~150 MB.
-WINE_EXCLUDE := libavcodec61,libavformat61,libavutil59,libgstreamer-plugins-base1.0-0,libgstreamer1.0-0,libgphoto2-6t64,libgphoto2-port12t64,libpcap0.8t64,libpulse0,libcapi20-3t64,ocl-icd-libopencl1
+# of Wine works. FFmpeg + GStreamer alone would add ~150 MB. (libpulse0 is
+# kept: Debian's SDL 2 links it, and without it no SDL 2 program, game or
+# emulator starts; ~3 MB with libsndfile.)
+WINE_EXCLUDE := libavcodec61,libavformat61,libavutil59,libgstreamer-plugins-base1.0-0,libgstreamer1.0-0,libgphoto2-6t64,libgphoto2-port12t64,libpcap0.8t64,libcapi20-3t64,ocl-icd-libopencl1
 DEBIAN_EXCLUDE := cpp,cpp-14,cpp-14-x86-64-linux-gnu,cpp-x86-64-linux-gnu,man-db,groff-base,systemd,udev,xbase-clients,systemd-sysv,libpam-systemd,dbus-user-session,$(WINE_EXCLUDE),$(XFCE_APPS_EXCLUDE)
 DEBIAN_I386_EXCLUDE := base-files,debianutils,gawk,libmpfr6,libgmp10,libsigsegv2,readline-common,libreadline8t64
 DEBIAN_I386_PROGS := hello busybox bash
