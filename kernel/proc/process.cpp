@@ -740,9 +740,10 @@ long exec_impl(interrupts::Frame* frame, const char* path, const char* const* ar
     }
 
     sched::Thread* t = sched::current();
-    Memory* old = p->mem;
+    Memory* old;
     {
-        InterruptGuard guard;
+        LockGuard guard(table_lock()); // as in finish_process: /proc takes references under it
+        old = p->mem;
         p->mem = mem;
         t->aspace = as;
         as->activate();
@@ -858,8 +859,16 @@ namespace {
         me->aspace = nullptr;
         vmm::AddressSpace::kernel().activate();
     }
-    p->mem->put();
-    p->mem = nullptr;
+    // Detach the memory under the table lock before dropping it: /proc
+    // readers take their own reference under that lock, and must never
+    // find a pointer to memory that is already freed.
+    Memory* mem;
+    {
+        LockGuard guard(table_lock());
+        mem = p->mem;
+        p->mem = nullptr;
+    }
+    mem->put();
     me->process = nullptr; // from here on we're an ordinary kernel thread
 
     if (p->vfork_child)
