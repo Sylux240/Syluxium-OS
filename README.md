@@ -190,7 +190,10 @@ Legend: ✅ done · 🟡 partly done · ⬜ to do
 - ✅ AppImages: FUSE in the kernel (/dev/fuse, Linux's protocol; fusermount3 and libfuse 2/3 unmodified),
      double-click in Files runs them (offers to make a download executable), unpacked run when FUSE
      isn't usable; pre-installed AppImages (`DGPUFG_APPIMAGE`, tools/install-appimage.sh) get a menu
-     entry and icon
+     entry and icon, and AppImages in ~/Applications (or added when first opened) join the Start menu
+- 🟡 Sandboxes: unprivileged user namespaces (uid/gid maps, own mount/PID/UTS/IPC namespaces) for
+     bubblewrap and Electron/Chromium's sandbox; seccomp filters and network namespaces are accepted
+     but not enforced yet
 - 🟡 System-call coverage (grows with every phase)
 
 **Desktop** (Syluxium's own *Dusk* look: deep navy, the logo's cyan, glass panels)
@@ -257,4 +260,4 @@ Legend: ✅ done · 🟡 partly done · ⬜ to do
 - ✅ Updates (Syluxium Update: Debian packages through apt) and a Recovery boot entry
      (repair disks and packages, reset settings or passwords, root prompt)
 
-Tally: 49 done · 12 partly done · 2 to do.
+Tally: 53 done · 13 partly done · 1 to do.
