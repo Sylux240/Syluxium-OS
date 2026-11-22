@@ -1,0 +1,12 @@
+#!/bin/sh
+# Waydroid, with Android started first where a desktop user needs it: the
+# Start menu entries of Android apps run "waydroid app launch PACKAGE"; this
+# makes sure Android is up (setup, container, session in multi-window mode on
+# the right Wayland display) before. Everything else goes straight to Waydroid.
+case "$1 $2" in
+"app launch"|"app install"|"app intent"|"show-full-ui "*)
+    if [ "$(id -u)" != 0 ] && [ -z "$SYLUXIUM_ANDROID_INNER" ]; then
+        /usr/local/bin/syluxium-android ensure || exit 1
+    fi ;;
+esac
+exec /usr/bin/waydroid "$@"

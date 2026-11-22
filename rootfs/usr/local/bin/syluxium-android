@@ -1,64 +1,231 @@
 #!/bin/bash
-# Android Apps: Android (Waydroid) in a window on the desktop. Starts only
-# when launched: sets Android up the first time (syluxium-android-setup),
-# starts the container (root, via sudo), then a Wayland compositor as an X
-# window (weston, kiosk shell) with Android's home screen in it. Closing the
-# window stops the Android session; X and the desktop are never touched.
+# Android apps on Syluxium (Waydroid), each app its own window on the desktop.
+#
+#   syluxium-android                  open the Android Apps overview (setup the first time)
+#   syluxium-android ensure           set up if needed, start Android in the background
+#   syluxium-android launch PACKAGE   open an Android app as a window
+#   syluxium-android install FILE.apk install an app (the .apk dialog uses this)
+#   syluxium-android remove PACKAGE   remove an app
+#   syluxium-android list             installed apps: "package<TAB>name"
+#   syluxium-android full-ui          Android's own home screen in one window
+#   syluxium-android stop             stop Android (apps close)
+#   syluxium-android status           "not-set-up", "stopped", "starting" or "running"
+#
+# Windows: Android runs in Waydroid's multi-window mode, so every app is a
+# Wayland window. In Xfce they go through syluxium-wayland-host (an Xfce
+# window each: frame, taskbar entry, icon, Alt+Tab, clipboard); in the
+# Wayland shell they're native windows of the shell. Android starts on the
+# first use and stops with "stop" or when the desktop session ends.
+# Log: ~/.cache/syluxium-android.log
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+WAYDROID=/usr/bin/waydroid
 HELPER="sudo -n /usr/local/sbin/syluxium-android-container"
 LOG="$HOME/.cache/syluxium-android.log"
-SOCKET=syluxium-android
-mkdir -p "$HOME/.cache"
-exec >> "$LOG" 2>&1
-echo "=== $(date) ==="
+APPS="$HOME/.local/share/applications"
+mkdir -p "$HOME/.cache" "$APPS"
+export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
+STATE="$XDG_RUNTIME_DIR/syluxium-android"
+mkdir -p "$STATE"
+
+log() { echo "$(date '+%F %T') $*" >> "$LOG"; }
+
+notify() { # title, text (shown only in a desktop session)
+    command -v notify-send > /dev/null && [ -n "$DISPLAY$WAYLAND_DISPLAY" ] &&
+        notify-send -a "Android Apps" -i android "$1" "$2" 2>/dev/null
+}
 
 fail() {
-    echo "error: $*"
-    if command -v kdialog >/dev/null; then kdialog --title "Android Apps" --error "$*"
-    elif command -v xmessage >/dev/null; then xmessage -center "Android Apps: $*"; fi
+    log "error: $*"
+    if [ -n "$DISPLAY$WAYLAND_DISPLAY" ]; then
+        if command -v zenity > /dev/null; then zenity --error --title="Android Apps" --text="$*" 2>/dev/null
+        elif command -v xmessage > /dev/null; then xmessage -center "Android Apps: $*"; fi
+    fi
+    echo "syluxium-android: $*" >&2
     exit 1
 }
 
-case "$($HELPER status)" in
-not-set-up) syluxium-android-setup || exit 0 ;;
+session_running() { $WAYDROID status 2>/dev/null | grep -q 'Session:.*RUNNING'; }
+# Android is ready once its package manager answers.
+android_ready() { session_running && [ -f "$STATE/ready" ]; }
+
+# The Wayland display Android's windows go to.
+wayland_display() {
+    if [ "$XDG_SESSION_TYPE" = wayland ] && [ -n "$WAYLAND_DISPLAY" ] &&
+       [ "${WAYLAND_DISPLAY#syluxium-x11-}" = "$WAYLAND_DISPLAY" ]; then
+        echo "$WAYLAND_DISPLAY"  # the Wayland shell itself
+    elif [ -n "$DISPLAY" ]; then
+        syluxium-wayland-run --start 2>> "$LOG"  # the host for this X session
+    fi
+}
+
+# Android's sound goes to a PulseAudio socket, which Waydroid binds into the
+# container and needs at start: PipeWire's when there is one, else an empty
+# socket (Android starts, silent).
+audio_socket() {
+    local pulse="$XDG_RUNTIME_DIR/pulse/native"
+    [ -S "$pulse" ] && return
+    if command -v pipewire > /dev/null && command -v pipewire-pulse > /dev/null; then
+        pgrep -u "$(id -u)" -x pipewire > /dev/null || { setsid pipewire >> "$STATE/pipewire.log" 2>&1 < /dev/null 9>&- & sleep 1; }
+        pgrep -u "$(id -u)" -x pipewire-pulse > /dev/null || { setsid pipewire-pulse >> "$STATE/pipewire.log" 2>&1 < /dev/null 9>&- & }
+        for _ in $(seq 30); do [ -S "$pulse" ] && return; sleep 0.1; done
+    fi
+    mkdir -p "$(dirname "$pulse")"
+    python3 -c "import socket,sys; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1])" "$pulse" 2>/dev/null
+    log "no PulseAudio/PipeWire: Android has no sound"
+}
+
+# Waydroid's menu entries (waydroid.<package>.desktop) go to the "Android
+# Apps" folder of the Start menu, with "Remove" as a right-click action.
+fix_menu_entries() {
+    local f pkg changed=0
+    for f in "$APPS"/waydroid.*.desktop; do
+        [ -f "$f" ] || continue
+        grep -q '^X-Syluxium-Android=' "$f" && continue
+        pkg=${f##*/waydroid.}; pkg=${pkg%.desktop}
+        case "$pkg" in com.android.*|org.lineageos.*|com.google.android.*) # system apps: not shown
+            grep -q '^NoDisplay=true' "$f" || echo "NoDisplay=true" >> "$f"
+            echo "X-Syluxium-Android=system" >> "$f"; continue ;;
+        esac
+        sed -i -e 's/^Categories=.*/Categories=X-WayDroid-App;X-Syluxium-Android;/' \
+               -e '/^Actions=/d' "$f"
+        grep -q '^Categories=' "$f" || echo "Categories=X-WayDroid-App;X-Syluxium-Android;" >> "$f"
+        grep -q '^Comment=' "$f" || echo "Comment=Android app" >> "$f"
+        grep -q '^StartupWMClass=' "$f" || echo "StartupWMClass=$pkg" >> "$f"
+        {
+            echo "Actions=remove;"
+            echo "X-Syluxium-Android=$pkg"
+            echo
+            echo "[Desktop Action remove]"
+            echo "Name=Remove from this computer"
+            echo "Exec=syluxium-android remove $pkg"
+        } >> "$f"
+        changed=1
+    done
+    [ $changed = 1 ] && command -v update-desktop-database > /dev/null && update-desktop-database "$APPS" 2>/dev/null
+    return 0
+}
+
+# Watches Waydroid's menu entries while Android runs (apps installed from
+# inside Android too).
+menu_watcher() {
+    while session_running; do
+        fix_menu_entries
+        sleep 4
+    done
+}
+
+ensure() {
+    if android_ready; then return 0; fi
+    # one starter at a time
+    exec 9> "$STATE/lock"
+    flock 9
+    android_ready && return 0
+
+    case "$($HELPER status 2>/dev/null)" in
+    not-set-up)
+        syluxium-android-setup || exit 1 ;;
+    "") fail "Android can't be started: the system helper is missing (sudo rules)." ;;
+    esac
+    log "starting the Android container"
+    $HELPER start >> "$LOG" 2>&1 || fail "The Android container didn't start (see /var/log/waydroid-container.log)."
+
+    if ! session_running; then
+        local disp
+        disp=$(wayland_display)
+        [ -n "$disp" ] || fail "Android apps need the desktop (no X or Wayland display)."
+        audio_socket
+        rm -f "$STATE/ready"
+        log "starting the Android session on $disp"
+        WAYLAND_DISPLAY=$disp setsid $WAYDROID session start >> "$LOG" 2>&1 < /dev/null 9>&- &
+        echo $! > "$STATE/session.pid"
+        for _ in $(seq 240); do
+            session_running && break
+            kill -0 "$(cat "$STATE/session.pid")" 2>/dev/null || fail "Android stopped while starting (see $LOG)."
+            sleep 0.5
+        done
+        session_running || fail "Android did not start in time (see $LOG)."
+    fi
+    # Each app its own window; no Android home screen.
+    $WAYDROID prop set persist.waydroid.multi_windows true >> "$LOG" 2>&1
+    # Ready when the package manager lists apps (first boot: a few minutes).
+    local i
+    for i in $(seq 600); do
+        $WAYDROID app list 2>/dev/null | grep -q '^packageName:' && break
+        session_running || fail "Android stopped while starting (see $LOG)."
+        sleep 1
+    done
+    $WAYDROID app list 2>/dev/null | grep -q '^packageName:' || fail "Android did not finish starting (see $LOG)."
+    touch "$STATE/ready"
+    log "Android is ready (${i}s)"
+    fix_menu_entries
+    (menu_watcher 9>&- &) 2>/dev/null
+    return 0
+}
+
+# "package<TAB>name" of apps that aren't part of Android itself.
+list_apps() {
+    $WAYDROID app list 2>/dev/null | awk '
+        /^Name:/ { name = substr($0, 7) }
+        /^packageName:/ { pkg = substr($0, 14); if (pkg !~ /^(com\.android\.|org\.lineageos\.|android$)/) print pkg "\t" name }'
+}
+
+case "${1:-}" in
+"")
+    ensure && exec syluxium-appstore --android 2>/dev/null
+    ;;
+ensure)
+    ensure
+    ;;
+launch)
+    [ -n "$2" ] || fail "launch: which app?"
+    ensure && SYLUXIUM_ANDROID_INNER=1 exec $WAYDROID app launch "$2"
+    ;;
+install)
+    [ -f "$2" ] || fail "install: no such file: $2"
+    ensure || exit 1
+    log "installing $2"
+    # Waydroid reads the file from the host side; give it a path it can read.
+    tmp="$STATE/install-$$.apk"
+    cp -f "$2" "$tmp" && chmod 644 "$tmp"
+    out=$($WAYDROID app install "$tmp" 2>&1); rc=$?
+    rm -f "$tmp"
+    echo "$out" >> "$LOG"
+    # Waydroid prints nothing useful on failure; check the result.
+    [ $rc = 0 ] || { echo "$out" >&2; exit 1; }
+    sleep 2
+    fix_menu_entries
+    ;;
+remove)
+    [ -n "$2" ] || fail "remove: which app?"
+    ensure || exit 1
+    log "removing $2"
+    $WAYDROID app remove "$2" >> "$LOG" 2>&1 || exit 1
+    rm -f "$APPS/waydroid.$2.desktop"
+    ;;
+list)
+    ensure > /dev/null && list_apps
+    ;;
+full-ui)
+    ensure && SYLUXIUM_ANDROID_INNER=1 exec $WAYDROID show-full-ui
+    ;;
+stop)
+    log "stopping Android"
+    $WAYDROID session stop >> "$LOG" 2>&1
+    $HELPER stop >> "$LOG" 2>&1
+    rm -f "$STATE/ready"
+    ;;
+status)
+    s=$($HELPER status 2>/dev/null)
+    if [ "$s" = running ] && session_running; then
+        android_ready && echo running || echo starting
+    elif [ "$s" = not-set-up ]; then echo not-set-up
+    else echo stopped; fi
+    ;;
+--help|-h)
+    sed -n '2,18s/^# \{0,1\}//p' "$0"
+    ;;
+*)
+    echo "usage: syluxium-android [ensure|launch PKG|install FILE|remove PKG|list|full-ui|stop|status]" >&2
+    exit 1
+    ;;
 esac
-$HELPER start || fail "The Android container didn't start (see /var/log/waydroid-container.log)."
-
-export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
-mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
-
-# Android's audio goes to a PulseAudio socket (Waydroid binds it into the
-# container and won't start without one): PipeWire's, started for this
-# session if nothing provides one yet.
-PULSE="$XDG_RUNTIME_DIR/pulse/native"
-if [ ! -S "$PULSE" ] && command -v pipewire >/dev/null && command -v pipewire-pulse >/dev/null; then
-    pipewire > "$HOME/.cache/syluxium-android-pipewire.log" 2>&1 &
-    sleep 1
-    pipewire-pulse >> "$HOME/.cache/syluxium-android-pipewire.log" 2>&1 &
-    for _ in $(seq 30); do [ -S "$PULSE" ] && break; sleep 0.1; done
-fi
-if [ ! -S "$PULSE" ]; then # no sound, but the container starts
-    mkdir -p "$(dirname "$PULSE")"
-    python3 -c "import socket,sys; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1])" "$PULSE" 2>/dev/null
-fi
-
-# The nested compositor: one X window holding Android.
-weston --backend=x11-backend.so --shell=kiosk-shell.so --socket="$SOCKET" \
-       --width=1280 --height=800 --idle-time=0 &
-WESTON=$!
-for _ in $(seq 50); do [ -S "$XDG_RUNTIME_DIR/$SOCKET" ] && break; sleep 0.1; done
-[ -S "$XDG_RUNTIME_DIR/$SOCKET" ] || fail "The Android window (weston) didn't start."
-export WAYLAND_DISPLAY=$SOCKET
-
-waydroid session start &
-SESSION=$!
-for _ in $(seq 300); do
-    waydroid status 2>/dev/null | grep -q 'Session:.*RUNNING' && break
-    kill -0 $WESTON 2>/dev/null || break
-    sleep 0.5
-done
-waydroid show-full-ui &
-
-wait $WESTON                     # the window was closed
-waydroid session stop
-kill $SESSION 2>/dev/null

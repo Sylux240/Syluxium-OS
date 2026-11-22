@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Name=Android (full screen)
+GenericName=Android
+Comment=Android's own home screen in one window (apps normally open in windows of their own)
+Exec=syluxium-android full-ui
+Icon=android
+Terminal=false
+Categories=X-Syluxium-Android;
+Actions=stop;
+
+[Desktop Action stop]
+Name=Stop Android
+Exec=syluxium-android stop

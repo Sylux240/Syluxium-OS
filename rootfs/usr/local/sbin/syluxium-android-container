@@ -5,6 +5,13 @@
 #   syluxium-android-container start    start the Android container (if not running)
 #   syluxium-android-container stop     stop it
 #   syluxium-android-container status   "running" / "stopped" / "not-set-up"
+#   syluxium-android-container variant  "VANILLA" (no Google) or "GAPPS" (Google Play services)
+#   syluxium-android-container switch VANILLA|GAPPS
+#                                        change Android's system image (downloads it; apps
+#                                        and their data stay); Android must be stopped
+#   syluxium-android-container android-id
+#                                        the Google services Android ID (for Google's
+#                                        registration of uncertified devices), if there is one
 # Nothing here runs at boot: Android only starts when its launcher is used.
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 LXC=/var/lib/waydroid/lxc/waydroid
@@ -18,17 +25,29 @@ set_up() { [ -f /var/lib/waydroid/waydroid.cfg ] && [ -f "$LXC/config" ]; }
 adapt_config() {
     local c="$LXC/config"
     [ -f "$c" ] || return 0
-    sed -i -e '/^lxc\.net\./d' -e '/^lxc\.seccomp/d' -e '/^lxc\.apparmor/d' "$c"
+    # (each start: the previous run's lines go first, so nothing piles up)
+    sed -i -e '/^lxc\.net\./d' -e '/^lxc\.seccomp/d' -e '/^lxc\.apparmor/d' -e '/^# Syluxium/d' \
+        -e '/^lxc\.cgroup\.relative/d' -e '/syluxium\/android/d' "$c"
     {
         echo "# Syluxium: host network, no seccomp/AppArmor"
         echo "lxc.net.0.type = none"
-        echo "lxc.net.0.link = host" # (Waydroid's waydroid-net.sh skips itself unless the link is waydroid0)
+        # (Waydroid's waydroid-net.sh skips itself unless the link is waydroid0)
+        echo "lxc.net.0.link = host"
         echo "lxc.apparmor.profile = unconfined"
-        echo "lxc.cgroup.relative = 1" # (our cgroup, not init's: there's no init process)
+        # (our cgroup, not init's: there's no init process)
+        echo "lxc.cgroup.relative = 1"
+        # No netfilter in the kernel yet: netd gets an iptables that accepts its
+        # rules (without it netd aborts, and init restarts Android's framework
+        # with it over and over). ip6tables and the -restore commands are
+        # symlinks to this one file.
+        echo "lxc.mount.entry = /usr/lib/syluxium/android/iptables system/bin/iptables none bind,ro 0 0"
     } >> "$c"
     # Waydroid's own network setup (bridge, dnsmasq, NAT) isn't used.
     if [ -f /var/lib/waydroid/waydroid.cfg ]; then
         grep -q '^\[properties\]' /var/lib/waydroid/waydroid.cfg || echo '[properties]' >> /var/lib/waydroid/waydroid.cfg
+        # Each Android app its own desktop window (no Android home screen).
+        grep -q '^persist.waydroid.multi_windows' /var/lib/waydroid/waydroid.cfg ||
+            sed -i '/^\[properties\]/a persist.waydroid.multi_windows = true' /var/lib/waydroid/waydroid.cfg
     fi
 }
 
@@ -88,8 +107,35 @@ stop)
 status)
     if ! set_up; then echo not-set-up; elif running; then echo running; else echo stopped; fi
     ;;
+variant)
+    # waydroid.cfg names the system image's OTA channel: .../system/lineage/waydroid_x86_64/GAPPS
+    if grep -q '^system_ota *=.*GAPPS' /var/lib/waydroid/waydroid.cfg 2>/dev/null; then echo GAPPS
+    else echo VANILLA; fi
+    ;;
+switch)
+    case "$2" in VANILLA|GAPPS) ;; *) echo "switch VANILLA|GAPPS" >&2; exit 1 ;; esac
+    set_up || { echo "not set up" >&2; exit 2; }
+    waydroid container stop >> "$LOG" 2>&1
+    running && kill "$(cat "$PIDFILE")" 2>/dev/null
+    rm -f "$PIDFILE"
+    # Preinstalled images (a test disk) would be used again: only downloads switch.
+    setup_binder
+    waydroid init -s "$2" -f 2>&1
+    rc=$?
+    adapt_config
+    exit $rc
+    ;;
+android-id)
+    lxc-info -P /var/lib/waydroid/lxc -n waydroid 2>/dev/null | grep -q RUNNING || exit 1
+    # gservices.db holds it once Google services have started once.
+    timeout 30 lxc-attach -P /var/lib/waydroid/lxc -n waydroid --clear-env -- /system/bin/sh -c \
+        'export ANDROID_DATA=/data ANDROID_RUNTIME_ROOT=/apex/com.android.runtime ANDROID_TZDATA_ROOT=/apex/com.android.tzdata ANDROID_I18N_ROOT=/apex/com.android.i18n
+         sqlite3 /data/data/com.google.android.gsf/databases/gservices.db "select value from main where name = \"android_id\";"' 2>/dev/null |
+        tr -dc '0-9'
+    echo
+    ;;
 *)
-    echo "usage: $0 init|start|stop|status" >&2
+    echo "usage: $0 init|start|stop|status|variant|switch VANILLA|GAPPS|android-id" >&2
     exit 1
     ;;
 esac

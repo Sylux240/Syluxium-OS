@@ -19,6 +19,10 @@
 #                                 GBM/surfaceless/device), X server glamor/DRI3,
 #                                 glxinfo, vulkaninfo --summary, vainfo. GPU_OUT=<file>
 #                                 writes it there (no stick needed: test aids)
+#   syluxium-diag android         android.txt: Android apps (Waydroid) - set up or not,
+#                                 image versions, container and session state, GPU
+#                                 mode, binder devices, Waydroid's and the container's
+#                                 logs, Android's boot state and its last fatal log lines
 #   syluxium-diag xwatch          GPU Test entry: X server start milestones and logs
 #                                 to the stick every 2 s for 3 minutes (a machine that
 #                                 hangs as X starts still leaves its last state)
@@ -92,6 +96,51 @@ print(" ".join(sorted(l[i].decode() for i in range(n.value))) if l else "no disp
     fi
     echo; echo "== Firmware files the kernel asked for"
     dmesg 2>/dev/null | grep -i -E "firmware|\.bin" | grep -i -E "amdgpu|nouveau|nvidia|i915|radeon|direct firmware|failed to load|loading" | tail -60
+    echo "== end at $(up) s"
+}
+
+# Android apps (Waydroid): see "android" above.
+android_report() {
+    echo "== Android report at $(up) s as $(id -un)"
+    if [ ! -f /var/lib/waydroid/waydroid.cfg ]; then
+        echo "Android is not set up (no /var/lib/waydroid/waydroid.cfg)"
+        ls -la /etc/waydroid-extra/images /var/lib/waydroid/images 2>&1
+        return
+    fi
+    echo "-- waydroid.cfg"; cat /var/lib/waydroid/waydroid.cfg
+    echo; echo "-- images"
+    ls -la /etc/waydroid-extra/images /var/lib/waydroid/images 2>/dev/null
+    grep -h "ro.build.display.id\|ro.build.version.release=\|ro.lineage.version" \
+        /var/lib/waydroid/rootfs/system/build.prop 2>/dev/null
+    echo; echo "-- state"
+    /usr/local/sbin/syluxium-android-container status 2>&1
+    waydroid status 2>&1
+    lxc-info -P /var/lib/waydroid/lxc -n waydroid 2>&1 | head -8
+    echo; echo "-- GPU mode (waydroid_base.prop: gralloc/EGL; gbm = GPU, default/swiftshader = software)"
+    grep -h "gralloc\|egl\|vulkan\|ro.hardware\|drm" /var/lib/waydroid/waydroid_base.prop 2>/dev/null
+    ls -l /dev/dri 2>&1
+    echo; echo "-- binder"
+    ls -l /dev/binderfs /dev/anbox-* 2>&1
+    grep binder /proc/mounts
+    echo; echo "-- Android (inside the container)"
+    if [ "$(id -u)" = 0 ] && lxc-info -P /var/lib/waydroid/lxc -n waydroid 2>/dev/null | grep -q RUNNING; then
+        a() { timeout 20 lxc-attach -P /var/lib/waydroid/lxc -n waydroid --clear-env -- "$@" 2>&1; }
+        echo "sys.boot_completed=$(a /system/bin/getprop sys.boot_completed)"
+        echo "persist.waydroid.multi_windows=$(a /system/bin/getprop persist.waydroid.multi_windows)"
+        echo "ro.hardware.gralloc=$(a /system/bin/getprop ro.hardware.gralloc) ro.hardware.egl=$(a /system/bin/getprop ro.hardware.egl)"
+        echo "-- processes"; a /system/bin/ps -A -o PID,NAME | grep -v "\[" | head -100
+        echo "-- last fatal/error lines (logcat)"
+        a /system/bin/logcat -d -b all 2>/dev/null | grep -v "runtime.cc:675\|option\[" | grep " [EF] " | tail -80
+    else
+        echo "(not running, or not root)"
+    fi
+    echo; echo "-- Waydroid log (last 150 lines)"
+    tail -150 /var/lib/waydroid/waydroid.log 2>&1
+    echo; echo "-- container log"
+    tail -60 /var/log/waydroid-container.log 2>&1
+    for u in /home/*/.cache/syluxium-android.log; do
+        [ -f "$u" ] && { echo; echo "-- $u (last 80 lines)"; tail -80 "$u"; }
+    done
     echo "== end at $(up) s"
 }
 
@@ -195,6 +244,8 @@ logs)
     for h in /run/user/*/syluxium-wayland-host.log; do
         [ -f "$h" ] && tail -c 262144 "$h" > "$L/wayland-host-$(basename "$(dirname "$h")").log" 2>/dev/null
     done
+    # Android apps, when they have been set up
+    [ -f /var/lib/waydroid/waydroid.cfg ] && android_report > "$L/android.txt" 2>&1
     ;;
 mark)
     # One file for root and the desktop user alike (in /run: both can write
@@ -223,6 +274,10 @@ gpu-clients)
     sync
     # The whole stack as the session sees it (gpu-session.txt).
     gpu_report > "$L/gpu-session.txt" 2>&1
+    sync
+    ;;
+android)
+    android_report > "$L/android.txt" 2>&1
     sync
     ;;
 gpu)
