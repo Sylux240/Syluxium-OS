@@ -48,6 +48,7 @@
 #include <xcb/randr.h>
 #include <xkbcommon/xkbcommon.h>
 #include <drm_fourcc.h>
+#include <xf86drm.h>
 #include <linux/input-event-codes.h>
 
 #include <wayland-server-core.h>
@@ -204,6 +205,10 @@ static struct {
 	struct wl_list views;
 	struct wl_list pointers;
 	struct view *pending_view;      /* the view whose output is being created */
+	bool test_output;               /* the start-up check's output is being created */
+	struct wlr_output *test_out;
+	bool test_presented;
+	char gpu_desc[160];             /* the rendering path, for the diagnostics */
 	struct view *pointer_view;      /* under the pointer */
 	struct view *focused;           /* has the X keyboard focus */
 	const char *socket;
@@ -846,9 +851,20 @@ static void output_destroy(struct wl_listener *l, void *data) {
 	}
 }
 
+static void test_present(struct wl_listener *l, void *data) {
+	S.test_presented = true;
+}
+static struct wl_listener l_test_present = { .notify = test_present };
+
 static void server_new_output(struct wl_listener *l, void *data) {
 	struct wlr_output *out = data;
 	struct view *v = S.pending_view;
+	if (S.test_output && wlr_output_is_x11(out)) {
+		S.test_output = false;
+		wlr_output_init_render(out, S.allocator, S.renderer);
+		S.test_out = out;
+		return;
+	}
 	if (!v || !wlr_output_is_x11(out))
 		return;
 	S.pending_view = NULL;
@@ -1053,8 +1069,11 @@ static void handle_map(struct wl_listener *l, void *data) {
 	if (v->kind == VIEW_TOPLEVEL) {
 		S.hosted++;
 		char *id = view_app_id(v);
-		diag("hosted: %s (pid %d) \"%s\" %dx%d, %s frame", id, (int)view_pid(v),
-			v->toplevel->title ? v->toplevel->title : "", v->w, v->h, v->csd ? "its own" : "xfwm4");
+		struct wlr_dmabuf_attributes dmabuf;
+		bool gpu = v->xdg->surface->buffer && wlr_buffer_get_dmabuf(&v->xdg->surface->buffer->base, &dmabuf);
+		diag("hosted: %s (pid %d) \"%s\" %dx%d, %s frame, draws into %s", id, (int)view_pid(v),
+			v->toplevel->title ? v->toplevel->title : "", v->w, v->h, v->csd ? "its own" : "xfwm4",
+			gpu ? "dma-bufs (GPU)" : "shared memory");
 		free(id);
 	}
 }
@@ -2968,6 +2987,79 @@ static struct wl_listener l_new_output = { .notify = server_new_output }, l_new_
 	l_new_deco = { .notify = new_xdg_decoration }, l_new_kde = { .notify = new_kde_decoration },
 	l_activate = { .notify = request_activate };
 
+/* How windows are drawn, in words for wayland-host.txt: GPU (GLES2 on a
+ * render node, dma-bufs to the X server through DRI3, programs offered
+ * linux-dmabuf) or software (pixman, MIT-SHM). */
+static void describe_gpu_path(void) {
+	int bfd = wlr_backend_get_drm_fd(S.backend);
+	const char *forced = getenv("WLR_RENDERER");
+	if (wlr_renderer_is_gles2(S.renderer)) {
+		int fd = wlr_renderer_get_drm_fd(S.renderer);
+		char *node = fd >= 0 ? drmGetDeviceNameFromFd2(fd) : NULL;
+		drmVersion *ver = fd >= 0 ? drmGetVersion(fd) : NULL;
+		bool dmabuf = wlr_renderer_get_texture_formats(S.renderer, WLR_BUFFER_CAP_DMABUF) != NULL;
+		snprintf(S.gpu_desc, sizeof(S.gpu_desc), "GPU rendering (GLES2 on %s, driver %s), %s to the X server, "
+			"programs %s dma-bufs", node ? node : "?", ver && ver->name ? ver->name : "?",
+			bfd >= 0 ? "dma-bufs (DRI3)" : "shared memory", dmabuf ? "can draw into" : "can't use");
+		free(node);
+		if (ver)
+			drmFreeVersion(ver);
+	} else {
+		snprintf(S.gpu_desc, sizeof(S.gpu_desc), "software rendering (pixman), shared memory (MIT-SHM) to the X "
+			"server (%s)", forced && *forced ? "forced" : bfd >= 0 ? "no OpenGL on the GPU" :
+			"the X server has no DRI3 / GPU");
+	}
+}
+
+/* Before programs connect: one frame through the chosen path into a
+ * window nobody sees, and the X server must say it was shown (Present).
+ * A GPU path that fails here (DRI3 import, modifiers, a broken driver)
+ * would leave every window black. */
+static bool gpu_check(void) {
+	if (wlr_renderer_is_pixman(S.renderer) || getenv("SYLUXIUM_WAYLAND_HOST_NOCHECK"))
+		return true;
+	xcb_window_t hidden = xcb_generate_id(S.x);
+	xcb_create_window(S.x, XCB_COPY_FROM_PARENT, hidden, S.root, -200, -200, 64, 64, 0,
+		XCB_WINDOW_CLASS_INPUT_OUTPUT, S.screen->root_visual, 0, NULL);
+	xcb_flush(S.x);
+	S.test_output = true;
+	struct wlr_output *out = wlr_x11_output_create(S.backend);
+	S.test_output = false;
+	if (!out || out != S.test_out) {
+		xcb_destroy_window(S.x, hidden);
+		return false;
+	}
+	xcb_window_t child = ((struct x11_output_prefix *)out)->win;
+	bool ok = child_window_ok(child);
+	if (ok) {
+		xcb_reparent_window(S.x, child, hidden, 0, 0);
+		free(xcb_get_input_focus_reply(S.x, xcb_get_input_focus(S.x), NULL));
+		struct wlr_scene *scene = wlr_scene_create();
+		const float c[4] = { 0.1f, 0.2f, 0.4f, 1 };
+		wlr_scene_rect_create(&scene->tree, 64, 64, c);
+		struct wlr_scene_output *so = wlr_scene_output_create(scene, out);
+		wl_signal_add(&out->events.present, &l_test_present);
+		S.test_presented = false;
+		struct wlr_output_state st;
+		wlr_output_state_init(&st);
+		wlr_output_state_set_enabled(&st, true);
+		wlr_output_state_set_custom_mode(&st, 64, 64, 0);
+		ok = wlr_scene_output_build_state(so, &st, NULL) && wlr_output_commit_state(out, &st);
+		wlr_output_state_finish(&st);
+		for (int i = 0; ok && !S.test_presented && i < 40; i++)
+			wl_event_loop_dispatch(S.loop, 50);
+		ok = ok && S.test_presented;
+		wl_list_remove(&l_test_present.link);
+		wlr_scene_output_destroy(so);
+		wlr_scene_node_destroy(&scene->tree.node);
+	}
+	wlr_output_destroy(out);
+	S.test_out = NULL;
+	xcb_destroy_window(S.x, hidden);
+	xcb_flush(S.x);
+	return ok;
+}
+
 static int on_signal(int sig, void *data) {
 	wl_display_terminate(S.display);
 	return 0;
@@ -2997,6 +3089,11 @@ int main(int argc, char **argv) {
 		diag("ERROR: cannot connect to the X display %s", dpy);
 		return 1;
 	}
+	/* SYLUXIUM_WAYLAND_HOST_RENDERER=pixman|gles2 (the starter sets it for
+	 * the software fallback and the whostsoft boot option) */
+	const char *want = getenv("SYLUXIUM_WAYLAND_HOST_RENDERER");
+	if (want && *want)
+		setenv("WLR_RENDERER", want, 1);
 	S.display = wl_display_create();
 	S.loop = wl_display_get_event_loop(S.display);
 	S.backend = wlr_x11_backend_create(S.loop, NULL);
@@ -3016,6 +3113,7 @@ int main(int argc, char **argv) {
 		diag("ERROR: no buffer allocator");
 		return 1;
 	}
+	describe_gpu_path();
 	wl_signal_add(&S.backend->events.new_output, &l_new_output);
 	wl_signal_add(&S.backend->events.new_input, &l_new_input);
 
@@ -3090,15 +3188,19 @@ int main(int argc, char **argv) {
 	}
 	x_after_blocking();
 
+	if (!gpu_check()) {
+		diag("ERROR: drawing through %s failed (no frame shown in a test window); exiting so the starter "
+			"runs the host in software (pixman)", S.gpu_desc);
+		return 3;
+	}
+
 	if (wl_display_add_socket(S.display, S.socket) != 0) {
 		diag("socket %s is in use (another host is running?)", S.socket);
 		return 2;
 	}
-	const char *rend = wlr_renderer_is_pixman(S.renderer) ? "software (pixman)" :
-		wlr_renderer_is_gles2(S.renderer) ? "GPU (GLES2)" : "other";
-	diag("started on %s as WAYLAND_DISPLAY=%s: %s rendering, %s buffers, screen %dx%d at %.1f Hz, cursor theme %s %d",
-		dpy, S.socket, rend, (S.backend->impl && wlr_backend_get_drm_fd(S.backend) >= 0) ? "dma-buf (DRI3)" : "MIT-SHM",
-		S.screen->width_in_pixels, S.screen->height_in_pixels, 1e9 / S.frame_ns, theme[0] ? theme : "default", csize);
+	diag("started on %s as WAYLAND_DISPLAY=%s: %s; screen %dx%d at %.1f Hz, cursor theme %s %d",
+		dpy, S.socket, S.gpu_desc, S.screen->width_in_pixels, S.screen->height_in_pixels, 1e9 / S.frame_ns,
+		theme[0] ? theme : "default", csize);
 	/* tell the starter we are ready */
 	if (getenv("SYLUXIUM_WAYLAND_HOST_READY_FD")) {
 		int fd = atoi(getenv("SYLUXIUM_WAYLAND_HOST_READY_FD"));
