@@ -236,7 +236,9 @@ Legend: ✅ done · 🟡 partly done · ⬜ to do
      ext4 + Limine (UEFI/BIOS)
 - ✅ App Store: Debian and desktop packages by category, search, featured programs, install/remove
      with dependencies (apt), updates; double-click a .deb to install it; optional Craft apps
-     (LightCraft, PhotoCraft, VectorCraft, FilmCraft and 12 more, from their makers' .deb releases)
+     (LightCraft, PhotoCraft, VectorCraft, FilmCraft and 12 more, from their makers' .deb releases);
+     asks whether to put a desktop icon for a new program; Settings: software sources on/off, add a
+     repository (with its signing key) or remove one
 - ✅ Packages' install scripts run (real dpkg database; apt works)
 - ✅ Accounts: graphical login, User Accounts (add/remove users, passwords), administrator prompts
 - 🟡 Security: NX, kernel W^X, guard pages, per-user permissions done; ASLR, SMEP/SMAP to do

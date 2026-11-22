@@ -6,6 +6,7 @@ install updates, and install downloaded .deb packages.
     syluxium-appstore                    the store
     syluxium-appstore --updates          the store, on the Updates page
     syluxium-appstore --search TEXT      the store, searching for TEXT
+    syluxium-appstore --settings         the store with its Settings (software sources) open
     syluxium-appstore --deb FILE.deb     the package installer for one file
                                          (what opening a .deb does)
 """
@@ -442,6 +443,438 @@ def confirm_plan(parent, name, pkg, res, catalog=None):
     return r == Gtk.ResponseType.OK
 
 
+# ---- desktop icons for newly installed programs ----
+SETTINGS = os.path.expanduser("~/.config/syluxium-appstore.conf")
+
+
+def setting(key, default=""):
+    try:
+        with open(SETTINGS) as f:
+            for line in f:
+                k, _, v = line.strip().partition("=")
+                if k == key:
+                    return v
+    except OSError:
+        pass
+    return default
+
+
+def set_setting(key, value):
+    lines = []
+    try:
+        with open(SETTINGS) as f:
+            lines = [l for l in f.read().splitlines() if not l.startswith(key + "=")]
+    except OSError:
+        pass
+    lines.append(f"{key}={value}")
+    os.makedirs(os.path.dirname(SETTINGS), exist_ok=True)
+    with open(SETTINGS, "w") as f:
+        f.write("\n".join(lines) + "\n")
+
+
+def ask_desktop_icon(parent, name):
+    """Before installing: put an icon on the desktop? (Remembered when asked to.)"""
+    saved = setting("desktop-icon")
+    if saved in ("yes", "no"):
+        return saved == "yes"
+    d = Gtk.MessageDialog(transient_for=parent, modal=True, message_type=Gtk.MessageType.QUESTION,
+                          text=f"Put an icon for {name} on the desktop?")
+    d.format_secondary_text("It is in the Start menu either way.")
+    remember = Gtk.CheckButton(label="Remember my choice (change it in Settings)")
+    remember.set_margin_start(12)
+    d.get_message_area().pack_start(remember, False, False, 0)
+    d.add_button("_No", Gtk.ResponseType.NO)
+    d.add_button("_Yes, add an icon", Gtk.ResponseType.YES)
+    d.set_default_response(Gtk.ResponseType.YES)
+    d.show_all()
+    r = d.run()
+    keep = remember.get_active()
+    d.destroy()
+    if r not in (Gtk.ResponseType.YES, Gtk.ResponseType.NO):
+        return None  # closed: cancel the installation
+    yes = r == Gtk.ResponseType.YES
+    if keep:
+        set_setting("desktop-icon", "yes" if yes else "no")
+    return yes
+
+
+def package_launchers(pkg):
+    """The visible start-menu entries a package installed (the Wayland-host
+    copy in /usr/local/share/applications wins over the original)."""
+    try:
+        files = subprocess.run(["dpkg", "-L", pkg], capture_output=True, text=True).stdout.split()
+    except OSError:
+        return []
+    out = []
+    for f in files:
+        if not (f.startswith("/usr/share/applications/") and f.endswith(".desktop")):
+            continue
+        local = "/usr/local/share/applications/" + os.path.basename(f)
+        path = local if os.path.exists(local) else f
+        try:
+            text = open(path, encoding="utf-8", errors="replace").read()
+        except OSError:
+            continue
+        if re.search(r"^(NoDisplay|Hidden)=true", text, re.M) or not re.search(r"^Type=Application", text, re.M):
+            continue
+        out.append(path)
+    return out
+
+
+def package_commands(pkg):
+    """Programs a package put on the PATH (for packages without a menu entry)."""
+    try:
+        files = subprocess.run(["dpkg", "-L", pkg], capture_output=True, text=True).stdout.split()
+    except OSError:
+        return []
+    return [os.path.basename(f) for f in files
+            if re.match(r"^/usr/(games|bin)/[^/]+$", f) and os.access(f, os.X_OK)]
+
+
+def add_desktop_icons(launchers):
+    desk = subprocess.run(["xdg-user-dir", "DESKTOP"], capture_output=True, text=True).stdout.strip() \
+        or os.path.expanduser("~/Desktop")
+    os.makedirs(desk, exist_ok=True)
+    added = 0
+    for src in launchers:
+        dst = os.path.join(desk, os.path.basename(src))
+        try:
+            with open(src, "rb") as f:
+                data = f.read()
+            with open(dst, "wb") as f:
+                f.write(data)
+            os.chmod(dst, 0o755)
+            # Xfce 4.18+ only starts launchers whose checksum is recorded (trusted).
+            import hashlib
+            subprocess.run(["gio", "set", "-t", "string", dst, "metadata::xfce-exe-checksum",
+                            hashlib.sha256(data).hexdigest()], capture_output=True)
+            added += 1
+        except OSError:
+            pass
+    return added
+
+
+# ---- software sources (apt repositories) ----
+SOURCES_DIR = "/etc/apt/sources.list.d"
+USER_PREFIX = "syluxium-added-"   # repositories added from the App Store (removable)
+
+
+class Source:
+    """One repository: a stanza of a .sources file, or one line of a .list file."""
+    def __init__(self, path, index, kind, fields, enabled):
+        self.path, self.index, self.kind, self.fields, self.enabled = path, index, kind, fields, enabled
+
+    @property
+    def removable(self):
+        return os.path.basename(self.path).startswith(USER_PREFIX)
+
+    def title(self):
+        uri = self.fields.get("URIs", "")
+        return re.sub(r"^https?://", "", uri).rstrip("/")
+
+    def subtitle(self):
+        f = self.fields
+        parts = [f.get("Suites", ""), f.get("Components", "")]
+        sig = "checked with " + os.path.basename(f["Signed-By"]) if f.get("Signed-By") else \
+            "NOT CHECKED (trusted=yes)" if f.get("Trusted", "").lower() == "yes" else \
+            "checked with the system's keys"
+        return " · ".join(p for p in parts if p) + " · signature " + sig
+
+
+def _stanzas(text):
+    """deb822 text -> list of blocks (lists of lines), blank lines separate them."""
+    blocks, cur = [], []
+    for line in text.splitlines():
+        if line.strip() == "":
+            if cur:
+                blocks.append(cur)
+                cur = []
+        else:
+            cur.append(line)
+    if cur:
+        blocks.append(cur)
+    return blocks
+
+
+def _fields(block):
+    f, key = {}, None
+    for line in block:
+        if line.startswith("#"):
+            continue
+        if line[:1] in (" ", "\t") and key:
+            f[key] += " " + line.strip()
+            continue
+        key, _, val = line.partition(":")
+        key = key.strip()
+        f[key] = val.strip()
+    return f
+
+
+def read_sources():
+    out = []
+    for path in sorted(glob.glob(os.path.join(SOURCES_DIR, "*.sources"))):
+        try:
+            text = open(path).read()
+        except OSError:
+            continue
+        for i, block in enumerate(_stanzas(text)):
+            f = _fields(block)
+            if "URIs" not in f:
+                continue
+            out.append(Source(path, i, "deb822", f, f.get("Enabled", "yes").lower() != "no"))
+    for path in ["/etc/apt/sources.list"] + sorted(glob.glob(os.path.join(SOURCES_DIR, "*.list"))):
+        try:
+            lines = open(path).read().splitlines()
+        except OSError:
+            continue
+        for i, line in enumerate(lines):
+            m = re.match(r"^\s*(#\s*)?(deb|deb-src)\s+(\[[^\]]*\]\s+)?(\S+)\s+(\S+)\s*(.*)$", line)
+            if not m or m.group(2) != "deb":
+                continue
+            opts = m.group(3) or ""
+            f = {"URIs": m.group(4), "Suites": m.group(5), "Components": m.group(6).strip()}
+            sb = re.search(r"signed-by=(\S+?)[\s\]]", opts)
+            if sb:
+                f["Signed-By"] = sb.group(1)
+            if re.search(r"trusted=yes", opts):
+                f["Trusted"] = "yes"
+            out.append(Source(path, i, "line", f, not m.group(1)))
+    return out
+
+
+def toggled_text(src, enable):
+    """The source file's new text with `src` switched on or off."""
+    text = open(src.path).read()
+    if src.kind == "line":
+        lines = text.splitlines()
+        line = lines[src.index]
+        lines[src.index] = re.sub(r"^\s*#\s*", "", line) if enable else "# " + line
+        return "\n".join(lines) + "\n"
+    blocks = _stanzas(text)
+    block = [l for l in blocks[src.index] if not re.match(r"^Enabled\s*:", l, re.I)]
+    if not enable:
+        # After the leading comment lines, so the comment stays on top.
+        at = next((i for i, l in enumerate(block) if not l.startswith("#")), len(block))
+        block.insert(at, "Enabled: no")
+    blocks[src.index] = block
+    return "\n\n".join("\n".join(b) for b in blocks) + "\n"
+
+
+def parse_repo_line(line):
+    """'deb [signed-by=...] URL suite comp...' or 'URL suite comp...' -> fields, or None."""
+    line = line.strip()
+    m = re.match(r"^(?:deb\s+)?(\[[^\]]*\]\s+)?((?:https?|ftp|file)://\S+)\s+(\S+)\s*(.*)$", line)
+    if not m:
+        return None
+    f = {"URIs": m.group(2), "Suites": m.group(3)}
+    if m.group(4).strip():
+        f["Components"] = m.group(4).strip()
+    opts = m.group(1) or ""
+    sb = re.search(r"signed-by=(\S+?)[\s\]]", opts)
+    if sb:
+        f["Signed-By"] = sb.group(1)
+    return f
+
+
+class SourcesDialog:
+    """Settings: repositories on/off, add and remove repositories, and the
+    App Store's own preferences."""
+    def __init__(self, store):
+        self.store, self.admin, self.changed = store, store.admin, False
+        self.d = Gtk.Dialog(title="App Store Settings", transient_for=store.win, modal=True)
+        self.d.set_default_size(680, 480)
+        self.d.add_button("_Close", Gtk.ResponseType.CLOSE)
+        area = self.d.get_content_area()
+        area.set_spacing(8)
+        for m in ("set_margin_start", "set_margin_end", "set_margin_top"):
+            getattr(area, m)(12)
+
+        area.pack_start(label("Software sources", bold=True, size="large"), False, False, 0)
+        area.pack_start(label("The repositories the App Store installs from. Untick one to stop using it; "
+                              "programs already installed from it stay.", wrap=True), False, False, 0)
+        self.model = Gtk.ListStore(bool, str, object, bool)  # enabled, markup, Source, editable
+        view = Gtk.TreeView(model=self.model, headers_visible=False)
+        tog = Gtk.CellRendererToggle()
+        tog.connect("toggled", self.on_toggle)
+        view.append_column(Gtk.TreeViewColumn("", tog, active=0, activatable=3))
+        txt = Gtk.CellRendererText(ypad=4)
+        txt.set_property("wrap-width", 560)
+        view.append_column(Gtk.TreeViewColumn("", txt, markup=1))
+        self.view = view
+        sw = Gtk.ScrolledWindow(shadow_type=Gtk.ShadowType.IN)
+        sw.set_vexpand(True)
+        sw.add(view)
+        area.pack_start(sw, True, True, 0)
+        row = Gtk.Box(spacing=8)
+        add = Gtk.Button(label="Add repository...")
+        add.connect("clicked", lambda *_: self.add())
+        self.remove_btn = Gtk.Button(label="Remove")
+        self.remove_btn.connect("clicked", lambda *_: self.remove())
+        self.remove_btn.set_tooltip_text("Only repositories added here can be removed; the built-in ones "
+                                         "can be switched off")
+        row.pack_start(add, False, False, 0)
+        row.pack_start(self.remove_btn, False, False, 0)
+        area.pack_start(row, False, False, 0)
+        view.get_selection().connect("changed", lambda *_: self.update_buttons())
+
+        area.pack_start(Gtk.Separator(), False, False, 6)
+        area.pack_start(label("When installing a program", bold=True, size="large"), False, False, 0)
+        self.icon_combo = Gtk.ComboBoxText()
+        for key, text in (("ask", "Ask whether to put an icon on the desktop"),
+                          ("yes", "Always put an icon on the desktop"),
+                          ("no", "Never put an icon on the desktop")):
+            self.icon_combo.append(key, text)
+        self.icon_combo.set_active_id(setting("desktop-icon", "ask") or "ask")
+        self.icon_combo.connect("changed", lambda c: set_setting("desktop-icon", c.get_active_id()))
+        area.pack_start(self.icon_combo, False, False, 0)
+
+        self.fill()
+        self.d.show_all()
+        self.update_buttons()
+        self.d.run()
+        self.d.destroy()
+        if self.changed and message(store.win, "Download the catalog from the changed sources now?",
+                                    "Programs from new sources appear after the catalog is downloaded.",
+                                    Gtk.MessageType.QUESTION, Gtk.ButtonsType.YES_NO) == Gtk.ResponseType.YES:
+            store.refresh_catalog()
+
+    def fill(self):
+        self.model.clear()
+        for s in read_sources():
+            markup = f"<b>{GLib.markup_escape_text(s.title())}</b>\n<small>" \
+                     f"{GLib.markup_escape_text(s.subtitle())}</small>"
+            self.model.append([s.enabled, markup, s, True])
+
+    def update_buttons(self):
+        model, it = self.view.get_selection().get_selected()
+        self.remove_btn.set_sensitive(bool(it) and model[it][2].removable)
+
+    def write_root(self, path, text, mode="644"):
+        """Write a system file as administrator (a temporary copy, then install)."""
+        if not self.admin.ready():
+            return False
+        tmp = os.path.join(os.path.expanduser("~/.cache"), "syluxium-appstore-src.tmp")
+        os.makedirs(os.path.dirname(tmp), exist_ok=True)
+        with open(tmp, "w") as f:
+            f.write(text)
+        p = self.admin.popen(["install", "-D", "-m", mode, "-o", "root", "-g", "root", tmp, path])
+        out = p.communicate()[0]
+        os.unlink(tmp)
+        if p.returncode != 0:
+            message(self.d, "The change could not be saved.", out or "", Gtk.MessageType.ERROR)
+            return False
+        return True
+
+    def on_toggle(self, cell, path):
+        row = self.model[path]
+        src, enable = row[2], not row[0]
+        if not enable and sum(1 for r in self.model if r[0]) == 1:
+            message(self.d, "At least one source has to stay on.", "", Gtk.MessageType.WARNING)
+            return
+        if self.write_root(src.path, toggled_text(src, enable)):
+            self.changed = True
+            self.fill()
+
+    def remove(self):
+        model, it = self.view.get_selection().get_selected()
+        if not it or not model[it][2].removable:
+            return
+        src = model[it][2]
+        if message(self.d, f"Remove {src.title()}?", "Programs installed from it stay installed but get no "
+                   "more updates from it.", Gtk.MessageType.QUESTION, Gtk.ButtonsType.YES_NO) != \
+                Gtk.ResponseType.YES:
+            return
+        if not self.admin.ready():
+            return
+        key = src.fields.get("Signed-By", "")
+        cmd = ["rm", "-f", src.path] + ([key] if key.startswith("/etc/apt/keyrings/" + USER_PREFIX) else [])
+        p = self.admin.popen(cmd)
+        p.communicate()
+        self.changed = True
+        self.fill()
+
+    def add(self):
+        d = Gtk.Dialog(title="Add Repository", transient_for=self.d, modal=True)
+        d.add_buttons("_Cancel", Gtk.ResponseType.CANCEL, "_Add", Gtk.ResponseType.OK)
+        d.set_default_response(Gtk.ResponseType.OK)
+        box = d.get_content_area()
+        box.set_spacing(6)
+        for m in ("set_margin_start", "set_margin_end", "set_margin_top", "set_margin_bottom"):
+            getattr(box, m)(12)
+        box.pack_start(label("The repository line from the software's download page, for example:\n"
+                             "<tt>deb https://example.org/debian stable main</tt>", wrap=True), False, False, 0)
+        box.get_children()[-1].set_use_markup(True)
+        line = Gtk.Entry(activates_default=True, placeholder_text="deb https://... suite components")
+        line.set_width_chars(60)
+        box.pack_start(line, False, False, 0)
+        box.pack_start(label("Signing key (recommended): the address of the repository's key file "
+                             "(.asc or .gpg). Without one, its packages can't be checked.", wrap=True),
+                       False, False, 0)
+        key = Gtk.Entry(activates_default=True, placeholder_text="https://.../key.asc  (optional)")
+        box.pack_start(key, False, False, 0)
+        d.show_all()
+        while True:
+            if d.run() != Gtk.ResponseType.OK:
+                d.destroy()
+                return
+            f = parse_repo_line(line.get_text())
+            if not f:
+                message(d, "That is not a repository line.", "It looks like: deb https://example.org/debian "
+                        "stable main", Gtk.MessageType.WARNING)
+                continue
+            if self.save_new(d, f, key.get_text().strip()):
+                break
+        d.destroy()
+
+    def save_new(self, parent, f, key_url):
+        host = re.sub(r"^\w+://", "", f["URIs"]).split("/")[0]
+        slug = re.sub(r"[^a-z0-9]+", "-", (host + "-" + f["Suites"]).lower()).strip("-")[:60]
+        name = USER_PREFIX + slug
+        path = os.path.join(SOURCES_DIR, name + ".sources")
+        if os.path.exists(path):
+            message(parent, "That repository is already in the list.", "", Gtk.MessageType.INFO)
+            return True
+        if key_url and "Signed-By" not in f:
+            import urllib.request
+            try:
+                req = urllib.request.Request(key_url, headers={"User-Agent": "Syluxium-AppStore"})
+                data = urllib.request.urlopen(req, timeout=30).read(1 << 20)
+            except Exception as e:  # noqa: BLE001
+                message(parent, "The signing key could not be downloaded.", str(e), Gtk.MessageType.ERROR)
+                return False
+            armored = data.lstrip().startswith(b"-----BEGIN PGP PUBLIC KEY BLOCK-----")
+            if not armored and data[:1] not in (b"\x99", b"\x98", b"\xc6"):
+                message(parent, "That file is not a signing key.", "Use the address of the repository's "
+                        ".asc or .gpg key file.", Gtk.MessageType.ERROR)
+                return False
+            keypath = f"/etc/apt/keyrings/{name}.{'asc' if armored else 'gpg'}"
+            tmp = os.path.join(os.path.expanduser("~/.cache"), "syluxium-appstore-key.tmp")
+            with open(tmp, "wb") as fh:
+                fh.write(data)
+            if not self.admin.ready():
+                return False
+            p = self.admin.popen(["install", "-D", "-m", "644", "-o", "root", "-g", "root", tmp, keypath])
+            p.communicate()
+            os.unlink(tmp)
+            if p.returncode != 0:
+                message(parent, "The signing key could not be saved.", "", Gtk.MessageType.ERROR)
+                return False
+            f["Signed-By"] = keypath
+        elif "Signed-By" not in f:
+            if message(parent, "Add it without a signing key?",
+                       "Packages from it are then only accepted if they are signed by a key already on this "
+                       "computer; otherwise refreshing the catalog reports it as not signed.",
+                       Gtk.MessageType.QUESTION, Gtk.ButtonsType.YES_NO) != Gtk.ResponseType.YES:
+                return False
+        text = "# Added from the App Store.\nTypes: deb\n" + "".join(
+            f"{k}: {f[k]}\n" for k in ("URIs", "Suites", "Components", "Signed-By") if f.get(k))
+        if self.write_root(path, text):
+            self.changed = True
+            self.fill()
+            return True
+        return False
+
+
 # ---- running apt with a progress bar ----
 class Runner:
     """apt as a child process read from the GTK main loop (no worker thread):
@@ -845,6 +1278,11 @@ class Store:
         refresh.set_tooltip_text("Download the newest list of programs and updates")
         refresh.connect("clicked", lambda *_: self.refresh_catalog())
         box.pack_end(refresh, False, False, 0)
+        settings = Gtk.Button.new_from_icon_name("preferences-system", Gtk.IconSize.BUTTON)
+        settings.set_valign(Gtk.Align.CENTER)
+        settings.set_tooltip_text("Settings: software sources (repositories) and desktop icons")
+        settings.connect("clicked", lambda *_: not self.runner.busy and SourcesDialog(self))
+        box.pack_end(settings, False, False, 0)
         ev.add(box)
         return ev
 
@@ -1200,7 +1638,7 @@ class Store:
         self.d_remove.set_sensitive(not on and not (self.current and PROTECTED.match(self.current)))
         self.update_all.set_sensitive(not on)
 
-    def after(self, ok, out, success, pkg=None):
+    def after(self, ok, out, success, pkg=None, desktop_icon=False):
         self.busy(False)
         if not ok and pkg and "RECOVERY: ok" in out:
             # The repair finished the job (a setup script that failed the
@@ -1211,6 +1649,8 @@ class Store:
                 self.log_note(f"{display_name(pkg)}: finished by the repair step.\n")
         if ok:
             self.status.set_text(success)
+            if pkg and success.endswith("was installed."):
+                self.after_install(pkg, desktop_icon)
         else:
             self.status.set_text("That did not work." + (" Nothing was left half installed." if "RECOVERY: ok" in out
                                                           else ""))
@@ -1226,6 +1666,25 @@ class Store:
             elif pkg:
                 self.fill(display_name(pkg), [pkg])
         self.reload(again)
+
+    def after_install(self, pkg, desktop_icon):
+        """Desktop icon if wanted; and say where to find a program that has
+        no Start menu entry (many command-line programs and older games)."""
+        name = display_name(pkg)
+        launchers = package_launchers(pkg)
+        if launchers:
+            if desktop_icon and add_desktop_icons(launchers):
+                self.status.set_text(f"{name} was installed. It is in the Start menu and on the desktop.")
+            else:
+                self.status.set_text(f"{name} was installed. It is in the Start menu.")
+            return
+        cmds = package_commands(pkg)
+        if cmds:
+            shown = ", ".join(cmds[:5])
+            message(self.win, f"{name} was installed, but it has no Start menu entry.",
+                    f"It is started by typing its command in a terminal: {shown}"
+                    + ("\n\nNo desktop icon could be made for it." if desktop_icon else ""),
+                    Gtk.MessageType.INFO)
 
     def log_note(self, text):
         self.runner.log(text)
@@ -1254,11 +1713,14 @@ class Store:
             if not res["ok"]:
                 message(self.win, f"{name} cannot be installed.", plan_problem_text(res), Gtk.MessageType.ERROR)
                 return
+            icon = ask_desktop_icon(self.win, name)
+            if icon is None:
+                return
             if not confirm_plan(self.win, name, pkg, res, self.pkgs):
                 return
             if self.runner.start(["apt-get"] + APT_OPTS + ["install", pkg], f"Installing {name}...",
-                                 lambda ok, out: self.after(ok, out, f"{name} was installed.", pkg), recover=True,
-                                 new=res["install"]):
+                                 lambda ok, out: self.after(ok, out, f"{name} was installed.", pkg, icon),
+                                 recover=True, new=res["install"]):
                 self.busy(True)
         self.planned(["install", pkg], go)
 
@@ -1273,6 +1735,10 @@ class Store:
         def found(rel):
             self.busy(False)
             version, url, size, sha = rel
+            icon = ask_desktop_icon(self.win, name)
+            if icon is None:
+                self.status.set_text("")
+                return
             if message(self.win, f"Install {name} {version}?",
                        f"{name} is an optional program from {OPTIONAL_REPO}/{pkg} (not part of Syluxium).\n\n"
                        f"Download: {human(size)}, plus the libraries it needs (Vulkan; Mesa's software renderer "
@@ -1307,7 +1773,7 @@ class Store:
                 self.runner.log(f"{name} {version}: {url}\n  sha256 {sha} (checked)\n")
                 cmd = ["apt-get"] + APT_OPTS + ["install", dest, "mesa-vulkan-drivers", "libvulkan1"]
                 if self.runner.start(cmd, f"Installing {name}...",
-                                     lambda ok, out: self.after(ok, out, f"{name} was installed.", pkg),
+                                     lambda ok, out: self.after(ok, out, f"{name} was installed.", pkg, icon),
                                      recover=True, new=[pkg]):
                     self.busy(True)
             threading.Thread(target=fetch, daemon=True).start()
@@ -1531,6 +1997,12 @@ def main(argv):
         Store(page="updates")
     elif len(argv) > 2 and argv[1] == "--search":
         Store(search=argv[2])
+    elif len(argv) > 1 and argv[1] == "--settings":
+        store = Store()
+        GLib.timeout_add(1500, lambda: SourcesDialog(store) and False)
+    elif len(argv) > 2 and argv[1] == "--ask-icon":  # test aid: the desktop-icon question alone
+        print("ANSWER", ask_desktop_icon(None, argv[2]), flush=True)
+        return
     else:
         Store()
     Gtk.main()
