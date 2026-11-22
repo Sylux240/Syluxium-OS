@@ -588,10 +588,23 @@ class TaskManager:
         return box
 
     def icon_for(self, cls):
+        """The window's icon: its class or Wayland app id as an icon name, else
+        the icon of the program's .desktop file (xfce4-terminal -> org.xfce.terminal)."""
         theme = Gtk.IconTheme.get_default()
         for name in (cls.lower(), cls.lower().replace(" ", "-")):
             if name and theme.has_icon(name):
                 return name
+        from gi.repository import Gio
+        for desktop in (cls, cls.lower()):
+            try:
+                info = Gio.DesktopAppInfo.new(desktop + ".desktop") if desktop else None
+            except TypeError:
+                info = None
+            icon = info.get_icon() if info else None
+            if isinstance(icon, Gio.ThemedIcon):
+                for name in icon.get_names():
+                    if theme.has_icon(name):
+                        return name
         return "application-x-executable"
 
     def refresh_apps(self):

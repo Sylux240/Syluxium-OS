@@ -6,10 +6,18 @@
 # e.g. "Unknown-1", "HDMI-A-1") can differ from X's, so a screen with none
 # yet gets the one already chosen for another screen (else the Dusk one).
 WALL=/opt/trinity/share/wallpapers/syluxium-default.jpg
+# Start-up milestones for the stick's milestones.txt (seconds since boot).
+/usr/local/sbin/syluxium-diag mark "shell: Wayfire up, autostart running"
+(
+    i=0
+    while [ $i -lt 120 ] && ! pgrep -u "$(id -u)" -x xfce4-panel >/dev/null; do sleep 0.5; i=$((i + 1)); done
+    /usr/local/sbin/syluxium-diag mark "shell: taskbar (xfce4-panel) started"
+) &
 /usr/local/bin/syluxium-xfce-setup >/dev/null 2>&1
 
 i=0
 while [ $i -lt 30 ] && ! pgrep -u "$(id -u)" -x xfdesktop >/dev/null; do sleep 1; i=$((i + 1)); done
+/usr/local/sbin/syluxium-diag mark "shell: desktop (xfdesktop) started"
 props=$(xfconf-query -c xfce4-desktop -l 2>/dev/null | grep '/workspace0/last-image$')
 ref=
 for p in $props; do
@@ -25,3 +33,4 @@ for status in /sys/class/drm/card*-*/status; do
     xfconf-query -c xfce4-desktop -p "$p" -n -t string -s "$ref"
     xfconf-query -c xfce4-desktop -p "${p%last-image}image-style" -n -t int -s 5
 done
+/usr/local/sbin/syluxium-diag mark "shell: desktop ready (icons, wallpaper)"
