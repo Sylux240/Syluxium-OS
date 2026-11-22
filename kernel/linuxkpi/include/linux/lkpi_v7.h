@@ -10,6 +10,7 @@
 #include <linux/slab.h>
 #include <linux/vmalloc.h>
 #include <linux/timer.h>
+#include <linux/pci.h>
 
 /* ---- typed allocation helpers (include/linux/slab.h, 7.0) ---- */
 #ifndef default_gfp
@@ -86,3 +87,72 @@ DEFINE_LOCK_GUARD_1(spinlock_irqsave, spinlock_t, spin_lock_irqsave(_T->lock, _T
 		    spin_unlock_irqrestore(_T->lock, _T->flags), unsigned long flags)
 DEFINE_LOCK_GUARD_0(rcu, rcu_read_lock(), rcu_read_unlock())
 #endif
+
+/* ---- PCI odds and ends ---- */
+#ifndef MDIO_NAME_SIZE /* net/lkpi_phy.h (included first where used) has its own */
+static inline int pci_select_bars(struct pci_dev *dev, unsigned long flags)
+{
+	int i, bars = 0;
+	for (i = 0; i < 6; i++)
+		if (pci_resource_flags(dev, i) & flags)
+			bars |= 1 << i;
+	return bars;
+}
+#endif
+/* Config space is never blocked here (no user space config access to race with). */
+static inline void pci_cfg_access_lock(struct pci_dev *dev) { }
+static inline void pci_cfg_access_unlock(struct pci_dev *dev) { }
+static inline bool pci_cfg_access_trylock(struct pci_dev *dev) { return true; }
+
+/* ---- struct helpers (linux/stddef.h) ---- */
+#ifndef TRAILING_OVERLAP
+#define __TRAILING_OVERLAP(TYPE, NAME, FAM, ATTRS, MEMBERS) \
+	union { \
+		TYPE NAME; \
+		struct { \
+			unsigned char __offset_to_FAM[offsetof(TYPE, FAM)]; \
+			MEMBERS \
+		} ATTRS; \
+	}
+#define TRAILING_OVERLAP(TYPE, NAME, FAM, MEMBERS) __TRAILING_OVERLAP(TYPE, NAME, FAM, , MEMBERS)
+#endif
+
+/* ---- 32-bit compat ioctls: Linux drivers are never called from ia32 code here
+ * (the ia32 layer translates the structures it knows, drivers get 64-bit ones) ---- */
+#include <linux/uio.h>
+#ifndef in_compat_syscall
+#define in_compat_syscall() false
+#endif
+typedef u32 compat_uptr_t;
+typedef u32 compat_size_t;
+typedef s32 compat_int_t;
+typedef u32 compat_uint_t;
+typedef u32 compat_ulong_t;
+struct compat_iovec { compat_uptr_t iov_base; compat_size_t iov_len; };
+
+/* ---- SIGIO notification of a driver file (fasync): not delivered ---- */
+struct fasync_struct;
+struct file;
+static inline int fasync_helper(int fd, struct file *filp, int on, struct fasync_struct **fapp) { return 0; }
+static inline void kill_fasync(struct fasync_struct **fp, int sig, int band) { }
+#ifndef SIGIO
+#define SIGIO 29
+#endif
+#ifndef POLL_IN
+#define POLL_IN 1
+#endif
+
+/* ---- kdump "reset_devices" boot option: never set ---- */
+#define reset_devices 0
+
+/* ---- driver attributes (sysfs files of a driver): not exposed ---- */
+struct driver_attribute {
+	struct attribute attr;
+	ssize_t (*show)(struct device_driver *driver, char *buf);
+	ssize_t (*store)(struct device_driver *driver, const char *buf, size_t count);
+};
+#define DRIVER_ATTR_RW(_name) struct driver_attribute driver_attr_##_name = __ATTR_RW(_name)
+#define DRIVER_ATTR_RO(_name) struct driver_attribute driver_attr_##_name = __ATTR_RO(_name)
+#define DRIVER_ATTR_WO(_name) struct driver_attribute driver_attr_##_name = __ATTR_WO(_name)
+static inline int driver_create_file(const struct device_driver *drv, const struct driver_attribute *attr) { return 0; }
+static inline void driver_remove_file(const struct device_driver *drv, const struct driver_attribute *attr) { }
