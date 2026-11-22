@@ -174,6 +174,19 @@ if text:
         time.sleep(0.25)
 s.sendall(f"screendump {sys.argv[2]}\n".encode())
 time.sleep(1)
+# A GL display (virtio-vga-gl on egl-headless) writes the picture later.
+for _ in range(40):
+    if os.path.exists(sys.argv[2]) and os.path.getsize(sys.argv[2]) > 0:
+        break
+    time.sleep(0.25)
+s.setblocking(False)
+try:
+    reply = s.recv(65536).decode(errors="replace")
+    if "rror" in reply:
+        print("monitor:", reply.strip().splitlines()[-2:], file=sys.stderr)
+except BlockingIOError:
+    pass
+s.setblocking(True)
 s.sendall(b"quit\n")
 time.sleep(0.5)
 EOF

@@ -31,6 +31,15 @@ fi
 
 # X display driver for this machine (modesetting on a DRM device, else fbdev).
 syluxium-display-config > /dev/null 2>&1
+# GPU Test entry: the GPU stack before the X server starts (gpu-boot.txt:
+# driver start, sysfs as libdrm sees it, Mesa's driver choice on its own),
+# then milestones and logs every 2 s while X comes up (xwatch.txt).
+if grep -qw gpu /proc/cmdline; then
+    syluxium-diag mark "gpu: report before X (Mesa on the render node, no X yet)"
+    syluxium-diag gpu boot
+    syluxium-diag mark "gpu: report done; starting the login screen and X"
+    syluxium-diag xwatch &
+fi
 
 # Printing (CUPS): what its install scripts would set up, then the print service.
 if [ -x /usr/sbin/cupsd ]; then
