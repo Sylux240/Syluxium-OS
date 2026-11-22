@@ -1452,13 +1452,20 @@ unsigned long clear_user(void __user *to, unsigned long n)
 	}
 	return 0;
 }
+/* The caching the driver asks for: write-combining for framebuffers
+ * (simpledrm's firmware framebuffer was mapped uncached: whole-screen
+ * copies ran at ~80 MB/s), write-back for MEMREMAP_WB. */
 void *devm_memremap(struct device *dev, resource_size_t offset, size_t size, unsigned long flags)
 {
+	if (flags & MEMREMAP_WC)
+		return (void *)ioremap_wc(offset, size);
+	if (flags & MEMREMAP_WB)
+		return (void *)ioremap_cache(offset, size);
 	return (void *)ioremap(offset, size);
 }
 void __iomem *devm_ioremap_wc(struct device *dev, resource_size_t offset, resource_size_t size)
 {
-	return ioremap(offset, size);
+	return ioremap_wc(offset, size);
 }
 
 void *memdup_array_user(const void __user *src, size_t n, size_t size)
