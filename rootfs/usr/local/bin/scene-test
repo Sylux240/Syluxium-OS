@@ -13,6 +13,8 @@
 #         service), moved to the trash (Thunar, GVfs); results in ~/scene.log;
 #         Thunar shows the trash
 #   run:PROGRAM  start one program (e.g. run:syluxium-taskmgr)
+#   x11   X11 programs through Xwayland (xwayland-test, all phases);
+#         x11:PHASE,PHASE  only those (e.g. x11:lazy,clip)
 case "$1" in
 apps|menu|tm)
     syluxium-open documents &
@@ -45,6 +47,8 @@ files)
     thunar "$d" & sleep 5
     ;;
 run:*) ${1#run:} & sleep 20 ;;
+x11) xwayland-test ;;
+x11:*) xwayland-test $(echo "${1#x11:}" | tr ',' ' ') ;;
 halt) xfce4-session-logout --halt ;;
 reboot) xfce4-session-logout --reboot ;;
 logout) xfce4-session-logout --logout ;;
