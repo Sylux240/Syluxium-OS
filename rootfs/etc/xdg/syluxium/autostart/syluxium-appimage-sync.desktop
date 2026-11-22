@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=AppImage Start menu entries
+Comment=AppImages in ~/Applications get Start menu entries; entries of removed ones go
+Exec=syluxium-appimage --sync
+NoDisplay=true
+OnlyShowIn=XFCE;
