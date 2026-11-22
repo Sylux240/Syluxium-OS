@@ -524,6 +524,11 @@ void kernel_main_thread(void*) {
     sysfs::init(); // needs the final CPU count
     cpupower::publish(); // cpufreq files; idle CPUs go tickless from here
     watchdog::start();   // stuck CPUs print where they are
+    if (strstr(boot::cmdline(), "watchdog_test")) // test aid: the stuck-operation report
+        sched::spawn("watchdog-test", [](void*) {
+            watchdog::Guard guard("watchdog self-test", "(boot option watchdog_test)", 2);
+            sched::sleep_ms(4000);
+        }, nullptr, -1, true);
     splash::stage(30, "Starting drivers");
     discover_hardware();
     splash::stage(62, "Starting services");

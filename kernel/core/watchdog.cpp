@@ -10,7 +10,10 @@
 #include <core/bootlog.hpp>
 #include <core/log.hpp>
 #include <core/watchdog.hpp>
+#include <lib/format.hpp>
+#include <lib/spinlock.hpp>
 #include <sched/sched.hpp>
+#include <time/clock.hpp>
 
 namespace watchdog {
 
@@ -22,6 +25,20 @@ u32 g_stale[MAX];
 bool g_reported[MAX];
 volatile bool g_dump_request[MAX];
 volatile bool g_thread_dump_request = false;
+
+// Guarded operations (watchdog::Guard).
+constexpr int GUARDS = 16;
+struct GuardSlot {
+    volatile bool used;
+    bool reported;
+    u64 start_ms;
+    u32 limit_s;
+    const char* what;
+    char detail[48];
+    const char* thread;
+};
+GuardSlot g_guards[GUARDS];
+IrqSpinlock g_guard_lock;
 
 void nmi(interrupts::Frame* f) {
     Cpu* cpu = this_cpu();
@@ -60,6 +77,24 @@ void thread(void*) {
             save_pending = false;
             bootlog::save();
         }
+        // Guarded operations that overran their time: report once each.
+        {
+            u64 now = (clock::now_ns() / 1000000);
+            bool dump = false;
+            for (int i = 0; i < GUARDS; i++) {
+                GuardSlot& g = g_guards[i];
+                if (!g.used || g.reported || now - g.start_ms < static_cast<u64>(g.limit_s) * 1000)
+                    continue;
+                g.reported = true;
+                klog::warn("Stuck: %s %s still running after %u s (thread %s); every thread's state follows",
+                           g.what, g.detail, static_cast<unsigned>((now - g.start_ms) / 1000), g.thread ? g.thread : "?");
+                dump = true;
+            }
+            if (dump) {
+                sched::dump_threads();
+                bootlog::save();
+            }
+        }
         u32 n = percpu::count();
         for (u32 i = 0; i < n && i < MAX; i++) {
             Cpu* c = percpu::get(i);
@@ -85,6 +120,35 @@ void thread(void*) {
 }
 
 } // namespace
+
+Guard::Guard(const char* what, const char* detail, u32 limit_s) : m_slot(-1) {
+    LockGuard lock(g_guard_lock);
+    for (int i = 0; i < GUARDS; i++) {
+        if (g_guards[i].used)
+            continue;
+        GuardSlot& g = g_guards[i];
+        g.reported = false;
+        g.start_ms = (clock::now_ns() / 1000000);
+        g.limit_s = limit_s;
+        g.what = what;
+        snprintf(g.detail, sizeof(g.detail), "%s", detail ? detail : "");
+        sched::Thread* t = sched::current();
+        g.thread = t ? t->name : nullptr;
+        g.used = true;
+        m_slot = i;
+        return;
+    }
+}
+
+Guard::~Guard() {
+    if (m_slot < 0)
+        return;
+    GuardSlot& g = g_guards[m_slot];
+    if (g.reported)
+        klog::info("Stuck: %s %s finished after all (%u s)", g.what, g.detail,
+                   static_cast<unsigned>(((clock::now_ns() / 1000000) - g.start_ms) / 1000));
+    g.used = false;
+}
 
 void request_thread_dump() {
     g_thread_dump_request = true;

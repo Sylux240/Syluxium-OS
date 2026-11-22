@@ -7,6 +7,7 @@
 // Process, identity, signal-bookkeeping and system-information calls.
 
 #include <core/log.hpp>
+#include <core/watchdog.hpp>
 #include <arch/x86_64/cpu.hpp>
 #include <arch/x86_64/percpu.hpp>
 #include <lib/format.hpp>
@@ -950,13 +951,23 @@ long sys_reboot(SYSCALL_ARGS) {
     const char* what = cmd == POWER_OFF ? "power off" : cmd == HALT ? "halt" : "restart";
     klog::info("System %s: flushing disks...", what);
     bootlog::save();
-    block::sync_all();
+    {
+        watchdog::Guard guard("shutdown: flushing disks", what, 20);
+        block::sync_all();
+    }
     klog::info("System %s: disks flushed; closing file system journals", what);
     bootlog::save();
-    ext2::shutdown_all();
-    block::sync_all();
+    {
+        watchdog::Guard guard("shutdown: closing journals", what, 20);
+        ext2::shutdown_all();
+        block::sync_all();
+    }
     klog::info("System %s: file systems clean; asking the firmware (ACPI)", what);
     bootlog::save();
+    // Firmware that ignores the request: reported (with every thread) after 10 s.
+    static watchdog::Guard* firmware_guard = nullptr;
+    firmware_guard = new watchdog::Guard("shutdown: firmware didn't act on", what, 10);
+    (void)firmware_guard;
     if (cmd == RESTART || cmd == RESTART2)
         acpi::restart();
     if (cmd == POWER_OFF)

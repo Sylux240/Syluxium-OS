@@ -122,8 +122,20 @@ while "\\{" in rest:
     pieces += list(before) + [("monitor", cmd)]
 pieces += list(rest)
 for ch in pieces:
-    if isinstance(ch, tuple):  # \{cmd}
-        s.sendall((ch[1] + "\n").encode()); time.sleep(1); continue
+    if isinstance(ch, tuple):  # \{cmd}: its reply goes to monitor-<mode>.log
+        s.sendall((ch[1] + "\n").encode()); time.sleep(1)
+        s.setblocking(False)
+        try:
+            reply = s.recv(65536).decode(errors="replace")
+        except BlockingIOError:
+            reply = ""
+        s.setblocking(True)
+        with open(sys.argv[2].rsplit("/", 1)[0] + "/monitor-" + sys.argv[2].rsplit("-", 1)[-1].split(".")[0] + ".log", "a") as m:
+            import re
+            clean = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", reply).replace("\r", "")
+            lines = [l for l in clean.split("\n") if l.strip() and not l.startswith("(qemu)") and ch[1] not in l]
+            m.write(f">>> {ch[1]}\n" + "\n".join(lines) + "\n")
+        continue
     if ch == "\x03":       # \c in $TYPE: Ctrl+C
         s.sendall(b"sendkey ctrl-c\n"); time.sleep(0.3); continue
     if ch == "\x06":       # \t in $TYPE: Ctrl+Alt+Del

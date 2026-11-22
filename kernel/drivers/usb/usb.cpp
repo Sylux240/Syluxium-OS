@@ -1,5 +1,6 @@
 #include <linuxkpi/linuxkpi.hpp>
 #include <core/log.hpp>
+#include <core/watchdog.hpp>
 #include <drivers/usb/usb.hpp>
 #include <lib/format.hpp>
 #include <lib/spinlock.hpp>
@@ -103,8 +104,13 @@ void detach(Device* d) {
         return; // already detached (disable() sets it)
     klog::info("USB %s: %s disconnected", d->path, d->product_name);
     d->disable(); // no callbacks or transfers from here on
-    for (int i = d->binding_count; i-- > 0;)
-        d->bindings[i].disconnect(d->bindings[i].ctx);
+    {
+        // A driver whose unplug never returns would stop all USB hot-plug
+        // (this is the hub thread): say so on the stick.
+        watchdog::Guard guard("USB unplug of", d->path, 10);
+        for (int i = d->binding_count; i-- > 0;)
+            d->bindings[i].disconnect(d->bindings[i].ctx);
+    }
     d->binding_count = 0;
     if (d->entry) {
         dev::remove(d->entry);
@@ -184,7 +190,12 @@ void attach(Device* d) {
         const char* name = nullptr;
         dev::Category category = category_for(intf.cls);
         const char* linux_driver = nullptr;
-        if (linuxkpi::usb_probe(d, intf, &linux_driver)) {
+        bool bound;
+        {
+            watchdog::Guard guard("USB Linux driver probe of", d->path, 20);
+            bound = linuxkpi::usb_probe(d, intf, &linux_driver);
+        }
+        if (bound) {
             // A Linux driver (LinuxKPI) whose id_table matches: Wi-Fi dongles.
             category = dev::Category::Network;
             name = linux_driver;
