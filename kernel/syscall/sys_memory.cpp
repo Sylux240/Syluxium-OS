@@ -3,6 +3,7 @@
 #include <fs/ramfs.hpp>
 #include <mm/layout.hpp>
 #include <proc/process.hpp>
+#include <proc/uaccess.hpp>
 #include <syscall/syscall.hpp>
 
 namespace syscall {
@@ -146,9 +147,58 @@ long sys_madvise(SYSCALL_ARGS) {
     return 0; // advice only
 }
 
+// mincore: which pages of [addr, addr + len) are in memory, one byte per
+// page (bit 0). Mesa calls it (es2gears_x11 logged it as unimplemented).
+// Pages are faulted in on first touch, so "in memory" means the page table
+// has the page. ENOMEM if part of the range isn't mapped, as on Linux.
+struct MincoreRange {
+    uptr end, covered; // `covered`: how far from the start the mappings reach without a gap
+};
+
+void mincore_cover(const Vma& v, void* ctx) {
+    auto* r = static_cast<MincoreRange*>(ctx);
+    if (v.end <= r->covered || v.start >= r->end)
+        return;
+    if (v.start <= r->covered)
+        r->covered = v.end;
+}
+
+long sys_mincore(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    uptr addr = a0;
+    usize len = a1;
+    auto* vec = reinterpret_cast<u8*>(a2);
+    if (addr & 0xFFF)
+        return -err::INVAL;
+    if (len == 0)
+        return 0;
+    if (len > (1ull << 47) || addr + len < addr)
+        return -err::NOMEM;
+    Process* p = current();
+    uptr end = align_up<uptr>(addr + len, 4096);
+    MincoreRange r{end, addr};
+    p->mem->for_each_vma(mincore_cover, &r); // sorted by address: one pass finds any gap
+    if (r.covered < end)
+        return -err::NOMEM;
+    u8 buf[256];
+    usize pages = (end - addr) / 4096;
+    for (usize done = 0; done < pages;) {
+        usize n = pages - done < sizeof buf ? pages - done : sizeof buf;
+        for (usize i = 0; i < n; i++) {
+            u64 phys;
+            buf[i] = p->mem->aspace()->translate(addr + (done + i) * 4096, &phys) ? 1 : 0;
+        }
+        if (long e = uaccess::copy_to(vec + done, buf, n); e < 0)
+            return e;
+        done += n;
+    }
+    return 0;
+}
+
 } // namespace
 
 void register_memory() {
+    set(27, sys_mincore, "mincore");
     set(9, sys_mmap, "mmap");
     set(10, sys_mprotect, "mprotect");
     set(11, sys_munmap, "munmap");
