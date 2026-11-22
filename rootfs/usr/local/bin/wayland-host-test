@@ -268,6 +268,15 @@ compose)
         say "compose in $(xprop -id "$w" _SYLUXIUM_WAYLAND 2>/dev/null | grep -q '= 1' && echo hosted || echo X11) Mousepad: $(xclip_text)"
     done
     ;;
+footscroll)
+    # foot scrolls through its shared-memory buffer, freeing behind it with
+    # fallocate(PUNCH_HOLE) (memfd): 30000 lines, the last one on screen
+    before=$(awk '/MemAvailable/ {print $2}' /proc/meminfo)
+    hosted foot --title "foot scroll" sh -c 'seq 1 30000; echo SCROLL-DONE; sleep 60' &
+    sleep 20
+    w=$(xdotool search --name "foot scroll" 2>/dev/null | head -1); [ -n "$w" ] && xdotool windowmove "$w" 100 80
+    say "footscroll: foot window $w, MemAvailable before $before kB, now $(awk '/MemAvailable/ {print $2}' /proc/meminfo) kB"
+    ;;
 imshow)
     # (last phase) a composition left open in the hosted and the X11 Mousepad:
     # the final screenshot shows both candidate lists

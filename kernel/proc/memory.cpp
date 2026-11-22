@@ -29,7 +29,8 @@ IrqSpinlock g_dev_lock;
 IntrusiveList<Vma, &Vma::dev_node> g_dev_vmas; // every VMA_DEVICE mapping
 
 void dev_track(Vma* v, Memory* owner) {
-    if (v->kind != VMA_DEVICE || v->owner)
+    // (device mappings, and mappings of RAM files for zap_file_page)
+    if ((v->kind != VMA_DEVICE && !(v->file && v->file->shared_mappable())) || v->owner)
         return;
     v->owner = owner;
     LockGuard guard(g_dev_lock);
@@ -162,6 +163,8 @@ void zap_device_range(u64 offset, u64 len) {
     {
         LockGuard guard(g_dev_lock);
         for (Vma* v = g_dev_vmas.front(); v && n < MAX_HITS; v = g_dev_vmas.next_of(v)) {
+            if (v->kind != VMA_DEVICE)
+                continue;  // (a RAM file's mapping)
             u64 vbeg = v->file_offset, vend = v->file_offset + (v->end - v->start);
             u64 beg = max(vbeg, offset), end = min(vend, offset + len);
             if (beg >= end || !v->owner->aspace())
@@ -173,6 +176,42 @@ void zap_device_range(u64 offset, u64 len) {
         for (uptr page = hits[i].start; page < hits[i].end; page += PAGE_SIZE)
             hits[i].as->unmap(page);
         vmm::shootdown(hits[i].start, (hits[i].end - hits[i].start) / PAGE_SIZE, hits[i].as);
+    }
+}
+
+void zap_file_page(vfs::Inode* file, u64 offset, u64 phys) {
+    // Shared mappings of a RAM file are VMA_DEVICE (the file's pages, no
+    // reference of their own); private ones map its pages read-only with a
+    // reference until written to.
+    // (in rounds of up to 64 mappings: every one must go, or it would keep
+    // showing a page that is freed)
+    struct Hit { vmm::AddressSpace* as; uptr va; bool counted; };
+    constexpr usize MAX_HITS = 64;
+    Hit hits[MAX_HITS];
+    for (usize skip = 0;; skip += MAX_HITS) {
+        usize n = 0, seen = 0;
+        {
+            LockGuard guard(g_dev_lock);
+            for (Vma* v = g_dev_vmas.front(); v && n < MAX_HITS; v = g_dev_vmas.next_of(v)) {
+                if (v->file != file || !v->owner->aspace())
+                    continue;
+                if (offset < v->file_offset || offset >= v->file_offset + (v->end - v->start))
+                    continue;
+                if (seen++ < skip)
+                    continue;
+                hits[n++] = {v->owner->aspace(), v->start + (offset - v->file_offset), v->kind != VMA_DEVICE};
+            }
+        }
+        for (usize i = 0; i < n; i++) {
+            u64 now;
+            if (!hits[i].as->translate(hits[i].va, &now) || (now & ~(PAGE_SIZE - 1)) != phys)
+                continue;  // not mapped, or a private copy
+            if (hits[i].as->unmap(hits[i].va) == phys && hits[i].counted)
+                vmm::release_user_page(phys);
+            vmm::shootdown(hits[i].va, 1, hits[i].as);
+        }
+        if (n < MAX_HITS)
+            break;
     }
 }
 

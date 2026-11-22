@@ -5,6 +5,8 @@
 #include <mm/pmm.hpp>
 #include <lib/string.hpp>
 #include <mm/heap.hpp>
+#include <mm/vmm.hpp>
+#include <proc/memory.hpp>
 
 namespace ramfs {
 
@@ -315,6 +317,49 @@ long RegularFile::truncate(u64 new_size) {
             free_pages_from(align_up<u64>(new_size, PAGE_SIZE) / PAGE_SIZE);
     }
     size = new_size;
+    mtime = ctime = vfs::now();
+    return 0;
+}
+
+// The range reads as zeros: partial pages are cleared, whole pages leave the
+// file (and every mapping still showing them) and their memory is freed,
+// as Linux's tmpfs does. foot keeps its scrolling shared-memory buffer from
+// growing this way.
+long RegularFile::punch_hole(u64 offset, u64 len) {
+    LockGuard guard(m_io);
+    if (m_seals & (F_SEAL_WRITE | F_SEAL_FUTURE_WRITE))
+        return -err::PERM;
+    if (offset >= size)
+        return 0;
+    u64 end = min<u64>(offset + len, size);
+    u64 first = align_up<u64>(offset, PAGE_SIZE) / PAGE_SIZE, last = end / PAGE_SIZE;  // whole pages
+    auto clear = [&](u64 from, u64 to) {  // bytes inside one page
+        if (from >= to)
+            return;
+        if (u64 phys = page(from / PAGE_SIZE, false))
+            memset(mm::phys_to_virt<u8>(phys) + from % PAGE_SIZE, 0, to - from);
+    };
+    if (first > last) {  // all inside one page
+        clear(offset, end);
+    } else {
+        clear(offset, first * PAGE_SIZE);
+        clear(last * PAGE_SIZE, end);
+    }
+    for (u64 i = first; i < last; i++) {
+        u64 phys = 0;
+        {
+            LockGuard pages(m_pages_lock);
+            if (i < m_slots) {
+                phys = m_pages[i];
+                m_pages[i] = 0;
+            }
+        }
+        if (!phys)
+            continue;
+        if (__atomic_load_n(&m_maps, __ATOMIC_ACQUIRE))
+            proc::zap_file_page(this, i * PAGE_SIZE, phys);
+        vmm::release_user_page(phys);  // the file's reference (mappings hold their own)
+    }
     mtime = ctime = vfs::now();
     return 0;
 }
