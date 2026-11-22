@@ -868,6 +868,17 @@ long sys_pidfd_send_signal(SYSCALL_ARGS) {
 
 } // namespace
 
+// waitid(P_PIDFD, fd, ...): the pid a pidfd refers to (as the caller's PID
+// namespace numbers it), -EBADF if fd isn't a pidfd.
+long pidfd_to_pid(int fd) {
+    vfs::File* f = proc::fd_get(proc::current(), fd);
+    if (!f)
+        return -err::BADF;
+    long r = f->inode->anon_kind == KIND_PIDFD ? static_cast<PidFd*>(f->inode)->pid : -err::BADF;
+    vfs::file_put(f);
+    return r;
+}
+
 } // namespace events
 
 namespace syscall {

@@ -24,6 +24,8 @@
 #include <time/clock.hpp>
 #include <time/rtc.hpp>
 
+namespace events { long pidfd_to_pid(int fd); }
+
 namespace syscall {
 
 namespace {
@@ -380,12 +382,18 @@ long sys_execve(SYSCALL_ARGS) {
 // status in a siginfo (CLD_EXITED/KILLED/DUMPED, pid, uid, status).
 long sys_waitid(SYSCALL_ARGS) {
     SYSCALL_UNUSED;
-    constexpr int P_ALL = 0, P_PID = 1, P_PGID = 2;
+    constexpr int P_ALL = 0, P_PID = 1, P_PGID = 2, P_PIDFD = 3;
     constexpr int WNOHANG = 1, WEXITED = 4, WNOWAIT = 0x01000000;
     int idtype = static_cast<int>(a0), id = static_cast<int>(a1), options = static_cast<int>(a3);
     if (!(options & WEXITED))
         return -err::INVAL; // stopped/continued children don't exist here (no job-control stops)
     int pid = idtype == P_ALL ? -1 : idtype == P_PID ? id : idtype == P_PGID ? (id ? -id : 0) : -999;
+    if (idtype == P_PIDFD) { // GLib watches its children this way
+        long p = events::pidfd_to_pid(id);
+        if (p < 0)
+            return p;
+        pid = static_cast<int>(p);
+    }
     if (pid == -999)
         return -err::INVAL;
     int status = 0;

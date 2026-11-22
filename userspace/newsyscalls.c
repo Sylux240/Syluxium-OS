@@ -76,6 +76,19 @@ static void test_pidfd(void) {
           "pidfd_send_signal to a reaped process: ESRCH");
     close(pfd);
     check(syscall(SYS_pidfd_open, 999999, 0) < 0 && errno == ESRCH, "pidfd_open of no process: ESRCH");
+
+    /* waitid(P_PIDFD): how GLib (Xfce's session) watches its children. */
+    child = fork();
+    if (child == 0) {
+        usleep(100 * 1000);
+        _exit(7);
+    }
+    pfd = syscall(SYS_pidfd_open, child, 0);
+    siginfo_t si;
+    memset(&si, 0, sizeof(si));
+    check(waitid(3 /* P_PIDFD */, pfd, &si, WEXITED) == 0 && si.si_pid == child && si.si_code == CLD_EXITED &&
+              si.si_status == 7, "waitid(P_PIDFD) reaps the child");
+    close(pfd);
 }
 
 static void test_sigtimedwait(void) {
