@@ -94,6 +94,11 @@ logs)
     for h in /home/*/.xsession-errors; do
         [ -f "$h" ] && cp "$h" "$L/xsession-errors-$(basename "$(dirname "$h")").txt" 2>/dev/null
     done
+    # Wayland programs in the Xfce desktop (syluxium-wayland-host; its
+    # summary is wayland-host.txt from /run/syluxium-diag)
+    for h in /run/user/*/syluxium-wayland-host.log; do
+        [ -f "$h" ] && tail -c 262144 "$h" > "$L/wayland-host-$(basename "$(dirname "$h")").log" 2>/dev/null
+    done
     ;;
 mark)
     # One file for root and the desktop user alike (in /run: both can write

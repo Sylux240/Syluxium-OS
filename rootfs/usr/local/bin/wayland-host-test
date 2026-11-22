@@ -13,6 +13,8 @@
 #   close   closing through the window manager (unsaved text: a question)
 #   perf    frame rates: es2gears and shell-fps-test, X11 vs hosted
 #   menu    a hosted program's menu (xdg_popup as an X window)
+#   launch  a Wayland-only program (foot) from its start-menu entry
+#   unsaved closing with unsaved text: the program asks (dialog)
 say() { echo "WHTEST $*" > /dev/console; }
 LOG=/root/whtest.log; : > $LOG; chmod 666 $LOG
 ( while :; do sleep 15; say "..."; done ) &
@@ -136,19 +138,28 @@ close)
     say "close: mousepad still running (asks to save): $(pgrep -u 1000 -x mousepad) host alive: $(pgrep -f syluxium-wayland-host | head -1) windows: $(xdotool search --class mousepad 2>/dev/null | tr '\n' ' ')"
     ;;
 perf)
-    for mode in x11 wayland; do
-        if [ $mode = x11 ]; then asuser sh -c "timeout 16 es2gears_x11 > /tmp/gears-$mode.txt 2>&1" &
-        else hosted sh -c "timeout 16 es2gears_wayland > /tmp/gears-$mode.txt 2>&1" & fi
-        sleep 17
-        say "perf es2gears $mode: $(tr '\n' '|' < /tmp/gears-$mode.txt | tail -c 300)"
-    done
+    # CPU time (user+system ticks) of the X server and the host around each run
+    ticks() { for pid in $(pidof Xorg) $(pgrep -f syluxium-wayland-host); do awk '{print $14 + $15}' /proc/$pid/stat; done | awk '{s += $1} END {print s + 0}'; }
+    xticks() { awk '{print $14 + $15}' /proc/$(pidof Xorg)/stat; }
+    gears() {  # $1 label, rest: command run as the user (16 s)
+        label=$1; shift
+        t0=$(ticks); x0=$(xticks)
+        "$@" sh -c "timeout 16 stdbuf -oL $GEARS > /tmp/gears.txt 2>&1"
+        say "perf es2gears $label: $(grep FPS /tmp/gears.txt | tail -2 | tr '\n' '|') CPU ticks/16 s: Xorg+host $(( $(ticks) - t0 )), Xorg $(( $(xticks) - x0 ))"
+    }
+    hosted true   # the host is up before measuring
+    GEARS=es2gears_x11 gears "X11" asuser
+    GEARS=es2gears_wayland gears "Wayland (hosted)" hosted
+    GEARS="env vblank_mode=0 es2gears_x11" gears "X11, no vsync" asuser
+    GEARS="env vblank_mode=0 es2gears_wayland" gears "Wayland (hosted), no vsync" hosted
     for mode in x11 wayland; do
         rm -f /tmp/fps.log
+        t0=$(ticks); x0=$(xticks)
         if [ $mode = x11 ]; then asuser shell-fps-test 16 900 600 both
         else hosted shell-fps-test 16 900 600 both; fi
-        say "perf shell-fps-test $mode: $(grep summary /tmp/fps.log | tr '\n' '|')"
+        say "perf shell-fps-test $mode: $(grep summary /tmp/fps.log | tr '\n' '|') CPU ticks/16 s: Xorg+host $(( $(ticks) - t0 )), Xorg $(( $(xticks) - x0 ))"
     done
-    say "perf host cpu: $(ps -o pid,time,rss,args -u 1000 2>/dev/null | grep -E 'wayland-host|Xorg' | grep -v grep | tr '\n' '|')"
+    say "perf host: $(ps -o pid,time,rss,args -u 1000 2>/dev/null | grep -E 'wayland-host' | grep -v grep | tr '\n' '|')"
     ;;
 menu)
     pgrep -u 1000 -x mousepad > /dev/null || { hosted mousepad & sleep 8; }
@@ -156,6 +167,25 @@ menu)
     xdotool windowactivate --sync "$w" 2>/dev/null; sleep 1
     xdotool key F10; sleep 2
     say "menu: popup windows: $(xdotool search --all --class mousepad 2>/dev/null | while read x; do xprop -id "$x" _NET_WM_WINDOW_TYPE 2>/dev/null | grep -o 'POPUP_MENU\|TOOLTIP'; done | tr '\n' ' ')"
+    ;;
+launch)
+    # foot (Wayland-only) from its start-menu entry: through the host by itself
+    asuser python3 -c 'import gi; gi.require_version("Gio", "2.0")
+from gi.repository import Gio
+a = Gio.DesktopAppInfo.new("foot.desktop"); print("launching", a.get_filename()); a.launch([], None)' &
+    sleep 6
+    w=$(win_of foot)
+    say "launch: foot from its menu entry: window $w $( [ -n "$w" ] && xprop -id "$w" _SYLUXIUM_WAYLAND WM_CLASS 2>&1 | tr '\n' ' ') entry: $(grep '^Exec' /usr/local/share/applications/foot.desktop | head -1)"
+    ;;
+unsaved)
+    # closing a program with unsaved text: it asks (a dialog, transient for its window)
+    pgrep -u 1000 -x mousepad > /dev/null || { hosted mousepad & sleep 8; }
+    w=$(waitwin mousepad)
+    xdotool windowactivate --sync "$w" 2>/dev/null; sleep 1
+    xdotool type --delay 40 'unsaved text'; sleep 1
+    xdotool key alt+F4; sleep 3
+    d=$(xdotool search --onlyvisible --class mousepad 2>/dev/null | while read x; do xprop -id "$x" WM_TRANSIENT_FOR 2>/dev/null | grep -q window && echo "$x"; done | head -1)
+    say "unsaved: mousepad running: $(pgrep -u 1000 -x mousepad) dialog: $d $( [ -n "$d" ] && xprop -id "$d" _NET_WM_NAME _NET_WM_WINDOW_TYPE WM_TRANSIENT_FOR 2>&1 | tr '\n' ' ')"
     ;;
 shot)
     sleep ${WHTEST_SHOT_WAIT:-2} ;;

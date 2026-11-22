@@ -45,6 +45,7 @@
 #include <xcb/render.h>
 #include <xcb/xfixes.h>
 #include <xcb/xinput.h>
+#include <xcb/randr.h>
 #include <xkbcommon/xkbcommon.h>
 #include <linux/input-event-codes.h>
 
@@ -134,6 +135,8 @@ struct view {
 	struct wl_listener req_move, req_resize, req_max, req_full, req_min, req_menu;
 	struct wl_listener reposition;
 	struct wl_listener out_frame, out_request_state, out_destroy, out_present, out_commit;
+	struct wl_event_source *pace;               /* frames at the monitor's rate */
+	uint64_t last_frame_ns, next_due_ns;
 	uint32_t n_frames, n_commits, n_presents;   /* SYLUXIUM_WAYLAND_HOST_DEBUG statistics */
 };
 
@@ -227,6 +230,7 @@ static struct {
 
 	FILE *diag;
 	int hosted;
+	uint64_t frame_ns;              /* one refresh of the monitor */
 } S;
 
 static struct {
@@ -672,14 +676,81 @@ static bool popup_screen_pos(struct view *v, int *x, int *y) {
 	return true;
 }
 
-static void output_frame(struct wl_listener *l, void *data) {
-	struct view *v = wl_container_of(l, v, out_frame);
+static uint64_t mono_ns(void) {
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (uint64_t)ts.tv_sec * 1000000000ull + ts.tv_nsec;
+}
+
+static void view_frame(struct view *v) {
 	v->n_frames++;
-	if (v->output->needs_frame || v->sout)
-		v->n_commits += wlr_scene_output_commit(v->sout, NULL) ? 1 : 0;
+	uint64_t now_ns = mono_ns();
+	v->last_frame_ns = now_ns;
+	/* the next frame one refresh after this one's due time (no drift) */
+	v->next_due_ns = (v->next_due_ns && now_ns - v->next_due_ns < S.frame_ns) ? v->next_due_ns + S.frame_ns
+		: now_ns + S.frame_ns;
+	v->n_commits += wlr_scene_output_commit(v->sout, NULL) ? 1 : 0;
 	struct timespec now;
 	clock_gettime(CLOCK_MONOTONIC, &now);
 	wlr_scene_output_send_frame_done(v->sout, &now);
+}
+
+static int pace_timer(void *data) {
+	struct view *v = data;
+	if (v->sout)
+		view_frame(v);
+	return 0;
+}
+
+/* The X server says when a frame was shown (Present). Without vertical
+ * blank events from the display driver (simpledrm, the firmware
+ * framebuffer) it says so at once, and programs would draw hundreds of
+ * frames a second for nothing: frames are paced to the monitor's rate. */
+static void output_frame(struct wl_listener *l, void *data) {
+	struct view *v = wl_container_of(l, v, out_frame);
+	uint64_t now = mono_ns();
+	if (v->next_due_ns == 0 || now + 1500000 >= v->next_due_ns) {
+		view_frame(v);
+		return;
+	}
+	if (!v->pace)
+		v->pace = wl_event_loop_add_timer(S.loop, pace_timer, v);
+	uint64_t wait_ms = (v->next_due_ns - now) / 1000000;
+	wl_event_source_timer_update(v->pace, wait_ms > 0 ? wait_ms : 1);
+}
+
+/* The monitor's refresh rate (the fastest one with several), from RandR. */
+static void read_refresh_rate(void) {
+	double best = 0;
+	const xcb_query_extension_reply_t *ext = xcb_get_extension_data(S.x, &xcb_randr_id);
+	if (ext && ext->present) {
+		xcb_randr_get_screen_resources_current_reply_t *res = xcb_randr_get_screen_resources_current_reply(S.x,
+			xcb_randr_get_screen_resources_current(S.x, S.root), NULL);
+		if (res) {
+			xcb_randr_crtc_t *crtcs = xcb_randr_get_screen_resources_current_crtcs(res);
+			xcb_randr_mode_info_t *modes = xcb_randr_get_screen_resources_current_modes(res);
+			int nmodes = xcb_randr_get_screen_resources_current_modes_length(res);
+			for (int i = 0; i < xcb_randr_get_screen_resources_current_crtcs_length(res); i++) {
+				xcb_randr_get_crtc_info_reply_t *ci = xcb_randr_get_crtc_info_reply(S.x,
+					xcb_randr_get_crtc_info(S.x, crtcs[i], res->config_timestamp), NULL);
+				if (ci && ci->mode)
+					for (int m = 0; m < nmodes; m++)
+						if (modes[m].id == ci->mode && modes[m].htotal && modes[m].vtotal) {
+							double hz = (double)modes[m].dot_clock / ((double)modes[m].htotal * modes[m].vtotal);
+							if (hz > best && hz < 1000)
+								best = hz;
+						}
+				free(ci);
+			}
+			free(res);
+		}
+	}
+	const char *e = getenv("SYLUXIUM_WAYLAND_HOST_HZ");
+	if (e && atof(e) > 1)
+		best = atof(e);
+	if (best < 20)
+		best = 60;
+	S.frame_ns = (uint64_t)(1e9 / best);
 }
 
 /* The backend asks for a size (its window was resized; with our frame
@@ -715,9 +786,9 @@ static int debug_stats(void *data) {
 	struct view *v;
 	wl_list_for_each(v, &S.views, link)
 		if (v->output)
-			diag("debug: %s %dx%d frames %u commits %u presents %u, needs frame %d",
+			diag("debug: %s %dx%d frames %u commits %u presents %u",
 				v->toplevel && v->toplevel->app_id ? v->toplevel->app_id : "popup", v->w, v->h,
-				v->n_frames, v->n_commits, v->n_presents, (int)v->output->needs_frame);
+				v->n_frames, v->n_commits, v->n_presents);
 	wl_event_source_timer_update(data ? *(struct wl_event_source **)data : NULL, 3000);
 	return 0;
 }
@@ -730,6 +801,10 @@ static void output_destroy(struct wl_listener *l, void *data) {
 	wl_list_remove(&v->out_request_state.link);
 	wl_list_remove(&v->out_destroy.link);
 	wl_list_remove(&v->out_present.link);
+	if (v->pace)
+		wl_event_source_remove(v->pace);
+	v->pace = NULL;
+	v->last_frame_ns = v->next_due_ns = 0;
 	wl_list_remove(&v->out_commit.link);
 	if (v->sout)
 		wlr_scene_output_destroy(v->sout);
@@ -2312,6 +2387,7 @@ int main(int argc, char **argv) {
 		return 1;
 	}
 	make_screen_output();
+	read_refresh_rate();
 
 	S.x_src = wl_event_loop_add_fd(S.loop, xcb_get_file_descriptor(S.x), WL_EVENT_READABLE, x_readable, NULL);
 	S.incoming_timer = wl_event_loop_add_timer(S.loop, incoming_timeout, NULL);
@@ -2334,9 +2410,9 @@ int main(int argc, char **argv) {
 	}
 	const char *rend = wlr_renderer_is_pixman(S.renderer) ? "software (pixman)" :
 		wlr_renderer_is_gles2(S.renderer) ? "GPU (GLES2)" : "other";
-	diag("started on %s as WAYLAND_DISPLAY=%s: %s rendering, %s buffers, screen %dx%d, cursor theme %s %d",
+	diag("started on %s as WAYLAND_DISPLAY=%s: %s rendering, %s buffers, screen %dx%d at %.1f Hz, cursor theme %s %d",
 		dpy, S.socket, rend, (S.backend->impl && wlr_backend_get_drm_fd(S.backend) >= 0) ? "dma-buf (DRI3)" : "MIT-SHM",
-		S.screen->width_in_pixels, S.screen->height_in_pixels, theme[0] ? theme : "default", csize);
+		S.screen->width_in_pixels, S.screen->height_in_pixels, 1e9 / S.frame_ns, theme[0] ? theme : "default", csize);
 	/* tell the starter we are ready */
 	if (getenv("SYLUXIUM_WAYLAND_HOST_READY_FD")) {
 		int fd = atoi(getenv("SYLUXIUM_WAYLAND_HOST_READY_FD"));
