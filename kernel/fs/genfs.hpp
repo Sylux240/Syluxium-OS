@@ -29,6 +29,7 @@ public:
     GeneratedFile(Generator gen, const void* ctx, u32 perms = 0444);
     isize read(u64 offset, void* buf, usize count) override;
     bool seekable() const override { return true; }
+    bool epoll_regular() const override { return true; }
 
 private:
     Generator m_gen;

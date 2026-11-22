@@ -1,0 +1,180 @@
+#!/usr/bin/python3
+"""Install an Android app from an .apk file (what opening an .apk does).
+
+    syluxium-apk-install FILE.apk          the confirmation dialog, then install
+    syluxium-apk-install --yes FILE.apk    install without asking (scripts, tests)
+
+Shows the app's name, icon, version and what it may access, then installs it
+into Android (starting Android first if needed). The app then has its own
+entry in the Start menu's "Android Apps" folder.
+"""
+import os
+import subprocess
+import sys
+import threading
+
+sys.path.insert(0, "/usr/local/lib/syluxium/python")
+from syluxium_apk import ApkError, describe_permissions, read_apk  # noqa: E402
+
+TITLE = "Android App Installer"
+
+
+def install(path):
+    p = subprocess.run(["syluxium-android", "install", path], capture_output=True, text=True)
+    return p.returncode == 0, (p.stdout + p.stderr).strip()
+
+
+def no_gui(path):
+    try:
+        info = read_apk(path)
+    except ApkError as e:
+        print(f"{path}: {e}", file=sys.stderr)
+        return 1
+    print(f"Installing {info.label} ({info.package} {info.version})...")
+    ok, out = install(path)
+    print("Installed." if ok else f"The installation did not work: {out}")
+    return 0 if ok else 1
+
+
+def gui(path):
+    import gi
+    gi.require_version("Gtk", "3.0")
+    gi.require_version("GdkPixbuf", "2.0")
+    from gi.repository import GdkPixbuf, GLib, Gtk
+    from syluxium_sys import label, message, window
+
+    win = window(TITLE, 520, 480, "android")
+    box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10, margin=16)
+    win.add(box)
+    try:
+        info = read_apk(path)
+    except ApkError as e:
+        box.pack_start(label("This file is not an Android app Syluxium can install.", bold=True, wrap=True),
+                       False, False, 0)
+        box.pack_start(label(f"{os.path.basename(path)}: {e}", wrap=True), False, False, 0)
+        close = Gtk.Button(label="Close")
+        close.connect("clicked", lambda *_: win.destroy())
+        row = Gtk.Box()
+        row.pack_end(close, False, False, 0)
+        box.pack_end(row, False, False, 0)
+        win.show_all()
+        Gtk.main()
+        return 1
+
+    # Head: icon, "Install NAME?", version.
+    head = Gtk.Box(spacing=14)
+    pix = None
+    if info.icon_png:
+        try:
+            loader = GdkPixbuf.PixbufLoader()
+            loader.write(info.icon_png)
+            loader.close()
+            pix = loader.get_pixbuf().scale_simple(64, 64, GdkPixbuf.InterpType.BILINEAR)
+        except GLib.Error:
+            pix = None
+    img = Gtk.Image.new_from_pixbuf(pix) if pix else Gtk.Image.new_from_icon_name("android", Gtk.IconSize.DIALOG)
+    img.set_pixel_size(64)
+    head.pack_start(img, False, False, 0)
+    texts = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+    texts.pack_start(label(f"Install {info.label}?", bold=True, size="large", wrap=True), False, False, 0)
+    texts.pack_start(label(f"Android app {info.package}" + (f", version {info.version}" if info.version else ""),
+                           wrap=True), False, False, 0)
+    head.pack_start(texts, True, True, 0)
+    box.pack_start(head, False, False, 0)
+
+    notes = []
+    if info.abis and not ({"x86_64", "x86"} & set(info.abis)):
+        notes.append("This app is built only for phone processors (ARM). It may not start on this computer.")
+    if info.min_sdk and info.min_sdk > 33:
+        notes.append(f"This app needs a newer Android (API {info.min_sdk}) than the one on this computer (13).")
+    for n in notes:
+        box.pack_start(label(n, wrap=True), False, False, 0)
+
+    # What it may access: sensitive things first, marked.
+    box.pack_start(label("It may:", bold=True), False, False, 0)
+    perms = [p for p in info.permissions if not p.startswith(info.package + ".")]
+    listing = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
+    described = describe_permissions(perms)
+    if not described:
+        listing.add(label("  Use nothing special (no permissions)."))
+    for text, sensitive in described:
+        row = Gtk.Box(spacing=8, margin_start=6, margin_top=2, margin_bottom=2)
+        icon = Gtk.Image.new_from_icon_name("dialog-warning", Gtk.IconSize.MENU) if sensitive else Gtk.Image()
+        icon.set_size_request(16, 16)
+        row.pack_start(icon, False, False, 0)
+        row.pack_start(label(text, bold=sensitive, wrap=True), True, True, 0)
+        listing.add(row)
+    scroller = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER)
+    scroller.add(listing)
+    box.pack_start(scroller, True, True, 0)
+    box.pack_start(label("Only install apps from publishers you trust. Android asks again before an app "
+                         "uses your camera, microphone, location or files.", wrap=True), False, False, 0)
+
+    bar = Gtk.ProgressBar()
+    bar.set_no_show_all(True)
+    box.pack_start(bar, False, False, 0)
+    status = label("", wrap=True)
+    row = Gtk.Box(spacing=6)
+    row.pack_start(status, True, True, 0)
+    cancel = Gtk.Button(label="Cancel")
+    go = Gtk.Button.new_with_mnemonic("_Install")
+    go.get_style_context().add_class("suggested-action")
+    open_btn = Gtk.Button.new_with_mnemonic("_Open")
+    open_btn.set_no_show_all(True)
+    row.pack_end(cancel, False, False, 0)
+    row.pack_end(go, False, False, 0)
+    row.pack_end(open_btn, False, False, 0)
+    box.pack_end(row, False, False, 0)
+    cancel.connect("clicked", lambda *_: win.destroy())
+    open_btn.connect("clicked", lambda *_: (subprocess.Popen(["syluxium-android", "launch", info.package],
+                                                             start_new_session=True), win.destroy()))
+    state = {"pulse": None}
+
+    def finished(ok, out):
+        GLib.source_remove(state["pulse"])
+        bar.hide()
+        cancel.set_sensitive(True)
+        cancel.set_label("Close")
+        if ok:
+            status.set_text(f"{info.label} was installed. It is in the Start menu under Android Apps.")
+            if info.launchable:
+                open_btn.show()
+        else:
+            status.set_text("The app was not installed.")
+            go.set_sensitive(True)
+            message(win, f"{info.label} could not be installed.",
+                    out[-600:] or "Android did not accept the app (see ~/.cache/syluxium-android.log).",
+                    Gtk.MessageType.ERROR)
+        return False
+
+    def start(*_):
+        go.set_sensitive(False)
+        cancel.set_sensitive(False)
+        bar.show()
+        status.set_text("Starting Android and installing (the first start takes a few minutes)...")
+        state["pulse"] = GLib.timeout_add(120, lambda: bar.pulse() or True)
+
+        def work():
+            ok, out = install(path)
+            GLib.idle_add(finished, ok, out)
+        threading.Thread(target=work, daemon=True).start()
+
+    go.connect("clicked", start)
+    win.show_all()
+    Gtk.main()
+    return 0
+
+
+def main(argv):
+    args = [a for a in argv[1:] if a != "--yes"]
+    if not args:
+        print(__doc__.strip())
+        return 1
+    path = os.path.abspath(args[0])
+    if "--yes" in argv or not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+        return no_gui(path)
+    return gui(path)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

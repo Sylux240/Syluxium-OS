@@ -706,8 +706,8 @@ long sys_epoll_ctl(SYSCALL_ARGS) {
     if (op != EPOLL_CTL_DEL)
         if (long r = uaccess::get(&ev, reinterpret_cast<EpollEvent*>(a3)); r < 0)
             return r;
-    if (vfs::is_reg(target.f->inode->mode) || vfs::is_dir(target.f->inode->mode))
-        return -err::PERM; // like Linux: regular files and directories can't be watched
+    if ((vfs::is_reg(target.f->inode->mode) || vfs::is_dir(target.f->inode->mode)) && !target.f->inode->epoll_regular())
+        return -err::PERM; // like Linux: regular files and directories can't be watched (procfs can)
     return ep->ctl(op, static_cast<int>(a2), target.f, &ev);
 }
 

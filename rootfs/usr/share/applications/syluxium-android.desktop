@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Android Apps
+GenericName=Android
+Comment=Find, install and open Android apps
+Exec=syluxium-android
+Icon=android
+Terminal=false
+Categories=X-Syluxium-Android;
+Keywords=android;apk;waydroid;phone;apps;

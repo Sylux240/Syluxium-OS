@@ -379,6 +379,61 @@ long sys_execve(SYSCALL_ARGS) {
     return r;
 }
 
+// execveat(dirfd, path, argv, envp, flags): execve with the path relative to
+// dirfd, or (AT_EMPTY_PATH, empty path) the file dirfd itself: fexecve, which
+// LXC uses to re-run itself from a memfd.
+long sys_execveat(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    constexpr long AT_FDCWD = -100;
+    constexpr u32 AT_SYMLINK_NOFOLLOW = 0x100, AT_EMPTY_PATH = 0x1000;
+    int dirfd = static_cast<int>(a0);
+    u32 flags = static_cast<u32>(a4);
+    if (flags & ~(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH))
+        return -err::INVAL;
+    char* path = static_cast<char*>(kmalloc(4096));
+    if (!path)
+        return -err::NOMEM;
+    long r = uaccess::string_from(reinterpret_cast<const char*>(a1), path, 4096);
+    StringVector argv, envp;
+    if (r >= 0)
+        r = argv.copy_from_user(a2);
+    if (r >= 0)
+        r = envp.copy_from_user(a3);
+    if (r >= 0) {
+        if (path[0] == '/' || (path[0] && dirfd == static_cast<int>(AT_FDCWD))) {
+            r = proc::do_execve(frame, path, argv.get(), envp.get());
+        } else if (!path[0] && !(flags & AT_EMPTY_PATH)) {
+            r = -err::NOENT;
+        } else if (vfs::File* f = proc::fd_get(proc::current(), dirfd)) {
+            if (!path[0]) {
+                char name[300];
+                if (f->path)
+                    snprintf(name, sizeof(name), "%s", f->path);
+                else
+                    snprintf(name, sizeof(name), "/dev/fd/%d", dirfd);
+                r = proc::do_execve_inode(frame, f->inode, name, argv.get(), envp.get());
+            } else if (!vfs::is_dir(f->inode->mode) || !f->path) {
+                r = vfs::is_dir(f->inode->mode) ? -err::NOENT : -err::NOTDIR;
+            } else {
+                // Relative to the directory: by its absolute path.
+                char* full = static_cast<char*>(kmalloc(8192));
+                if (!full) {
+                    r = -err::NOMEM;
+                } else {
+                    snprintf(full, 8192, "%s/%s", f->path, path);
+                    r = proc::do_execve(frame, full, argv.get(), envp.get());
+                    kfree(full);
+                }
+            }
+            vfs::file_put(f);
+        } else {
+            r = -err::BADF;
+        }
+    }
+    kfree(path);
+    return r;
+}
+
 // waitid(idtype, id, siginfo*, options, rusage*): wait with the child's
 // status in a siginfo (CLD_EXITED/KILLED/DUMPED, pid, uid, status).
 long sys_waitid(SYSCALL_ARGS) {
@@ -496,6 +551,18 @@ long sys_tgkill(SYSCALL_ARGS) {
     if (a2)
         signal::send_thread(t, static_cast<int>(a2), signal::SI_TKILL);
     return 0;
+}
+
+// rt_sigqueueinfo / rt_tgsigqueueinfo: signals with a payload (Android's
+// libc and BoringSSL's self-tests). Delivered like kill / tgkill; the payload
+// (si_value) isn't carried yet.
+long sys_rt_sigqueueinfo(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    return sys_kill(a0, a1, 0, 0, 0, 0, frame);
+}
+long sys_rt_tgsigqueueinfo(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    return sys_tgkill(a0, a1, a2, 0, 0, 0, frame);
 }
 
 long sys_tkill(SYSCALL_ARGS) {
@@ -799,6 +866,8 @@ long sys_prlimit64(SYSCALL_ARGS) {
     return 0; // setting limits: accepted, not enforced yet
 }
 
+long sys_setrlimit(SYSCALL_ARGS) { SYSCALL_UNUSED; return 0; } // accepted, not enforced yet (as prlimit64)
+
 long sys_getrlimit(SYSCALL_ARGS) {
     SYSCALL_UNUSED;
     return uaccess::put(reinterpret_cast<RLimit*>(a1), default_limit(static_cast<u32>(a0)));
@@ -945,6 +1014,16 @@ long sys_reboot(SYSCALL_ARGS) {
         return 0;
     if (cmd != RESTART && cmd != RESTART2 && cmd != HALT && cmd != POWER_OFF)
         return -err::INVAL;
+    // Inside a PID namespace (a container: Android's init) a reboot ends the
+    // namespace, not the machine: its init dies (and with it everything in it).
+    if (Process* me = proc::current(); me->pidns) {
+        klog::info("%s[%d]: %s inside a PID namespace: ending the namespace", me->name, me->pid,
+                   cmd == POWER_OFF || cmd == HALT ? "power off" : "restart");
+        LockGuard guard(proc::table_lock());
+        if (Process* init = me->pidns->init)
+            signal::send(init, 9 /* SIGKILL */);
+        return 0;
+    }
     // Each step is logged and the boot log saved after it, so a shutdown
     // that hangs (a disk that never answers, firmware that ignores the
     // power-off) shows where on the stick.
@@ -1290,12 +1369,13 @@ long sys_setns(SYSCALL_ARGS) {
 
 long sys_personality(SYSCALL_ARGS) {
     SYSCALL_UNUSED;
-    // PER_LINUX (with flags such as ADDR_NO_RANDOMIZE) only; 0xffffffff queries.
+    // PER_LINUX (with flags such as ADDR_NO_RANDOMIZE) and PER_LINUX32 (8:
+    // Android's 32-bit libc sets it); 0xffffffff queries.
     Process* me = proc::current();
     u32 old = me->personality;
     if (a0 == 0xffffffff)
         return old;
-    if ((a0 & 0xff) != 0)
+    if ((a0 & 0xff) != 0 && (a0 & 0xff) != 8)
         return -err::INVAL;
     me->personality = static_cast<u32>(a0);
     return old;
@@ -1504,6 +1584,7 @@ void register_process() {
     set(57, sys_fork, "fork");
     set(58, sys_vfork, "vfork");
     set(59, sys_execve, "execve");
+    set(322, sys_execveat, "execveat");
     set(61, sys_wait4, "wait4");
     set(62, sys_kill, "kill");
     set(130, sys_rt_sigsuspend, "rt_sigsuspend");
@@ -1525,6 +1606,9 @@ void register_process() {
     set(273, sys_set_robust_list, "set_robust_list");
     set(274, sys_get_robust_list, "get_robust_list");
     set(302, sys_prlimit64, "prlimit64");
+    set(160, sys_setrlimit, "setrlimit");
+    set(129, sys_rt_sigqueueinfo, "rt_sigqueueinfo");
+    set(297, sys_rt_tgsigqueueinfo, "rt_tgsigqueueinfo");
     set(318, sys_getrandom, "getrandom");
     set(309, sys_getcpu, "getcpu");
     set(157, sys_prctl, "prctl");

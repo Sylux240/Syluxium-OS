@@ -608,7 +608,43 @@ void for_each(void (*fn)(Device*, void*), void* ctx) {
         fn(g_devices[i], ctx);
 }
 
+// Uncached devices: whole sectors straight from the driver, partial ones
+// through a bounce buffer (read-modify-write for writes).
+long direct_io(Device* d, u64 offset, void* rbuf, const void* wbuf, usize len) {
+    if (offset + len > d->size_bytes())
+        return -err::IO;
+    u8* bounce = static_cast<u8*>(kmalloc(4096));
+    if (!bounce)
+        return -err::NOMEM;
+    long r = 0;
+    while (len && r == 0) {
+        u64 lba = offset / 512, in = offset % 512;
+        usize n = 4096 - in < len ? 4096 - in : len;
+        u32 sectors = static_cast<u32>((in + n + 511) / 512);
+        if (rbuf) {
+            r = d->read_sectors(lba, sectors, bounce);
+            if (r == 0)
+                memcpy(rbuf, bounce + in, n);
+            rbuf = static_cast<u8*>(rbuf) + n;
+        } else {
+            if (in || n % 512)
+                r = d->read_sectors(lba, sectors, bounce);
+            if (r == 0) {
+                memcpy(bounce + in, wbuf, n);
+                r = d->write_sectors(lba, sectors, bounce);
+            }
+            wbuf = static_cast<const u8*>(wbuf) + n;
+        }
+        offset += n;
+        len -= n;
+    }
+    kfree(bounce);
+    return r < 0 ? r : 0;
+}
+
 long read(Device* d, u64 offset, void* buf, usize len) {
+    if (d->uncached)
+        return direct_io(d, offset, buf, nullptr, len);
     if (offset + len > d->size_bytes())
         return -err::IO;
     LockGuard guard(g_cache_lock);
@@ -629,6 +665,8 @@ long read(Device* d, u64 offset, void* buf, usize len) {
 }
 
 long write(Device* d, u64 offset, const void* buf, usize len) {
+    if (d->uncached)
+        return direct_io(d, offset, nullptr, buf, len);
     if (offset + len > d->size_bytes())
         return -err::IO;
     LockGuard guard(g_cache_lock);
@@ -665,6 +703,8 @@ void add_sync_hook(void (*fn)(void*), void* ctx) {
 }
 
 long hold(Device* d, u64 offset, usize len, int delta) {
+    if (d->uncached)
+        return 0; // written at once anyway
     LockGuard guard(g_cache_lock);
     while (len) {
         u64 n = offset / BLOCK;
@@ -684,6 +724,8 @@ long hold(Device* d, u64 offset, usize len, int delta) {
 }
 
 long write_through(Device* d, u64 offset, const void* buf, usize len) {
+    if (d->uncached)
+        return direct_io(d, offset, nullptr, buf, len);
     if (long r = write(d, offset, buf, len); r < 0)
         return r;
     LockGuard guard(g_cache_lock);
@@ -698,6 +740,8 @@ long write_through(Device* d, u64 offset, const void* buf, usize len) {
 }
 
 long sync_device(Device* d) {
+    if (d->uncached)
+        return d->flush();
     LockGuard guard(g_cache_lock);
     for (CacheBlock* b : g_lru)
         if (b->dirty && b->dev == d)

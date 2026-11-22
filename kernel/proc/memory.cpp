@@ -98,6 +98,7 @@ Memory* Memory::fork() {
     // just made copy-on-write: flush them everywhere this space is running.
     vmm::shootdown(0, ~usize(0) >> 1, m_as);
     child->arg_start = arg_start;
+    child->start_stack = start_stack;
     child->arg_end = arg_end;
     child->env_start = env_start;
     child->env_end = env_end;
@@ -224,8 +225,9 @@ void Memory::insert(Vma* v) {
 }
 
 // Highest free gap of `len` bytes below the mmap area's top.
-uptr Memory::find_gap(usize len) {
-    uptr top = mmap_top();
+uptr Memory::find_gap(usize len, uptr top, uptr bottom) {
+    if (!top)
+        top = mmap_top();
     for (Vma* v = m_vmas.back(); v; v = m_vmas.prev_of(v)) {
         if (v->start >= top)
             continue;
@@ -233,7 +235,7 @@ uptr Memory::find_gap(usize len) {
             return top - len;
         top = min(top, v->start);
     }
-    return top >= USER_MIN + len ? top - len : 0;
+    return top >= bottom + len ? top - len : 0;
 }
 
 Vma* Memory::split(Vma* v, uptr at) {
@@ -307,8 +309,14 @@ long Memory::map(uptr addr, usize len, u32 prot, u32 flags, vfs::Inode* file, u6
         }
     } else {
         addr = align_down<uptr>(addr, PAGE_SIZE);
-        if (!addr || addr < USER_MIN || addr + len > mmap_top() || overlaps(addr, addr + len))
-            addr = find_gap(len);
+        if (!addr || addr < USER_MIN || addr + len > mmap_top() || overlaps(addr, addr + len)) {
+            // MAP_32BIT (x86_64): in the second gigabyte, as Linux places it.
+            // 64-bit ART keeps its Java heap there: object references are 32 bits.
+            if ((flags & MAP_32BIT) && !m_compat)
+                addr = find_gap(len, 0x80000000, 0x40000000);
+            else
+                addr = find_gap(len);
+        }
         if (!addr)
             return -err::NOMEM;
     }
@@ -490,7 +498,70 @@ long Memory::protect(uptr addr, usize len, u32 prot) {
         }
         vmm::shootdown(v->start, (v->end - v->start) / PAGE_SIZE, m_as);
     }
+    merge_adjacent(addr, end);
     return 0;
+}
+
+long Memory::discard(uptr addr, usize len) {
+    if (addr & (PAGE_SIZE - 1))
+        return -err::INVAL;
+    len = align_up<usize>(len, PAGE_SIZE);
+    uptr end = addr + len;
+    if (end < addr)
+        return -err::INVAL;
+    LockGuard guard(m_lock);
+    bool gap = false;
+    uptr covered = addr;
+    for (Vma* v = m_vmas.front(); v; v = m_vmas.next_of(v)) {
+        if (v->end <= addr || v->start >= end)
+            continue;
+        uptr s = max(v->start, addr), e = min(v->end, end);
+        if (s > covered)
+            gap = true;
+        covered = e;
+        if (v->kind == VMA_DEVICE)
+            continue; // shared memory keeps its contents
+        // A private anonymous page only this mapping uses is zeroed where it
+        // is: what the program sees is the same as a fresh zero page, without
+        // freeing pages or TLB shootdowns (glibc does this for every cached
+        // thread stack; unmapping each time stressed thread exit on a busy
+        // machine). Pages shared copy-on-write and private file pages (which
+        // must read back as the file's data) are dropped as Linux drops them.
+        for (uptr page = s; page < e; page += PAGE_SIZE) {
+            u64 phys;
+            if (!m_as->translate(page, &phys))
+                continue;
+            if (!v->file && __atomic_load_n(&pmm::frame(phys)->refcount, __ATOMIC_ACQUIRE) == 1)
+                memset(mm::phys_to_virt(phys), 0, PAGE_SIZE);
+            else
+                unmap_pages(page, page + PAGE_SIZE, true);
+        }
+    }
+    return gap || covered < end ? -err::NOMEM : 0;
+}
+
+// Linux merges neighbouring mappings that became alike again (protection put
+// back). Programs rely on it: bionic's atexit table toggles single pages
+// read-only, then mremap()s the whole table, which must be one mapping.
+// Only private anonymous memory is merged (no file offsets to line up).
+void Memory::merge_adjacent(uptr start, uptr end) {
+    auto mergeable = [](const Vma* a, const Vma* b) {
+        return a->end == b->start && a->prot == b->prot && a->kind == VMA_NORMAL && b->kind == VMA_NORMAL &&
+               !a->file && !b->file;
+    };
+    for (Vma* v = m_vmas.front(); v;) {
+        Vma* n = m_vmas.next_of(v);
+        if (!n || v->start > end)
+            break;
+        if (n->end >= start && mergeable(v, n)) {
+            v->end = n->end;
+            m_vmas.remove(n);
+            dev_untrack(n);
+            delete n;
+            continue; // v may take its next neighbour too
+        }
+        v = n;
+    }
 }
 
 long Memory::residency(uptr addr, usize len, u8* out) {

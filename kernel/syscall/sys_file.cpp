@@ -222,7 +222,7 @@ long do_openat(long dirfd, u64 user_path, u32 flags, u32 mode) {
         return -err::NOTDIR;
     if (is_dir(inode->mode) && (flags & O_ACCMODE) != O_RDONLY)
         return -err::ISDIR;
-    if (is_lnk(inode->mode) && !(flags & O_PATH))
+    if (is_lnk(inode->mode) && !(flags & O_PATH) && !inode->magic_link())
         return -err::LOOP; // O_NOFOLLOW on a symlink
     if ((flags & O_TRUNC) && is_reg(inode->mode) && (flags & O_ACCMODE) != O_RDONLY && inode->size) {
         inode->truncate(0);
@@ -391,12 +391,66 @@ long sys_pwrite64(SYSCALL_ARGS) {
     return do_write(f.get(), a1, a2, static_cast<i64>(a3));
 }
 
+// readv/writev on a socket: one message, as Linux does. Per-iovec writes
+// would turn each piece into its own datagram (liblog writes a header, a
+// priority, a tag and a message with one writev; logd drops a lone header).
+long vectored_socket(File* f, const KIoVec* iov, u64 count, bool write) {
+    if (write ? !can_write(f) : !can_read(f))
+        return -err::BADF;
+    usize total = 0;
+    for (u64 i = 0; i < count; i++) {
+        if (iov[i].len > 0x7ffff000 - total)
+            return -err::INVAL;
+        total += iov[i].len;
+    }
+    constexpr usize MAX_MSG = 256 * 1024; // larger ones go in pieces, like a stream
+    usize n = min(total, MAX_MSG);
+    u8* k = static_cast<u8*>(kmalloc(n ? n : 1));
+    if (!k)
+        return -err::NOMEM;
+    long r = 0;
+    if (write) {
+        usize pos = 0;
+        for (u64 i = 0; i < count && pos < n && r >= 0; i++) {
+            usize part = min<usize>(iov[i].len, n - pos);
+            if (part)
+                r = uaccess::copy_from(k + pos, reinterpret_cast<const void*>(iov[i].base), part);
+            pos += part;
+        }
+        if (r >= 0)
+            r = f->inode->write_file(f, 0, k, n);
+    } else {
+        r = f->inode->read_file(f, 0, k, n);
+        usize pos = 0;
+        for (u64 i = 0; r > 0 && i < count && pos < static_cast<usize>(r); i++) {
+            usize part = min<usize>(iov[i].len, static_cast<usize>(r) - pos);
+            if (long e = part ? uaccess::copy_to(reinterpret_cast<void*>(iov[i].base), k + pos, part) : 0; e < 0) {
+                r = e;
+                break;
+            }
+            pos += part;
+        }
+    }
+    kfree(k);
+    return r;
+}
+
 long vectored(u64 fd, u64 user_iov, u64 count, bool write) {
     FileRef f(proc::current(), static_cast<long>(fd));
     if (!f)
         return -err::BADF;
     if (count > 1024)
         return -err::INVAL;
+    if ((f->inode->mode & S_IFMT) == S_IFSOCK) {
+        auto* iov = static_cast<KIoVec*>(kmalloc(sizeof(KIoVec) * (count ? count : 1)));
+        if (!iov)
+            return -err::NOMEM;
+        long r = count ? uaccess::copy_from(iov, reinterpret_cast<const void*>(user_iov), sizeof(KIoVec) * count) : 0;
+        if (r >= 0)
+            r = vectored_socket(f.get(), iov, count, write);
+        kfree(iov);
+        return r;
+    }
     if (write && f->inode->whole_writes()) {
         // Gathered into one buffer and written at once.
         IoVec vecs[64];
@@ -770,11 +824,67 @@ long do_mkdirat(long dirfd, u64 user_path, u32 mode) {
 // mknod/mknodat: named pipes (FIFOs) and plain files. Device nodes are made
 // by the kernel itself (devtmpfs-style), so only root may ask, and gets
 // EPERM like an unprivileged container would.
-long do_mknodat(long dirfd, u64 user_path, u32 mode) {
+// The device node in the system's /dev (any depth) with this type and number.
+Inode* find_device_node(Inode* dir, u32 type, u64 rdev, int depth) {
+    vfs::DirEntry e;
+    for (u64 i = 0; dir->readdir(i, &e) > 0; i++) {
+        usize len = strlen(e.name);
+        if ((len == 1 && e.name[0] == '.') || (len == 2 && e.name[0] == '.' && e.name[1] == '.'))
+            continue;
+        Inode* n = dir->lookup(e.name, len);
+        if (!n)
+            continue;
+        if ((n->mode & S_IFMT) == type && n->rdev == rdev)
+            return n;
+        if (depth < 3 && vfs::is_dir(n->mode))
+            if (Inode* f = find_device_node(n, type, rdev, depth + 1))
+                return f;
+    }
+    return nullptr;
+}
+
+// A device node made by mknod (root; containers build their own /dev): the
+// same device as the system's node with that number, under the new name.
+long mknod_device(Inode* parent, const char* name, usize len, u32 type, u64 linux_dev) {
+    if (!proc::capable())
+        return -err::PERM;
+    // Linux's dev_t: major in bits 8-19 (and 32+), minor in bits 0-7 and 20-31.
+    u32 major = static_cast<u32>(((linux_dev >> 8) & 0xFFF) | ((linux_dev >> 32) & ~0xFFFu));
+    u32 minor = static_cast<u32>((linux_dev & 0xFF) | ((linux_dev >> 12) & ~0xFFu));
+    u64 rdev = (major << 8) | (minor & 0xFF) | (static_cast<u64>(minor & ~0xFFu) << 12);
+    Inode* dev;
+    if (vfs::resolve_global("/dev", &dev) < 0)
+        return -err::NODEV;
+    Inode* node = find_device_node(dev, type, rdev, 0);
+    if (!node)
+        return -err::NODEV; // no such device here
+    if (!parent->is_ramfs_dir())
+        return -err::PERM; // tmpfs (where containers make their /dev) only
+    if (long r = static_cast<ramfs::Dir*>(parent)->attach(name, len, node); r < 0)
+        return r;
+    node->nlink++;
+    return 0;
+}
+
+long do_mknodat(long dirfd, u64 user_path, u32 mode, u64 linux_dev) {
     Process* p = proc::current();
     u32 type = mode & S_IFMT;
-    if (type == S_IFCHR || type == S_IFBLK)
-        return -err::PERM;
+    if (type == S_IFCHR || type == S_IFBLK) {
+        UserPath path(user_path);
+        if (path.error())
+            return path.error();
+        Inode* base;
+        if (long r = dir_for(p, dirfd, path.c_str(), &base); r < 0)
+            return r;
+        Inode* parent;
+        const char* name;
+        usize len;
+        if (long r = resolve_parent(path.c_str(), base, &parent, &name, &len); r < 0)
+            return r;
+        if (parent->lookup(name, len))
+            return -err::EXIST;
+        return mknod_device(parent, name, len, type, linux_dev);
+    }
     if (type != 0 && type != S_IFREG && type != S_IFIFO)
         return -err::INVAL; // sockets are made by bind()
     UserPath path(user_path);
@@ -804,8 +914,8 @@ long do_mknodat(long dirfd, u64 user_path, u32 mode) {
     return r;
 }
 
-long sys_mknod(SYSCALL_ARGS) { SYSCALL_UNUSED; return do_mknodat(AT_FDCWD, a0, static_cast<u32>(a1)); }
-long sys_mknodat(SYSCALL_ARGS) { SYSCALL_UNUSED; return do_mknodat(static_cast<i32>(a0), a1, static_cast<u32>(a2)); }
+long sys_mknod(SYSCALL_ARGS) { SYSCALL_UNUSED; return do_mknodat(AT_FDCWD, a0, static_cast<u32>(a1), a2); }
+long sys_mknodat(SYSCALL_ARGS) { SYSCALL_UNUSED; return do_mknodat(static_cast<i32>(a0), a1, static_cast<u32>(a2), a3); }
 
 long sys_mkdir(SYSCALL_ARGS) { SYSCALL_UNUSED; return do_mkdirat(AT_FDCWD, a0, static_cast<u32>(a1)); }
 long sys_mkdirat(SYSCALL_ARGS) { SYSCALL_UNUSED; return do_mkdirat(static_cast<i32>(a0), a1, static_cast<u32>(a2)); }
@@ -1733,6 +1843,7 @@ long sys_mount(SYSCALL_ARGS) {
     if (target.error()) return target.error();
     char abs[512];
     join_path(proc::current()->cwd_path, target.c_str(), abs, sizeof(abs));
+    { char c[512]; if (vfs::canonical_path(abs, "/", c, sizeof(c)) == 0) snprintf(abs, sizeof(abs), "%s", c); } // (/proc/self/fd/N paths: the real one)
 
     // Mount flags (containers): bind mounts, moves, remounts and propagation
     // changes. Read-only and propagation are accepted, not enforced: there is
@@ -1750,18 +1861,24 @@ long sys_mount(SYSCALL_ARGS) {
             return source.error();
         char src_abs[512];
         join_path(proc::current()->cwd_path, source.c_str(), src_abs, sizeof(src_abs));
+    { char c[512]; if (vfs::canonical_path(src_abs, "/", c, sizeof(c)) == 0) snprintf(src_abs, sizeof(src_abs), "%s", c); } // (/proc/self/fd/N paths: the real one)
         Inode* src;
         if (long r = vfs::resolve(src_abs, nullptr, true, &src); r < 0)
             return r;
-        // (MS_REC needs nothing more: mounts hang on directories, so the ones
-        // below src show through the bind as well.)
-        return vfs::mount_at(abs, src, src_abs, "bind");
+        // Mounts hang on directories, so the ones below src show through the
+        // bind anyway; MS_REC also records copies under abs (they survive
+        // unmounting the originals, as on Linux).
+        long r = vfs::mount_at(abs, src, src_abs, "bind");
+        if (r == 0 && (mflags & (1 << 14) /* MS_REC */))
+            vfs::bind_replicate(src_abs, abs);
+        return r;
     }
     if (mflags & MS_MOVE) {
         if (source.error())
             return source.error();
         char src_abs[512];
         join_path(proc::current()->cwd_path, source.c_str(), src_abs, sizeof(src_abs));
+    { char c[512]; if (vfs::canonical_path(src_abs, "/", c, sizeof(c)) == 0) snprintf(src_abs, sizeof(src_abs), "%s", c); } // (/proc/self/fd/N paths: the real one)
         return vfs::move_mount(src_abs, abs);
     }
     if (mflags & (MS_UNBINDABLE | MS_PRIVATE | MS_SLAVE | MS_SHARED)) {
@@ -1902,12 +2019,13 @@ long sys_umount2(SYSCALL_ARGS) {
         return target.error();
     char abs[512];
     join_path(proc::current()->cwd_path, target.c_str(), abs, sizeof(abs));
+    { char c[512]; if (vfs::canonical_path(abs, "/", c, sizeof(c)) == 0) snprintf(abs, sizeof(abs), "%s", c); }
     block::sync_all();
     char source[64];
     vfs::mount_source(abs, source, sizeof(source));
     Inode* mounted = nullptr;
     vfs::resolve(abs, nullptr, true, &mounted);
-    long r = vfs::unmount(abs);
+    long r = vfs::unmount_at(target.c_str(), proc::current()->cwd, abs);
     if (r == 0) {
         loop::unmounted(source); // mount -o loop's device goes with it
         fuse::unmounted(mounted); // a FUSE server's loop ends
@@ -2015,8 +2133,8 @@ long sys_kcmp(SYSCALL_ARGS) {
     if (type < KCMP_FILE || type >= KCMP_EPOLL_TFD)
         return -err::INVAL;
     LockGuard guard(proc::table_lock());
-    Process* p1 = proc::find(static_cast<int>(a0));
-    Process* p2 = proc::find(static_cast<int>(a1));
+    Process* p1 = proc::find_visible(static_cast<int>(a0), proc::current());
+    Process* p2 = proc::find_visible(static_cast<int>(a1), proc::current());
     if (!p1 || !p2)
         return -err::SRCH;
     Process* self = proc::current();
@@ -2038,6 +2156,15 @@ long sys_kcmp(SYSCALL_ARGS) {
         y = p2;
     }
     return x == y ? 0 : reinterpret_cast<uptr>(x) < reinterpret_cast<uptr>(y) ? 1 : 2;
+}
+
+long socket_vectored(u64 fd, const KIoVec* iov, u64 count, bool write, bool* is_socket) {
+    *is_socket = false;
+    FileRef f(proc::current(), static_cast<long>(fd));
+    if (!f || (f->inode->mode & S_IFMT) != S_IFSOCK)
+        return 0;
+    *is_socket = true;
+    return vectored_socket(f.get(), iov, count, write);
 }
 
 void register_file() {

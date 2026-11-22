@@ -171,9 +171,17 @@ long sys_mincore(SYSCALL_ARGS) {
     return 0;
 }
 
+// madvise: MADV_DONTNEED (and MADV_FREE, which may behave the same) really
+// drop pages: ART zeroes its GC structures that way. The rest is advice.
 long sys_madvise(SYSCALL_ARGS) {
     SYSCALL_UNUSED;
-    return 0; // advice only
+    constexpr int MADV_DONTNEED = 4, MADV_FREE = 8;
+    if (a0 & 0xFFF)
+        return -err::INVAL;
+    int advice = static_cast<int>(a2);
+    if (advice == MADV_DONTNEED || advice == MADV_FREE)
+        return current()->mem->discard(a0, a1);
+    return 0;
 }
 
 } // namespace
