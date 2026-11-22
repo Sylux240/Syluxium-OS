@@ -284,7 +284,16 @@ LKPI_LINUX_CFLAGS := -I$(LKPI_INCLUDE) -include linux/kconfig.h -Werror=implicit
     -Wno-initializer-overrides -Wno-unused-const-variable -Wno-implicit-fallthrough -Wno-format-zero-length \
     -Wno-missing-field-initializers -Wno-sign-compare -Wno-address-of-packed-member -Wno-tautological-constant-out-of-range-compare \
     -Wno-default-const-init-field-unsafe -Wno-unknown-warning-option
-lkpi_modname = $(if $(findstring /brcm80211/,$<),brcmfmac,$(lkpi_modname_net))
+lkpi_modname = $(or $(lkpi_modname_list),$(lkpi_modname_old))
+lkpi_modname_old = $(if $(findstring /brcm80211/,$<),brcmfmac,$(lkpi_modname_net))
+# Drivers imported from Linux 7.4-rc3 (docs/drivers.md): "<path part>:<module name>".
+LKPI_MODNAMES := /ethernet/intel/igb/:igb /drivers/net/mdio.c:mdio /ethernet/broadcom/bnx2:bnx2 \
+    /rtw89/rtw8851be.c:rtw89_8851be /rtw89/rtw8852ae.c:rtw89_8852ae /rtw89/rtw8852be.c:rtw89_8852be \
+    /rtw89/rtw8852bte.c:rtw89_8852bte /rtw89/rtw8852ce.c:rtw89_8852ce /rtw89/rtw8922ae.c:rtw89_8922ae \
+    /rtw89/pci:rtw89_pci /rtw89/:rtw89_core /scsi/megaraid/:megaraid_sas /drivers/scsi/scsi_common:scsi_common \
+    /mt7921/usb.c:mt7921u /rtw88/usb.c:rtw88_usb /rtw88/rtw8822bu:rtw88_8822bu /rtw88/rtw8822cu:rtw88_8822cu \
+    /rtw88/rtw8821cu:rtw88_8821cu /rtw88/rtw8723du:rtw88_8723du
+lkpi_modname_list = $(firstword $(foreach m,$(LKPI_MODNAMES),$(if $(findstring $(word 1,$(subst :, ,$(m))),$<),$(word 2,$(subst :, ,$(m))))))
 lkpi_modname_net = $(if $(findstring /drivers/net/usb/,$<),$(basename $(notdir $<)),$(lkpi_modname_net2))
 lkpi_modname_net2 = $(if $(findstring /iwlwifi/mvm/,$<),iwlmvm,$(if $(findstring /iwlwifi/,$<),iwlwifi,$(if $(findstring /ethernet/realtek/r8169,$<),r8169,$(if $(findstring /ethernet/broadcom/tg3,$<),tg3,$(if $(findstring /ethernet/intel/e1000e/,$<),e1000e,$(if $(findstring /ethernet/intel/igc/,$<),igc,$(if $(findstring /drivers/net/phy/realtek,$<),realtek,$(if $(findstring /drivers/net/phy/,$<),libphy,$(lkpi_modname_rest)))))))))
 lkpi_modname_rest = $(if $(findstring /drm/i915/,$<),i915,$(if $(findstring /drm/radeon/,$<),radeon,$(if $(findstring /drm/amd/,$<),amdgpu,$(if $(findstring /drm/nouveau/,$<),nouveau,$(if $(findstring /drm/scheduler/,$<),gpu_sched,$(patsubst virtual,mac80211_hwsim,$(patsubst wireless,cfg80211,$(notdir $(patsubst %/,%,$(dir $<))))))))))
@@ -295,12 +304,16 @@ $(OBJDIR)/$(LKPI_IWL)/%: LKPI_DRV_CFLAGS = -I$(LKPI_IWL) -DCONFIG_IWLWIFI=1 -DCO
 $(OBJDIR)/kernel/linuxkpi/drivers/bcma/%: LKPI_DRV_CFLAGS = -include net/lkpi_bcma.h
 $(OBJDIR)/kernel/linuxkpi/drivers/net/wireless/broadcom/%: LKPI_DRV_CFLAGS = -include net/lkpi_bcma.h
 $(OBJDIR)/kernel/linuxkpi/drivers/net/wireless/realtek/rtw88/%: LKPI_DRV_CFLAGS = -include net/lkpi_netcompat.h
+# Realtek rtw89 (RTL8852AE/BE/BTE/CE, 8851BE, 8922AE Wi-Fi 6/6E/7): from Linux 6.12 like the wireless stack it plugs into.
+$(OBJDIR)/kernel/linuxkpi/drivers/net/wireless/realtek/rtw89/%: LKPI_DRV_CFLAGS = -include net/lkpi_netcompat.h
 $(OBJDIR)/kernel/linuxkpi/drivers/net/wireless/ath/%: LKPI_DRV_CFLAGS = -include net/lkpi_netcompat.h -Ikernel/linuxkpi/drivers/net/wireless/ath
 # Bluetooth core
 $(OBJDIR)/kernel/linuxkpi/net/bluetooth/%: LKPI_DRV_CFLAGS = -include net/lkpi_bt.h
 $(OBJDIR)/kernel/linuxkpi/drivers/bluetooth/%: LKPI_DRV_CFLAGS = -include net/lkpi_bt.h -fshort-wchar
 LKPI_MT76 := kernel/linuxkpi/drivers/net/wireless/mediatek/mt76
 $(OBJDIR)/$(LKPI_MT76)/%: LKPI_DRV_CFLAGS = -include net/lkpi_netcompat.h -I$(LKPI_MT76) -DCONFIG_PM=1
+# mt76 USB (mt7921u): linear transfer buffers, no scatter-gather URBs (net/lkpi_wifiusb.h).
+$(OBJDIR)/$(LKPI_MT76)/usb.c.o: LKPI_DRV_CFLAGS = -include net/lkpi_wifiusb.h -I$(LKPI_MT76) -DCONFIG_PM=1
 LKPI_BRCM := kernel/linuxkpi/drivers/net/wireless/broadcom/brcm80211
 $(OBJDIR)/$(LKPI_BRCM)/%: LKPI_DRV_CFLAGS = -include net/lkpi_bcma.h -I$(LKPI_BRCM)/brcmfmac -I$(LKPI_BRCM)/include
 # Realtek Ethernet (r8169) and phylib.
@@ -312,6 +325,15 @@ $(OBJDIR)/$(LKPI_NETDRV)/phy/%: LKPI_DRV_CFLAGS = -include net/lkpi_phy.h
 # USB Ethernet adapters (r8152, ax88179_178a over usbnet)
 $(OBJDIR)/$(LKPI_NETDRV)/usb/%: LKPI_DRV_CFLAGS = -include net/lkpi_usbnet.h
 $(OBJDIR)/$(LKPI_NETDRV)/ethernet/intel/%: LKPI_DRV_CFLAGS = -include net/lkpi_phy.h -DCONFIG_E1000E=1 -DCONFIG_IGC=1
+# Intel 1 GbE server/desktop NICs (igb: 82575/82576/82580, I350, I210/I211, I354), Linux 7.4-rc3.
+$(OBJDIR)/$(LKPI_NETDRV)/ethernet/intel/igb/%: LKPI_DRV_CFLAGS = -include net/lkpi_netdrv.h -DCONFIG_IGB=1
+# Qualcomm Atheros/Killer Ethernet (alx: AR8161/8171/E2200..; atl1c: AR813x/815x, L1c/L2c), Linux 7.4-rc3; MDIO library.
+$(OBJDIR)/$(LKPI_NETDRV)/ethernet/atheros/%: LKPI_DRV_CFLAGS = -include net/lkpi_netdrv.h
+$(OBJDIR)/$(LKPI_NETDRV)/mdio.c.o: LKPI_DRV_CFLAGS = -include net/lkpi_netdrv.h
+# Broadcom NetXtreme II (bnx2), Linux 7.4-rc3: tg3's helpers plus the 7.x set.
+$(OBJDIR)/$(LKPI_NETDRV)/ethernet/broadcom/bnx2.c.o: LKPI_DRV_CFLAGS = -include net/lkpi_netdrv.h -include net/lkpi_tg3.h
+# SCSI host adapters (Linux 7.4-rc3) on the LinuxKPI SCSI midlayer (glue/scsi.c, scsi.cpp).
+$(OBJDIR)/kernel/linuxkpi/drivers/scsi/%: LKPI_DRV_CFLAGS = -include linux/lkpi_v7.h -include linux/cpumask.h
 # GPU drivers: their own include directory and Kconfig (drm/lkpi_<driver>_config.h).
 LKPI_I915 := kernel/linuxkpi/drivers/gpu/drm/i915
 $(OBJDIR)/$(LKPI_I915)/%: LKPI_DRV_CFLAGS = -I$(LKPI_I915) -DI915 -include drm/lkpi_i915_config.h -gline-tables-only
@@ -479,7 +501,7 @@ $(DEBIAN_CONFIGURED): $(DEBIAN_STAMP) tools/configure-packages.sh
 # Device firmware from Debian's non-free-firmware section: the packages are
 # huge (GPU firmware), so only the files our drivers load are kept.
 FIRMWARE_REPO  := http://deb.debian.org/debian|$(DEBIAN_SUITE)|non-free-firmware
-FIRMWARE_PKGS  := firmware-mediatek firmware-realtek firmware-misc-nonfree firmware-intel-graphics firmware-amd-graphics firmware-nvidia-graphics firmware-iwlwifi firmware-brcm80211 firmware-atheros
+FIRMWARE_PKGS  := firmware-mediatek firmware-realtek firmware-misc-nonfree firmware-intel-graphics firmware-amd-graphics firmware-nvidia-graphics firmware-iwlwifi firmware-brcm80211 firmware-atheros firmware-bnx2
 FIRMWARE_FILES = mediatek/mt7601u.bin rtlwifi/rtl8188eufw.bin rtlwifi/rtl8723bu_nic.bin rtl_bt/rtl8723b_fw.bin \
                   $(I915_FIRMWARE)
 # i915: display microcontroller (DMC) firmware for Skylake..Alder Lake, GuC/HuC
@@ -509,9 +531,11 @@ GPU_FIRMWARE   += amdgpu/vega10_* amdgpu/vega12_* amdgpu/vega20_* amdgpu/raven* 
 # the PCIe chips (BCM43602 of 2015-17 MacBook Pros, 4350/4356/4358/43570/4371
 # ...) and the USB ones (~6.5 MB); Apple's 4355/4364 (T2 Macs) aren't in it.
 # Realtek rtw88 (RTL8822BE/CE, 8821CE, 8723DE): ~0.6 MB.
+# Realtek rtw89 (RTL8852AE/BE/BTE/CE, 8851BE, 8922AE): the newest format each 6.12 chip driver reads, ~8.7 MB.
 # MediaTek MT7921/MT7922 (mt7921e): ~2 MB.
 # Qualcomm ath10k: the laptop and PCIe-card chips QCA6174, QCA9377, QCA988x, QCA9887 (~6.5 MB).
 # Bluetooth (btusb): Intel (ibt-*, ~17 MB), Realtek (rtl_bt, ~1.5 MB), MediaTek MT7921/MT7922 (~1 MB).
+# Broadcom NetXtreme II (bnx2: BCM5706/5708/5709/5716, PowerEdge R610/R710 and other servers): ~0.4 MB.
 NET_FIRMWARE   := tigon/* intel/ibt-* rtl_bt/* mediatek/BT_RAM_CODE_MT7961_1_2_hdr.bin mediatek/BT_RAM_CODE_MT7922_1_1_hdr.bin ath10k/QCA6174/*/* ath10k/QCA9377/*/* ath10k/QCA988X/*/* ath10k/QCA9887/*/* mediatek/WIFI_RAM_CODE_MT7961_1.bin mediatek/WIFI_MT7961_patch_mcu_1_2_hdr.bin mediatek/WIFI_RAM_CODE_MT7922_1.bin mediatek/WIFI_MT7922_patch_mcu_1_1_hdr.bin rtw88/rtw8822b_fw.bin rtw88/rtw8822c_fw.bin rtw88/rtw8821c_fw.bin rtw88/rtw8723d_fw.bin brcm/brcmfmac*-pcie.* brcm/brcmfmac43143.bin brcm/brcmfmac43236b.bin brcm/brcmfmac43242a.bin \
                   brcm/brcmfmac43569.bin brcm/brcmfmac4373.bin \
                   iwlwifi-7260-17.ucode iwlwifi-3160-17.ucode iwlwifi-7265-17.ucode iwlwifi-7265D-29.ucode \
@@ -520,7 +544,9 @@ NET_FIRMWARE   := tigon/* intel/ibt-* rtl_bt/* mediatek/BT_RAM_CODE_MT7961_1_2_h
                   iwlwifi-QuZ-a0-??-b0-77.ucode iwlwifi-so-a0-hr-b0-89.ucode iwlwifi-so-a0-jf-b0-77.ucode \
                   iwlwifi-so-a0-gf-a0-89.ucode iwlwifi-so-a0-gf4-a0-89.ucode iwlwifi-ty-a0-gf-a0-89.ucode \
                   iwlwifi-ma-b0-*-89.ucode iwlwifi-bz-b0-gf-a0-92.ucode iwlwifi-bz-b0-fm-c0-93.ucode \
-                  iwlwifi-gl-c0-fm-c0-92.ucode iwlwifi-*.pnvm rtl_nic/*
+                  iwlwifi-gl-c0-fm-c0-92.ucode iwlwifi-*.pnvm rtl_nic/* \
+                  bnx2/bnx2-* rtw89/rtw8851b_fw.bin rtw89/rtw8852a_fw.bin rtw89/rtw8852b_fw-1.bin rtw89/rtw8852bt_fw.bin \
+                  rtw89/rtw8852c_fw-1.bin rtw89/rtw8922a_fw-1.bin
 GPU_FIRMWARE_SKIP := */gsp/* */gc_9_4_* */psp_13_0_6_* */psp_13_0_14_* */smu_13_0_6_* */smu_13_0_14_* */sdma_4_4_* */vcn_4_0_3_*
 FIRMWARE_ROOT  := $(BUILD)/firmware-debian
 FIRMWARE_STAMP := $(FIRMWARE_ROOT)/.fetched
@@ -683,6 +709,12 @@ clean:
 
 distclean: clean
 	rm -rf deps
+
+# The flags Linux driver sources are compiled with (tools/lkpi-check.py uses
+# them to try upstream driver directories against the LinuxKPI headers).
+.PHONY: print-lkpi-cflags
+print-lkpi-cflags:
+	@echo $(filter-out -isystem $(LKPI_INCLUDE) -MD -MP,$(CFLAGS)) $(LKPI_LINUX_CFLAGS)
 
 -include $(DEPS)
 

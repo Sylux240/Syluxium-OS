@@ -11,6 +11,7 @@
 #include <lib/format.hpp>
 #include <lib/spinlock.hpp>
 #include <lib/string.hpp>
+#include <linuxkpi/linuxkpi.hpp>
 
 namespace sysfs {
 
@@ -106,6 +107,17 @@ bool gen_device_list(TextBuffer& o, const void*) {
     return true;
 }
 
+// Firmware files Linux drivers asked for: "loaded|missing  <device>  <file>".
+// Drivers often try several versions of a file and take the first one
+// found, so a missing file next to a loaded one of the same family is fine.
+bool gen_firmware(TextBuffer& o, const void*) {
+    const char *device, *file;
+    bool loaded;
+    for (unsigned i = 0; linuxkpi::firmware_record(i, &device, &file, &loaded); i++)
+        o.printf("%s\t%s\t%s\n", loaded ? "loaded" : "missing", device, file);
+    return true;
+}
+
 void add(const char* dir, const char* name, vfs::Inode* node) {
     char path[160];
     snprintf(path, sizeof(path), "%s/%s", dir, name);
@@ -119,6 +131,7 @@ void populate_devices() {
     vfs::mkdir_p("/sys/bus/pci/drivers", 0755);
     vfs::mkdir_p("/sys/kernel/syluxium", 0755);
     vfs::add_node("/sys/kernel/syluxium/devices", new GeneratedFile(gen_device_list, nullptr));
+    vfs::add_node("/sys/kernel/syluxium/firmware", new GeneratedFile(gen_firmware, nullptr));
 
     dev::for_each([](dev::Device* d, void*) {
         if (d->bus != dev::Bus::Pci)

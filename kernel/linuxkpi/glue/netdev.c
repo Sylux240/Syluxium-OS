@@ -821,6 +821,8 @@ bool napi_schedule_prep(struct napi_struct* napi)
 
 void __napi_schedule(struct napi_struct* napi) { queue_work(system_highpri_wq, &napi->lkpi_work); }
 
+bool napi_is_scheduled(struct napi_struct* napi) { return __atomic_load_n(&napi->state, __ATOMIC_RELAXED) & NAPI_SCHED; }
+
 bool napi_complete_done(struct napi_struct* napi, int work_done)
 {
 	__atomic_and_fetch(&napi->state, ~NAPI_SCHED, __ATOMIC_SEQ_CST);

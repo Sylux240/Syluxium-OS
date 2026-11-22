@@ -4,6 +4,7 @@
 
 #include <dev/device.hpp>
 #include <drivers/usb/usb.hpp>
+#include <lib/format.hpp>
 #include <linuxkpi/linuxkpi.hpp>
 
 extern "C" {
@@ -35,6 +36,16 @@ void lkpi_sylux_usb_bound(void* registry, const char* driver_name) {
     if (auto* e = static_cast<dev::Device*>(registry)) {
         e->category = dev::Category::Network;
         e->driver_name = driver_name;
+    }
+}
+
+// A Linux driver matched an interface and its probe failed.
+void lkpi_sylux_usb_failed(void* registry, const char* driver_name, int error) {
+    if (auto* e = static_cast<dev::Device*>(registry)) {
+        if (e->driver_name)
+            return; // another interface is bound
+        e->status = dev::Status::Error;
+        snprintf(e->status_text, sizeof(e->status_text), "%s failed to start (error %d)", driver_name, -error);
     }
 }
 

@@ -57,6 +57,18 @@ struct pci_dev {
     struct pci_bus* subordinate;  /* appended: the bus behind a bridge (none known: NULL) */
     unsigned int error_state;     /* appended: pci_channel_io_normal (1) */
     u64 dma_mask;                 /* appended: as set by dma_set_mask (for messages) */
+    unsigned int is_virtfn:1;     /* appended: an SR-IOV virtual function (never: no SR-IOV) */
+    unsigned int is_physfn:1;     /* appended */
+    unsigned short dev_flags;     /* appended: PCI_DEV_FLAGS_* quirks (drivers set them) */
+};
+enum pci_dev_flags {
+    PCI_DEV_FLAGS_MSI_INTX_DISABLE_BUG = 1 << 0,
+    PCI_DEV_FLAGS_NO_D3 = 1 << 1,
+    PCI_DEV_FLAGS_ASSIGNED = 1 << 2,
+    PCI_DEV_FLAGS_NO_BUS_RESET = 1 << 6,
+    PCI_DEV_FLAGS_NO_PM_RESET = 1 << 7,
+    PCI_DEV_FLAGS_NO_FLR_RESET = 1 << 10,
+    PCI_DEV_FLAGS_NO_RELAXED_ORDERING = 1 << 11,
 };
 
 struct pci_driver {
@@ -69,6 +81,8 @@ struct pci_driver {
     void* lkpi; /* Syluxium registration */
     const struct pci_error_handlers* err_handler; /* appended */
     const struct attribute_group** dev_groups;
+    int (*sriov_configure)(struct pci_dev* dev, int num_vfs); /* appended: never called (no SR-IOV) */
+    bool driver_managed_dma;                                 /* appended */
 };
 
 #define to_pci_dev(d) container_of(d, struct pci_dev, dev)

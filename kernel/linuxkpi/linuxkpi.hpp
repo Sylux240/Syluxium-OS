@@ -39,6 +39,10 @@ void usb_retry_deferred();
 // never waits (it is the one that mounts the root).
 void firmware_root_expected();
 void firmware_root_ready();
+// Every firmware file a Linux driver asked for (deduplicated, at most 128):
+// record i (0..), false past the end. For hardware.txt: which files a
+// driver wanted and didn't find (/sys/kernel/syluxium/firmware).
+bool firmware_record(unsigned i, const char** device, const char** file, bool* loaded);
 
 // socket(2) for an address family a Linux driver registered (AF_BLUETOOTH):
 // a socket, or nullptr with *error set (-EAFNOSUPPORT if none did).
