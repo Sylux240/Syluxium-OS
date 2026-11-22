@@ -101,6 +101,8 @@ DEBIAN_PKGS  += xfce4-session xfwm4 xfce4-panel xfdesktop4 xfce4-settings xfconf
 # udisks2 (pulled in by GVfs) is left out: no udev, and syluxium-automount
 # mounts USB sticks.
 DEBIAN_PKGS  += xfce4-terminal galculator drawing gucharmap xfce4-screenshooter mousepad yad xdg-utils
+# Task Manager's window list in the Wayland shell (Xfce's window library from Python).
+DEBIAN_PKGS  += gir1.2-libxfce4windowing-0.0
 XFCE_APPS_EXCLUDE := udisks2
 DEBIAN_ROOT  := $(BUILD)/rootfs-debian
 DEBIAN_STAMP := $(DEBIAN_ROOT)/.fetched
