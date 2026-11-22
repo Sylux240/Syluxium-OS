@@ -1615,7 +1615,7 @@ void apply_module_params() {
             if ((s != cmd && s[-1] != ' ') || s[n] != '=')
                 continue;
             const char* v = s + n + 1;
-            char buf[64];
+            char buf[256];
             usize len = 0;
             while (v[len] && v[len] != ' ' && len + 1 < sizeof(buf)) {
                 buf[len] = v[len];
@@ -1633,7 +1633,17 @@ void apply_module_params() {
             case 'b': *static_cast<unsigned char*>(p->var) = static_cast<unsigned char>(value); break;
             case 'B': *static_cast<bool*>(p->var) = yes; break;
             case 'I': *static_cast<bool*>(p->var) = !yes; break;
-            default: continue; // charp: not supported
+            case 'c': {
+                // charp (nouveau.debug=gr=debug,fifo=trace, nouveau.config=...):
+                // a copy that lives as long as the kernel.
+                auto* copy = static_cast<char*>(sylux_kmalloc(len + 1));
+                if (!copy)
+                    continue;
+                memcpy(copy, buf, len + 1);
+                *static_cast<char**>(p->var) = copy;
+                break;
+            }
+            default: continue;
             }
             klog::info("linuxkpi: %s = %s", p->name, buf);
         }

@@ -432,6 +432,17 @@ int drm_release(struct inode *inode, struct file *filp)
 }
 EXPORT_SYMBOL(drm_release);
 
+/* LinuxKPI: the driver behind an open DRM node, NULL for other files
+ * (glue/file.c traces GPU ioctls by driver). */
+const char *lkpi_drm_file_driver(struct file *filp)
+{
+	struct drm_file *file_priv = filp->private_data;
+
+	if (!filp->f_op || filp->f_op->release != drm_release || !file_priv || !file_priv->minor)
+		return NULL;
+	return file_priv->minor->dev->driver->name;
+}
+
 void drm_file_update_pid(struct drm_file *filp)
 {
 	struct drm_device *dev;
