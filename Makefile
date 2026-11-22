@@ -51,6 +51,15 @@ USER32_CFLAGS := --sysroot=$(LIBC_SYSROOT32) -isystem $(LIBC_SYSROOT32)/usr/incl
 USER32_PROGS  := $(patsubst userspace/ia32/%.c,$(TESTS_DIR)/%,$(wildcard userspace/ia32/*.c))
 # Windows test programs for Wine (x86-64 and i386 PE), built with clang +
 # lld-link against import libraries made from userspace/windows/*.def.
+# The shell's software-rendering fix (userspace/shell/glsync.c): no libc needed.
+SHELL_GLSYNC  := $(BUILD)/libsyluxium-glsync.so
+# The shell's window frames (userspace/shell/syluxium-decor.cpp): a Wayfire
+# plugin, built with clang against Debian's Wayfire/wlroots headers and
+# libraries (a sysroot of their -dev packages in deps/shell-sysroot).
+SHELL_SYSROOT := $(CURDIR)/deps/shell-sysroot
+SHELL_SYSROOT_PKGS := wayfire-dev libwlroots-0.18-dev libcairo2-dev libpango1.0-dev libglm-dev libstdc++-14-dev libgles-dev libc6-dev
+SHELL_PKGCONFIG := PKG_CONFIG_SYSROOT_DIR=$(SHELL_SYSROOT) PKG_CONFIG_LIBDIR=$(SHELL_SYSROOT)/usr/lib/x86_64-linux-gnu/pkgconfig:$(SHELL_SYSROOT)/usr/share/pkgconfig pkg-config
+SHELL_DECOR   := $(BUILD)/libsyluxium-decor.so
 WIN_PROGS     := $(TESTS_DIR)/winhello64.exe $(TESTS_DIR)/winhello32.exe $(TESTS_DIR)/winbox32.exe
 
 # Official Debian packages (and their dependencies) that make up the userland.
@@ -371,6 +380,23 @@ $(TESTS_DIR)/%: userspace/%.c | $(LIBC_SYSROOT)/.done
 	@echo "  USER  $<"
 	@$(USER_CC) $(USER_CFLAGS) $< -o $@ -lm
 
+$(SHELL_SYSROOT)/.done:
+	@echo "  FETCH Debian Wayfire/wlroots development files for the shell's plugin"
+	@python3 tools/debian-fetch.py --suite $(DEBIAN_SUITE) --out $(SHELL_SYSROOT) --cache deps/debian \
+	    --exclude systemd,udev,systemd-sysv,libpam-systemd,dbus-user-session,man-db $(SHELL_SYSROOT_PKGS) >/dev/null
+	@touch $@
+
+$(SHELL_DECOR): userspace/shell/syluxium-decor.cpp | $(SHELL_SYSROOT)/.done
+	@echo "  SO    $<"
+	@clang++ --target=x86_64-linux-gnu --sysroot=$(SHELL_SYSROOT) --gcc-install-dir=$(SHELL_SYSROOT)/usr/lib/gcc/x86_64-linux-gnu/14 \
+	    -std=c++17 -O2 -fPIC -shared -DWLR_USE_UNSTABLE -DWAYFIRE_PLUGIN -Wall -Wno-deprecated-declarations \
+	    $$($(SHELL_PKGCONFIG) --cflags wayfire wlroots-0.18 cairo pango pangocairo glesv2) \
+	    $< -o $@ -fuse-ld=lld -Wl,--as-needed $$($(SHELL_PKGCONFIG) --libs cairo pango pangocairo glesv2)
+
+$(SHELL_GLSYNC): userspace/shell/glsync.c
+	@echo "  SO    $<"
+	@$(USER_CC) -shared -fPIC -nostdlib -O2 -Wall $< -o $@
+
 $(TESTS_DIR)/%: userspace/ia32/%.c | $(LIBC_SYSROOT32)/.done
 	@mkdir -p $(dir $@)
 	@echo "  USER32 $<"
@@ -476,7 +502,7 @@ $(WINE_I386_STAMP): tools/debian-fetch.py Makefile
 	@python3 tools/debian-fetch.py --arch i386 --suite $(DEBIAN_SUITE) --out $(WINE_I386_ROOT) --cache deps/debian --no-deps libwine
 	@touch $@
 
-$(INITRAMFS): $(KERNEL) $(PICKER) $(DEBIAN_CONFIGURED) tools/merge-accounts.py tools/mkfontdir.py tools/debrand-tde.py tools/syluxium_names.py tools/run-triggers.sh tools/wine-setup.sh tools/wine-prefix-links.py $(DEBIAN_STAMP) $(DEBIAN_I386_STAMP) $(WINE_I386_STAMP) $(FIRMWARE_STAMP) $(USER_PROGS) $(USER32_PROGS) $(WIN_PROGS) $(shell find rootfs -type f 2>/dev/null) $(shell find rootfs -type d 2>/dev/null) Makefile
+$(INITRAMFS): $(KERNEL) $(PICKER) $(DEBIAN_CONFIGURED) tools/merge-accounts.py tools/mkfontdir.py tools/debrand-tde.py tools/syluxium_names.py tools/run-triggers.sh tools/wine-setup.sh tools/wine-prefix-links.py $(DEBIAN_STAMP) $(DEBIAN_I386_STAMP) $(WINE_I386_STAMP) $(FIRMWARE_STAMP) $(USER_PROGS) $(USER32_PROGS) $(WIN_PROGS) $(SHELL_GLSYNC) $(SHELL_DECOR) $(shell find rootfs -type f 2>/dev/null) $(shell find rootfs -type d 2>/dev/null) Makefile
 	@echo "  ROOT  $(ROOTFS)"
 	@rm -rf $(ROOTFS)
 	@cp -a $(DEBIAN_ROOT) $(ROOTFS)
@@ -488,6 +514,8 @@ $(INITRAMFS): $(KERNEL) $(PICKER) $(DEBIAN_CONFIGURED) tools/merge-accounts.py t
 	@ln -sf busybox $(ROOTFS)/usr/bin/sh
 	@mkdir -p $(ROOTFS)/opt/syluxium/tests
 	@cp $(USER_PROGS) $(USER32_PROGS) $(WIN_PROGS) $(ROOTFS)/opt/syluxium/tests/
+	@mkdir -p $(ROOTFS)/usr/lib/syluxium && cp $(SHELL_GLSYNC) $(ROOTFS)/usr/lib/syluxium/
+	@cp $(SHELL_DECOR) $(ROOTFS)/usr/lib/x86_64-linux-gnu/wayfire/
 	@# 32-bit Debian userland (multiarch, as on Debian): libraries in
 	@# /usr/lib/i386-linux-gnu, ld-linux.so.2, programs installed as <name>-i386
 	@mkdir -p $(ROOTFS)/usr/lib/i386-linux-gnu

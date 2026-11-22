@@ -1,0 +1,10 @@
+# Syluxium: the Dusk look for GTK programs where no XSETTINGS manager runs
+# (Wayland: the Syluxium shell). GTK 3 on Wayland takes its theme, icons and
+# fonts from these settings; under Xfce, xfsettingsd provides the same values.
+[org.gnome.desktop.interface]
+gtk-theme='Syluxium'
+icon-theme='Syluxium'
+font-name='Inter 10'
+monospace-font-name='DejaVu Sans Mono 10'
+color-scheme='prefer-dark'
+cursor-size=24

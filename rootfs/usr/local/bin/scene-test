@@ -1,0 +1,23 @@
+#!/bin/sh
+# Test aid: the same scene in the Xfce desktop and the Syluxium shell, so
+# screenshots of both can be compared side by side. Run as the user inside
+# the session (accessories-test phase "scene", or the shell's boot option
+# shellscene=<name>).
+#   apps  Files (Documents) and a terminal
+#   menu  the same, then the start menu
+#   pers  Personalize and a notification
+case "$1" in
+apps|menu)
+    syluxium-open documents &
+    sleep 4
+    xfce4-terminal --title "Terminal" -x sh -c 'echo "Hello from the Dusk terminal"; ls /; exec sh' &
+    sleep 4
+    [ "$1" = menu ] && xfce4-popup-whiskermenu
+    ;;
+pers)
+    syluxium-personalize &
+    sleep 5
+    notify-send -i dialog-information "Syluxium" "A notification bubble, the same in both sessions."
+    ;;
+esac
+sleep 2

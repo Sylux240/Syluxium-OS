@@ -21,6 +21,13 @@ gi.require_version("Gdk", "3.0")
 gi.require_version("GdkPixbuf", "2.0")
 from gi.repository import Gdk, GdkPixbuf, Gio, GLib, Gtk, Pango  # noqa: E402
 
+# Wayland (the Syluxium shell): bubbles are layer-shell surfaces in the
+# lower right corner (a Wayland program can't place its own windows).
+WAYLAND = type(Gdk.Display.get_default()).__name__ == "GdkWaylandDisplay"
+if WAYLAND:
+    gi.require_version("GtkLayerShell", "0.1")
+    from gi.repository import GtkLayerShell  # noqa: E402
+
 BUS_NAME = "org.freedesktop.Notifications"
 PATH = "/org/freedesktop/Notifications"
 XML = """
@@ -108,7 +115,13 @@ def pixbuf_from_hint(v):
 
 class Bubble(Gtk.Window):
     def __init__(self, daemon, nid):
-        super().__init__(type=Gtk.WindowType.POPUP)
+        super().__init__(type=Gtk.WindowType.TOPLEVEL if WAYLAND else Gtk.WindowType.POPUP)
+        if WAYLAND:
+            GtkLayerShell.init_for_window(self)
+            GtkLayerShell.set_namespace(self, "notification")
+            GtkLayerShell.set_layer(self, GtkLayerShell.Layer.OVERLAY)
+            GtkLayerShell.set_anchor(self, GtkLayerShell.Edge.RIGHT, True)
+            GtkLayerShell.set_anchor(self, GtkLayerShell.Edge.BOTTOM, True)
         self.daemon, self.nid = daemon, nid
         self.timer = 0
         self.critical = False
@@ -352,11 +365,17 @@ class Daemon:
         geo = mon.get_geometry()
         # Without a work area from the window manager: keep clear of the taskbar.
         bottom = area.y + area.height if area.height < geo.height else geo.y + geo.height - 48
+        if WAYLAND:  # layer-shell margins count from the edge the taskbar leaves free
+            bottom = geo.y + geo.height
         y = bottom - MARGIN
         for b in reversed(list(self.bubbles.values())):
             h = max(b.height, b.get_preferred_height_for_width(WIDTH)[1])
             y -= h
-            b.move(area.x + area.width - WIDTH - MARGIN, y)
+            if WAYLAND:
+                GtkLayerShell.set_margin(b, GtkLayerShell.Edge.RIGHT, MARGIN)
+                GtkLayerShell.set_margin(b, GtkLayerShell.Edge.BOTTOM, bottom - (y + h))
+            else:
+                b.move(area.x + area.width - WIDTH - MARGIN, y)
             if os.environ.get("SYLUXIUM_NOTIFYD_DEBUG"):
                 print(f"syluxium-notifyd: bubble {b.nid} at {area.x + area.width - WIDTH - MARGIN},{y} "
                       f"{WIDTH}x{h} (work area {area.x},{area.y} {area.width}x{area.height})", file=sys.stderr)

@@ -3,21 +3,23 @@
 colour and wallpaper. The choices are kept in
 ~/.config/syluxium-shell/settings.ini in every session.
 
-Syluxium shell (Wayland): the panel and wallpaper follow settings.ini at
-once, and blur is switched in the user's Wayfire configuration (Wayfire
-reloads it by itself).
-
-Classic desktop (X11, Xfce): through xfconf (xfconf-query):
+Both the Xfce desktop (X11) and the Syluxium shell (Wayland) run Xfce's
+taskbar and desktop, so most settings go through xfconf (xfconf-query):
   taskbar    xfce4-panel  /panels/panel-N/background-style = 1 (colour) and
                           background-rgba (the panel's colour, the chosen alpha)
-  windows    xfwm4        /general/inactive_opacity, show_frame_shadow,
-                          show_popup_shadow, show_dock_shadow, use_compositing
   wallpaper  xfce4-desktop /backdrop/screen*/monitor*/workspace*/last-image
   accent     a per-user copy of the Syluxium GTK theme with the accent
              swapped (~/.local/share/themes/Syluxium-RRGGBB), chosen through
-             xsettings /Net/ThemeName so running programs restyle at once
-             (and gtk-theme-name in ~/.config/gtk-3.0/settings.ini for
-             programs started outside Xfce).
+             xsettings /Net/ThemeName (X11 programs) and, in the shell, GSettings
+             org.gnome.desktop.interface gtk-theme (Wayland programs), so
+             running programs restyle at once; gtk-theme-name in
+             ~/.config/gtk-3.0/settings.ini for programs started elsewhere.
+Windows:
+  X11        xfwm4        /general/inactive_opacity, show_frame_shadow,
+                          show_popup_shadow, show_dock_shadow, use_compositing
+  Wayland    the shell's Wayfire configuration: shadows (winshadows) and,
+             with a graphics driver, blur behind the taskbar and menus
+             (Wayfire reloads it by itself; syluxium-shell keeps the choice).
 Without Xfce (or when xfconfd doesn't answer) only the accent colour applies
 (to programs started afterwards); the window says so."""
 import glob
@@ -30,7 +32,7 @@ import sys
 sys.path.insert(0, "/usr/local/lib/syluxium/python")
 import syluxium_sys as S  # noqa: E402
 from syluxium_sys import Gtk, GLib  # noqa: E402
-from gi.repository import Gdk, GdkPixbuf  # noqa: E402
+from gi.repository import Gdk, GdkPixbuf, Gio  # noqa: E402
 
 DIR = os.path.expanduser("~/.config/syluxium-shell")
 SETTINGS = os.path.join(DIR, "settings.ini")
@@ -70,13 +72,14 @@ def write(values):
     tmp = SETTINGS + ".new"
     with open(tmp, "w") as f:
         f.write("# Syluxium shell: Personalize (syluxium-personalize)\n[shell]\n")
-        for k in ("opacity", "accent", "blur", "wallpaper"):
-            f.write(f"{k} = {values[k]}\n")
+        for k in ("opacity", "accent", "blur", "shadows", "wallpaper"):
+            if k in values:
+                f.write(f"{k} = {values[k]}\n")
     os.replace(tmp, SETTINGS)
 
 
-def set_blur(on):
-    """Add or remove Wayfire's blur plugin in the user's configuration."""
+def set_plugin(plugin, on):
+    """Add or remove a Wayfire plugin (blur, winshadows) in the user's configuration."""
     try:
         text = open(WAYFIRE).read()
     except OSError:
@@ -84,9 +87,9 @@ def set_blur(on):
     m = re.search(r"^plugins = (.*)$", text, re.M)
     if not m:
         return False
-    plugins = [p for p in m.group(1).split() if p != "blur"]
+    plugins = [p for p in m.group(1).split() if p != plugin]
     if on:
-        plugins.insert(1, "blur")
+        plugins.insert(1, plugin)
     text = text[:m.start(1)] + " ".join(plugins) + text[m.end(1):]
     with open(WAYFIRE + ".new", "w") as f:
         f.write(text)
@@ -111,8 +114,8 @@ class Xfconf:
     every call returns None (or False) instead of failing."""
 
     def __init__(self):
-        self.ok = (S.desktop_session() == "xfce" and shutil.which("xfconf-query") is not None
-                   and self.run("-l") is not None)
+        self.ok = ("XFCE" in os.environ.get("XDG_CURRENT_DESKTOP", "").upper()
+                   and shutil.which("xfconf-query") is not None and self.run("-l") is not None)
 
     def run(self, *args):
         try:
@@ -277,18 +280,18 @@ def set_gtk_settings_theme(name):
 class Personalize:
     def __init__(self):
         self.values = read()
-        self.xfconf = None if WAYLAND else Xfconf()
+        self.xfconf = Xfconf()
         self.pending = {}
-        if self.xfconf and self.xfconf.ok:
+        if self.xfconf.ok:
             a = self.xfconf.panel_alpha()
             if a is not None:
                 self.values["opacity"] = f"{a:.2f}"
-        self.win = S.window("Personalize", 720, 640 if WAYLAND else 700, "preferences-desktop-theme")
+        self.win = S.window("Personalize", 720, 700, "preferences-desktop-theme")
         outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14, margin=22)
         self.win.add(outer)
         outer.pack_start(S.label("Personalize", bold=True, size="x-large"), False, False, 0)
-        xfce = WAYLAND or self.xfconf.ok  # the taskbar/window/wallpaper settings can apply
-        if not WAYLAND and not self.xfconf.ok:
+        xfce = self.xfconf.ok  # the taskbar/window/wallpaper settings can apply
+        if not self.xfconf.ok:
             why = ("Xfce's settings service (xfconfd) isn't answering"
                    if S.desktop_session() == "xfce" else "this desktop isn't Xfce")
             note = S.label(f"The taskbar, window and wallpaper settings are for the Xfce desktop, but {why}. "
@@ -297,8 +300,7 @@ class Personalize:
             outer.pack_start(note, False, False, 0)
 
         # taskbar transparency
-        outer.pack_start(S.label("Taskbar and menu transparency" if WAYLAND else "Taskbar transparency",
-                                 bold=True), False, False, 0)
+        outer.pack_start(S.label("Taskbar transparency", bold=True), False, False, 0)
         row = Gtk.Box(spacing=12)
         row.pack_start(S.label("See-through"), False, False, 0)
         self.opacity = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 20, 100, 1)
@@ -317,8 +319,37 @@ class Personalize:
         self.preview.connect("draw", self.draw_preview)
         outer.pack_start(self.preview, False, False, 0)
 
+        # windows: transparency of the windows not in use (xfwm4), shadows
+        outer.pack_start(S.label("Windows", bold=True), False, False, 0)
+        wbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        self.inactive = None
+        if not WAYLAND:
+            wrow = Gtk.Box(spacing=12)
+            wrow.pack_start(S.label("Windows in the background"), False, False, 0)
+            self.inactive = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 40, 100, 1)
+            self.inactive.set_value_pos(Gtk.PositionType.RIGHT)
+            self.inactive.connect("format-value",
+                                  lambda _s, v: "solid" if v >= 100 else f"{100 - int(v)} % see-through")
+            self.inactive.set_value(self.xfconf.inactive_opacity() if self.xfconf.ok else 100)
+            self.inactive.set_hexpand(True)
+            self.inactive.connect("value-changed", self.on_windows)
+            wrow.pack_start(self.inactive, True, True, 0)
+            wbox.pack_start(wrow, False, False, 0)
+        srow = Gtk.Box(spacing=12)
+        srow.pack_start(S.label("Shadows under windows and menus"), False, False, 0)
+        self.shadows = Gtk.Switch()
         if WAYLAND:
-            # blur
+            self.shadows.set_active(self.values.get("shadows", "true") != "false")
+        else:
+            self.shadows.set_active(self.xfconf.shadows() if self.xfconf.ok else True)
+        self.shadows.connect("notify::active", self.on_windows)
+        srow.pack_end(self.shadows, False, False, 0)
+        wbox.pack_start(srow, False, False, 0)
+        wbox.set_sensitive(xfce or WAYLAND)
+        outer.pack_start(wbox, False, False, 0)
+
+        if WAYLAND:
+            # blur (the shell, with a graphics driver)
             brow = Gtk.Box(spacing=12)
             self.blur = Gtk.Switch()
             self.blur.set_active(self.values["blur"] != "false")
@@ -331,31 +362,9 @@ class Personalize:
                                "so blur stays off.", wrap=True)
                 hint.get_style_context().add_class("dim-label")
                 outer.pack_start(hint, False, False, 0)
+                self.blur.handler_block_by_func(self.on_blur)  # shown off, the saved choice stays
+                self.blur.set_active(False)
                 self.blur.set_sensitive(False)
-        else:
-            # windows: transparency of the windows not in use, shadows
-            outer.pack_start(S.label("Windows", bold=True), False, False, 0)
-            wbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
-            wrow = Gtk.Box(spacing=12)
-            wrow.pack_start(S.label("Windows in the background"), False, False, 0)
-            self.inactive = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 40, 100, 1)
-            self.inactive.set_value_pos(Gtk.PositionType.RIGHT)
-            self.inactive.connect("format-value",
-                                  lambda _s, v: "solid" if v >= 100 else f"{100 - int(v)} % see-through")
-            self.inactive.set_value(self.xfconf.inactive_opacity() if self.xfconf.ok else 100)
-            self.inactive.set_hexpand(True)
-            self.inactive.connect("value-changed", self.on_windows)
-            wrow.pack_start(self.inactive, True, True, 0)
-            wbox.pack_start(wrow, False, False, 0)
-            srow = Gtk.Box(spacing=12)
-            srow.pack_start(S.label("Shadows under windows and menus"), False, False, 0)
-            self.shadows = Gtk.Switch()
-            self.shadows.set_active(self.xfconf.shadows() if self.xfconf.ok else True)
-            self.shadows.connect("notify::active", self.on_windows)
-            srow.pack_end(self.shadows, False, False, 0)
-            wbox.pack_start(srow, False, False, 0)
-            wbox.set_sensitive(xfce)
-            outer.pack_start(wbox, False, False, 0)
 
         # accent
         outer.pack_start(S.label("Accent colour", bold=True), False, False, 0)
@@ -432,16 +441,20 @@ class Personalize:
     def on_opacity(self, scale):
         self.values["opacity"] = f"{scale.get_value() / 100:.2f}"
         self.save()
-        if self.xfconf and self.xfconf.ok:
+        if self.xfconf.ok:
             self.later("opacity", lambda: self.xfconf.set_panel_alpha(float(self.values["opacity"])))
 
     def on_blur(self, sw, _p):
         self.values["blur"] = "true" if sw.get_active() else "false"
-        set_blur(sw.get_active())
+        set_plugin("blur", sw.get_active())
         self.save()
 
     def on_windows(self, *_):
-        if self.xfconf.ok:
+        if WAYLAND:
+            self.values["shadows"] = "true" if self.shadows.get_active() else "false"
+            set_plugin("winshadows", self.shadows.get_active())
+            self.save()
+        elif self.xfconf.ok:
             self.later("windows", lambda: self.xfconf.set_windows(int(self.inactive.get_value()),
                                                                   self.shadows.get_active()))
 
@@ -450,12 +463,15 @@ class Personalize:
             return
         self.values["accent"] = hexv
         self.save()
-        if WAYLAND:
-            return
         name = accent_theme(hexv)
         if not name:
             return
         set_gtk_settings_theme(name)
+        if WAYLAND:  # Wayland GTK programs follow GSettings
+            try:
+                Gio.Settings.new("org.gnome.desktop.interface").set_string("gtk-theme", name)
+            except GLib.Error:
+                pass
         if self.xfconf.ok:
             # A new theme name: every GTK program (this one too) reloads its style.
             self.xfconf.set_theme(name)
@@ -466,7 +482,7 @@ class Personalize:
     def set_wallpaper(self, path):
         self.values["wallpaper"] = path
         self.save()
-        if self.xfconf and self.xfconf.ok:
+        if self.xfconf.ok:
             self.xfconf.set_wallpaper(path)
 
     def on_wallpaper(self, _flow, child):

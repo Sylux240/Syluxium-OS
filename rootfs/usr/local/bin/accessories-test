@@ -99,6 +99,11 @@ term)
     xdotool type --delay 50 'echo typed ok; tty'; xdotool key Return; sleep 2
     shot term
     pkill xfce4-terminal; sleep 1 ;;
+scene)
+    # The same scene as the shell's boot option shellscene=menu (scene-test).
+    asuser scene-test ${ACCTEST_SCENE:-menu}
+    sleep 3
+    shot scene ;;
 xfconf)
     # Personalize's Xfce settings, as its window applies them: taskbar 50 %,
     # background windows 75 %, no shadows, lavender accent, another wallpaper.

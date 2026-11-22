@@ -15,20 +15,38 @@ syluxium-diag mark "session: Wayland shell (Wayfire) starting for $U"
 # Wayfire runs from the user's own copy of the configuration (Personalize
 # switches blur there; Wayfire reloads it by itself). Blur needs a GPU
 # driver: on the firmware framebuffer (software rendering) it misplaces the
-# panel, and partial redraws leave stale areas, so everything is redrawn.
+# panel.
 HOME_=$(getent passwd "$U" | cut -d: -f6)
 mkdir -p "$HOME_/.config/syluxium-shell"
 CONF=$HOME_/.config/syluxium-shell/wayfire.ini
 SET=$HOME_/.config/syluxium-shell/settings.ini
 cp /etc/syluxium-shell/wayfire.ini "$CONF"
+# Boot options for testing: shelldebug (Wayfire's debug log), shellbench
+# (frame-rate overlay), shellrerender (redraw everything every frame).
+grep -qw shelldebug /proc/cmdline && SYLUXIUM_WAYFIRE_ARGS="-dwlroots $SYLUXIUM_WAYFIRE_ARGS"
+grep -qw shellrerender /proc/cmdline && SYLUXIUM_WAYFIRE_ARGS="--damage-rerender $SYLUXIUM_WAYFIRE_ARGS"
+for v in $(tr ' ' '\n' < /proc/cmdline | sed -n 's/^shellenv\.//p'); do SYLUXIUM_SHELL_ENV="$SYLUXIUM_SHELL_ENV $v"; done
+grep -qw shellbench /proc/cmdline && sed -i 's/^plugins = autostart /plugins = autostart bench /' "$CONF"
+# shellfps[=full]: a window measuring the frame rate (shell-fps-test) once the desktop is up.
+fps=$(tr ' ' '\n' < /proc/cmdline | sed -n 's/^shellfps=\{0,1\}//p' | head -1)
+grep -qw "shellfps\(=full\)\{0,1\}" /proc/cmdline && \
+    printf "fpstest = sh -c 'sleep 20; shell-fps-test 30 900 600 %s'\n" "$fps" >> "$CONF"
+# shellscene=<name>: a test scene (scene-test) once the desktop is up.
+scene=$(tr ' ' '\n' < /proc/cmdline | sed -n 's/^shellscene=//p' | head -1)
+[ -n "$scene" ] && printf "scenetest = sh -c 'sleep 15; scene-test %s'\n" "$scene" >> "$CONF"
+PRELOAD=
 if grep -qs "simple-framebuffer" /sys/class/drm/card0/device/uevent; then
-    SYLUXIUM_WAYFIRE_ARGS="--damage-rerender $SYLUXIUM_WAYFIRE_ARGS"
-    # Drawn on the processor: window shadows cost more than they're worth.
-    sed -i 's/^\(plugins = .*\) winshadows/\1/' "$CONF"
+    # Drawn on the processor (llvmpipe): each frame must be finished before
+    # the display copies it (libsyluxium-glsync.so, see userspace/shell/glsync.c),
+    # or half-drawn parts stay on the screen. (shellnosync: without, for tests)
+    grep -qw shellnosync /proc/cmdline || PRELOAD="env LD_PRELOAD=/usr/lib/syluxium/libsyluxium-glsync.so"
 elif ! grep -qs "^blur *= *false" "$SET"; then
     sed -i 's/^plugins = autostart /plugins = autostart blur /' "$CONF"
 fi
+# Personalize's "Shadows under windows" switch.
+grep -qs "^shadows *= *false" "$SET" && sed -i 's/^\(plugins = .*\) winshadows/\1/' "$CONF"
 chown -R "$U" "$HOME_/.config/syluxium-shell"
 exec su "$U" -s /bin/bash -c "export XDG_RUNTIME_DIR=$RT XDG_SESSION_TYPE=wayland LIBSEAT_BACKEND=seatd \
-    WLR_RENDERER_ALLOW_SOFTWARE=1 GDK_BACKEND=wayland,x11 MOZ_ENABLE_WAYLAND=1 $SYLUXIUM_SHELL_ENV; \
-    cd ~; exec dbus-run-session wayfire $SYLUXIUM_WAYFIRE_ARGS -c $CONF" > $LOG 2>&1
+    WLR_RENDERER_ALLOW_SOFTWARE=1 GDK_BACKEND=wayland,x11 MOZ_ENABLE_WAYLAND=1 \
+    XDG_CONFIG_DIRS=/etc/xdg/syluxium:/etc/xdg XDG_CURRENT_DESKTOP=XFCE XDG_MENU_PREFIX=xfce- $SYLUXIUM_SHELL_ENV; \
+    cd ~; exec dbus-run-session $PRELOAD wayfire $SYLUXIUM_WAYFIRE_ARGS -c $CONF" > $LOG 2>&1

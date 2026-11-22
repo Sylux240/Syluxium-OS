@@ -1,0 +1,28 @@
+<?xml version="1.0"?>
+<wayfire>
+	<plugin name="syluxium-decor">
+		<_short>Syluxium window frames</_short>
+		<_long>Window frames drawn from an xfwm4 theme, the same as the Xfce desktop's.</_long>
+		<category>Effects</category>
+		<option name="theme" type="string">
+			<_short>xfwm4 theme folder</_short>
+			<_long>The folder with the theme's pictures and themerc.</_long>
+			<default>/usr/share/themes/Syluxium/xfwm4</default>
+		</option>
+		<option name="title_font" type="string">
+			<_short>Title font</_short>
+			<_long>The title font (xfwm4's title_font).</_long>
+			<default>Inter Semi-Bold 10</default>
+		</option>
+		<option name="button_layout" type="string">
+			<_short>Button layout</_short>
+			<_long>xfwm4's button_layout: O menu, H hide, M maximize, C close, S shade, T stick; | separates the left and right sides.</_long>
+			<default>O|HMC</default>
+		</option>
+		<option name="ignore_views" type="string">
+			<_short>Windows without frames</_short>
+			<_long>Windows matching these criteria get no frame.</_long>
+			<default>none</default>
+		</option>
+	</plugin>
+</wayfire>
