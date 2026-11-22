@@ -99,9 +99,12 @@ window() { # window <name regex> <seconds>: id of the first visible window
 mounts() { grep -E " fuse" /proc/mounts | cut -d' ' -f1-4 | tr '\n' ';'; }
 finish() { # finish <name> <pid>
     if [ -z "$keep" ]; then
-        pkill -TERM -P "$2" 2>/dev/null; kill "$2" 2>/dev/null; sleep 3
+        # SIGTERM: the program ends, and the runtime's FUSE server unmounts
+        # (a SIGKILLed server leaves a dead mount, as on Linux).
+        pkill -TERM -P "$2" 2>/dev/null; kill "$2" 2>/dev/null
+        pkill -TERM -f "$1" 2>/dev/null; sleep 5
         pkill -KILL -f "$1" 2>/dev/null
-        sleep 2
+        sleep 1
         say "$1: after exit, FUSE mounts: $(mounts)"
     fi
 }
