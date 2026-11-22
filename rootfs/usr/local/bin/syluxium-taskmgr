@@ -595,9 +595,19 @@ class TaskManager:
             if name and theme.has_icon(name):
                 return name
         from gi.repository import Gio
-        for desktop in (cls, cls.lower()):
+        # As the taskbar finds it (libxfce4windowing): <app id>.desktop, else
+        # the best match of a .desktop search (X11 programs under Xwayland
+        # have their WM_CLASS as app id: "Mousepad" -> org.xfce.mousepad,
+        # "Kcalc" -> trinity-kcalc).
+        ids = [cls, cls.lower()]
+        try:
+            ids += [d for group in Gio.DesktopAppInfo.search(cls) for d in group][:3] if cls else []
+        except (TypeError, GLib.Error):
+            pass
+        for desktop in ids:
             try:
-                info = Gio.DesktopAppInfo.new(desktop + ".desktop") if desktop else None
+                info = Gio.DesktopAppInfo.new(desktop if desktop.endswith(".desktop") else desktop + ".desktop") \
+                    if desktop else None
             except TypeError:
                 info = None
             icon = info.get_icon() if info else None
