@@ -16,7 +16,7 @@
 #   electron  Obsidian (Electron, old runtime: libfuse2 + fusermount)
 #   noexec    a download without the execute bit through syluxium-appimage:
 #             the "make it executable" question, answered with Run
-#   open      the file manager's way (xdg-open / gio open: the default
+#   open      the file manager's way (exo-open: GIO's default
 #             program for application/vnd.appimage)
 #   nofuse    KeePassXC with FUSE unavailable (APPIMAGE_EXTRACT_AND_RUN)
 #   keep      leave the last program's window open (for the final screenshot)
@@ -170,10 +170,11 @@ noexec)
     ;;
 open)
     fetch "xournalpp-*.AppImage" Opened.AppImage || continue
-    say "open: default for application/vnd.appimage: $(xdg-mime query default application/vnd.appimage); file type: $(xdg-mime query filetype "$D/Opened.AppImage")"
+    say "open: default for application/vnd.appimage: $(XDG_CURRENT_DESKTOP=XFCE xdg-mime query default application/vnd.appimage)"
     chmod +x "$D/Opened.AppImage"
-    gio open "$D/Opened.AppImage" > /tmp/apptest-open.out 2>&1 &
-    if w=$(window "Xournal" 90); then say "open: PASS window from gio open"; else say "open: FAIL no window from gio open"; fi
+    # exo-open: GIO's default program for the file's type, as Thunar does.
+    exo-open "$D/Opened.AppImage" > /tmp/apptest-open.out 2>&1 &
+    if w=$(window "Xournal" 90); then say "open: PASS window from exo-open"; else say "open: FAIL no window from exo-open: $(head -c 300 /tmp/apptest-open.out)"; fi
     sleep 3
     finish "$D/Opened.AppImage" $!
     ;;
