@@ -69,3 +69,20 @@ static inline void swab64s(u64 *p) { *p = __builtin_bswap64(*p); }
 #define PCI_VDEVICE_SUB(vend, dev, subvend, subdev) \
 	.vendor = PCI_VENDOR_ID_##vend, .device = (dev), .subvendor = (subvend), .subdevice = (subdev), 0, 0
 #endif
+
+/* ---- scope-based lock guards (guard(mutex)(&m), scoped_guard(spinlock_irqsave, &l) {...}),
+ * as include/linux/{mutex,spinlock,rcupdate}.h define them ---- */
+#include <linux/cleanup.h>
+#include <linux/mutex.h>
+#include <linux/spinlock.h>
+#include <linux/rcupdate.h>
+#ifndef LKPI_LOCK_GUARDS
+#define LKPI_LOCK_GUARDS 1
+DEFINE_GUARD(mutex, struct mutex *, mutex_lock(_T), mutex_unlock(_T))
+DEFINE_LOCK_GUARD_1(spinlock, spinlock_t, spin_lock(_T->lock), spin_unlock(_T->lock))
+DEFINE_LOCK_GUARD_1(spinlock_irq, spinlock_t, spin_lock_irq(_T->lock), spin_unlock_irq(_T->lock))
+DEFINE_LOCK_GUARD_1(spinlock_bh, spinlock_t, spin_lock_bh(_T->lock), spin_unlock_bh(_T->lock))
+DEFINE_LOCK_GUARD_1(spinlock_irqsave, spinlock_t, spin_lock_irqsave(_T->lock, _T->flags),
+		    spin_unlock_irqrestore(_T->lock, _T->flags), unsigned long flags)
+DEFINE_LOCK_GUARD_0(rcu, rcu_read_lock(), rcu_read_unlock())
+#endif
