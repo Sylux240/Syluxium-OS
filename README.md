@@ -103,13 +103,14 @@ kernel/
   tests/              boot-time self-tests
   time/               clock (TSC/HPET), RTC wall clock
   video/              framebuffer, text console, font, boot splash, /dev/fb0
-  linuxkpi/           Linux driver compatibility layer + vendored Linux 6.12 drivers (Wi-Fi, DRM, ...)
+  linuxkpi/           Linux driver compatibility layer + vendored Linux drivers (Wi-Fi, Ethernet, SCSI, DRM, ...; docs/drivers.md)
 boot/picker/          graphical UEFI boot picker (runs before Limine)
 userspace/             test programs: built with the host gcc + glibc (static), i.e. real Linux binaries
 tools/debian-fetch.py  downloads official Debian packages (+ dependencies, SHA256-checked) into the rootfs
 rootfs/               files copied into the initramfs (/etc, ...)
 tools/psf2cpp.py      converts a PSF console font into kernel/video/font_*.cpp
 tools/smoke-test.sh   headless QEMU boot: serial log + screenshot
+tools/lkpi-check.py   what an upstream Linux driver still needs from the compatibility layer (docs/drivers.md)
 tools/wine-setup.sh   finishes Wine in the rootfs: WoW64 DLLs, stripping, template prefix (+ wine-prefix-links.py)
 userspace/windows/    Windows test programs (clang + lld-link) for Wine
 ```
