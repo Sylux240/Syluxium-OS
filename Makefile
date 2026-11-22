@@ -111,6 +111,12 @@ DEBIAN_PKGS  += gir1.2-libxfce4windowing-0.0
 # Wayland-only terminal, ~1 MB), wl-clipboard (wl-copy / wl-paste),
 # wayland-info, and xprop / xwininfo to look at the windows (~1 MB together).
 DEBIAN_PKGS  += foot wl-clipboard wayland-utils x11-utils
+# Input method: fcitx5 (X11 programs through its GTK module and XIM, Wayland
+# programs through syluxium-wayland-host) with Pinyin (Chinese), Anthy
+# (Japanese) and Hangul (Korean) (~100 MB, most of it the dictionaries).
+DEBIAN_PKGS  += fcitx5 fcitx5-frontend-gtk3 fcitx5-module-xorg fcitx5-chinese-addons fcitx5-anthy fcitx5-hangul
+# Chinese, Japanese and Korean characters (WenQuanYi Micro Hei, ~5 MB)
+DEBIAN_PKGS  += fonts-wqy-microhei
 XFCE_APPS_EXCLUDE := udisks2
 DEBIAN_ROOT  := $(BUILD)/rootfs-debian
 DEBIAN_STAMP := $(DEBIAN_ROOT)/.fetched

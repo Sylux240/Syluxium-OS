@@ -15,6 +15,10 @@
 #   menu    a hosted program's menu (xdg_popup as an X window)
 #   launch  a Wayland-only program (foot) from its start-menu entry
 #   unsaved closing with unsaved text: the program asks (dialog)
+#   dnd     drag and drop X11 <-> Wayland (test windows, a file into Mousepad)
+#   im      Chinese / Japanese / Korean input (fcitx5) in X11 and hosted Mousepad
+#   compose compose key sequences in both
+#   hidpi   scaling (WHTEST_SCALE, default 200): X11 and hosted Mousepad side by side
 say() { echo "WHTEST $*" > /dev/console; }
 LOG=/root/whtest.log; : > $LOG; chmod 666 $LOG
 ( while :; do sleep 15; say "..."; done ) &
@@ -186,6 +190,107 @@ unsaved)
     xdotool key alt+F4; sleep 3
     d=$(xdotool search --onlyvisible --class mousepad 2>/dev/null | while read x; do xprop -id "$x" WM_TRANSIENT_FOR 2>/dev/null | grep -q window && echo "$x"; done | head -1)
     say "unsaved: mousepad running: $(pgrep -u 1000 -x mousepad) dialog: $d $( [ -n "$d" ] && xprop -id "$d" _NET_WM_NAME _NET_WM_WINDOW_TYPE WM_TRANSIENT_FOR 2>&1 | tr '\n' ' ')"
+    ;;
+dnd)
+    # drag and drop both ways (dnd-test: GTK windows on X11 or Wayland), then
+    # real programs: a file from an X11 program into a hosted Mousepad,
+    # selected text from a hosted Mousepad into an X11 one
+    drag() {  # x1 y1 x2 y2
+        xdotool mousemove $1 $2; sleep 0.4; xdotool mousedown 1; sleep 0.3
+        for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+            xdotool mousemove $(( $1 + ($3 - $1) * i / 12 )) $(( $2 + ($4 - $2) * i / 12 )); sleep 0.1
+        done
+        sleep 0.8; xdotool mousemove $3 $(( $4 + 2 )); sleep 0.8
+        xdotool mouseup 1; sleep 2
+    }
+    place() { for i in $(seq 40); do w=$(xdotool search --onlyvisible --name "$1" 2>/dev/null | head -1); [ -n "$w" ] && { xdotool windowmove "$w" $2 $3; echo "$w"; return; }; sleep 0.25; done; }
+    rm -f /tmp/dnd-drop.txt; touch /tmp/dnd-drop.txt; chmod 666 /tmp/dnd-drop.txt
+    asuser env GDK_BACKEND=x11 dnd-test source "from X11" "X11 source" &
+    hosted dnd-test target "Wayland target" &
+    sleep 6; place "X11 source" 40 60 > /dev/null; place "Wayland target" 640 60 > /dev/null; sleep 1
+    drag 200 170 800 170
+    say "dnd X11 -> Wayland: $(tr '\n' '|' < /tmp/dnd-drop.txt)"
+    : > /tmp/dnd-drop.txt
+    hosted dnd-test source "from Wayland" "Wayland source" &
+    asuser env GDK_BACKEND=x11 dnd-test target "X11 target" &
+    sleep 6; place "Wayland source" 40 380 > /dev/null; place "X11 target" 640 380 > /dev/null; sleep 1
+    drag 200 490 800 490
+    say "dnd Wayland -> X11: $(tr '\n' '|' < /tmp/dnd-drop.txt)"
+    pkill -u 1000 -f dnd-test; sleep 1
+    # a file (text/uri-list from an X11 program) into a hosted Mousepad: it opens it
+    hosted mousepad &
+    asuser env GDK_BACKEND=x11 dnd-test source "file" "File source" &
+    sleep 7
+    m=$(waitwin mousepad); xdotool windowmove "$m" 640 60; place "File source" 40 60 > /dev/null; sleep 1
+    drag 200 170 900 260
+    sleep 2
+    say "dnd file into hosted Mousepad: titles $(for w in $(xdotool search --class mousepad 2>/dev/null); do xdotool getwindowname $w; done | tr '\n' '|')"
+    ;;
+im)
+    # input methods: Chinese (pinyin), Japanese (anthy), Korean (hangul) in an
+    # X11 and a hosted Mousepad; the text read back through the clipboard
+    for i in $(seq 20); do pgrep -u 1000 -x fcitx5 > /dev/null && break; sleep 1; done
+    say "im: fcitx5 $(pgrep -u 1000 -x fcitx5 || echo NOT running) profile: $(grep -c '^Name=' /home/syluxium/.config/fcitx5/profile 2>/dev/null) entries"
+    asuser env GDK_BACKEND=x11 mousepad --disable-server &
+    hosted mousepad &
+    sleep 8
+    hw=; xw=
+    for w in $(xdotool search --onlyvisible --class mousepad 2>/dev/null); do
+        xprop -id "$w" _SYLUXIUM_WAYLAND 2>/dev/null | grep -q "= 1" && hw=$w || xw=$w
+    done
+    xdotool windowmove "$xw" 40 60; xdotool windowmove "$hw" 640 60; sleep 1
+    remote() { asuser fcitx5-remote "$@"; }
+    for target in "$xw" "$hw"; do
+        xdotool windowactivate --sync "$target" 2>/dev/null; sleep 1
+        xdotool key ctrl+a BackSpace
+        remote -s pinyin; sleep 1.5
+        xdotool type --delay 150 nihao; sleep 1.5
+        xdotool key space; sleep 0.5
+        remote -s anthy; sleep 1.5
+        xdotool type --delay 150 nihongo; sleep 1; xdotool key space; sleep 1; xdotool key Return; sleep 0.5
+        remote -s hangul; sleep 1.5
+        xdotool type --delay 150 gksrmf; sleep 0.5; xdotool key space; sleep 0.5
+        remote -c; sleep 0.5
+        xdotool key ctrl+a; sleep 0.3; xdotool key ctrl+c; sleep 1
+        say "im typed into $( [ "$target" = "$hw" ] && echo 'hosted (Wayland)' || echo X11) Mousepad: $(xclip_text)"
+    done
+    say "im host: $(grep 'input method' /run/syluxium-diag/wayland-host.txt 2>/dev/null | tr '\n' '|')"
+    ;;
+compose)
+    # dead keys / compose (no input method): Right Alt as the compose key
+    asuser setxkbmap -option compose:ralt
+    pgrep -u 1000 -x mousepad > /dev/null || { asuser env GDK_BACKEND=x11 mousepad --disable-server & hosted mousepad & sleep 8; }
+    for w in $(xdotool search --onlyvisible --class mousepad 2>/dev/null); do
+        xdotool windowactivate --sync "$w" 2>/dev/null; sleep 1
+        asuser fcitx5-remote -c 2>/dev/null
+        xdotool key ctrl+a BackSpace; xdotool key Multi_key quotedbl a Multi_key apostrophe e Multi_key o c; sleep 1
+        xdotool key ctrl+a; sleep 0.3; xdotool key ctrl+c; sleep 1
+        say "compose in $(xprop -id "$w" _SYLUXIUM_WAYLAND 2>/dev/null | grep -q '= 1' && echo hosted || echo X11) Mousepad: $(xclip_text)"
+    done
+    ;;
+imshow)
+    # (last phase) a composition left open in the hosted and the X11 Mousepad:
+    # the final screenshot shows both candidate lists
+    for w in $(xdotool search --onlyvisible --class mousepad 2>/dev/null); do
+        xdotool windowactivate --sync "$w" 2>/dev/null; sleep 1
+        xdotool key ctrl+End Return
+        asuser fcitx5-remote -s pinyin; sleep 0.5
+        xdotool type --delay 150 zhongwen; sleep 2
+    done
+    ;;
+hidpi)
+    # scaling 200 % (Display Settings): an X11 and a hosted Mousepad the same size
+    asuser syluxium-display --scale ${WHTEST_SCALE:-200}; sleep 4
+    asuser env GDK_BACKEND=x11 mousepad --disable-server &
+    hosted mousepad &
+    sleep 8
+    for w in $(xdotool search --onlyvisible --class mousepad 2>/dev/null); do
+        if xprop -id "$w" _SYLUXIUM_WAYLAND 2>/dev/null | grep -q "= 1"; then xdotool windowmove "$w" 1300 100; k=hosted
+        else xdotool windowmove "$w" 60 100; k=X11; fi
+        xdotool windowactivate --sync "$w"; sleep 0.5; xdotool type --delay 30 "$k Mousepad at ${WHTEST_SCALE:-200} %"
+        say "hidpi $k: $(xdotool getwindowgeometry "$w" | tail -1)"
+    done
+    say "hidpi host: $(grep 'started\|scale' /run/syluxium-diag/wayland-host.txt 2>/dev/null | tail -2 | tr '\n' '|')"
     ;;
 shot)
     sleep ${WHTEST_SHOT_WAIT:-2} ;;

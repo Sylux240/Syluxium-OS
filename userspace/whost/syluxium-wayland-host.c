@@ -83,6 +83,9 @@
 #include <wlr/types/wlr_xdg_activation_v1.h>
 #include <wlr/types/wlr_xdg_decoration_v1.h>
 #include <wlr/types/wlr_xdg_shell.h>
+#include <wlr/types/wlr_text_input_v3.h>
+#include <wlr/types/wlr_input_method_v2.h>
+#include <wlr/types/wlr_virtual_keyboard_v1.h>
 #include <wlr/util/log.h>
 #include <wlr/xcursor.h>
 
@@ -104,7 +107,7 @@ struct x11_backend_prefix {
 	xcb_connection_t *xcb;
 };
 
-enum view_kind { VIEW_TOPLEVEL, VIEW_POPUP };
+enum view_kind { VIEW_TOPLEVEL, VIEW_POPUP, VIEW_IM /* an input method's candidate window */ };
 
 struct view {
 	struct wl_list link;            /* server.views */
@@ -286,6 +289,10 @@ static struct wlr_data_source *dnd_wayland_source(void);
 static bool w_drag_motion(uint32_t time);
 static bool w_drag_button_release(uint32_t time);
 static void scale_changed(void);
+static void schedule_keymap_reload(void);
+static bool im_take_key(struct wlr_keyboard_key_event *ev);
+static bool im_take_modifiers(void);
+static void im_focus_changed(struct wlr_surface *surface);
 static void read_scale(void);
 
 static xcb_atom_t intern(const char *name) {
@@ -921,6 +928,8 @@ static bool child_window_ok(xcb_window_t w) {
 	return false;
 }
 
+static bool view_attach_x(struct view *v, int w, int h, bool popup, struct wlr_surface *enter);
+
 static bool view_map_x(struct view *v) {
 	struct wlr_box geo;
 	wlr_xdg_surface_get_geometry(v->xdg, &geo);
@@ -981,7 +990,12 @@ static bool view_map_x(struct view *v) {
 	}
 	xcb_flush(S.x);
 
-	/* The backend's window, inside ours. */
+	return view_attach_x(v, w, h, popup, v->xdg->surface);
+}
+
+/* The backend's window (a wlroots output) inside our frame window, the
+ * first frame drawn, the frame shown. */
+static bool view_attach_x(struct view *v, int w, int h, bool popup, struct wlr_surface *enter) {
 	S.pending_view = v;
 	struct wlr_output *out = wlr_x11_output_create(S.backend);
 	S.pending_view = NULL;
@@ -1035,8 +1049,8 @@ static bool view_map_x(struct view *v) {
 	xcb_map_window(S.x, v->frame);
 	xcb_flush(S.x);
 	v->x_mapped = true;
-	if (S.screen_output)
-		wlr_surface_send_enter(v->xdg->surface, S.screen_output);
+	if (S.screen_output && enter)
+		wlr_surface_send_enter(enter, S.screen_output);
 	return true;
 }
 
@@ -1045,7 +1059,7 @@ static void view_unmap_x(struct view *v) {
 		S.pointer_view = NULL;
 	if (S.focused == v) {
 		S.focused = NULL;
-		if (S.seat->keyboard_state.focused_surface == v->xdg->surface)
+		if (v->xdg && S.seat->keyboard_state.focused_surface == v->xdg->surface)
 			wlr_seat_keyboard_notify_clear_focus(S.seat);
 	}
 	if (S.seat->pointer_state.focused_surface &&
@@ -1465,6 +1479,7 @@ static void focus_check(void *data) {
 	} else {
 		wlr_seat_keyboard_notify_clear_focus(S.seat);
 	}
+	im_focus_changed(S.seat->keyboard_state.focused_surface);
 }
 
 /* The topmost of our windows under the pointer, if any. */
@@ -1515,10 +1530,14 @@ static void keyboard_key(struct wl_listener *l, void *data) {
 		wl_event_source_remove(S.focus_check);
 		focus_check(NULL);
 	}
+	if (im_take_key(ev))
+		return;
 	wlr_seat_set_keyboard(S.seat, S.keyboard);
 	wlr_seat_keyboard_notify_key(S.seat, ev->time_msec, ev->keycode, ev->state);
 }
 static void keyboard_modifiers(struct wl_listener *l, void *data) {
+	if (im_take_modifiers())
+		return;
 	wlr_seat_set_keyboard(S.seat, S.keyboard);
 	wlr_seat_keyboard_notify_modifiers(S.seat, &S.keyboard->modifiers);
 }
@@ -1535,12 +1554,37 @@ static struct xkb_keymap *x_keymap(struct xkb_context *ctx) {
 	int32_t (*core_id)(xcb_connection_t *) = dlsym(lib, "xkb_x11_get_core_keyboard_device_id");
 	struct xkb_keymap *(*from_dev)(struct xkb_context *, xcb_connection_t *, int32_t, int) =
 		dlsym(lib, "xkb_x11_keymap_new_from_device");
-	if (!setup || !core_id || !from_dev || !setup(S.x, 1, 0, 0, NULL, NULL, NULL, NULL))
-		return NULL;
-	int32_t id = core_id(S.x);
-	struct xkb_keymap *km = id >= 0 ? from_dev(ctx, S.x, id, 0) : NULL;
-	x_after_blocking();
+	/* (on a connection of its own: a connection that uses XKB no longer gets
+	 * the core MappingNotify that tells us the keymap changed) */
+	xcb_connection_t *c = xcb_connect(NULL, NULL);
+	struct xkb_keymap *km = NULL;
+	if (!xcb_connection_has_error(c) && setup && core_id && from_dev && setup(c, 1, 0, 0, NULL, NULL, NULL, NULL)) {
+		int32_t id = core_id(c);
+		km = id >= 0 ? from_dev(ctx, c, id, 0) : NULL;
+	}
+	xcb_disconnect(c);
 	return km;
+}
+
+/* The X keyboard mapping changed (Xfce's keyboard settings, setxkbmap, a
+ * compose key option): the same keymap for Wayland programs and the input
+ * method. */
+static struct wl_event_source *keymap_idle;
+static void reload_keymap(void *data) {
+	keymap_idle = NULL;
+	if (!S.keyboard)
+		return;
+	struct xkb_context *ctx = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
+	struct xkb_keymap *km = x_keymap(ctx);
+	if (km) {
+		wlr_keyboard_set_keymap(S.keyboard, km);
+		xkb_keymap_unref(km);
+	}
+	xkb_context_unref(ctx);
+}
+static void schedule_keymap_reload(void) {
+	if (!keymap_idle)
+		keymap_idle = wl_event_loop_add_idle(S.loop, reload_keymap, NULL);
 }
 
 static void setup_keyboard(struct wlr_keyboard *kb) {
@@ -2143,6 +2187,392 @@ static void handle_selection_request(xcb_selection_request_event_t *req) {
 		wlr_data_source_send(S.seat->selection_source, mime, p[1]);
 	else
 		wlr_primary_selection_source_send(S.seat->primary_selection_source, mime, p[1]);
+}
+
+/* ------------------------------------------------------------------------
+ * Input methods (Chinese, Japanese, Korean, compose): Wayland programs ask
+ * for text input (text-input-v3), an input method (fcitx5, connected to the
+ * host by syluxium-wayland-run through its D-Bus controller) answers
+ * through input-method-v2; the host relays between them, as sway does.
+ * The input method's candidate list (an input popup surface) becomes an
+ * override-redirect X window under the text cursor.
+ */
+struct text_input {
+	struct wl_list link;
+	struct wlr_text_input_v3 *ti;
+	struct wl_listener enable, commit, disable, destroy;
+};
+
+struct im_popup {
+	struct wl_list link;
+	struct wlr_input_popup_surface_v2 *popup;
+	struct view *view;
+	struct wl_listener commit, destroy;
+};
+
+static struct {
+	struct wlr_text_input_manager_v3 *ti_mgr;
+	struct wlr_input_method_manager_v2 *im_mgr;
+	struct wl_list text_inputs;
+	struct wl_list popups;
+	struct wlr_input_method_v2 *im;
+	struct wlr_input_method_keyboard_grab_v2 *grab;
+	struct wl_listener im_commit, im_new_popup, im_grab, im_destroy, grab_destroy;
+	bool logged_use;
+} IM;
+
+/* The enabled text input of the window with the keyboard focus. */
+static struct text_input *im_focused_text_input(void) {
+	struct text_input *t;
+	wl_list_for_each(t, &IM.text_inputs, link)
+		if (t->ti->current_enabled && t->ti->focused_surface &&
+		    t->ti->focused_surface == S.seat->keyboard_state.focused_surface)
+			return t;
+	return NULL;
+}
+
+static void im_send_state(struct text_input *t) {
+	struct wlr_input_method_v2 *im = IM.im;
+	struct wlr_text_input_v3 *ti = t->ti;
+	if (ti->active_features & WLR_TEXT_INPUT_V3_FEATURE_SURROUNDING_TEXT)
+		wlr_input_method_v2_send_surrounding_text(im, ti->current.surrounding.text ? ti->current.surrounding.text : "",
+			ti->current.surrounding.cursor, ti->current.surrounding.anchor);
+	wlr_input_method_v2_send_text_change_cause(im, ti->current.text_change_cause);
+	if (ti->active_features & WLR_TEXT_INPUT_V3_FEATURE_CONTENT_TYPE)
+		wlr_input_method_v2_send_content_type(im, ti->current.content_type.hint, ti->current.content_type.purpose);
+	wlr_input_method_v2_send_done(im);
+}
+
+static void im_place_popups(void);
+
+static void ti_enable(struct wl_listener *l, void *data) {
+	struct text_input *t = wl_container_of(l, t, enable);
+	if (!IM.im)
+		return;
+	wlr_input_method_v2_send_activate(IM.im);
+	im_send_state(t);
+	if (!IM.logged_use) {
+		IM.logged_use = true;
+		diag("input method: in use by a Wayland program");
+	}
+}
+static void ti_commit(struct wl_listener *l, void *data) {
+	struct text_input *t = wl_container_of(l, t, commit);
+	if (!IM.im || !t->ti->current_enabled)
+		return;
+	im_send_state(t);
+	im_place_popups();
+}
+static void ti_disable(struct wl_listener *l, void *data) {
+	if (!IM.im)
+		return;
+	wlr_input_method_v2_send_deactivate(IM.im);
+	wlr_input_method_v2_send_done(IM.im);
+}
+static void ti_destroy(struct wl_listener *l, void *data) {
+	struct text_input *t = wl_container_of(l, t, destroy);
+	wl_list_remove(&t->enable.link);
+	wl_list_remove(&t->commit.link);
+	wl_list_remove(&t->disable.link);
+	wl_list_remove(&t->destroy.link);
+	wl_list_remove(&t->link);
+	free(t);
+}
+
+/* Keyboard focus moved: the text inputs of the window's program learn it. */
+static void im_focus_changed(struct wlr_surface *surface) {
+	struct text_input *t;
+	wl_list_for_each(t, &IM.text_inputs, link) {
+		if (t->ti->focused_surface && t->ti->focused_surface != surface) {
+			if (t->ti->current_enabled && IM.im) {
+				wlr_input_method_v2_send_deactivate(IM.im);
+				wlr_input_method_v2_send_done(IM.im);
+			}
+			wlr_text_input_v3_send_leave(t->ti);
+		}
+		if (surface && !t->ti->focused_surface &&
+		    wl_resource_get_client(t->ti->resource) == wl_resource_get_client(surface->resource))
+			wlr_text_input_v3_send_enter(t->ti, surface);
+	}
+}
+
+static void new_text_input(struct wl_listener *l, void *data) {
+	struct text_input *t = calloc(1, sizeof(*t));
+	t->ti = data;
+	t->enable.notify = ti_enable;
+	wl_signal_add(&t->ti->events.enable, &t->enable);
+	t->commit.notify = ti_commit;
+	wl_signal_add(&t->ti->events.commit, &t->commit);
+	t->disable.notify = ti_disable;
+	wl_signal_add(&t->ti->events.disable, &t->disable);
+	t->destroy.notify = ti_destroy;
+	wl_signal_add(&t->ti->events.destroy, &t->destroy);
+	wl_list_insert(&IM.text_inputs, &t->link);
+	struct wlr_surface *focus = S.seat->keyboard_state.focused_surface;
+	if (focus && wl_resource_get_client(t->ti->resource) == wl_resource_get_client(focus->resource))
+		wlr_text_input_v3_send_enter(t->ti, focus);
+}
+
+/* The input method composed something: to the program. */
+static void im_commit(struct wl_listener *l, void *data) {
+	struct text_input *t = im_focused_text_input();
+	struct wlr_input_method_v2 *im = IM.im;
+	if (!t || !im)
+		return;
+	if (im->current.preedit.text)
+		wlr_text_input_v3_send_preedit_string(t->ti, im->current.preedit.text, im->current.preedit.cursor_begin,
+			im->current.preedit.cursor_end);
+	if (im->current.commit_text)
+		wlr_text_input_v3_send_commit_string(t->ti, im->current.commit_text);
+	if (im->current.delete.before_length || im->current.delete.after_length)
+		wlr_text_input_v3_send_delete_surrounding_text(t->ti, im->current.delete.before_length,
+			im->current.delete.after_length);
+	wlr_text_input_v3_send_done(t->ti);
+}
+
+static void grab_destroyed(struct wl_listener *l, void *data) {
+	wl_list_remove(&IM.grab_destroy.link);
+	IM.grab = NULL;
+	if (S.keyboard)  /* the program gets the real modifiers back */
+		wlr_seat_keyboard_notify_modifiers(S.seat, &S.keyboard->modifiers);
+}
+
+static void im_grab_keyboard(struct wl_listener *l, void *data) {
+	IM.grab = data;
+	if (S.keyboard)
+		wlr_input_method_keyboard_grab_v2_set_keyboard(IM.grab, S.keyboard);
+	IM.grab_destroy.notify = grab_destroyed;
+	wl_signal_add(&IM.grab->events.destroy, &IM.grab_destroy);
+}
+
+/* -- the candidate window -- */
+
+static void im_popup_position(struct im_popup *p, int *x, int *y, int w, int h) {
+	struct text_input *t = im_focused_text_input();
+	*x = 0; *y = 0;
+	struct view *v = t ? root_view(view_from_surface(wlr_surface_get_root_surface(t->ti->focused_surface))) : NULL;
+	int ox, oy;
+	if (!v || !view_root_origin(v, &ox, &oy))
+		return;
+	struct wlr_box geo = {0}, r = t->ti->current.cursor_rectangle;
+	wlr_xdg_surface_get_geometry(v->xdg, &geo);
+	*x = ox + px(v, r.x - geo.x);
+	*y = oy + px(v, r.y + r.height - geo.y);
+	if (*x + w > S.screen->width_in_pixels)
+		*x = S.screen->width_in_pixels - w;
+	if (*y + h > S.screen->height_in_pixels)  /* no room below the text: above it */
+		*y = oy + px(v, r.y - geo.y) - h;
+	if (*x < 0) *x = 0;
+	if (*y < 0) *y = 0;
+	wlr_input_popup_surface_v2_send_text_input_rectangle(p->popup, &r);
+}
+
+static void im_popup_update(struct im_popup *p) {
+	struct wlr_surface *s = p->popup->surface;
+	struct view *v = p->view;
+	if (getenv("SYLUXIUM_WAYLAND_HOST_DEBUG"))
+		diag("debug: candidate window: buffer %d, text input %p, size %dx%d", wlr_surface_has_buffer(s),
+			(void *)im_focused_text_input(), s->current.width, s->current.height);
+	if (!wlr_surface_has_buffer(s) || !im_focused_text_input()) {
+		if (v->frame)
+			view_unmap_x(v);
+		return;
+	}
+	v->scale = S.scale;
+	int w = px(v, s->current.width), h = px(v, s->current.height), x, y;
+	if (w < 1 || h < 1)
+		return;
+	im_popup_position(p, &x, &y, w, h);
+	if (!v->frame) {
+		v->frame = xcb_generate_id(S.x);
+		uint32_t mask = XCB_CW_BACK_PIXEL | XCB_CW_OVERRIDE_REDIRECT;
+		uint32_t vals[] = { 0x1d2552, 1 };
+		xcb_create_window(S.x, XCB_COPY_FROM_PARENT, v->frame, S.root, x, y, w, h, 0,
+			XCB_WINDOW_CLASS_INPUT_OUTPUT, S.screen->root_visual, mask, vals);
+		uint32_t type = A._NET_WM_WINDOW_TYPE_POPUP_MENU;
+		set_prop(v->frame, A._NET_WM_WINDOW_TYPE, XCB_ATOM_ATOM, 32, 1, &type);
+		set_text(v->frame, A._NET_WM_NAME, A.UTF8_STRING, "Input method");
+		set_prop(v->frame, XCB_ATOM_WM_CLASS, XCB_ATOM_STRING, 8, 12, "fcitx5\0Fcitx");
+		if (!view_attach_x(v, w, h, true, s))
+			v->frame = 0;
+		return;
+	}
+	uint32_t vals[4] = { x, y, w, h };
+	xcb_configure_window(S.x, v->frame, XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y | XCB_CONFIG_WINDOW_WIDTH |
+		XCB_CONFIG_WINDOW_HEIGHT, vals);
+	xcb_flush(S.x);
+	view_render_resize(v, w, h);
+}
+
+static void im_place_popups(void) {
+	struct im_popup *p;
+	wl_list_for_each(p, &IM.popups, link)
+		im_popup_update(p);
+}
+
+static void im_popup_commit(struct wl_listener *l, void *data) {
+	struct im_popup *p = wl_container_of(l, p, commit);
+	im_popup_update(p);
+}
+
+static void im_popup_destroy(struct wl_listener *l, void *data) {
+	struct im_popup *p = wl_container_of(l, p, destroy);
+	if (p->view->frame)
+		view_unmap_x(p->view);
+	wl_list_remove(&p->view->link);
+	wlr_scene_node_destroy(&p->view->scene->tree.node);
+	free(p->view);
+	wl_list_remove(&p->commit.link);
+	wl_list_remove(&p->destroy.link);
+	wl_list_remove(&p->link);
+	free(p);
+}
+
+static void im_new_popup(struct wl_listener *l, void *data) {
+	struct im_popup *p = calloc(1, sizeof(*p));
+	p->popup = data;
+	struct view *v = calloc(1, sizeof(*v));
+	v->kind = VIEW_IM;
+	v->scale = S.scale;
+	v->icon_fd = -1;
+	v->scene = wlr_scene_create();
+	const float bg[4] = { 0.114f, 0.145f, 0.322f, 1.0f };
+	v->bg = wlr_scene_rect_create(&v->scene->tree, 1, 1, bg);
+	v->surface_tree = wlr_scene_subsurface_tree_create(&v->scene->tree, p->popup->surface);
+	wl_list_insert(&S.views, &v->link);
+	p->view = v;
+	p->commit.notify = im_popup_commit;
+	wl_signal_add(&p->popup->surface->events.commit, &p->commit);
+	p->destroy.notify = im_popup_destroy;
+	wl_signal_add(&p->popup->events.destroy, &p->destroy);
+	wl_list_insert(&IM.popups, &p->link);
+	im_popup_update(p);
+}
+
+static void im_destroyed(struct wl_listener *l, void *data) {
+	wl_list_remove(&IM.im_commit.link);
+	wl_list_remove(&IM.im_new_popup.link);
+	wl_list_remove(&IM.im_grab.link);
+	wl_list_remove(&IM.im_destroy.link);
+	IM.im = NULL;
+	diag("input method: disconnected");
+}
+
+static void new_input_method(struct wl_listener *l, void *data) {
+	struct wlr_input_method_v2 *im = data;
+	if (IM.im) {
+		wlr_input_method_v2_send_unavailable(im);
+		return;
+	}
+	IM.im = im;
+	IM.im_commit.notify = im_commit;
+	wl_signal_add(&im->events.commit, &IM.im_commit);
+	IM.im_new_popup.notify = im_new_popup;
+	wl_signal_add(&im->events.new_popup_surface, &IM.im_new_popup);
+	IM.im_grab.notify = im_grab_keyboard;
+	wl_signal_add(&im->events.grab_keyboard, &IM.im_grab);
+	IM.im_destroy.notify = im_destroyed;
+	wl_signal_add(&im->events.destroy, &IM.im_destroy);
+	pid_t pid = 0; uid_t uid; gid_t gid;
+	wl_client_get_credentials(wl_resource_get_client(im->resource), &pid, &uid, &gid);
+	char comm[64] = "?", path[64];
+	snprintf(path, sizeof(path), "/proc/%d/comm", (int)pid);
+	FILE *f = fopen(path, "r");
+	if (f) {
+		if (fgets(comm, sizeof(comm), f))
+			comm[strcspn(comm, "\n")] = 0;
+		fclose(f);
+	}
+	diag("input method: %s (pid %d) connected", comm, (int)pid);
+	struct text_input *t = im_focused_text_input();
+	if (t) {
+		wlr_input_method_v2_send_activate(im);
+		im_send_state(t);
+	}
+}
+
+/* Virtual keyboards (the input method passing on keys it doesn't use):
+ * straight to the program with the focus. */
+struct virtual_kb {
+	struct wlr_virtual_keyboard_v1 *vk;
+	struct wl_listener key, modifiers, destroy;
+};
+static void vk_key(struct wl_listener *l, void *data) {
+	struct virtual_kb *k = wl_container_of(l, k, key);
+	struct wlr_keyboard_key_event *ev = data;
+	wlr_seat_set_keyboard(S.seat, &k->vk->keyboard);
+	wlr_seat_keyboard_notify_key(S.seat, ev->time_msec, ev->keycode, ev->state);
+}
+static void vk_modifiers(struct wl_listener *l, void *data) {
+	struct virtual_kb *k = wl_container_of(l, k, modifiers);
+	wlr_seat_set_keyboard(S.seat, &k->vk->keyboard);
+	wlr_seat_keyboard_notify_modifiers(S.seat, &k->vk->keyboard.modifiers);
+}
+static void vk_destroy(struct wl_listener *l, void *data) {
+	struct virtual_kb *k = wl_container_of(l, k, destroy);
+	wl_list_remove(&k->key.link);
+	wl_list_remove(&k->modifiers.link);
+	wl_list_remove(&k->destroy.link);
+	if (S.keyboard)
+		wlr_seat_set_keyboard(S.seat, S.keyboard);
+	free(k);
+}
+static void new_virtual_keyboard(struct wl_listener *l, void *data) {
+	struct virtual_kb *k = calloc(1, sizeof(*k));
+	k->vk = data;
+	k->key.notify = vk_key;
+	wl_signal_add(&k->vk->keyboard.events.key, &k->key);
+	k->modifiers.notify = vk_modifiers;
+	wl_signal_add(&k->vk->keyboard.events.modifiers, &k->modifiers);
+	k->destroy.notify = vk_destroy;
+	wl_signal_add(&k->vk->keyboard.base.events.destroy, &k->destroy);
+}
+
+static struct wl_listener l_new_ti = { .notify = new_text_input }, l_new_im = { .notify = new_input_method },
+	l_new_vk = { .notify = new_virtual_keyboard };
+
+static void im_setup(void) {
+	wl_list_init(&IM.text_inputs);
+	wl_list_init(&IM.popups);
+	IM.ti_mgr = wlr_text_input_manager_v3_create(S.display);
+	wl_signal_add(&IM.ti_mgr->events.text_input, &l_new_ti);
+	IM.im_mgr = wlr_input_method_manager_v2_create(S.display);
+	wl_signal_add(&IM.im_mgr->events.input_method, &l_new_im);
+	struct wlr_virtual_keyboard_manager_v1 *vkm = wlr_virtual_keyboard_manager_v1_create(S.display);
+	wl_signal_add(&vkm->events.new_virtual_keyboard, &l_new_vk);
+}
+
+/* The input method of the X session (fcitx5) is asked to connect to us too. */
+static void im_invite(void) {
+	pid_t pid = fork();
+	if (pid == 0) {
+		int null = open("/dev/null", O_RDWR);
+		if (null >= 0) {
+			dup2(null, 1);
+			dup2(null, 2);
+		}
+		char arg[128];
+		snprintf(arg, sizeof(arg), "string:%s", S.socket);
+		execlp("dbus-send", "dbus-send", "--session", "--type=method_call", "--dest=org.fcitx.Fcitx5", "/controller",
+			"org.fcitx.Fcitx.Controller1.OpenWaylandConnection", arg, (char *)NULL);
+		_exit(127);
+	}
+}
+
+/* Keys go to the input method while it has the keyboard (it passes the
+ * rest back through its virtual keyboard). */
+static bool im_take_key(struct wlr_keyboard_key_event *ev) {
+	if (!IM.grab || !im_focused_text_input())
+		return false;
+	wlr_input_method_keyboard_grab_v2_set_keyboard(IM.grab, S.keyboard);
+	wlr_input_method_keyboard_grab_v2_send_key(IM.grab, ev->time_msec, ev->keycode, ev->state);
+	return true;
+}
+static bool im_take_modifiers(void) {
+	if (!IM.grab || !im_focused_text_input())
+		return false;
+	wlr_input_method_keyboard_grab_v2_send_modifiers(IM.grab, &S.keyboard->modifiers);
+	return true;
 }
 
 /* ------------------------------------------------------------------------
@@ -2799,6 +3229,12 @@ static void x_event(xcb_generic_event_t *e) {
 	case XCB_SELECTION_NOTIFY:
 		handle_selection_notify((void *)e);
 		break;
+	case XCB_MAPPING_NOTIFY: {
+		xcb_mapping_notify_event_t *ev = (void *)e;
+		if (ev->request == XCB_MAPPING_KEYBOARD || ev->request == XCB_MAPPING_MODIFIER)
+			schedule_keymap_reload();
+		break;
+	}
 	case XCB_SELECTION_REQUEST:
 		handle_selection_request((void *)e);
 		break;
@@ -3288,6 +3724,7 @@ int main(int argc, char **argv) {
 	wl_signal_add(&shape->events.request_set_shape, &l_cursor_shape);
 
 	S.seat = wlr_seat_create(S.display, "seat0");
+	im_setup();
 	wl_signal_add(&S.seat->events.request_set_cursor, &l_req_cursor);
 	wl_signal_add(&S.seat->events.request_set_selection, &l_req_sel);
 	wl_signal_add(&S.seat->events.request_set_primary_selection, &l_req_prim);
@@ -3350,6 +3787,7 @@ int main(int argc, char **argv) {
 	diag("started on %s as WAYLAND_DISPLAY=%s: %s; screen %dx%d at %.1f Hz, %s, cursor theme %s %d",
 		dpy, S.socket, S.gpu_desc, S.screen->width_in_pixels, S.screen->height_in_pixels, 1e9 / S.frame_ns,
 		S.scale_desc, theme[0] ? theme : "default", csize);
+	im_invite();
 	/* tell the starter we are ready */
 	if (getenv("SYLUXIUM_WAYLAND_HOST_READY_FD")) {
 		int fd = atoi(getenv("SYLUXIUM_WAYLAND_HOST_READY_FD"));

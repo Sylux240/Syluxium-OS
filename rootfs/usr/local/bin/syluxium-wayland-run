@@ -16,7 +16,9 @@ fi
 toolkits_on_wayland() {
     export GDK_BACKEND=wayland QT_QPA_PLATFORM=wayland SDL_VIDEODRIVER=wayland SDL_VIDEO_DRIVER=wayland \
         MOZ_ENABLE_WAYLAND=1 CLUTTER_BACKEND=wayland ELECTRON_OZONE_PLATFORM_HINT=wayland \
-        XDG_SESSION_TYPE=wayland
+        XDG_SESSION_TYPE=wayland GTK_IM_MODULE=wayland QT_IM_MODULE=wayland
+    # (the input method through the host: text-input-v3, not fcitx's own D-Bus
+    # module, which would place the candidate list as if on X11)
 }
 
 if [ "$XDG_SESSION_TYPE" = wayland ] && [ -n "$WAYLAND_DISPLAY" ] && [ "${WAYLAND_DISPLAY#syluxium-x11-}" = "$WAYLAND_DISPLAY" ]; then
