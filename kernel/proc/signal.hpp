@@ -35,6 +35,9 @@ bool pending(proc::Process* p);
 
 // For blocking system calls: should the current wait end with -EINTR?
 bool interrupted();
+// Is the current thread being killed (SIGKILL, exit_group)? For waits that
+// mustn't end on ordinary signals but shouldn't outlive the process.
+bool fatal_pending();
 
 // signalfd: signals pending for the calling thread (its own + process-wide),
 // and taking one of them (lowest number in `mask`; 0 if none).
