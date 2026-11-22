@@ -114,6 +114,7 @@ check "futex stress (GIL handoff, condvars, timeouts)" /opt/syluxium/tests/futex
 check "pipe / fd stress (close races, dup, fork)"     /opt/syluxium/tests/pipestress 1
 check "futex wakeups while forking, WAKE_OP, PI, robust" /opt/syluxium/tests/futexfork 1
 check "copy_file_range, pidfd, sigtimedwait, mlock"   /opt/syluxium/tests/newsyscalls
+check "bpf: maps, programs, cgroup attach, bpffs pins" /opt/syluxium/tests/bpftest
 
 echo "selftest: $pass passed, $fail failed"
 exit $fail

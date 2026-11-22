@@ -1,3 +1,4 @@
+#include <bpf/bpf.hpp>
 #include <boot/limine_requests.hpp>
 #include <arch/x86_64/cpu.hpp>
 #include <arch/x86_64/percpu.hpp>
@@ -1096,7 +1097,7 @@ void init() {
         snprintf(cmdline, sizeof(cmdline), "%s\n", boot::cmdline());
         genfs::static_file("/proc/cmdline", cmdline);
     }
-    genfs::static_file("/proc/filesystems", "nodev\tramfs\nnodev\tproc\nnodev\tsysfs\nnodev\tdevtmpfs\nnodev\ttmpfs\nnodev\tdevpts\nnodev\tcgroup\nnodev\tcgroup2\nnodev\tmqueue\nnodev\tbinder\nnodev\tfuse\n\tvfat\n\texfat\n\text4\n\text3\n\text2\n");
+    genfs::static_file("/proc/filesystems", "nodev\tramfs\nnodev\tproc\nnodev\tsysfs\nnodev\tdevtmpfs\nnodev\ttmpfs\nnodev\tdevpts\nnodev\tcgroup\nnodev\tcgroup2\nnodev\tmqueue\nnodev\tbinder\nnodev\tfuse\nnodev\tbpf\n\tvfat\n\texfat\n\text4\n\text3\n\text2\n");
     add("mounts", new GeneratedFile(gen_mounts, nullptr));
     vfs::mkdir_p("/proc/sys/kernel");
     genfs::static_file("/proc/sys/kernel/hostname", "syluxium\n");
@@ -1140,6 +1141,7 @@ void init() {
     vfs::mkdir_p("/sys/kernel", 0755);
     vfs::mkdir_p("/sys/class", 0755);
     vfs::mkdir_p("/sys/bus", 0755);
+    bpf::init(); // /sys/fs/bpf
     vfs::mkdir_p("/sys/block", 0755);
     vfs::mkdir_p("/sys/firmware", 0755);
 

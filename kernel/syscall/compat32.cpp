@@ -1219,7 +1219,7 @@ constexpr Mapping IDENTICAL[] = {
     {292, 254, "inotify_add_watch"}, {293, 255, "inotify_rm_watch"}, {332, 294, "inotify_init1"},
     {297, 259, "mknodat"}, {310, 272, "unshare"}, {322, 283, "timerfd_create"}, {327, 289, "signalfd4"},
     {328, 290, "eventfd2"}, {329, 291, "epoll_create1"}, {344, 306, "syncfs"}, {346, 308, "setns"},
-    {349, 312, "kcmp"}, {356, 319, "memfd_create"}, {375, 324, "membarrier"}, {355, 318, "getrandom"}, {359, 41, "socket"},
+    {349, 312, "kcmp"}, {356, 319, "memfd_create"}, {357, 321, "bpf"}, {375, 324, "membarrier"}, {355, 318, "getrandom"}, {359, 41, "socket"},
     {360, 53, "socketpair"}, {361, 49, "bind"}, {362, 42, "connect"}, {363, 50, "listen"},
     {364, 288, "accept4"}, {365, 55, "getsockopt"}, {366, 54, "setsockopt"}, {367, 51, "getsockname"},
     {368, 52, "getpeername"}, {369, 44, "sendto"}, {371, 45, "recvfrom"}, {373, 48, "shutdown"},

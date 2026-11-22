@@ -7,6 +7,7 @@
 #include <proc/process.hpp>
 #include <proc/signal.hpp>
 #include <syscall/syscall.hpp>
+#include <bpf/bpf.hpp>
 
 extern "C" void syscall_entry();
 extern "C" void syscall32_entry(); // compat_entry.S
@@ -62,6 +63,7 @@ void register_all() {
     register_events();
     register_ipc();
     register_inotify();
+    bpf::register_syscalls();
     register_compat(); // last: the 32-bit table reuses native handlers
 }
 

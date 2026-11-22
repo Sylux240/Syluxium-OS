@@ -1,5 +1,6 @@
 // File and filesystem system calls.
 
+#include <bpf/bpf.hpp>
 #include <arch/x86_64/protect.hpp>
 #include <block/block.hpp>
 #include <fs/ext2.hpp>
@@ -1988,6 +1989,8 @@ long sys_mount(SYSCALL_ARGS) {
     }
     if (strcmp(t, "binder") == 0) // binderfs: Android binder devices (kernel/linuxkpi/binder.cpp)
         return vfs::mount_at(abs, linuxkpi::binderfs_mount(), "binder", "binder");
+    if (strcmp(t, "bpf") == 0) // the BPF file system: pinned maps and programs (kernel/bpf)
+        return vfs::mount_at(abs, bpf::fs_mount(), "bpf", "bpf");
     if (strcmp(t, "cgroup2") == 0 || strcmp(t, "cgroup") == 0)
         return vfs::mount_at(abs, cgroupfs::mount(), "cgroup2", "cgroup2");
     if (strcmp(t, "mqueue") == 0) { // POSIX message queues: an empty directory for now
