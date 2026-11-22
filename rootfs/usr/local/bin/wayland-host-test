@@ -1,0 +1,166 @@
+#!/bin/sh
+# Test aid: Wayland programs in the Xfce (X11) desktop. Starts the desktop,
+# logs in, then runs phases as the desktop user; results on the console as
+# "WHTEST ..." lines (the test harness takes the screenshot at the end).
+#   WHTEST_PHASES="env survey host input clip resize close perf menu"
+#   env     the session's environment (no Wayland leftovers for X11 programs)
+#   survey  programs with an X11 side start on X11; a Wayland-only one alone
+#   host    Wayland programs through syluxium-wayland-run: X windows, class,
+#           process, icon, frames
+#   input   typing into a hosted program; its clipboard read by X11
+#   clip    X11 clipboard pasted in a Wayland program (and wl-paste)
+#   resize  the X window resized: the Wayland window follows
+#   close   closing through the window manager (unsaved text: a question)
+#   perf    frame rates: es2gears and shell-fps-test, X11 vs hosted
+#   menu    a hosted program's menu (xdg_popup as an X window)
+say() { echo "WHTEST $*" > /dev/console; }
+LOG=/root/whtest.log; : > $LOG; chmod 666 $LOG
+( while :; do sleep 15; say "..."; done ) &
+beat=$!
+startdesktop > /dev/null 2>&1 &
+export DISPLAY=:0
+for i in $(seq 1 120); do
+    XAUTHORITY="$(ls /var/run/xauth/A:0-* 2>/dev/null | head -1)"
+    [ -n "$XAUTHORITY" ] && [ -S /tmp/.X11-unix/X0 ] && break
+    sleep 1
+done
+export XAUTHORITY
+sleep 10
+xdotool key Return    # log in (the login screen's user has no password)
+for i in $(seq 1 120); do pidof xfce4-panel > /dev/null && break; sleep 1; done
+sleep 15
+say "desktop up"
+env=
+for e in /proc/[0-9]*/environ; do
+    [ -z "$env" ] || break
+    [ "$(stat -c %u "$e" 2>/dev/null)" = 1000 ] || continue
+    tr '\0' '\n' < "$e" 2>/dev/null | grep -q '^SESSION_MANAGER=' || continue
+    tr '\0' '\n' < "$e" 2>/dev/null | grep -q '^DBUS_SESSION_BUS_ADDRESS=' || continue
+    sessenv=$e
+    env=$(tr '\0' '\n' < "$e" | grep -E '^[A-Za-z_][A-Za-z0-9_]*=' | grep -v "'" | sed "s/^/export /; s/=/='/; s/\$/'/")
+done
+[ -n "$env" ] || { say "no session environment found"; env="export DISPLAY=:0"; }
+asuser() {
+    ( eval "$env"; cd /home/syluxium; exec python3 -c 'import os, sys
+os.initgroups("syluxium", 1000); os.setgid(1000); os.setuid(1000)
+os.execvp(sys.argv[1], sys.argv[1:])' "$@" ) < /dev/null >> $LOG 2>&1
+}
+# the X window (the frame xfwm4 manages) of a hosted program, by class
+win_of() { xdotool search --class "$1" 2>/dev/null | tail -1; }
+waitwin() { for i in $(seq 1 40); do w=$(xdotool search --onlyvisible --class "$1" 2>/dev/null | tail -1); [ -n "$w" ] && { echo "$w"; return; }; sleep 0.5; done; }
+props() { xprop -id "$1" WM_CLASS _NET_WM_NAME _NET_WM_PID _SYLUXIUM_WAYLAND _NET_WM_WINDOW_TYPE 2>&1 | tr '\n' ' '; echo " icon:$(xprop -id "$1" _NET_WM_ICON 2>/dev/null | wc -c) bytes geometry:$(xdotool getwindowgeometry "$1" 2>/dev/null | tr '\n' ' ')"; }
+xclip_text() {  # the X11 clipboard, as an X11 program sees it
+    asuser env GDK_BACKEND=x11 timeout 5 python3 -c '
+import gi; gi.require_version("Gtk", "3.0")
+from gi.repository import Gtk, Gdk
+print("XCLIP[" + str(Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD).wait_for_text()) + "]")'
+    grep "XCLIP\[" $LOG | tail -1
+}
+hosted() {  # run as the user through the host (WHTEST_DEBUG=1: the host's statistics)
+    asuser env ${WHTEST_DEBUG:+SYLUXIUM_WAYLAND_HOST_DEBUG=1} syluxium-wayland-run "$@"
+}
+fps_lines() { grep -E "FPS|frames in" $LOG | tail -${1:-6} | tr '\n' '|'; }
+
+for p in ${WHTEST_PHASES:-env survey host input clip resize close}; do case $p in
+env)
+    say "env: $(tr '\0' '\n' < "$sessenv" | grep -E '^(WAYLAND_DISPLAY|WAYLAND_SOCKET|XDG_SESSION_TYPE|GDK_BACKEND|QT_QPA_PLATFORM|SDL_VIDEODRIVER|MOZ_ENABLE_WAYLAND|XDG_RUNTIME_DIR|XDG_DATA_DIRS|DISPLAY)=' | tr '\n' ' ')"
+    say "runtime dir: $(ls -la /run/user/1000 2>&1 | tr '\n' '|')"
+    ;;
+survey)
+    # GTK programs (X11 and Wayland able) must pick X11 in this session
+    asuser mousepad & asuser galculator &
+    sleep 8
+    for prog in mousepad galculator; do
+        pid=$(pgrep -u 1000 -x $prog | head -1)
+        say "survey $prog: pid $pid X windows: $(xdotool search --pid "$pid" 2>/dev/null | wc -l) wayland env: $(tr '\0' '\n' < /proc/$pid/environ 2>/dev/null | grep -c WAYLAND_DISPLAY) wayland socket: $(ls -l /proc/$pid/fd 2>/dev/null | grep -c syluxium-x11)"
+    done
+    pkill -u 1000 -x mousepad; pkill -u 1000 -x galculator
+    # a Wayland-only program without the host
+    asuser timeout 5 es2gears_wayland
+    say "survey es2gears_wayland alone: $(tail -2 $LOG | tr '\n' ' ')"
+    ;;
+host)
+    hosted sh -c 'EGL_LOG_LEVEL=debug timeout 8 es2gears_wayland > /tmp/gears-egl.txt 2>&1' &
+    hosted mousepad &
+    hosted foot &
+    sleep 10
+    for c in es2gears mousepad foot; do
+        w=$(win_of "$c")
+        say "host $c: window $w $( [ -n "$w" ] && props "$w")"
+    done
+ say "host es2gears EGL: $(grep -v '^$' /tmp/gears-egl.txt | grep -v '^libEGL debug:  \|0x0' | tail -14 | tr '\n' '|' | cut -c1-1500)"
+    say "host log: $(tr '\n' '|' < /run/user/1000/syluxium-wayland-host.log | tail -c 900)"
+    say "diag: $(tr '\n' '|' < /run/syluxium-diag/wayland-host.txt 2>/dev/null | tail -c 900)"
+    say "taskbar list: $(xprop -root _NET_CLIENT_LIST | tr '\n' ' ')"
+    w=$(win_of mousepad); [ -n "$w" ] && xdotool windowmove "$w" 40 40
+    w=$(win_of es2gears); [ -n "$w" ] && xdotool windowmove "$w" 620 60
+    w=$(win_of foot); [ -n "$w" ] && xdotool windowmove "$w" 300 420
+    sleep 3
+    ;;
+input)
+    pgrep -u 1000 -x mousepad > /dev/null || { hosted mousepad & sleep 8; }
+    w=$(waitwin mousepad)
+    xdotool windowactivate --sync "$w" 2>/dev/null; sleep 1
+    xdotool type --delay 40 'Hello from Wayland'; sleep 1
+    xdotool key ctrl+a; sleep 0.5; xdotool key ctrl+c; sleep 1
+    say "input: typed in hosted mousepad, X11 clipboard now: $(xclip_text)"
+    ;;
+clip)
+    # an X11 program owns the clipboard; Wayland programs paste it
+    asuser env GDK_BACKEND=x11 python3 -c '
+import gi; gi.require_version("Gtk", "3.0")
+from gi.repository import Gtk, Gdk, GLib
+Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD).set_text("copied in X11", -1)
+GLib.timeout_add(25000, Gtk.main_quit); Gtk.main()' &
+    sleep 3
+    hosted sh -c 'timeout 5 wl-paste -n > /tmp/wlpaste.txt 2>&1'
+    say "clip: wl-paste in the host got [$(cat /tmp/wlpaste.txt 2>&1)]"
+    pgrep -u 1000 -x mousepad > /dev/null || { hosted mousepad & sleep 8; }
+    w=$(waitwin mousepad)
+    xdotool windowactivate --sync "$w" 2>/dev/null; sleep 1
+    xdotool key ctrl+End Return; xdotool key ctrl+v; sleep 1
+    hosted sh -c 'printf "copied in Wayland" | wl-copy'; sleep 2
+    say "clip: wl-copy -> X11 clipboard: $(xclip_text)"
+    ;;
+resize)
+    pgrep -u 1000 -x mousepad > /dev/null || { hosted mousepad & sleep 8; }
+    w=$(waitwin mousepad)
+    say "resize: before $(xdotool getwindowgeometry "$w" | tr '\n' ' ')"
+    xdotool windowsize "$w" 760 420; sleep 3
+    say "resize: after 760x420 request $(xdotool getwindowgeometry "$w" | tr '\n' ' ') log: $(tail -c 300 /run/user/1000/syluxium-wayland-host.log | tr '\n' '|')"
+    ;;
+close)
+    w=$(waitwin mousepad)
+    xdotool windowactivate --sync "$w" 2>/dev/null; sleep 1
+    xdotool key alt+F4; sleep 3
+    say "close: mousepad still running (asks to save): $(pgrep -u 1000 -x mousepad) host alive: $(pgrep -f syluxium-wayland-host | head -1) windows: $(xdotool search --class mousepad 2>/dev/null | tr '\n' ' ')"
+    ;;
+perf)
+    for mode in x11 wayland; do
+        if [ $mode = x11 ]; then asuser sh -c "timeout 16 es2gears_x11 > /tmp/gears-$mode.txt 2>&1" &
+        else hosted sh -c "timeout 16 es2gears_wayland > /tmp/gears-$mode.txt 2>&1" & fi
+        sleep 17
+        say "perf es2gears $mode: $(tr '\n' '|' < /tmp/gears-$mode.txt | tail -c 300)"
+    done
+    for mode in x11 wayland; do
+        rm -f /tmp/fps.log
+        if [ $mode = x11 ]; then asuser shell-fps-test 16 900 600 both
+        else hosted shell-fps-test 16 900 600 both; fi
+        say "perf shell-fps-test $mode: $(grep summary /tmp/fps.log | tr '\n' '|')"
+    done
+    say "perf host cpu: $(ps -o pid,time,rss,args -u 1000 2>/dev/null | grep -E 'wayland-host|Xorg' | grep -v grep | tr '\n' '|')"
+    ;;
+menu)
+    pgrep -u 1000 -x mousepad > /dev/null || { hosted mousepad & sleep 8; }
+    w=$(waitwin mousepad)
+    xdotool windowactivate --sync "$w" 2>/dev/null; sleep 1
+    xdotool key F10; sleep 2
+    say "menu: popup windows: $(xdotool search --all --class mousepad 2>/dev/null | while read x; do xprop -id "$x" _NET_WM_WINDOW_TYPE 2>/dev/null | grep -o 'POPUP_MENU\|TOOLTIP'; done | tr '\n' ' ')"
+    ;;
+shot)
+    sleep ${WHTEST_SHOT_WAIT:-2} ;;
+esac; done
+[ -n "$WHTEST_DEBUG" ] && say "host debug: $(grep 'debug:' /run/user/1000/syluxium-wayland-host.log | tail -6 | tr '\n' '|')"
+say "log: $(tr '\n' '|' < $LOG | tail -c 1500)"
+kill $beat
+say "done"

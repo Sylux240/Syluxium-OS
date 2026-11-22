@@ -6,6 +6,12 @@
 export XDG_CONFIG_DIRS=/etc/xdg/syluxium:/etc/xdg
 export XDG_CURRENT_DESKTOP=XFCE XDG_SESSION_DESKTOP=syluxium DESKTOP_SESSION=syluxium
 export XDG_MENU_PREFIX=xfce-
+# An X11 session: programs that can use either X11 or Wayland must take X11
+# (GTK would otherwise try a Wayland socket left in the runtime folder, e.g.
+# wayland-0). Wayland programs run through syluxium-wayland-run, which sets
+# their own WAYLAND_DISPLAY (syluxium-x11-0) and toolkit choices.
+unset WAYLAND_DISPLAY WAYLAND_SOCKET
+export XDG_SESSION_TYPE=x11 GDK_BACKEND=x11
 /usr/local/sbin/syluxium-diag mark "session: Syluxium (Xfce) starting for $USER"
 # On the GPU Test entry: does a program get the GPU? (gpu-clients.txt)
 (sleep 25; /usr/local/sbin/syluxium-diag gpu-clients) &

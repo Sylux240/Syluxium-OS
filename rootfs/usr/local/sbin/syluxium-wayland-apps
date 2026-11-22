@@ -1,0 +1,130 @@
+#!/usr/bin/python3
+"""Start-menu entries of Wayland-only programs go through
+syluxium-wayland-run, so they open as normal windows in the Xfce (X11)
+desktop. For each .desktop file in /usr/share/applications whose program
+links the Wayland client library but no X11 toolkit (GTK, Qt, SDL, GLFW,
+Xlib/xcb), a copy with "syluxium-wayland-run" in front of every Exec line
+goes to /usr/local/share/applications (which comes first in the menu);
+copies whose program is gone or no longer Wayland-only are removed.
+/etc/syluxium/wayland-apps.conf: "wayland <id>.desktop" forces an entry
+through the host, "x11 <id>.desktop" never.
+Run at image build (--root ROOTFS) and by apt after every install."""
+import os
+import re
+import shutil
+import sys
+
+root = sys.argv[sys.argv.index("--root") + 1] if "--root" in sys.argv else "/"
+SRC = os.path.join(root, "usr/share/applications")
+DST = os.path.join(root, "usr/local/share/applications")
+CONF = os.path.join(root, "etc/syluxium/wayland-apps.conf")
+MARK = "X-Syluxium-Wayland-Host=true"
+X11_LIBS = re.compile(rb"^(libX11\.so|libxcb\.so|libgtk-[34]|libgdk-3|libQt[56]Gui|libSDL2-2\.0|libSDL3|libglfw|libSDL-1\.2)")
+PATH = ["usr/local/bin", "usr/bin", "bin", "usr/games", "usr/sbin"]
+
+
+def needed(path):
+    """DT_NEEDED entries of a 64-bit ELF file (no tools needed)."""
+    import struct
+    try:
+        with open(path, "rb") as f:
+            data = f.read()
+    except OSError:
+        return None
+    if data[:4] != b"\x7fELF" or data[4] != 2:
+        return None
+    shoff, = struct.unpack_from("<Q", data, 0x28)
+    shentsize, shnum = struct.unpack_from("<HH", data, 0x3A)
+    secs = [struct.unpack_from("<IIQQQQIIQQ", data, shoff + i * shentsize) for i in range(shnum)]
+    dyn = next((s for s in secs if s[1] == 6), None)  # SHT_DYNAMIC
+    if not dyn:
+        return []
+    strtab = secs[dyn[6]]
+    out = []
+    for off in range(dyn[4], dyn[4] + dyn[5], 16):
+        tag, val = struct.unpack_from("<qQ", data, off)
+        if tag == 0:
+            break
+        if tag == 1:  # DT_NEEDED
+            s = strtab[4] + val
+            out.append(data[s:data.index(b"\0", s)])
+    return out
+
+
+def program(exec_line):
+    words = exec_line.split()
+    while words and (words[0] == "env" or ("=" in words[0] and not words[0].startswith("/"))):
+        words = words[1:]
+    if not words:
+        return None
+    p = words[0].strip('"')
+    if p.startswith("/"):
+        return os.path.join(root, p.lstrip("/"))
+    for d in PATH:
+        c = os.path.join(root, d, p)
+        if os.path.isfile(c):
+            return c
+    return None
+
+
+def wayland_only(path):
+    libs = needed(os.path.realpath(path)) if path else None
+    if not libs:
+        return False
+    return any(lib.startswith(b"libwayland-client.so") for lib in libs) and not any(X11_LIBS.match(lib) for lib in libs)
+
+
+def main():
+    force, never = set(), set()
+    if os.path.exists(CONF):
+        for line in open(CONF):
+            w = line.split()
+            if len(w) == 2 and w[0] == "wayland":
+                force.add(w[1])
+            elif len(w) == 2 and w[0] == "x11":
+                never.add(w[1])
+    want = {}
+    for name in sorted(os.listdir(SRC)) if os.path.isdir(SRC) else []:
+        if not name.endswith(".desktop") or name in never:
+            continue
+        path = os.path.join(SRC, name)
+        try:
+            text = open(path, encoding="utf-8").read()
+        except (OSError, UnicodeDecodeError):
+            continue
+        m = re.search(r"^Exec=(.*)$", text, re.M)
+        if not m:
+            continue
+        # (entries not in the menu, e.g. Xwayland's own)
+        if name not in force and re.search(r"^(NoDisplay|Hidden)=true", text, re.M):
+            continue
+        if name in force or wayland_only(program(m.group(1))):
+            want[name] = re.sub(r"^Exec=(?!syluxium-wayland-run )", "Exec=syluxium-wayland-run ", text, flags=re.M)
+            want[name] = want[name].replace("[Desktop Entry]\n", f"[Desktop Entry]\n{MARK}\n", 1)
+    os.makedirs(DST, exist_ok=True)
+    changed = []
+    for name in os.listdir(DST):
+        p = os.path.join(DST, name)
+        try:
+            ours = MARK in open(p, encoding="utf-8").read()
+        except (OSError, UnicodeDecodeError):
+            continue
+        if ours and name not in want:
+            os.remove(p)
+            changed.append(f"-{name}")
+    for name, text in want.items():
+        p = os.path.join(DST, name)
+        old = open(p, encoding="utf-8").read() if os.path.exists(p) else None
+        if old is not None and MARK not in old:
+            continue  # the administrator's own entry
+        if old != text:
+            with open(p, "w", encoding="utf-8") as f:
+                f.write(text)
+            changed.append(f"+{name}")
+    if changed:
+        print("Wayland-only programs through syluxium-wayland-run:", " ".join(changed))
+    if changed and root == "/" and shutil.which("update-desktop-database"):
+        os.system(f"update-desktop-database -q {DST} 2>/dev/null")
+
+
+main()

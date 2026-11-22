@@ -60,6 +60,10 @@ SHELL_SYSROOT := $(CURDIR)/deps/shell-sysroot
 SHELL_SYSROOT_PKGS := wayfire-dev libwlroots-0.18-dev libcairo2-dev libpango1.0-dev libglm-dev libstdc++-14-dev libgles-dev libc6-dev
 SHELL_PKGCONFIG := PKG_CONFIG_SYSROOT_DIR=$(SHELL_SYSROOT) PKG_CONFIG_LIBDIR=$(SHELL_SYSROOT)/usr/lib/x86_64-linux-gnu/pkgconfig:$(SHELL_SYSROOT)/usr/share/pkgconfig pkg-config
 SHELL_DECOR   := $(BUILD)/libsyluxium-decor.so
+# Wayland programs in the Xfce (X11) session (userspace/whost): a wlroots
+# compositor on its X11 backend, against the same Debian sysroot.
+WHOST         := $(BUILD)/syluxium-wayland-host
+WHOST_GEN     := $(BUILD)/whost-gen
 WIN_PROGS     := $(TESTS_DIR)/winhello64.exe $(TESTS_DIR)/winhello32.exe $(TESTS_DIR)/winbox32.exe
 
 # Official Debian packages (and their dependencies) that make up the userland.
@@ -103,6 +107,10 @@ DEBIAN_PKGS  += xfce4-session xfwm4 xfce4-panel xfdesktop4 xfce4-settings xfconf
 DEBIAN_PKGS  += xfce4-terminal galculator drawing gucharmap xfce4-screenshooter mousepad yad xdg-utils
 # Task Manager's window list in the Wayland shell (Xfce's window library from Python).
 DEBIAN_PKGS  += gir1.2-libxfce4windowing-0.0
+# Wayland programs in the Xfce desktop (syluxium-wayland-host): foot (a
+# Wayland-only terminal, ~1 MB), wl-clipboard (wl-copy / wl-paste),
+# wayland-info, and xprop / xwininfo to look at the windows (~1 MB together).
+DEBIAN_PKGS  += foot wl-clipboard wayland-utils x11-utils
 XFCE_APPS_EXCLUDE := udisks2
 DEBIAN_ROOT  := $(BUILD)/rootfs-debian
 DEBIAN_STAMP := $(DEBIAN_ROOT)/.fetched
@@ -395,6 +403,18 @@ $(SHELL_DECOR): userspace/shell/syluxium-decor.cpp | $(SHELL_SYSROOT)/.done
 	    $$($(SHELL_PKGCONFIG) --cflags wayfire wlroots-0.18 cairo pango pangocairo glesv2) \
 	    $< -o $@ -fuse-ld=lld -Wl,--as-needed $$($(SHELL_PKGCONFIG) --libs cairo pango pangocairo glesv2)
 
+$(WHOST_GEN)/xdg-shell-protocol.h: | $(SHELL_SYSROOT)/.done
+	@mkdir -p $(WHOST_GEN)
+	@wayland-scanner server-header $(SHELL_SYSROOT)/usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml $@
+	@wayland-scanner server-header $(SHELL_SYSROOT)/usr/share/wayland-protocols/staging/cursor-shape/cursor-shape-v1.xml $(WHOST_GEN)/cursor-shape-v1-protocol.h
+
+$(WHOST): userspace/whost/syluxium-wayland-host.c $(WHOST_GEN)/xdg-shell-protocol.h | $(SHELL_SYSROOT)/.done
+	@echo "  CC    $<"
+	@clang --target=x86_64-linux-gnu --sysroot=$(SHELL_SYSROOT) --gcc-install-dir=$(SHELL_SYSROOT)/usr/lib/gcc/x86_64-linux-gnu/14 \
+	    -std=gnu11 -O2 -Wall -Wno-unused-parameter -DWLR_USE_UNSTABLE -I$(WHOST_GEN) \
+	    $$($(SHELL_PKGCONFIG) --cflags wlroots-0.18 xcb xcb-render xcb-xfixes xcb-xinput xkbcommon pixman-1) \
+	    $< -o $@ -fuse-ld=lld -Wl,--as-needed $$($(SHELL_PKGCONFIG) --libs wlroots-0.18 wayland-server xcb xcb-render xcb-xfixes xcb-xinput xkbcommon pixman-1) -ldl
+
 $(SHELL_GLSYNC): userspace/shell/glsync.c
 	@echo "  SO    $<"
 	@$(USER_CC) -shared -fPIC -nostdlib -O2 -Wall $< -o $@
@@ -504,7 +524,7 @@ $(WINE_I386_STAMP): tools/debian-fetch.py Makefile
 	@python3 tools/debian-fetch.py --arch i386 --suite $(DEBIAN_SUITE) --out $(WINE_I386_ROOT) --cache deps/debian --no-deps libwine
 	@touch $@
 
-$(INITRAMFS): $(KERNEL) $(PICKER) $(DEBIAN_CONFIGURED) tools/merge-accounts.py tools/mkfontdir.py tools/debrand-tde.py tools/syluxium_names.py tools/run-triggers.sh tools/wine-setup.sh tools/wine-prefix-links.py $(DEBIAN_STAMP) $(DEBIAN_I386_STAMP) $(WINE_I386_STAMP) $(FIRMWARE_STAMP) $(USER_PROGS) $(USER32_PROGS) $(WIN_PROGS) $(SHELL_GLSYNC) $(SHELL_DECOR) $(shell find rootfs -type f 2>/dev/null) $(shell find rootfs -type d 2>/dev/null) Makefile
+$(INITRAMFS): $(KERNEL) $(PICKER) $(DEBIAN_CONFIGURED) tools/merge-accounts.py tools/mkfontdir.py tools/debrand-tde.py tools/syluxium_names.py tools/run-triggers.sh tools/wine-setup.sh tools/wine-prefix-links.py $(DEBIAN_STAMP) $(DEBIAN_I386_STAMP) $(WINE_I386_STAMP) $(FIRMWARE_STAMP) $(USER_PROGS) $(USER32_PROGS) $(WIN_PROGS) $(SHELL_GLSYNC) $(SHELL_DECOR) $(WHOST) $(shell find rootfs -type f 2>/dev/null) $(shell find rootfs -type d 2>/dev/null) Makefile
 	@echo "  ROOT  $(ROOTFS)"
 	@rm -rf $(ROOTFS)
 	@cp -a $(DEBIAN_ROOT) $(ROOTFS)
@@ -518,6 +538,7 @@ $(INITRAMFS): $(KERNEL) $(PICKER) $(DEBIAN_CONFIGURED) tools/merge-accounts.py t
 	@cp $(USER_PROGS) $(USER32_PROGS) $(WIN_PROGS) $(ROOTFS)/opt/syluxium/tests/
 	@mkdir -p $(ROOTFS)/usr/lib/syluxium && cp $(SHELL_GLSYNC) $(ROOTFS)/usr/lib/syluxium/
 	@cp $(SHELL_DECOR) $(ROOTFS)/usr/lib/x86_64-linux-gnu/wayfire/
+	@cp $(WHOST) $(ROOTFS)/usr/lib/syluxium/
 	@# 32-bit Debian userland (multiarch, as on Debian): libraries in
 	@# /usr/lib/i386-linux-gnu, ld-linux.so.2, programs installed as <name>-i386
 	@mkdir -p $(ROOTFS)/usr/lib/i386-linux-gnu
@@ -529,6 +550,8 @@ $(INITRAMFS): $(KERNEL) $(PICKER) $(DEBIAN_CONFIGURED) tools/merge-accounts.py t
 	@python3 tools/merge-accounts.py $(ROOTFS) $(DEBIAN_ROOT)
 	@# Menu entries read "Control Panel", "Start Menu", ... rather than TDE's names.
 	@python3 tools/debrand-tde.py $(ROOTFS)
+	@# Wayland-only programs' menu entries through syluxium-wayland-run.
+	@python3 rootfs/usr/local/sbin/syluxium-wayland-apps --root $(ROOTFS) | sed 's/^/  WAYL  /'
 	@# What Debian's install scripts and triggers would build (MIME types, image loaders, schemas, icons).
 	@tools/run-triggers.sh $(ROOTFS)
 	@# /var/run and /var/lock point into /run, as on Debian (programs look for
