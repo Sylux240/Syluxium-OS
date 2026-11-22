@@ -327,6 +327,17 @@ void deliver(interrupts::Frame* frame) {
     // Thread-directed signals first, then process-wide ones.
     u64 mine = __atomic_load_n(&t->sig_pending, __ATOMIC_ACQUIRE) & (~t->sigmask | UNBLOCKABLE);
     u64 shared = __atomic_load_n(&p->sig_pending, __ATOMIC_ACQUIRE) & (~t->sigmask | UNBLOCKABLE);
+    if (!mine && !shared) {
+        // Another thread took the process-wide signal pending() saw (or it
+        // is blocked here). Without this check the "signal" was ctz(0) + 1 =
+        // 65: sigactions[65] read past the array, and the default action
+        // killed the whole process ("Unknown signal 65", status 193).
+        if (t->restore_sigmask) {
+            t->sigmask = t->saved_sigmask;
+            t->restore_sigmask = false;
+        }
+        return;
+    }
     int sig;
     i32 si_code, si_pid;
     u32 si_uid;
