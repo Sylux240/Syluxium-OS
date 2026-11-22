@@ -2,7 +2,8 @@
 # Chooses the X display driver for this machine, at every boot (the same
 # disk moves between computers):
 #   a GPU driver (i915, amdgpu, radeon, nouveau) -> modesetting + glamor (OpenGL acceleration)
-#   another kernel display driver (simpledrm, virtio-gpu) -> modesetting, no acceleration
+#   virtio-gpu with virgl (QEMU 3D)               -> modesetting + glamor (on the host GPU)
+#   another kernel display driver (simpledrm, 2D virtio-gpu) -> modesetting, no acceleration
 #   no kernel display driver                     -> fbdev (/dev/fb0)
 # Boot options: "xfbdev" forces fbdev, "noaccel" turns acceleration off,
 # "nogpu" (kernel) keeps GPU drivers from loading at all.
@@ -26,6 +27,8 @@ fi
 accel=none
 case "$driver" in
     i915|amdgpu|radeon|nouveau) accel=glamor ;;
+    # A VM's virtio-gpu with 3D (QEMU virgl): Mesa's virgl driver, the host's GPU.
+    virtio_gpu) dmesg 2>/dev/null | grep -q "features: +virgl" && accel=glamor ;;
 esac
 # glamor needs Mesa's OpenGL drivers.
 if [ "$accel" = glamor ] && ! ls /usr/lib/x86_64-linux-gnu/libgallium-*.so /usr/lib/x86_64-linux-gnu/dri/*_dri.so >/dev/null 2>&1; then

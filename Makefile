@@ -77,6 +77,10 @@ TRINITY_PKGS := dbus tdebase-trinity-bin twin-trinity kicker-trinity kdesktop-tr
 DEBIAN_PKGS  := bash busybox hello ncurses-base pciutils pci.ids netbase alsa-utils xserver-xorg-core xserver-xorg-video-fbdev xserver-xorg-input-evdev xinit x11-xserver-utils x11-xkb-utils xterm twm xfonts-base sudo libpam-runtime libpam-modules login fdisk e2fsprogs dosfstools xdotool firefox-esr \
                 wine wine64 iw wpasupplicant wireless-regdb hostapd fonts-wine xcape gparted python3 python3-gi python3-gi-cairo fonts-inter wayfire wayfire-plugin-winshadows xwayland seatd gir1.2-gtklayershell-0.1 swaybg gir1.2-gtk-3.0 librsvg2-common cups cups-bsd dpkg apt debconf libc-bin coreutils trinity-keyring ca-certificates \
                 libgl1-mesa-dri libglx-mesa0 libegl-mesa0 mesa-utils
+# Vulkan (Mesa's RADV, NVK, ANV, venus for VMs, lavapipe; ~80 MB), video
+# decode (VA-API: radeonsi, nouveau, virgl) and the GPU checks syluxium-diag
+# runs on GPU Test boots (vulkaninfo, vainfo, drm_info).
+DEBIAN_PKGS  += mesa-vulkan-drivers vulkan-tools mesa-va-drivers vainfo drm-info
 # Right-click "Extract Here" for .7z (zip and tar are handled without it).
 DEBIAN_PKGS  += 7zip
 # libinput (Wayland shell input) and its "libinput list-devices / debug-events" tools (~4 MB)
@@ -343,6 +347,10 @@ $(OBJDIR)/$(LKPI_AMD)/%: LKPI_DRV_CFLAGS = -I$(AMD_ASIC_REG) -I$(LKPI_AMD)/inclu
 # and run inside kernel FPU sections (DC_FP_START/END -> kernel_fpu_begin/end).
 -include $(LKPI_AMD)/display/lkpi-fpu-objs.mk
 $(AMD_DC_FPU_OBJS): LKPI_FP_CFLAGS = -msse -msse2 -mno-soft-float
+# virtio core (virtio-pci) and virtio-gpu (QEMU's virgl/venus 3D: the test
+# bed for the GPU userspace path in VMs).
+$(OBJDIR)/kernel/linuxkpi/drivers/virtio/%: LKPI_DRV_CFLAGS = -include drm/lkpi_virtio_config.h
+$(OBJDIR)/kernel/linuxkpi/drivers/gpu/drm/virtio/%: LKPI_DRV_CFLAGS = -include drm/lkpi_virtio_config.h
 LKPI_NOUVEAU := kernel/linuxkpi/drivers/gpu/drm/nouveau
 $(OBJDIR)/$(LKPI_NOUVEAU)/%: LKPI_DRV_CFLAGS = -I$(LKPI_NOUVEAU)/include -I$(LKPI_NOUVEAU)/include/nvkm -I$(LKPI_NOUVEAU)/nvkm \
     -I$(LKPI_NOUVEAU) -include drm/lkpi_nouveau_config.h -gline-tables-only

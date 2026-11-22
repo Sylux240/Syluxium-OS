@@ -1,0 +1,129 @@
+#!/usr/bin/env python3
+# What Mesa and the X server learn about the GPUs through libdrm: for every
+# /dev/dri node, the sysfs files libdrm's drmGetDevice2() reads
+# (/sys/dev/char/<major>:<minor>/device/{uevent,vendor,device,...,subsystem},
+# device/drm/) and what drmGetDevice2() / drmGetDevices2() / drmGetVersion()
+# make of them. Mesa picks its driver from this (PCI vendor/device ->
+# radeonsi, nouveau, iris, ...; else the kernel driver's name), and radeonsi,
+# RADV and NVK give up when drmGetDevice2() fails. Used by syluxium-diag gpu.
+import ctypes, ctypes.util, os, stat, sys
+
+BUS = {0: "PCI", 1: "USB", 2: "platform", 3: "host1x"}
+NODE = {0: "primary", 1: "control", 2: "render"}
+
+
+class PciBus(ctypes.Structure):
+    _fields_ = [("domain", ctypes.c_uint16), ("bus", ctypes.c_uint8), ("dev", ctypes.c_uint8), ("func", ctypes.c_uint8)]
+
+
+class PciDev(ctypes.Structure):
+    _fields_ = [("vendor_id", ctypes.c_uint16), ("device_id", ctypes.c_uint16), ("subvendor_id", ctypes.c_uint16),
+                ("subdevice_id", ctypes.c_uint16), ("revision_id", ctypes.c_uint8)]
+
+
+class DrmDevice(ctypes.Structure):
+    _fields_ = [("nodes", ctypes.POINTER(ctypes.c_char_p)), ("available_nodes", ctypes.c_int), ("bustype", ctypes.c_int),
+                ("businfo", ctypes.c_void_p), ("deviceinfo", ctypes.c_void_p)]
+
+
+class DrmVersion(ctypes.Structure):
+    _fields_ = [("major", ctypes.c_int), ("minor", ctypes.c_int), ("patchlevel", ctypes.c_int),
+                ("name_len", ctypes.c_int), ("name", ctypes.c_char_p), ("date_len", ctypes.c_int),
+                ("date", ctypes.c_char_p), ("desc_len", ctypes.c_int), ("desc", ctypes.c_char_p)]
+
+
+def describe(d):
+    out = "bus %s" % BUS.get(d.bustype, d.bustype)
+    if d.bustype == 0 and d.businfo and d.deviceinfo:
+        b = ctypes.cast(d.businfo, ctypes.POINTER(PciBus)).contents
+        i = ctypes.cast(d.deviceinfo, ctypes.POINTER(PciDev)).contents
+        out += " %04x:%02x:%02x.%u id %04x:%04x sub %04x:%04x rev %02x" % (
+            b.domain, b.bus, b.dev, b.func, i.vendor_id, i.device_id, i.subvendor_id, i.subdevice_id, i.revision_id)
+    nodes = [NODE[n] + "=" + d.nodes[n].decode() for n in range(3) if d.available_nodes & (1 << n)]
+    return out + "; nodes " + ", ".join(nodes)
+
+
+def cat(path):
+    try:
+        with open(path, errors="replace") as f:
+            return f.read().strip().replace("\n", " ")
+    except OSError as e:
+        return "(%s)" % e.strerror
+
+
+def main():
+    try:
+        drm = ctypes.CDLL(ctypes.util.find_library("drm") or "libdrm.so.2")
+    except OSError as e:
+        print("libdrm: %s" % e)
+        return
+    drm.drmGetDevice2.argtypes = [ctypes.c_int, ctypes.c_uint32, ctypes.POINTER(ctypes.POINTER(DrmDevice))]
+    drm.drmGetDevices2.argtypes = [ctypes.c_uint32, ctypes.POINTER(ctypes.POINTER(DrmDevice)), ctypes.c_int]
+    drm.drmGetVersion.restype = ctypes.POINTER(DrmVersion)
+    drm.drmGetRenderDeviceNameFromFd.restype = ctypes.c_char_p
+    drm.drmGetDeviceNameFromFd2.restype = ctypes.c_char_p
+    try:
+        names = sorted(os.listdir("/dev/dri"))
+    except OSError:
+        names = []
+    if not names:
+        print("no /dev/dri nodes")
+    for name in names:
+        path = "/dev/dri/" + name
+        try:
+            st = os.stat(path)
+        except OSError as e:
+            print("%s: %s" % (path, e.strerror))
+            continue
+        if not stat.S_ISCHR(st.st_mode):
+            continue
+        mj, mn = os.major(st.st_rdev), os.minor(st.st_rdev)
+        sysdir = "/sys/dev/char/%d:%d" % (mj, mn)
+        print("== %s (%d:%d, mode %o)" % (path, mj, mn, st.st_mode & 0o7777))
+        print("  %s/device -> %s" % (sysdir, os.path.realpath(sysdir + "/device") if os.path.exists(sysdir + "/device") else "(missing)"))
+        print("  subsystem: %s" % os.path.basename(os.path.realpath(sysdir + "/device/subsystem")))
+        print("  node uevent: %s" % cat(sysdir + "/uevent"))
+        print("  device uevent: %s" % cat(sysdir + "/device/uevent"))
+        print("  vendor %s device %s subsystem %s:%s revision %s class %s" % tuple(
+            cat(sysdir + "/device/" + a) for a in ("vendor", "device", "subsystem_vendor", "subsystem_device", "revision", "class")))
+        drv = sysdir + "/device/driver"
+        print("  driver link: %s" % (os.path.basename(os.readlink(drv)) if os.path.islink(drv) else "(none)"))
+        try:
+            print("  device/drm: %s" % " ".join(sorted(os.listdir(sysdir + "/device/drm"))))
+        except OSError as e:
+            print("  device/drm: (%s)" % e.strerror)
+        try:
+            fd = os.open(path, os.O_RDWR | os.O_CLOEXEC)
+        except OSError as e:
+            print("  open: %s" % e.strerror)
+            continue
+        v = drm.drmGetVersion(fd)
+        if v:
+            print("  drmGetVersion: %s %d.%d.%d (%s)" % (v.contents.name.decode(), v.contents.major, v.contents.minor,
+                                                       v.contents.patchlevel, v.contents.desc.decode(errors="replace")))
+            drm.drmFreeVersion(v)
+        else:
+            print("  drmGetVersion: failed")
+        dev = ctypes.POINTER(DrmDevice)()
+        r = drm.drmGetDevice2(fd, 0, ctypes.byref(dev))
+        if r == 0:
+            print("  drmGetDevice2: " + describe(dev.contents))
+            drm.drmFreeDevice(ctypes.byref(dev))
+        else:
+            print("  drmGetDevice2: FAILED (%d: %s) - radeonsi/RADV/NVK can't start on this node" % (r, os.strerror(-r)))
+        rn = drm.drmGetRenderDeviceNameFromFd(fd)
+        pn = drm.drmGetDeviceNameFromFd2(fd)
+        print("  render node: %s, primary name: %s" % (rn.decode() if rn else None, pn.decode() if pn else None))
+        os.close(fd)
+    arr = (ctypes.POINTER(DrmDevice) * 16)()
+    n = drm.drmGetDevices2(0, arr, 16)
+    print("== drmGetDevices2: %d device(s)" % n)
+    for i in range(max(n, 0)):
+        print("  %d: %s" % (i, describe(arr[i].contents)))
+    if n > 0:
+        drm.drmFreeDevices(arr, n)
+
+
+if __name__ == "__main__":
+    main()
+    sys.stdout.flush()

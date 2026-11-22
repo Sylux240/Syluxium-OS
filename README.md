@@ -163,7 +163,8 @@ Legend: ✅ done · 🟡 partly done · ⬜ to do
 - ✅ Audio: ALSA-compatible interface, Intel HDA, virtio-sound, USB Audio (works on real laptops)
 - 🟡 GPU: DRM/KMS core, simpledrm, Xorg modesetting with glamor; Intel (i915), AMD (amdgpu, incl.
      Vega and newer, APUs) and NVIDIA (nouveau) drivers run on real machines (NVIDIA renders the desktop);
-     stability fixes, multi-monitor, Vulkan to do
+     virtio-gpu with 3D in VMs (QEMU virgl: glamor, DRI3, OpenGL 4.3 and VA-API on the host's GPU);
+     Mesa's Vulkan drivers installed; stability fixes, multi-monitor, Vulkan on real GPUs to do
 
 **Storage**
 - ✅ VFS, RAM filesystem, initramfs

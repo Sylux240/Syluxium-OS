@@ -1644,6 +1644,7 @@ void apply_module_params() {
 
 extern "C" void lkpi_register_boot_framebuffer(u64 phys, u32 width, u32 height, u32 pitch, u32 red_shift);
 extern "C" unsigned long __drm_debug;
+extern "C" long lkpi_drm_debug_budget; // drm_print.c
 extern "C" void lkpi_boot_fb_set(u64 base, u32 width, u32 height, u32 pitch, u32 red_shift);
 
 // A GPU driver took the display over (glue/gpu.c): the kernel must stop
@@ -1706,8 +1707,13 @@ void init() {
     // the boot log unless drm.debug= says otherwise. Not driver debug
     // (DRM_UT_DRIVER): nouveau logs every GPU fence event there, thousands a
     // second, and writing them out made a GTX 1650 desktop crawl and freeze.
-    if (strstr(boot::cmdline(), " gpu") || !strncmp(boot::cmdline(), "gpu", 3))
+    // Only the first 30000 messages, unless drm.debug= asks for them: the
+    // desktop's page flips log several a frame (drm_print.c).
+    if (strstr(boot::cmdline(), " gpu") || !strncmp(boot::cmdline(), "gpu", 3)) {
         __drm_debug = 0x04; // DRM_UT_KMS
+        if (!strstr(boot::cmdline(), "drm.debug="))
+            lkpi_drm_debug_budget = 30000;
+    }
     apply_module_params();
     // GPU drivers (probed later) take the display over from the firmware
     // framebuffer when it lies in their memory (glue/gpu.c).

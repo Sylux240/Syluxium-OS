@@ -149,7 +149,7 @@ void pci_unmap_rom(struct pci_dev* pdev, void __iomem* rom);
 #define pcie_aspm_support_enabled() false
 #define pci_enable_atomic_ops_to_root(d, mask) (-EINVAL)
 #define pcie_capability_read_dword(d, pos, v) (*(v) = 0, 0)
-#define pci_find_next_capability(d, pos, cap) 0
+int pci_find_next_capability(struct pci_dev* dev, u8 pos, int cap);
 #define pci_bus_max_busnr(bus) 0
 enum pci_bus_speed { PCIE_SPEED_2_5GT = 0x14, PCIE_SPEED_5_0GT = 0x15, PCIE_SPEED_8_0GT = 0x16, PCIE_SPEED_16_0GT = 0x17,
                      PCIE_SPEED_32_0GT = 0x18, PCIE_SPEED_64_0GT = 0x19, PCI_SPEED_UNKNOWN = 0xff };

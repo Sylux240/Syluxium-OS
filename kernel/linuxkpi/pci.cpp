@@ -734,6 +734,18 @@ int pci_find_capability(struct pci_dev* p, int cap) {
     return 0;
 }
 
+// The next capability of this type after the one at `pos` (virtio devices
+// have several vendor-specific ones).
+int pci_find_next_capability(struct pci_dev* p, u8 pos, int cap) {
+    pos = pci::read8(fn(p), static_cast<u16>(pos + 1)) & 0xFC;
+    for (int guard = 0; pos && guard < 48; guard++) {
+        if (pci::read8(fn(p), pos) == cap)
+            return pos;
+        pos = pci::read8(fn(p), static_cast<u16>(pos + 1)) & 0xFC;
+    }
+    return 0;
+}
+
 int pci_find_ext_capability(struct pci_dev* p, int cap) {
     u16 pos = 0x100;
     for (int guard = 0; pos && guard < 64; guard++) {
