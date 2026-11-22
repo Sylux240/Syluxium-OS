@@ -181,6 +181,10 @@ Legend: ✅ done · 🟡 partly done · ⬜ to do
 
 **Linux compatibility**
 - ✅ ELF loader, dynamic linking, Debian userland running unmodified
+- ✅ AppImages: FUSE in the kernel (/dev/fuse, Linux's protocol; fusermount3 and libfuse 2/3 unmodified),
+     double-click in Files runs them (offers to make a download executable), unpacked run when FUSE
+     isn't usable; pre-installed AppImages (`DGPUFG_APPIMAGE`, tools/install-appimage.sh) get a menu
+     entry and icon
 - 🟡 System-call coverage (grows with every phase)
 
 **Desktop** (Syluxium's own *Dusk* look: deep navy, the logo's cyan, glass panels)
@@ -236,4 +240,4 @@ Legend: ✅ done · 🟡 partly done · ⬜ to do
 - ✅ Updates (Syluxium Update: Debian packages through apt) and a Recovery boot entry
      (repair disks and packages, reset settings or passwords, root prompt)
 
-Tally: 48 done · 12 partly done · 2 to do.
+Tally: 49 done · 12 partly done · 2 to do.

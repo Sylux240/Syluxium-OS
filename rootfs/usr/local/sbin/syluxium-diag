@@ -11,6 +11,9 @@
 #   syluxium-diag mark <text>     milestones.txt: "<seconds since boot> <text>"
 #   syluxium-diag gpu-clients     gpu-clients.txt: why programs do or don't get the
 #                                 GPU (Mesa's own explanation); GPU Test entry only
+#   syluxium-diag appimage        appimage.txt: does the pre-installed dGPUFG AppImage
+#                                 start (FUSE mount, its Vulkan GPU list, its window
+#                                 drawn off screen); one line in milestones.txt
 #
 # Never copies secrets: wpa_supplicant's configuration (the Wi-Fi key) is not
 # read, and passwords are scrubbed from what is copied.
@@ -120,5 +123,34 @@ gpu-clients)
     EGL_LOG_LEVEL=debug timeout 30 eglinfo -B >> "$out" 2>&1
     echo "== exit $? at $(up) s" >> "$out"
     sync
+    ;;
+appimage)
+    # Run as the desktop user inside the session. Nothing shows on screen:
+    # the window is drawn off screen (dGPUFG's screenshot mode).
+    [ -x /usr/local/bin/dgpufg ] || exit 0
+    out="$L/appimage.txt"
+    shots=$(mktemp -d)
+    {
+        echo "== $(up) s: dGPUFG AppImage ($(ls /opt/apps/dgpufg/*.AppImage 2>/dev/null))"
+        cat /opt/apps/dgpufg/GLIBC-MISMATCH 2>/dev/null
+        echo "FUSE: /dev/fuse $([ -c /dev/fuse ] && echo present || echo MISSING), $(command -v fusermount3 || echo 'no fusermount3')"
+        echo "== dgpufg cli gpus (Vulkan devices it sees)"
+        DGPUFG_LOG=1 timeout 60 /usr/local/bin/dgpufg cli gpus > "$shots.log" 2>&1
+        rc=$?
+        tail -n 40 "$shots.log"
+        echo "== exit $rc at $(up) s"
+        echo "== GUI, off screen (QT_QPA_PLATFORM=offscreen DGPUFG_SCREENSHOT)"
+        QT_QPA_PLATFORM=offscreen DGPUFG_SCREENSHOT="$shots" timeout 90 /usr/local/bin/dgpufg > "$shots.log" 2>&1
+        gui=$?
+        tail -n 20 "$shots.log"
+        echo "== exit $gui at $(up) s, pages drawn: $(ls "$shots" 2>/dev/null | tr '\n' ' ')"
+        rm -f "$shots.log"
+    } > "$out" 2>&1
+    first=$(ls "$shots"/*.png 2>/dev/null | head -n 1)
+    [ -n "$first" ] && cp "$first" "$L/appimage-dgpufg.png" 2>/dev/null
+    n=$(ls "$shots"/*.png 2>/dev/null | wc -l)
+    rm -rf "$shots"
+    if [ "$gui" = 0 ] && [ "$n" -gt 0 ]; then res="started, $n pages drawn"; else res="FAILED (exit $gui, see appimage.txt)"; fi
+    "$0" mark "appimage: dGPUFG $res"
     ;;
 esac

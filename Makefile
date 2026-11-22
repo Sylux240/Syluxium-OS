@@ -103,6 +103,17 @@ DEBIAN_PKGS  += xfce4-session xfwm4 xfce4-panel xfdesktop4 xfce4-settings xfconf
 DEBIAN_PKGS  += xfce4-terminal galculator drawing gucharmap xfce4-screenshooter mousepad yad xdg-utils
 # Task Manager's window list in the Wayland shell (Xfce's window library from Python).
 DEBIAN_PKGS  += gir1.2-libxfce4windowing-0.0
+# AppImages: fusermount3 (setuid mount helper) for the type-2 runtime's FUSE
+# mount of its squashfs; libfuse2 for older AppImages whose runtime loads
+# libfuse.so.2.
+DEBIAN_PKGS  += fuse3 libfuse2t64
+# Vulkan drivers (Mesa: lavapipe as the software fallback, RADV/ANV/NVK) and
+# vulkaninfo, for Vulkan programs such as dGPUFG.
+DEBIAN_PKGS  += mesa-vulkan-drivers vulkan-tools
+# Pre-installed AppImages (not in the repository; skipped with a warning when
+# missing). dGPUFG: frame generation and upscaling. DGPUFG_APPIMAGE=<path> to
+# use another build.
+DGPUFG_APPIMAGE ?= $(lastword $(sort $(wildcard $(HOME)/CLionProjects/dGPUFG-Linux/build/dGPUFG-*-x86_64.AppImage)))
 XFCE_APPS_EXCLUDE := udisks2
 DEBIAN_ROOT  := $(BUILD)/rootfs-debian
 DEBIAN_STAMP := $(DEBIAN_ROOT)/.fetched
@@ -504,7 +515,7 @@ $(WINE_I386_STAMP): tools/debian-fetch.py Makefile
 	@python3 tools/debian-fetch.py --arch i386 --suite $(DEBIAN_SUITE) --out $(WINE_I386_ROOT) --cache deps/debian --no-deps libwine
 	@touch $@
 
-$(INITRAMFS): $(KERNEL) $(PICKER) $(DEBIAN_CONFIGURED) tools/merge-accounts.py tools/mkfontdir.py tools/debrand-tde.py tools/syluxium_names.py tools/run-triggers.sh tools/wine-setup.sh tools/wine-prefix-links.py $(DEBIAN_STAMP) $(DEBIAN_I386_STAMP) $(WINE_I386_STAMP) $(FIRMWARE_STAMP) $(USER_PROGS) $(USER32_PROGS) $(WIN_PROGS) $(SHELL_GLSYNC) $(SHELL_DECOR) $(shell find rootfs -type f 2>/dev/null) $(shell find rootfs -type d 2>/dev/null) Makefile
+$(INITRAMFS): $(KERNEL) $(PICKER) $(DEBIAN_CONFIGURED) tools/merge-accounts.py tools/mkfontdir.py tools/debrand-tde.py tools/syluxium_names.py tools/run-triggers.sh tools/wine-setup.sh tools/wine-prefix-links.py tools/install-appimage.sh $(wildcard $(DGPUFG_APPIMAGE)) $(DEBIAN_STAMP) $(DEBIAN_I386_STAMP) $(WINE_I386_STAMP) $(FIRMWARE_STAMP) $(USER_PROGS) $(USER32_PROGS) $(WIN_PROGS) $(SHELL_GLSYNC) $(SHELL_DECOR) $(shell find rootfs -type f 2>/dev/null) $(shell find rootfs -type d 2>/dev/null) Makefile
 	@echo "  ROOT  $(ROOTFS)"
 	@rm -rf $(ROOTFS)
 	@cp -a $(DEBIAN_ROOT) $(ROOTFS)
@@ -529,6 +540,8 @@ $(INITRAMFS): $(KERNEL) $(PICKER) $(DEBIAN_CONFIGURED) tools/merge-accounts.py t
 	@python3 tools/merge-accounts.py $(ROOTFS) $(DEBIAN_ROOT)
 	@# Menu entries read "Control Panel", "Start Menu", ... rather than TDE's names.
 	@python3 tools/debrand-tde.py $(ROOTFS)
+	@# Pre-installed AppImages (before the triggers: menu and icon caches include them).
+	@tools/install-appimage.sh $(ROOTFS) dgpufg "$(DGPUFG_APPIMAGE)"
 	@# What Debian's install scripts and triggers would build (MIME types, image loaders, schemas, icons).
 	@tools/run-triggers.sh $(ROOTFS)
 	@# /var/run and /var/lock point into /run, as on Debian (programs look for
