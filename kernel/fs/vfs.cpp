@@ -41,6 +41,7 @@ struct Mount {
     char path[256];
     char source[64];
     char type[16];
+    char options[80]; // what /proc/mounts lists ("" = rw,relatime)
     Inode* root;
     Inode* covered; // the directory it sits on
 };
@@ -434,7 +435,7 @@ void file_put(File* f) {
 
 // ---- Mounts ----
 
-long mount_at(const char* path, Inode* fs_root, const char* source, const char* type) {
+long mount_at(const char* path, Inode* fs_root, const char* source, const char* type, const char* options) {
     Inode* target;
     if (long r = resolve(path, nullptr, true, &target); r < 0)
         return r;
@@ -451,6 +452,7 @@ long mount_at(const char* path, Inode* fs_root, const char* source, const char* 
     snprintf(m.path, sizeof(m.path), "%s", path);
     snprintf(m.source, sizeof(m.source), "%s", source);
     snprintf(m.type, sizeof(m.type), "%s", type);
+    snprintf(m.options, sizeof(m.options), "%s", options ? options : "");
     m.root = fs_root;
     m.covered = target;
     if (!fs_root->parent)
@@ -548,11 +550,11 @@ Inode* ram_root() { return g_ram_root; }
 
 void set_permission_hook(long (*fn)(Inode*, int)) { g_permission = fn; }
 
-void for_each_mount(void (*fn)(const char*, const char*, const char*, void*), void* ctx) {
-    fn(g_root_source, "/", g_root_type, ctx); // not "rootfs": tools like df skip entries by that name
+void for_each_mount(void (*fn)(const char*, const char*, const char*, const char*, void*), void* ctx) {
+    fn(g_root_source, "/", g_root_type, "", ctx); // not "rootfs": tools like df skip entries by that name
     LockGuard guard(g_mount_lock);
     for (usize i = 0; i < g_mount_count; i++)
-        fn(g_mounts[i].source, g_mounts[i].path, g_mounts[i].type, ctx);
+        fn(g_mounts[i].source, g_mounts[i].path, g_mounts[i].type, g_mounts[i].options, ctx);
 }
 
 } // namespace vfs

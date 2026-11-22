@@ -139,6 +139,13 @@ public:
         return 0;
     }
     virtual bool seekable() const { return true; }
+    // Before stat/statx report the fields above: file systems whose
+    // attributes live elsewhere (FUSE servers) bring them up to date, or
+    // fail (ENOTCONN when the server is gone).
+    virtual long revalidate() { return 0; }
+    // Message devices (/dev/fuse): a writev() must arrive as one write
+    // (libfuse sends each reply's header and data as separate iovecs).
+    virtual bool whole_writes() const { return false; }
 
     // Reads/writes through an open file. Most inodes only care about the
     // offset; pipes and sockets also need the file (non-blocking mode, ends).
@@ -239,7 +246,8 @@ u64 next_fs_dev(); // a fresh st_dev for a newly mounted file system
 // ---- Mounts ----
 // Attach a file system's root over the directory at `path` (on any file
 // system). source/type are what /proc/mounts shows.
-long mount_at(const char* path, Inode* fs_root, const char* source, const char* type);
+long mount_at(const char* path, Inode* fs_root, const char* source, const char* type,
+              const char* options = nullptr); // options: what /proc/mounts lists (default "rw,relatime")
 long unmount(const char* path);
 void mount_source(const char* path, char* out, usize size); // what /proc/mounts shows as its device
 long move_mount(const char* from, const char* to); // MS_MOVE
@@ -260,6 +268,8 @@ void set_root(Inode* new_root, const char* source, const char* type);
 Inode* ram_root(); // the RAM file system created at boot (the root until set_root)
 // Permission check used while walking paths (directories need search/x).
 void set_permission_hook(long (*fn)(Inode*, int));
-void for_each_mount(void (*fn)(const char* source, const char* path, const char* type, void* ctx), void* ctx);
+void for_each_mount(void (*fn)(const char* source, const char* path, const char* type, const char* options,
+                               void* ctx),
+                    void* ctx);
 
 } // namespace vfs

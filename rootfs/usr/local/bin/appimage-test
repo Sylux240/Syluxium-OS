@@ -1,0 +1,187 @@
+#!/bin/sh
+# Test aid: AppImages in the desktop. The test AppImages come on a USB stick
+# labelled APPTEST (ext4, mounted at /media/APPTEST by the automounter); the
+# pre-installed dGPUFG needs none. Results: "APPTEST ..." lines on the
+# console and in /tmp/apptest.log.
+#
+#   appimage-test [PHASES]   as root on the text console: starts the Xfce
+#                            desktop, logs in and runs the phases as the user
+#   (as the user)            the phases themselves, inside a session; the
+#                            Wayland shell runs it with the boot options
+#                            "shellscene=run:appimage-test apptest=<p1>,<p2>"
+#
+# Phases (default: dgpufg qt gtk electron noexec open):
+#   dgpufg    the pre-installed dGPUFG (menu launcher), plus its CLI's GPU list
+#   qt        KeePassXC (Qt)           gtk  Xournal++ (GTK 3)
+#   electron  Obsidian (Electron, old runtime: libfuse2 + fusermount)
+#   noexec    a download without the execute bit through syluxium-appimage:
+#             the "make it executable" question, answered with Run
+#   open      the file manager's way (exo-open: GIO's default
+#             program for application/vnd.appimage)
+#   nofuse    KeePassXC with FUSE unavailable (APPIMAGE_EXTRACT_AND_RUN)
+#   keep      leave the last program's window open (for the final screenshot)
+LOG=/tmp/apptest.log
+
+say() {
+    echo "APPTEST $*" >> $LOG
+    [ -w /dev/console ] && echo "APPTEST $*" > /dev/console 2>/dev/null
+}
+
+if [ "$(id -u)" = 0 ] && [ -z "$APPTEST_SESSION" ]; then
+    : > $LOG; chmod 666 $LOG
+    ( while :; do sleep 15; echo "APPTEST ..." > /dev/console; done ) &
+    beat=$!
+    startdesktop > /dev/null 2>&1 &
+    export DISPLAY=:0
+    for i in $(seq 1 120); do
+        XAUTHORITY="$(ls /var/run/xauth/A:0-* 2>/dev/null | head -1)"
+        [ -n "$XAUTHORITY" ] && [ -S /tmp/.X11-unix/X0 ] && break
+        sleep 1
+    done
+    export XAUTHORITY
+    sleep 10
+    xdotool key Return    # log in (the login screen's user has no password)
+    for i in $(seq 1 120); do pidof xfce4-panel > /dev/null && break; sleep 1; done
+    sleep 15
+    say "desktop up"
+    env=
+    for e in /proc/[0-9]*/environ; do
+        [ -z "$env" ] || break
+        [ "$(stat -c %u "$e" 2>/dev/null)" = 1000 ] || continue
+        tr '\0' '\n' < "$e" 2>/dev/null | grep -q '^DBUS_SESSION_BUS_ADDRESS=' || continue
+        env=$(tr '\0' '\n' < "$e" | grep -E '^[A-Za-z_][A-Za-z0-9_]*=' | grep -v "'" | sed "s/^/export /; s/=/='/; s/\$/'/")
+    done
+    [ -n "$env" ] || { say "no session environment found"; env="export DISPLAY=:0"; }
+    ( eval "$env"; export APPTEST_SESSION=1; exec python3 -c 'import os, sys
+os.initgroups("syluxium", 1000); os.setgid(1000); os.setuid(1000)
+os.environ["HOME"] = "/home/syluxium"; os.chdir("/home/syluxium")
+os.execvp(sys.argv[1], sys.argv[1:])' /usr/local/bin/appimage-test "$@" ) < /dev/null >> $LOG 2>&1
+    kill $beat 2>/dev/null
+    # What the session part logged (it can't write to the console itself).
+    grep -v "^APPTEST \.\.\.$" $LOG | sed 's/^/LOG /' > /dev/console
+    say "done"
+    exit 0
+fi
+
+# ---- inside the session, as the user ----
+phases="$*"
+[ -n "$phases" ] || phases=$(tr ' ' '\n' < /proc/cmdline | sed -n 's/^apptest=//p' | tr ',' ' ')
+[ -n "$phases" ] || phases="dgpufg qt gtk electron noexec open"
+say "session: $XDG_SESSION_DESKTOP ${WAYLAND_DISPLAY:+wayland=$WAYLAND_DISPLAY} ${DISPLAY:+x11=$DISPLAY}; phases: $phases"
+D=$HOME/Downloads
+mkdir -p "$D"
+# "keep": the last program phase leaves its window open; the others close theirs.
+want_keep=; case " $phases " in *" keep "*) want_keep=1;; esac
+lastapp=$(echo $phases | tr ' ' '\n' | grep -vx keep | tail -n 1)
+
+stick() { # the stick's folder: /media/APPTEST (automounter), or /data (an ext4 disk present at boot)
+    for i in $(seq 1 40); do
+        for S in /media/APPTEST /data; do ls $S/*.AppImage > /dev/null 2>&1 && return 0; done
+        sleep 1
+    done
+    say "no APPTEST stick at /media/APPTEST or /data"
+    return 1
+}
+fetch() { # fetch <glob> <name>: copy from the stick into Downloads (no execute bit: like a browser download)
+    stick || return 1
+    src=$(ls $S/$1 2>/dev/null | head -n 1)
+    [ -n "$src" ] || { say "$2: not on the stick"; return 1; }
+    cp "$src" "$D/$2" && chmod 644 "$D/$2"
+}
+window() { # window <name regex> <seconds>: id of the first visible window
+    for i in $(seq 1 "$2"); do
+        w=$(xdotool search --onlyvisible --name "$1" 2>/dev/null | head -n 1)
+        [ -n "$w" ] && { echo "$w"; return 0; }
+        sleep 1
+    done
+    return 1
+}
+mounts() { grep -E " fuse" /proc/mounts | cut -d' ' -f1-4 | tr '\n' ';'; }
+finish() { # finish <name> <pid>
+    if [ -z "$keep" ]; then
+        # SIGTERM: the program ends, and the runtime's FUSE server unmounts
+        # (a SIGKILLed server leaves a dead mount, as on Linux).
+        pkill -TERM -P "$2" 2>/dev/null; kill "$2" 2>/dev/null
+        pkill -TERM -f "$1" 2>/dev/null; sleep 5
+        pkill -KILL -f "$1" 2>/dev/null
+        sleep 1
+        say "$1: after exit, FUSE mounts: $(mounts)"
+    fi
+}
+run_app() { # run_app <label> <file> <window regex> [args]
+    label=$1 file=$2 title=$3; shift 3
+    t0=$(date +%s)
+    syluxium-appimage "$file" "$@" > "/tmp/apptest-$label.out" 2>&1 &
+    pid=$!
+    sleep 3
+    say "$label: FUSE mounts while starting: $(mounts)"
+    if w=$(window "$title" 90); then
+        say "$label: PASS window '$(xdotool getwindowname "$w")' after $(( $(date +%s) - t0 )) s"
+    else
+        say "$label: FAIL no window '$title' (alive: $(kill -0 $pid 2>/dev/null && echo yes || echo no))"
+        tail -n 8 "/tmp/apptest-$label.out" | sed "s/^/APPTEST $label|  /" >> $LOG
+        tail -n 8 "/tmp/apptest-$label.out" | sed "s/^/APPTEST $label|  /" > /dev/console 2>/dev/null
+    fi
+    sleep 5
+    finish "$file" $pid
+}
+
+for p in $phases; do
+keep=; [ -n "$want_keep" ] && [ "$p" = "$lastapp" ] && keep=1
+case $p in
+dgpufg)
+    say "dgpufg: $(cat /opt/apps/dgpufg/GLIBC-MISMATCH 2>/dev/null || echo 'glibc ok')"
+    SYLUXIUM_APPIMAGE_NOGUI=1 /usr/local/bin/dgpufg cli gpus > /tmp/apptest-dgpufg-cli.out 2>&1
+    say "dgpufg: cli gpus exit $?: $(tail -n 3 /tmp/apptest-dgpufg-cli.out | tr '\n' ' ' | cut -c1-300)"
+    # From the menu entry, as a user would start it: the window, or the error dialog.
+    t0=$(date +%s)
+    exo-open /usr/share/applications/dgpufg.desktop > /tmp/apptest-dgpufg.out 2>&1 &
+    if w=$(window "dGPUFG" 60); then
+        say "dgpufg: window '$(xdotool getwindowname "$w")' after $(( $(date +%s) - t0 )) s"
+    else
+        say "dgpufg: no window"
+    fi
+    say "dgpufg: launches: $(tail -n 2 "$HOME/.cache/syluxium/appimage.log" | tr '\n' ' ' | cut -c1-400)"
+    if [ -z "$keep" ]; then sleep 6; pkill -f dgpufg; xdotool search --name "dGPUFG" windowkill 2>/dev/null; fi
+    ;;
+qt)       fetch "KeePassXC-*.AppImage" KeePassXC.AppImage && chmod +x "$D/KeePassXC.AppImage" &&
+          run_app qt "$D/KeePassXC.AppImage" "KeePassXC$" ;;
+gtk)      fetch "xournalpp-*.AppImage" Xournalpp.AppImage && chmod +x "$D/Xournalpp.AppImage" &&
+          run_app gtk "$D/Xournalpp.AppImage" "Xournal\\+\\+" ;;
+electron) fetch "Obsidian-*.AppImage" Obsidian.AppImage && chmod +x "$D/Obsidian.AppImage" &&
+          run_app electron "$D/Obsidian.AppImage" "Obsidian$" ;;
+nofuse)   fetch "KeePassXC-*.AppImage" KeePassXC.AppImage && chmod +x "$D/KeePassXC.AppImage" &&
+          APPIMAGE_EXTRACT_AND_RUN=1 run_app nofuse "$D/KeePassXC.AppImage" "KeePassXC$" ;;
+noexec)
+    fetch "KeePassXC-*.AppImage" Downloaded.AppImage || continue
+    syluxium-appimage "$D/Downloaded.AppImage" > /tmp/apptest-noexec.out 2>&1 &
+    pid=$!
+    if w=$(window "^Run Downloaded" 20); then
+        say "noexec: question shown: '$(xdotool getwindowname "$w")'"
+        sleep 2
+        xdotool windowactivate --sync "$w" key Return 2>/dev/null
+    else
+        say "noexec: FAIL no question"
+    fi
+    if w=$(window "KeePassXC$" 90); then
+        say "noexec: PASS started after Run; executable now: $([ -x "$D/Downloaded.AppImage" ] && echo yes || echo no)"
+    else
+        say "noexec: FAIL no window after Run"
+    fi
+    sleep 3
+    finish "$D/Downloaded.AppImage" $pid
+    ;;
+open)
+    fetch "xournalpp-*.AppImage" Opened.AppImage || continue
+    say "open: default for application/vnd.appimage: $(XDG_CURRENT_DESKTOP=XFCE xdg-mime query default application/vnd.appimage)"
+    chmod +x "$D/Opened.AppImage"
+    # exo-open: GIO's default program for the file's type, as Thunar does.
+    exo-open "$D/Opened.AppImage" > /tmp/apptest-open.out 2>&1 &
+    if w=$(window "Xournal\\+\\+" 90); then say "open: PASS window from exo-open"; else say "open: FAIL no window from exo-open: $(head -c 300 /tmp/apptest-open.out)"; fi
+    sleep 3
+    finish "$D/Opened.AppImage" $!
+    ;;
+keep) ;;
+*) say "unknown phase $p" ;;
+esac; done
+say "session phases done"
