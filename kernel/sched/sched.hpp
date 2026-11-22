@@ -63,5 +63,7 @@ u64 thread_count();
 // Every thread's name, state and (if not running) kernel call chain into the
 // kernel log: Alt+SysRq+W, for systems that froze but still take keys.
 void dump_threads();
+void sample_load();            // every 5 s (watchdog thread): runnable threads into the load average
+void load_average(u64 out[3]); // 1, 5, 15 minutes, fixed point (2048 = 1.00)
 
 } // namespace sched

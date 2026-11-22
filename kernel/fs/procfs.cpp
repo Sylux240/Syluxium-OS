@@ -814,7 +814,15 @@ bool gen_stat_global(TextBuffer& out, const void*) {
 }
 
 bool gen_loadavg(TextBuffer& out, const void*) {
-    out.printf("0.00 0.00 0.00 1/%u %u\n", proc::count(), proc::count());
+    u64 l[3];
+    sched::load_average(l);
+    u32 running = 0;
+    for (u32 i = 0; i < percpu::count(); i++)
+        if (Cpu* c = percpu::get(i); c && c->online)
+            running += static_cast<u32>(c->rq.ready.size()) + (c->current && c->current != c->rq.idle ? 1 : 0);
+    out.printf("%lu.%02lu %lu.%02lu %lu.%02lu %u/%lu %u\n", l[0] >> 11, ((l[0] & 2047) * 100) >> 11,
+               l[1] >> 11, ((l[1] & 2047) * 100) >> 11, l[2] >> 11, ((l[2] & 2047) * 100) >> 11,
+               running ? running : 1, sched::thread_count(), proc::count());
     return true;
 }
 
