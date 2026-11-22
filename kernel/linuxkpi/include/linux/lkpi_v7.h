@@ -55,3 +55,17 @@ static inline size_t lkpi_size_mul(size_t a, size_t b)
 #define for_each_set_bit_from(bit, addr, size) \
 	for ((bit) = find_next_bit((addr), (size), (bit)); (bit) < (size); (bit) = find_next_bit((addr), (size), (bit) + 1))
 #endif
+
+/* ---- byte swapping in place ---- */
+#ifndef swab32s
+static inline void swab16s(u16 *p) { *p = __builtin_bswap16(*p); }
+static inline void swab32s(u32 *p) { *p = __builtin_bswap32(*p); }
+static inline void swab64s(u64 *p) { *p = __builtin_bswap64(*p); }
+#define swab32s swab32s
+#endif
+
+/* ---- PCI id tables ---- */
+#ifndef PCI_VDEVICE_SUB
+#define PCI_VDEVICE_SUB(vend, dev, subvend, subdev) \
+	.vendor = PCI_VENDOR_ID_##vend, .device = (dev), .subvendor = (subvend), .subdevice = (subdev), 0, 0
+#endif

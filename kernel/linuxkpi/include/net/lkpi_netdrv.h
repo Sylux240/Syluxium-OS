@@ -59,3 +59,6 @@ static inline int ndo_dflt_fdb_add(struct ndmsg *ndm, struct nlattr *tb[], struc
 {
 	return -EOPNOTSUPP;
 }
+
+/* ---- page fragments ---- */
+static inline void skb_frag_size_sub(skb_frag_t *frag, int delta) { frag->len -= delta; }
