@@ -36,6 +36,19 @@ static inline void netif_queue_set_napi(struct net_device *dev, unsigned int que
 /* Launch time (ETF qdisc): consumed by the driver; no such qdisc here. */
 static inline void skb_txtime_consumed(struct sk_buff *skb) { skb->tstamp = 0; }
 
+/* ---- transmit / statistics ---- */
+#ifndef netif_msg_tx_queued
+#define netif_msg_tx_queued(p) ((p)->msg_enable & NETIF_MSG_TX_QUEUED)
+#endif
+/* Byte queue limits aren't kept: every queued frame rings the doorbell. */
+static inline bool __netdev_tx_sent_queue(struct netdev_queue *q, unsigned int bytes, bool xmit_more)
+{
+	return true;
+}
+static inline void dev_core_stats_rx_dropped_inc(struct net_device *dev) { atomic_long_inc(&dev->rx_dropped); }
+/* NAPI polls run on a worker thread here already. */
+static inline void netif_threaded_enable(struct net_device *dev) { }
+
 /* ---- address lists / bridge FDB ---- */
 static inline int __dev_uc_unsync(struct net_device *dev, int (*unsync)(struct net_device *, const unsigned char *))
 {

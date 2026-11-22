@@ -59,6 +59,16 @@ struct pci_dev {
     u64 dma_mask;                 /* appended: as set by dma_set_mask (for messages) */
     unsigned int is_virtfn:1;     /* appended: an SR-IOV virtual function (never: no SR-IOV) */
     unsigned int is_physfn:1;     /* appended */
+    unsigned short dev_flags;     /* appended: PCI_DEV_FLAGS_* quirks (drivers set them) */
+};
+enum pci_dev_flags {
+    PCI_DEV_FLAGS_MSI_INTX_DISABLE_BUG = 1 << 0,
+    PCI_DEV_FLAGS_NO_D3 = 1 << 1,
+    PCI_DEV_FLAGS_ASSIGNED = 1 << 2,
+    PCI_DEV_FLAGS_NO_BUS_RESET = 1 << 6,
+    PCI_DEV_FLAGS_NO_PM_RESET = 1 << 7,
+    PCI_DEV_FLAGS_NO_FLR_RESET = 1 << 10,
+    PCI_DEV_FLAGS_NO_RELAXED_ORDERING = 1 << 11,
 };
 
 struct pci_driver {
