@@ -20,6 +20,10 @@
 #define CONFIG_64BIT 1
 #define CONFIG_X86 1
 #define CONFIG_X86_64 1
+/* x86 PAT: write-combining for GPU memory (the kernel programs PAT entry 5
+ * as WC; set_pages_array_wc & co. change the direct map, mm.cpp). */
+#define CONFIG_X86_PAT 1
+#define CONFIG_MTRR 1
 #define CONFIG_SMP 1
 #define CONFIG_NR_CPUS 64
 #define CONFIG_HZ 1000

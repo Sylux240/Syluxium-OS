@@ -335,15 +335,43 @@ const struct pci_device_id *lkpi_pci_match_id(const struct pci_device_id *ids, s
 	return NULL;
 }
 
+/* Scatter-gather mappings honour the device's DMA mask like dma_map_single:
+ * an entry above it goes through a bounce buffer under it (pci.cpp), copied
+ * on map/unmap/sync by direction. 0 (and nothing left mapped) on failure. */
+dma_addr_t lkpi_dma_map_virt(struct device *dev, void *virt, size_t size, int dir);
+void lkpi_dma_unmap(dma_addr_t a);
+void lkpi_dma_sync(dma_addr_t a, size_t size, int for_cpu);
+
+void lkpi_dma_unmap_sg(struct device *dev, struct scatterlist *sgl, int nents, int dir)
+{
+	struct scatterlist *sg;
+	int i;
+	for_each_sg(sgl, sg, nents, i)
+		if (sg->dma_address)
+			lkpi_dma_unmap(sg->dma_address);
+}
+
 int lkpi_dma_map_sg(struct device *dev, struct scatterlist *sgl, int nents, int dir)
 {
 	struct scatterlist *sg;
 	int i;
 	for_each_sg(sgl, sg, nents, i) {
-		sg->dma_address = lkpi_direct_to_phys(sg_virt(sg));
+		sg->dma_address = lkpi_dma_map_virt(dev, sg_virt(sg), sg->length, dir);
 		sg->dma_length = sg->length;
+		if (!sg->dma_address && sg->length) {
+			lkpi_dma_unmap_sg(dev, sgl, i, dir);
+			return 0;
+		}
 	}
 	return nents;
+}
+
+void lkpi_dma_sync_sg(struct device *dev, struct scatterlist *sgl, int nents, int for_cpu)
+{
+	struct scatterlist *sg;
+	int i;
+	for_each_sg(sgl, sg, nents, i)
+		lkpi_dma_sync(sg->dma_address, sg->length, for_cpu);
 }
 
 void *memdup_user_nul(const void __user *src, size_t len)

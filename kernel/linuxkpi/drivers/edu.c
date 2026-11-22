@@ -17,6 +17,7 @@
 #include <linux/io.h>
 #include <linux/module.h>
 #include <linux/pci.h>
+#include <linux/scatterlist.h>
 #include <linux/slab.h>
 #include <linux/timer.h>
 #include <linux/workqueue.h>
@@ -211,6 +212,68 @@ static int edu_probe(struct pci_dev* pdev, const struct pci_device_id* id)
         release_firmware(fw);
     } else {
         check(e, false, "request_firmware");
+    }
+
+    /* Write-combined kernel memory (x86 PAT): what TTM's write-combined
+     * pools and amdgpu's GTT do with their pages. */
+    {
+        extern int lkpi_kernel_cache_type(const void *virt);
+        struct page *pg = alloc_pages(GFP_KERNEL, 2);
+        if (pg) {
+            u32 *p = page_address(pg);
+            struct page *arr[4];
+            int r1, t1, t2, r2, t3, bad = -1;
+            for (i = 0; i < 4; i++)
+                arr[i] = virt_to_page((u8 *)p + i * PAGE_SIZE);
+            for (i = 0; i < 4 * PAGE_SIZE / 4; i++)
+                p[i] = (u32)(i * 2654435761u);
+            r1 = set_pages_array_wc(arr, 4);
+            t1 = lkpi_kernel_cache_type(p);
+            t2 = lkpi_kernel_cache_type((u8 *)p + 3 * PAGE_SIZE);
+            for (i = 0; bad < 0 && i < 4 * PAGE_SIZE / 4; i++)
+                if (p[i] != (u32)(i * 2654435761u))
+                    bad = i;
+            p[5] = 0xabcdef01;
+            r2 = set_pages_array_wb(arr, 4);
+            t3 = lkpi_kernel_cache_type(p);
+            if (r1 || t1 != 1 || t2 != 1 || bad >= 0 || r2 || t3 != 0 || p[5] != 0xabcdef01)
+                dev_info(&pdev->dev, "PAT test: wc %d types %d/%d data %d wb %d type %d\n", r1, t1, t2, bad, r2, t3);
+            check(e, !r1 && t1 == 1 && t2 == 1 && bad < 0 && !r2 && t3 == 0 && p[5] == 0xabcdef01,
+                  "set_pages_array_wc/wb: direct map write-combined and back, data kept");
+            __free_pages(pg, 2);
+        } else {
+            check(e, false, "alloc_pages for the PAT test");
+        }
+    }
+
+    /* Scatter-gather DMA under a small DMA mask: entries above it go
+     * through bounce buffers (dma_map_sg honours the mask). */
+    {
+        u64 old_mask = pdev->dev.dma_mask ? *pdev->dev.dma_mask : 0;
+        struct page *pg = alloc_pages(GFP_KERNEL, 0);
+        u64 mask = 0x7ffffff; /* 128 MiB: below most of a VM's free memory */
+        if (pg && page_to_phys(pg) > mask) {
+            struct scatterlist sg;
+            u8 *buf = page_address(pg);
+            bool ok;
+            memset(buf, 0x5a, PAGE_SIZE);
+            dma_set_mask(&pdev->dev, mask);
+            sg_init_table(&sg, 1);
+            sg_set_page(&sg, pg, PAGE_SIZE, 0);
+            ok = dma_map_sg(&pdev->dev, &sg, 1, DMA_BIDIRECTIONAL) == 1 && sg_dma_address(&sg) &&
+                 sg_dma_address(&sg) + PAGE_SIZE - 1 <= mask;
+            if (ok) {
+                u8 *dev_view = phys_to_virt(sg_dma_address(&sg));
+                ok = dev_view[100] == 0x5a; /* copied to the device's buffer */
+                memset(dev_view, 0xa5, PAGE_SIZE); /* the "device" writes */
+                dma_unmap_sg(&pdev->dev, &sg, 1, DMA_BIDIRECTIONAL);
+                ok = ok && buf[0] == 0xa5 && buf[PAGE_SIZE - 1] == 0xa5;
+            }
+            check(e, ok, "dma_map_sg under a 128 MiB DMA mask: bounce buffer below it, data both ways");
+            dma_set_mask(&pdev->dev, old_mask ? old_mask : DMA_BIT_MASK(64));
+        }
+        if (pg)
+            __free_pages(pg, 0);
     }
 
     dev_info(&pdev->dev, "LinuxKPI self-test: %d passed, %d failed (%d interrupts)\n", passed, failed,

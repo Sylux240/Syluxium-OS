@@ -499,9 +499,13 @@ const struct pci_device_id *lkpi_pci_match_id(const struct pci_device_id *ids, s
 #define pci_bus_for_each_resource(bus, res, ...) for (res = NULL; res; )
 #define dma_map_sg_attrs(dev, sg, n, dir, attrs) lkpi_dma_map_sg(dev, sg, n, dir)
 #define dma_map_sg(dev, sg, n, dir) lkpi_dma_map_sg(dev, sg, n, dir)
-#define dma_unmap_sg(dev, sg, n, dir) do { } while (0)
-#define dma_unmap_sg_attrs(dev, sg, n, dir, attrs) do { } while (0)
+#define dma_unmap_sg(dev, sg, n, dir) lkpi_dma_unmap_sg(dev, sg, n, dir)
+#define dma_unmap_sg_attrs(dev, sg, n, dir, attrs) lkpi_dma_unmap_sg(dev, sg, n, dir)
+#define dma_sync_sg_for_cpu(dev, sg, n, dir) lkpi_dma_sync_sg(dev, sg, n, 1)
+#define dma_sync_sg_for_device(dev, sg, n, dir) lkpi_dma_sync_sg(dev, sg, n, 0)
 int lkpi_dma_map_sg(struct device *dev, struct scatterlist *sg, int nents, int dir);
+void lkpi_dma_unmap_sg(struct device *dev, struct scatterlist *sg, int nents, int dir);
+void lkpi_dma_sync_sg(struct device *dev, struct scatterlist *sg, int nents, int for_cpu);
 #define devm_pinctrl_get_select(dev, state) ((struct pinctrl *)ERR_PTR(-ENODEV))
 struct pinctrl;
 #define i2c_acpi_find_adapter_by_handle(h) ((struct i2c_adapter *)NULL)
@@ -533,7 +537,6 @@ struct dev_pm_domain { struct dev_pm_ops ops; void (*detach)(struct device *, bo
 #define FOLL_WRITE 0x01
 #define FOLL_LONGTERM 0x100
 #define untagged_addr(a) (a)
-#define set_memory_uc(addr, n) 0
 #define set_memory_wt(addr, n) 0
 #define release_pages(pages, n) do { for (int __i = 0; __i < (int)(n); __i++) put_page((pages)[__i]); } while (0)
 #define unpin_user_pages(pages, n) release_pages(pages, n)
