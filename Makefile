@@ -270,7 +270,9 @@ lkpi_modname_old = $(if $(findstring /brcm80211/,$<),brcmfmac,$(lkpi_modname_net
 LKPI_MODNAMES := /ethernet/intel/igb/:igb /drivers/net/mdio.c:mdio /ethernet/broadcom/bnx2:bnx2 \
     /rtw89/rtw8851be.c:rtw89_8851be /rtw89/rtw8852ae.c:rtw89_8852ae /rtw89/rtw8852be.c:rtw89_8852be \
     /rtw89/rtw8852bte.c:rtw89_8852bte /rtw89/rtw8852ce.c:rtw89_8852ce /rtw89/rtw8922ae.c:rtw89_8922ae \
-    /rtw89/pci:rtw89_pci /rtw89/:rtw89_core /scsi/megaraid/:megaraid_sas /drivers/scsi/scsi_common:scsi_common
+    /rtw89/pci:rtw89_pci /rtw89/:rtw89_core /scsi/megaraid/:megaraid_sas /drivers/scsi/scsi_common:scsi_common \
+    /mt7921/usb.c:mt7921u /rtw88/usb.c:rtw88_usb /rtw88/rtw8822bu:rtw88_8822bu /rtw88/rtw8822cu:rtw88_8822cu \
+    /rtw88/rtw8821cu:rtw88_8821cu /rtw88/rtw8723du:rtw88_8723du
 lkpi_modname_list = $(firstword $(foreach m,$(LKPI_MODNAMES),$(if $(findstring $(word 1,$(subst :, ,$(m))),$<),$(word 2,$(subst :, ,$(m))))))
 lkpi_modname_net = $(if $(findstring /drivers/net/usb/,$<),$(basename $(notdir $<)),$(lkpi_modname_net2))
 lkpi_modname_net2 = $(if $(findstring /iwlwifi/mvm/,$<),iwlmvm,$(if $(findstring /iwlwifi/,$<),iwlwifi,$(if $(findstring /ethernet/realtek/r8169,$<),r8169,$(if $(findstring /ethernet/broadcom/tg3,$<),tg3,$(if $(findstring /ethernet/intel/e1000e/,$<),e1000e,$(if $(findstring /ethernet/intel/igc/,$<),igc,$(if $(findstring /drivers/net/phy/realtek,$<),realtek,$(if $(findstring /drivers/net/phy/,$<),libphy,$(lkpi_modname_rest)))))))))
@@ -290,6 +292,8 @@ $(OBJDIR)/kernel/linuxkpi/net/bluetooth/%: LKPI_DRV_CFLAGS = -include net/lkpi_b
 $(OBJDIR)/kernel/linuxkpi/drivers/bluetooth/%: LKPI_DRV_CFLAGS = -include net/lkpi_bt.h -fshort-wchar
 LKPI_MT76 := kernel/linuxkpi/drivers/net/wireless/mediatek/mt76
 $(OBJDIR)/$(LKPI_MT76)/%: LKPI_DRV_CFLAGS = -include net/lkpi_netcompat.h -I$(LKPI_MT76) -DCONFIG_PM=1
+# mt76 USB (mt7921u): linear transfer buffers, no scatter-gather URBs (net/lkpi_wifiusb.h).
+$(OBJDIR)/$(LKPI_MT76)/usb.c.o: LKPI_DRV_CFLAGS = -include net/lkpi_wifiusb.h -I$(LKPI_MT76) -DCONFIG_PM=1
 LKPI_BRCM := kernel/linuxkpi/drivers/net/wireless/broadcom/brcm80211
 $(OBJDIR)/$(LKPI_BRCM)/%: LKPI_DRV_CFLAGS = -include net/lkpi_bcma.h -I$(LKPI_BRCM)/brcmfmac -I$(LKPI_BRCM)/include
 # Realtek Ethernet (r8169) and phylib.
