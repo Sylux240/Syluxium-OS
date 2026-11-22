@@ -12,6 +12,7 @@ pgrep -x seatd > /dev/null || { seatd -g video > /var/log/seatd.log 2>&1 & sleep
 chmod 666 /run/seatd.sock 2>/dev/null
 LOG=/var/log/syluxium-shell.log
 syluxium-diag mark "session: Wayland shell (Wayfire) starting for $U"
+: > $LOG
 # Wayfire runs from the user's own copy of the configuration (Personalize
 # switches blur there; Wayfire reloads it by itself). Blur needs a GPU
 # driver: on the firmware framebuffer (software rendering) it misplaces the
@@ -27,10 +28,15 @@ grep -qw shelldebug /proc/cmdline && SYLUXIUM_WAYFIRE_ARGS="-dwlroots $SYLUXIUM_
 grep -qw shellrerender /proc/cmdline && SYLUXIUM_WAYFIRE_ARGS="--damage-rerender $SYLUXIUM_WAYFIRE_ARGS"
 for v in $(tr ' ' '\n' < /proc/cmdline | sed -n 's/^shellenv\.//p'); do SYLUXIUM_SHELL_ENV="$SYLUXIUM_SHELL_ENV $v"; done
 grep -qw shellbench /proc/cmdline && sed -i 's/^plugins = autostart /plugins = autostart bench /' "$CONF"
-# shellfps[=full]: a window measuring the frame rate (shell-fps-test) once the desktop is up.
-fps=$(tr ' ' '\n' < /proc/cmdline | sed -n 's/^shellfps=\{0,1\}//p' | head -1)
-grep -qw "shellfps\(=full\)\{0,1\}" /proc/cmdline && \
+# shellfps: a window measuring the frame rate (shell-fps-test) once the
+# desktop is up: 80 % of the screen, small updates then full redraws; the
+# results go to the log folder's shell.txt. shellfps=small|full: 900x600, one kind.
+fps=$(tr ' ' '\n' < /proc/cmdline | sed -n 's/^shellfps=//p' | head -1)
+if [ -n "$fps" ]; then
     printf "fpstest = sh -c 'sleep 20; shell-fps-test 30 900 600 %s'\n" "$fps" >> "$CONF"
+elif grep -qw shellfps /proc/cmdline; then
+    printf "fpstest = sh -c 'sleep 20; shell-fps-test 24 0 0 both'\n" >> "$CONF"
+fi
 # shellscene=<name>: a test scene (scene-test) once the desktop is up.
 scene=$(tr ' ' '\n' < /proc/cmdline | sed -n 's/^shellscene=//p' | head -1)
 [ -n "$scene" ] && printf "scenetest = sh -c 'sleep 15; scene-test %s'\n" "$scene" >> "$CONF"
@@ -45,8 +51,28 @@ elif ! grep -qs "^blur *= *false" "$SET"; then
 fi
 # Personalize's "Shadows under windows" switch.
 grep -qs "^shadows *= *false" "$SET" && sed -i 's/^\(plugins = .*\) winshadows/\1/' "$CONF"
+# For the stick's log folder (syluxium-diag copies /run/syluxium-diag):
+# display driver, screen mode, software or GPU rendering. The renderer
+# Wayfire really uses ("GL renderer: ...") is in syluxium-shell.log.
+{
+    echo "== Syluxium shell (Wayland), started $(cut -d' ' -f1 /proc/uptime) s after boot"
+    echo "display driver: $(basename "$(readlink /sys/class/drm/card0/device/driver 2>/dev/null)" 2>/dev/null)"
+    for s in /sys/class/drm/card*-*/status; do
+        [ "$(cat "$s" 2>/dev/null)" = connected ] || continue
+        d=$(dirname "$s"); echo "output $(basename "$d"): $(head -1 "$d/modes" 2>/dev/null) (first mode)"
+    done
+    [ -n "$PRELOAD" ] && echo "rendering: software (llvmpipe), frames finished before the copy (glsync)" \
+        || echo "rendering: GPU driver"
+    echo "wayfire: $SYLUXIUM_WAYFIRE_ARGS $(grep '^plugins' "$CONF")"
+} > /run/syluxium-diag/shell.txt 2>/dev/null
+chmod 666 /run/syluxium-diag/shell.txt 2>/dev/null
 chown -R "$U" "$HOME_/.config/syluxium-shell"
-exec su "$U" -s /bin/bash -c "export XDG_RUNTIME_DIR=$RT XDG_SESSION_TYPE=wayland LIBSEAT_BACKEND=seatd \
+# Logging out ends Wayfire: a new session starts (the shell has no login screen).
+while :; do
+su "$U" -s /bin/bash -c "export XDG_RUNTIME_DIR=$RT XDG_SESSION_TYPE=wayland LIBSEAT_BACKEND=seatd \
     WLR_RENDERER_ALLOW_SOFTWARE=1 GDK_BACKEND=wayland,x11 MOZ_ENABLE_WAYLAND=1 \
     XDG_CONFIG_DIRS=/etc/xdg/syluxium:/etc/xdg XDG_CURRENT_DESKTOP=XFCE XDG_MENU_PREFIX=xfce- $SYLUXIUM_SHELL_ENV; \
-    cd ~; exec dbus-run-session $PRELOAD wayfire $SYLUXIUM_WAYFIRE_ARGS -c $CONF" > $LOG 2>&1
+    cd ~; exec dbus-run-session $PRELOAD wayfire $SYLUXIUM_WAYFIRE_ARGS -c $CONF" >> $LOG 2>&1
+    syluxium-diag mark "session: Wayland shell ended (log out); starting a new one"
+    sleep 1
+done

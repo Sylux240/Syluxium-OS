@@ -6,6 +6,8 @@
 #   apps  Files (Documents) and a terminal
 #   menu  the same, then the start menu
 #   pers  Personalize and a notification
+#   halt  shut down through the session (xfce4-session-logout --halt)
+#   reboot / logout  the same for restarting and logging out
 case "$1" in
 apps|menu)
     syluxium-open documents &
@@ -19,5 +21,8 @@ pers)
     sleep 5
     notify-send -i dialog-information "Syluxium" "A notification bubble, the same in both sessions."
     ;;
+halt) xfce4-session-logout --halt ;;
+reboot) xfce4-session-logout --reboot ;;
+logout) xfce4-session-logout --logout ;;
 esac
 sleep 2

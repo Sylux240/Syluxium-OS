@@ -21,6 +21,7 @@
 #include <wayfire/scene-operations.hpp>
 #include <wayfire/scene-render.hpp>
 #include <wayfire/scene.hpp>
+#include <wayfire/seat.hpp>
 #include <wayfire/signal-definitions.hpp>
 #include <wayfire/signal-provider.hpp>
 #include <wayfire/toplevel-view.hpp>
@@ -287,6 +288,53 @@ class syluxium_frame_node_t : public wf::scene::node_t, public wf::pointer_inter
         damage_all();
     };
 
+    // The keyboard went to another surface (the start menu, the desktop):
+    // the frame may have to switch between active and inactive.
+    wf::signal::connection_t<wf::keyboard_focus_changed_signal> focus_changed = [=] (auto)
+    {
+        // The program draws itself inactive too (GTK's backdrop state), as in
+        // Xfce: the window is deactivated while the start menu or the desktop
+        // has the keyboard, and activated again when it gets it back.
+        if (auto view = _view.lock())
+        {
+            bool has_keyboard = focus_in_view(view);
+            if (view->activated && !has_keyboard && has_focus_node())
+            {
+                view->set_activated(false);
+                deactivated_by_us = true;
+            } else if (has_keyboard && deactivated_by_us)
+            {
+                deactivated_by_us = false;
+                if (!view->activated)
+                {
+                    view->set_activated(true);
+                }
+            }
+        }
+
+        damage_all();
+    };
+    bool deactivated_by_us = false;
+
+    static bool has_focus_node()
+    {
+        return wf::get_core().seat->get_active_node() != nullptr;
+    }
+
+    static bool focus_in_view(wayfire_toplevel_view view)
+    {
+        auto focus = wf::get_core().seat->get_active_node();
+        for (auto *n = focus.get(); n; n = n->parent())
+        {
+            if (n == view->get_root_node().get())
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     // The frame's pictures: title row, left and right edges, bottom row.
     wf::simple_texture_t tex_top, tex_left, tex_right, tex_bottom;
     bool dirty = true;
@@ -314,6 +362,7 @@ class syluxium_frame_node_t : public wf::scene::node_t, public wf::pointer_inter
     {
         _view = view->weak_from_this();
         view->connect(&title_set);
+        wf::get_core().connect(&focus_changed);
         update_fullscreen();
     }
 
@@ -332,10 +381,18 @@ class syluxium_frame_node_t : public wf::scene::node_t, public wf::pointer_inter
         wf::scene::damage_node(shared_from_this(), get_bounding_box());
     }
 
+    // Active as in xfwm4: the window has the keyboard. With the start menu
+    // (a layer-shell surface) or the desktop focused, Wayfire keeps the
+    // window "activated", but in Xfce it is drawn inactive.
     bool is_active()
     {
         auto view = _view.lock();
-        return view && view->activated;
+        if (!view || !view->activated)
+        {
+            return false;
+        }
+
+        return !has_focus_node() || focus_in_view(view);
     }
 
     bool is_maximized()

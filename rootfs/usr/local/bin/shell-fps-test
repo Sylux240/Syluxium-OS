@@ -1,11 +1,14 @@
 #!/usr/bin/python3
 """Test aid: frames per second the desktop delivers to a window. A window
-(W x H, default 900x600) animates a box sliding across it on every frame
-the compositor asks for (GTK frame clock = Wayland frame callbacks / X
-redraws) and logs the rate every 2 s to /tmp/fps.log, ~/fps.log and the console.
-    shell-fps-test [seconds] [W] [H] [full]
-"full": repaint the whole window each frame (a video), else only the box
-and the strip it left (a typical small update)."""
+animates a box sliding across it on every frame the compositor asks for
+(GTK frame clock = Wayland frame callbacks / X redraws) and logs the rate
+every 2 s to /tmp/fps.log, ~/fps.log and the console, and a summary to
+/run/syluxium-diag/shell.txt (copied to the stick's log folder).
+    shell-fps-test [seconds] [W] [H] [small|full|both]
+W, H: window size (0 = 80 % of the screen; default 900x600).
+small: only the box and the strip it left are redrawn (a typical update);
+full: the whole window every frame (a video); both: small, then full,
+half the time each."""
 import os
 import sys
 import time
@@ -13,23 +16,32 @@ import time
 import gi
 
 gi.require_version("Gtk", "3.0")
-from gi.repository import GLib, Gtk  # noqa: E402
+from gi.repository import Gdk, Gtk  # noqa: E402
 
 secs = float(sys.argv[1]) if len(sys.argv) > 1 else 30
 W = int(sys.argv[2]) if len(sys.argv) > 2 else 900
 H = int(sys.argv[3]) if len(sys.argv) > 3 else 600
-FULL = len(sys.argv) > 4 and sys.argv[4] == "full"
+MODE = sys.argv[4] if len(sys.argv) > 4 and sys.argv[4] in ("small", "full", "both") else "small"
+if W <= 0 or H <= 0:
+    display = Gdk.Display.get_default()
+    geo = (display.get_primary_monitor() or display.get_monitor(0)).get_geometry()
+    W, H = int(geo.width * 0.8), int(geo.height * 0.8)
 win = Gtk.Window(title="FPS test")
 win.set_default_size(W, H)
 area = Gtk.DrawingArea()
 win.add(area)
-state = {"x": 0, "frames": 0, "t0": time.monotonic(), "start": time.monotonic(), "prev": 0}
+now0 = time.monotonic()
+state = {"x": 0, "frames": 0, "t0": now0, "start": now0, "phase_start": now0, "phase_frames": 0,
+         "full": MODE == "full", "summary": []}
 
 
-def log(text):
+def log(text, summary=False):
     line = f"FPS {text}"
     print(line, flush=True)
-    for path in ("/tmp/fps.log", os.path.expanduser("~/fps.log"), "/dev/console"):
+    paths = ["/tmp/fps.log", os.path.expanduser("~/fps.log"), "/dev/console"]
+    if summary:
+        paths.append("/run/syluxium-diag/shell.txt")
+    for path in paths:
         try:
             with open(path, "a") as f:
                 f.write(line + "\n")
@@ -46,10 +58,19 @@ def draw(_w, cr):
     return False
 
 
+def end_phase(now):
+    kind = "full" if state["full"] else "small"
+    rate = state["phase_frames"] / max(now - state["phase_start"], 0.001)
+    state["summary"].append(f"{kind} {rate:.1f}")
+    log(f"summary: {rate:.1f} frames/s, {kind} updates, window {W}x{H} "
+        f"(session {os.environ.get('XDG_SESSION_TYPE', '?')})", summary=True)
+    state["phase_start"], state["phase_frames"] = now, 0
+
+
 def tick(_w, _clock):
     old = state["x"]
     state["x"] = (state["x"] + 12) % (W - 120)
-    if FULL:
+    if state["full"]:
         area.queue_draw()
     else:
         lo, hi = min(old, state["x"]), max(old, state["x"]) + 120
@@ -58,11 +79,16 @@ def tick(_w, _clock):
         else:
             area.queue_draw_area(lo, int(H / 2 - 60), hi - lo, 120)
     state["frames"] += 1
+    state["phase_frames"] += 1
     now = time.monotonic()
     if now - state["t0"] >= 2:
-        log(f"{state['frames'] / (now - state['t0']):.1f} frames/s ({W}x{H}{' full' if FULL else ''})")
+        log(f"{state['frames'] / (now - state['t0']):.1f} frames/s ({W}x{H}{' full' if state['full'] else ''})")
         state["frames"], state["t0"] = 0, now
+    if MODE == "both" and not state["full"] and now - state["start"] > secs / 2:
+        end_phase(now)
+        state["full"] = True
     if now - state["start"] > secs:
+        end_phase(now)
         Gtk.main_quit()
         return False
     return True
