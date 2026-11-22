@@ -267,7 +267,10 @@ LKPI_LINUX_CFLAGS := -I$(LKPI_INCLUDE) -include linux/kconfig.h -Werror=implicit
 lkpi_modname = $(or $(lkpi_modname_list),$(lkpi_modname_old))
 lkpi_modname_old = $(if $(findstring /brcm80211/,$<),brcmfmac,$(lkpi_modname_net))
 # Drivers imported from Linux 7.4-rc3 (docs/drivers.md): "<path part>:<module name>".
-LKPI_MODNAMES := /ethernet/intel/igb/:igb /drivers/net/mdio.c:mdio /ethernet/broadcom/bnx2:bnx2
+LKPI_MODNAMES := /ethernet/intel/igb/:igb /drivers/net/mdio.c:mdio /ethernet/broadcom/bnx2:bnx2 \
+    /rtw89/rtw8851be.c:rtw89_8851be /rtw89/rtw8852ae.c:rtw89_8852ae /rtw89/rtw8852be.c:rtw89_8852be \
+    /rtw89/rtw8852bte.c:rtw89_8852bte /rtw89/rtw8852ce.c:rtw89_8852ce /rtw89/rtw8922ae.c:rtw89_8922ae \
+    /rtw89/pci:rtw89_pci /rtw89/:rtw89_core
 lkpi_modname_list = $(firstword $(foreach m,$(LKPI_MODNAMES),$(if $(findstring $(word 1,$(subst :, ,$(m))),$<),$(word 2,$(subst :, ,$(m))))))
 lkpi_modname_net = $(if $(findstring /drivers/net/usb/,$<),$(basename $(notdir $<)),$(lkpi_modname_net2))
 lkpi_modname_net2 = $(if $(findstring /iwlwifi/mvm/,$<),iwlmvm,$(if $(findstring /iwlwifi/,$<),iwlwifi,$(if $(findstring /ethernet/realtek/r8169,$<),r8169,$(if $(findstring /ethernet/broadcom/tg3,$<),tg3,$(if $(findstring /ethernet/intel/e1000e/,$<),e1000e,$(if $(findstring /ethernet/intel/igc/,$<),igc,$(if $(findstring /drivers/net/phy/realtek,$<),realtek,$(if $(findstring /drivers/net/phy/,$<),libphy,$(lkpi_modname_rest)))))))))
@@ -279,6 +282,8 @@ $(OBJDIR)/$(LKPI_IWL)/%: LKPI_DRV_CFLAGS = -I$(LKPI_IWL) -DCONFIG_IWLWIFI=1 -DCO
 $(OBJDIR)/kernel/linuxkpi/drivers/bcma/%: LKPI_DRV_CFLAGS = -include net/lkpi_bcma.h
 $(OBJDIR)/kernel/linuxkpi/drivers/net/wireless/broadcom/%: LKPI_DRV_CFLAGS = -include net/lkpi_bcma.h
 $(OBJDIR)/kernel/linuxkpi/drivers/net/wireless/realtek/rtw88/%: LKPI_DRV_CFLAGS = -include net/lkpi_netcompat.h
+# Realtek rtw89 (RTL8852AE/BE/BTE/CE, 8851BE, 8922AE Wi-Fi 6/6E/7): from Linux 6.12 like the wireless stack it plugs into.
+$(OBJDIR)/kernel/linuxkpi/drivers/net/wireless/realtek/rtw89/%: LKPI_DRV_CFLAGS = -include net/lkpi_netcompat.h
 $(OBJDIR)/kernel/linuxkpi/drivers/net/wireless/ath/%: LKPI_DRV_CFLAGS = -include net/lkpi_netcompat.h -Ikernel/linuxkpi/drivers/net/wireless/ath
 # Bluetooth core
 $(OBJDIR)/kernel/linuxkpi/net/bluetooth/%: LKPI_DRV_CFLAGS = -include net/lkpi_bt.h
@@ -484,6 +489,7 @@ GPU_FIRMWARE   += amdgpu/vega10_* amdgpu/vega12_* amdgpu/vega20_* amdgpu/raven* 
 # the PCIe chips (BCM43602 of 2015-17 MacBook Pros, 4350/4356/4358/43570/4371
 # ...) and the USB ones (~6.5 MB); Apple's 4355/4364 (T2 Macs) aren't in it.
 # Realtek rtw88 (RTL8822BE/CE, 8821CE, 8723DE): ~0.6 MB.
+# Realtek rtw89 (RTL8852AE/BE/BTE/CE, 8851BE, 8922AE): the newest format each 6.12 chip driver reads, ~8.7 MB.
 # MediaTek MT7921/MT7922 (mt7921e): ~2 MB.
 # Qualcomm ath10k: the laptop and PCIe-card chips QCA6174, QCA9377, QCA988x, QCA9887 (~6.5 MB).
 # Bluetooth (btusb): Intel (ibt-*, ~17 MB), Realtek (rtl_bt, ~1.5 MB), MediaTek MT7921/MT7922 (~1 MB).
@@ -497,7 +503,8 @@ NET_FIRMWARE   := tigon/* intel/ibt-* rtl_bt/* mediatek/BT_RAM_CODE_MT7961_1_2_h
                   iwlwifi-so-a0-gf-a0-89.ucode iwlwifi-so-a0-gf4-a0-89.ucode iwlwifi-ty-a0-gf-a0-89.ucode \
                   iwlwifi-ma-b0-*-89.ucode iwlwifi-bz-b0-gf-a0-92.ucode iwlwifi-bz-b0-fm-c0-93.ucode \
                   iwlwifi-gl-c0-fm-c0-92.ucode iwlwifi-*.pnvm rtl_nic/* \
-                  bnx2/bnx2-*
+                  bnx2/bnx2-* rtw89/rtw8851b_fw.bin rtw89/rtw8852a_fw.bin rtw89/rtw8852b_fw-1.bin rtw89/rtw8852bt_fw.bin \
+                  rtw89/rtw8852c_fw-1.bin rtw89/rtw8922a_fw-1.bin
 GPU_FIRMWARE_SKIP := */gsp/* */gc_9_4_* */psp_13_0_6_* */psp_13_0_14_* */smu_13_0_6_* */smu_13_0_14_* */sdma_4_4_* */vcn_4_0_3_*
 FIRMWARE_ROOT  := $(BUILD)/firmware-debian
 FIRMWARE_STAMP := $(FIRMWARE_ROOT)/.fetched

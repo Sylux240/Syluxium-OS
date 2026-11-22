@@ -570,6 +570,7 @@ void netif_napi_del(struct napi_struct* napi);
 void napi_enable(struct napi_struct* napi);
 void napi_disable(struct napi_struct* napi);
 bool napi_schedule_prep(struct napi_struct* napi);
+bool napi_is_scheduled(struct napi_struct* napi); /* appended */
 void __napi_schedule(struct napi_struct* napi);
 #define __napi_schedule_irqoff __napi_schedule
 static inline bool napi_schedule(struct napi_struct* n) { if (napi_schedule_prep(n)) { __napi_schedule(n); return true; } return false; }
