@@ -32,7 +32,9 @@ constexpr int NETLINK_GENERIC = 16;
 constexpr u16 NLMSG_ERROR = 2, NLMSG_DONE = 3;
 constexpr u16 NLM_F_REQUEST = 0x1, NLM_F_MULTI = 0x2, NLM_F_ACK = 0x4, NLM_F_DUMP = 0x300;
 constexpr u16 RTM_NEWLINK = 16, RTM_DELLINK = 17, RTM_GETLINK = 18, RTM_SETLINK = 19, RTM_NEWADDR = 20,
-              RTM_DELADDR = 21, RTM_GETADDR = 22, RTM_NEWROUTE = 24, RTM_DELROUTE = 25, RTM_GETROUTE = 26;
+              RTM_DELADDR = 21, RTM_GETADDR = 22, RTM_NEWROUTE = 24, RTM_DELROUTE = 25, RTM_GETROUTE = 26,
+              RTM_NEWRULE = 32, RTM_DELRULE = 33, RTM_GETRULE = 34;
+constexpr u16 NLM_F_EXCL = 0x200;
 constexpr u16 IFLA_ADDRESS = 1, IFLA_BROADCAST = 2, IFLA_IFNAME = 3, IFLA_MTU = 4, IFLA_QDISC = 6, IFLA_STATS = 7,
               IFLA_TXQLEN = 13, IFLA_OPERSTATE = 16, IFLA_LINKMODE = 17, IFLA_STATS64 = 23, IFLA_GROUP = 27;
 constexpr u16 IFA_ADDRESS = 1, IFA_LOCAL = 2, IFA_LABEL = 3, IFA_BROADCAST = 4, IFA_FLAGS = 8;
@@ -387,14 +389,20 @@ long change_route(bool add, const u8* p, usize len) {
     memcpy(&rt, p, sizeof(rt));
     if (rt.family != AF_INET)
         return rt.family == AF_INET6 ? change_route6(add, p, len) : -EAFNOSUPPORT;
-    u32 gw = 0;
+    u32 gw = 0, table = rt.table;
     for_each_attr(p + sizeof(rt), len - sizeof(rt), [&](u16 type, const u8* data, usize alen) {
         if (type == RTA_GATEWAY && alen >= 4) {
             u32 v;
             memcpy(&v, data, 4);
             gw = be32(v);
+        } else if (type == RTA_TABLE && alen >= 4) {
+            memcpy(&table, data, 4);
         }
     });
+    // Routes in other tables (Android's netd keeps one per network, chosen by
+    // its policy rules): accepted, without touching the system's own routes.
+    if (table != 0 && table != RT_TABLE_MAIN)
+        return 0;
     if (rt.dst_len != 0)
         return 0; // on-link subnet routes follow from the interface netmasks
     if (add) {
@@ -407,6 +415,183 @@ long change_route(bool add, const u8* p, usize len) {
         return -err::SRCH;
     }
     return 0;
+}
+
+
+// ---- RTM_*RULE: policy routing rules ----
+// Stored and listed as given (Android's netd manages its rules this way);
+// routing itself still uses the main table only.
+constexpr u16 FRA_PRIORITY = 6, FRA_TABLE = 15, FRA_PAD = 18;
+constexpr u8 FR_ACT_TO_TBL = 1, RT_TABLE_DEFAULT = 253, RT_TABLE_LOCAL = 255;
+
+struct Rule {
+    u8 hdr[12];    // struct fib_rule_hdr (family, dst_len, src_len, tos, table, res1, res2, action, flags)
+    u8* attrs;     // the other attributes, as sent (without FRA_PRIORITY)
+    usize attrs_len;
+    u32 priority;
+    Rule* next;
+};
+Rule* g_rules = nullptr; // by priority (g_lock)
+bool g_rules_ready = false;
+
+u32 rule_table(const Rule* r) {
+    u32 table = r->hdr[4];
+    for_each_attr(r->attrs, r->attrs_len, [&](u16 type, const u8* data, usize alen) {
+        if (type == FRA_TABLE && alen >= 4)
+            memcpy(&table, data, 4);
+    });
+    return table;
+}
+
+void insert_rule(Rule* r) {
+    Rule** pos = &g_rules;
+    while (*pos && (*pos)->priority <= r->priority)
+        pos = &(*pos)->next;
+    r->next = *pos;
+    *pos = r;
+}
+
+Rule* make_rule(const u8* hdr, const u8* attrs, usize attrs_len, u32 priority) {
+    auto* r = static_cast<Rule*>(kzalloc(sizeof(Rule) + attrs_len));
+    if (!r)
+        return nullptr;
+    memcpy(r->hdr, hdr, 12);
+    r->attrs = reinterpret_cast<u8*>(r + 1);
+    memcpy(r->attrs, attrs, attrs_len);
+    r->attrs_len = attrs_len;
+    r->priority = priority;
+    return r;
+}
+
+// Linux's defaults: IPv4 local (0), main (32766), default (32767); IPv6 local, main.
+void default_rules() {
+    if (g_rules_ready)
+        return;
+    g_rules_ready = true;
+    struct { u8 family; u8 table; u32 prio; } defaults[] = {
+        {AF_INET, RT_TABLE_LOCAL, 0}, {AF_INET, RT_TABLE_MAIN, 32766}, {AF_INET, RT_TABLE_DEFAULT, 32767},
+        {AF_INET6, RT_TABLE_LOCAL, 0}, {AF_INET6, RT_TABLE_MAIN, 32766}};
+    for (auto& d : defaults) {
+        u8 hdr[12] = {d.family, 0, 0, 0, d.table, 0, 0, FR_ACT_TO_TBL, 0, 0, 0, 0};
+        u8 attrs[8];
+        u16 ah[2] = {8, FRA_TABLE};
+        u32 table = d.table;
+        memcpy(attrs, ah, 4);
+        memcpy(attrs + 4, &table, 4);
+        if (Rule* r = make_rule(hdr, attrs, sizeof(attrs), d.prio))
+            insert_rule(r);
+    }
+}
+
+// The request's attributes without FRA_PRIORITY and padding (compared and stored as is).
+usize rule_attrs(const u8* p, usize len, u8* out, usize room, u32* priority, bool* have_priority) {
+    usize n = 0;
+    for_each_attr(p, len, [&](u16 type, const u8* data, usize alen) {
+        if (type == FRA_PRIORITY && alen >= 4) {
+            memcpy(priority, data, 4);
+            *have_priority = true;
+            return;
+        }
+        if (type == FRA_PAD)
+            return;
+        usize total = align4(4 + alen);
+        if (n + total > room)
+            return;
+        u16 ah[2] = {static_cast<u16>(4 + alen), type};
+        memset(out + n, 0, total);
+        memcpy(out + n, ah, 4);
+        memcpy(out + n + 4, data, alen);
+        n += total;
+    });
+    return n;
+}
+
+// Every attribute of `want` is in `have`, with the same value.
+bool attrs_subset(const u8* want, usize want_len, const u8* have, usize have_len) {
+    bool ok = true;
+    for_each_attr(want, want_len, [&](u16 type, const u8* data, usize alen) {
+        bool found = false;
+        for_each_attr(have, have_len, [&](u16 t2, const u8* d2, usize l2) {
+            if (t2 == type && l2 == alen && memcmp(d2, data, alen) == 0)
+                found = true;
+        });
+        ok = ok && found;
+    });
+    return ok;
+}
+
+long change_rule(bool add, u16 nlflags, const u8* p, usize len) {
+    if (len < 12)
+        return -err::INVAL;
+    u8 family = p[0];
+    if (family != AF_INET && family != AF_INET6)
+        return -EAFNOSUPPORT;
+    default_rules();
+    u8 attrs[512];
+    u32 priority = 0;
+    bool have_priority = false;
+    usize alen = rule_attrs(p + 12, len - 12, attrs, sizeof(attrs), &priority, &have_priority);
+    if (add) {
+        if (!have_priority) { // Linux: just above the first rule after priority 0
+            priority = 0;
+            for (Rule* r = g_rules; r; r = r->next)
+                if (r->hdr[0] == family && r->priority > 0) {
+                    priority = r->priority - 1;
+                    break;
+                }
+        }
+        for (Rule* r = g_rules; r; r = r->next) {
+            if (r->hdr[0] == family && r->priority == priority && memcmp(r->hdr, p, 12) == 0 &&
+                r->attrs_len == alen && memcmp(r->attrs, attrs, alen) == 0)
+                return (nlflags & NLM_F_EXCL) ? -err::EXIST : 0;
+        }
+        Rule* r = make_rule(p, attrs, alen, priority);
+        if (!r)
+            return -err::NOMEM;
+        insert_rule(r);
+        return 0;
+    }
+    // Delete the first rule matching everything the request gives.
+    u8 want_table = p[4], want_action = p[7];
+    for (Rule** pos = &g_rules; *pos; pos = &(*pos)->next) {
+        Rule* r = *pos;
+        if (r->hdr[0] != family || (have_priority && r->priority != priority))
+            continue;
+        if ((want_table && r->hdr[4] != want_table) || (want_action && r->hdr[7] != want_action))
+            continue;
+        if (p[1] != r->hdr[1] || p[2] != r->hdr[2])
+            continue;
+        if (!attrs_subset(attrs, alen, r->attrs, r->attrs_len))
+            continue;
+        *pos = r->next;
+        kfree(r);
+        return 0;
+    }
+    return -err::NOENT;
+}
+
+void dump_rules(Builder& b, u8 family) {
+    default_rules();
+    for (Rule* r = g_rules; r; r = r->next) {
+        if (family != AF_UNSPEC && r->hdr[0] != family)
+            continue;
+        u8 hdr[12];
+        memcpy(hdr, r->hdr, 12);
+        u32 table = rule_table(r);
+        hdr[4] = table < 256 ? static_cast<u8>(table) : 252; // RT_TABLE_COMPAT
+        b.begin(RTM_NEWRULE, NLM_F_MULTI, hdr, 12);
+        bool has_table = false;
+        for_each_attr(r->attrs, r->attrs_len, [&](u16 type, const u8* data, usize alen) {
+            if (type == FRA_TABLE)
+                has_table = true;
+            b.attr(type, data, alen);
+        });
+        if (!has_table)
+            b.attr_u32(FRA_TABLE, table);
+        if (r->priority)
+            b.attr_u32(FRA_PRIORITY, r->priority);
+        b.end();
+    }
 }
 
 // ---- IPv6 addresses and routes ----
@@ -642,6 +827,15 @@ public:
                 break;
             case RTM_NEWROUTE:
             case RTM_DELROUTE: result = change_route(h.type == RTM_NEWROUTE, p, len); break;
+            case RTM_GETRULE:
+                if (!dump) {
+                    result = -EOPNOTSUPP_;
+                    break;
+                }
+                dump_rules(*b, family);
+                break;
+            case RTM_NEWRULE:
+            case RTM_DELRULE: result = change_rule(h.type == RTM_NEWRULE, h.flags, p, len); break;
             default:
                 // Other dumps (neighbours, rules, qdiscs...): an empty answer.
                 if (!dump)
