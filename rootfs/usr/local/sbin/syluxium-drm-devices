@@ -119,7 +119,20 @@ def main():
     n = drm.drmGetDevices2(0, arr, 16)
     print("== drmGetDevices2: %d device(s)" % n)
     for i in range(max(n, 0)):
-        print("  %d: %s" % (i, describe(arr[i].contents)))
+        d = arr[i].contents
+        print("  %d: %s" % (i, describe(d)))
+        # A GPU's card and render node must be one device. If they come
+        # apart (the card's sysfs leading somewhere else, as when a GPU
+        # driver took over simpledrm's card0 and its old entries stayed),
+        # Mesa's EGL/GBM finds no device with both: the X server's glamor
+        # and every GBM/EGL user fail ("DRI2: failed to create gbm device",
+        # "failed to find EGLDevice") while the render node alone works.
+        has_primary, has_render = d.available_nodes & 1, d.available_nodes & 4
+        if has_render and not has_primary:
+            print("  PROBLEM: device %d has a render node but no card node: glamor/GBM can't use this GPU" % i)
+        if has_primary and not has_render and d.bustype != 0:
+            print("  NOTE: device %d is a card without a render node on a %s bus (simpledrm-like; if a GPU driver"
+                  " owns this card, its sysfs entries are stale)" % (i, BUS.get(d.bustype, d.bustype)))
     if n > 0:
         drm.drmFreeDevices(arr, n)
 

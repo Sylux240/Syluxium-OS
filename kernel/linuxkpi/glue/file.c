@@ -159,10 +159,69 @@ long lkpi_file_write(struct file *f, const char __user *buf, size_t n, long long
 		return file_iter(f, (char __user *)buf, n, pos, true);
 	return f->f_op && f->f_op->write ? f->f_op->write(f, buf, n, pos) : -EINVAL;
 }
+bool lkpi_cmdline_word(const char *w); /* pci.cpp */
+
+/* Boot option "drmtrace": every driver ioctl on a DRM node (amdgpu CS/BO/
+ * INFO, nouveau NVIF/GEM/channels, ...) with its result and time, the first
+ * 6000, to find where a GPU program stops (Mesa gives up on several paths
+ * without a word). nouveau's NVIF calls also show the NVIF operation, the
+ * object class created or the method called and the NVIF status. */
+const char *lkpi_drm_file_driver(struct file *filp); /* drm_file.c */
+
+static void drm_trace(struct file *f, unsigned int cmd, unsigned long arg, long r, unsigned long ms)
+{
+	static int traced;
+	char extra[96] = "";
+	const char *drv = lkpi_drm_file_driver(f);
+
+	if (traced >= 6000)
+		return;
+	traced++;
+	if (drv && !strcmp(drv, "nouveau") && _IOC_NR(cmd) == 0x47 && arg) { /* DRM_NOUVEAU_NVIF */
+		/* struct nvif_ioctl_v0 {version, type, pad[4], owner, route,
+		 * token, object} (24 bytes), then the operation's arguments:
+		 * new_v0 {version, pad[6], route, token, object, handle, oclass},
+		 * mthd_v0 {version, method, ...} */
+		u8 head[56] = {0};
+		size_t n = min_t(size_t, _IOC_SIZE(cmd), sizeof(head));
+		if (n >= 26 && !copy_from_user(head, (void __user *)arg, n)) {
+			static const char *const types[] = {"nop", "sclass", "new", "del", "mthd", "rd", "wr",
+							    "map", "unmap"};
+			u8 type = head[1];
+			const char *tn = type < ARRAY_SIZE(types) ? types[type] : "?";
+			if (type == 2 && n >= 56)
+				snprintf(extra, sizeof(extra), " nvif %s oclass %#x", tn, *(s32 *)&head[52]);
+			else if (type == 4)
+				snprintf(extra, sizeof(extra), " nvif %s %#x", tn, head[25]);
+			else
+				snprintf(extra, sizeof(extra), " nvif %s", tn);
+		}
+	}
+	pr_info("drmtrace: %s[%d] %s ioctl 0x%02x size %u -> %ld (%lu ms)%s%s\n", current->comm, current->pid,
+		drv ? drv : "?", _IOC_NR(cmd), _IOC_SIZE(cmd), r, ms, extra, traced == 6000 ? " (no more)" : "");
+}
+
 long lkpi_file_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 {
-	static int logged;
+	static int logged, slow_logged, trace = -1;
+	u64 start = ktime_get_ns();
 	long r = f->f_op && f->f_op->unlocked_ioctl ? f->f_op->unlocked_ioctl(f, cmd, arg) : -ENOTTY;
+	unsigned long ms = (unsigned long)((ktime_get_ns() - start) / 1000000);
+
+	if (_IOC_TYPE(cmd) == 'd') {
+		if (trace < 0)
+			trace = lkpi_cmdline_word("drmtrace");
+		if (trace && _IOC_NR(cmd) >= 0x40)
+			drm_trace(f, cmd, arg, r, ms);
+		/* A GPU ioctl that takes seconds (a fence or the GPU not
+		 * answering: nouveau gives up on a channel after 15 s) is
+		 * always worth a line. */
+		if (ms >= 2000 && slow_logged < 100) {
+			slow_logged++;
+			pr_warn("drm: %s[%d]: ioctl 0x%02x (cmd %#x) took %lu ms, result %ld\n", current->comm,
+				current->pid, _IOC_NR(cmd), cmd, ms, r);
+		}
+	}
 	/* Failing GPU ioctls (type 'd'; not the mode-setting ones, whose probing
 	 * failures are routine), the first 60: Mesa aborts the X server
 	 * when command submission fails, often before its log reaches disk. */
