@@ -454,6 +454,26 @@ long Memory::protect(uptr addr, usize len, u32 prot) {
     return 0;
 }
 
+long Memory::residency(uptr addr, usize len, u8* out) {
+    if (addr & (PAGE_SIZE - 1))
+        return -err::INVAL;
+    uptr end = addr + align_up<usize>(len, PAGE_SIZE);
+    if (end < addr || end > task_end())
+        return -err::NOMEM;
+    LockGuard guard(m_lock);
+    for (uptr a = addr; a < end;) {
+        Vma* v = find(a);
+        if (!v)
+            return -err::NOMEM;
+        a = v->end;
+    }
+    for (uptr page = addr; page < end; page += PAGE_SIZE) {
+        u64 phys;
+        out[(page - addr) / PAGE_SIZE] = m_as->translate(page, &phys) ? 1 : 0;
+    }
+    return 0;
+}
+
 long Memory::brk(uptr new_end) {
     LockGuard guard(m_lock);
     if (new_end < m_brk_base)

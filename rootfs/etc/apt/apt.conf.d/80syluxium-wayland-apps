@@ -1,0 +1,3 @@
+// Syluxium: start-menu entries of newly installed Wayland-only programs go
+// through syluxium-wayland-run (Wayland windows in the Xfce desktop).
+DPkg::Post-Invoke { "[ -x /usr/local/sbin/syluxium-wayland-apps ] && /usr/local/sbin/syluxium-wayland-apps || true"; };
