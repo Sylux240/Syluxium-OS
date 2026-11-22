@@ -55,7 +55,7 @@ os.execvp(sys.argv[1], sys.argv[1:])' "$@" ) < /dev/null >> $LOG 2>&1
 }
 place() { for i in $(seq 1 30); do w=$(xdotool search --onlyvisible --name "$1" 2>/dev/null | head -1); [ -n "$w" ] && xdotool windowmove "$w" "$2" "$3" && return 0; sleep 0.5; done; say "no window '$1'"; return 1; }
 
-phase=${ACCTEST_PHASES:-"notify apps snip netconn mdns menu store craft"}
+phase=${ACCTEST_PHASES:-"notify apps snip gtk netconn mdns menu store craft"}
 for p in $phase; do case $p in
 notify)
     say "env: $(echo "$env" | tr '\n' ' ' | cut -c1-300)"
@@ -74,18 +74,46 @@ notify)
     say "notify log: $(grep -v -i 'dcop\|ICE\|^-*$\|authentication' $LOG | tail -12 | tr '\n' '|')"
     sleep 8 ;;
 apps)
-    asuser kcalc & asuser kolourpaint & asuser kcharselect & asuser abiword &
-    place "KCalc" 20 30; place "KolourPaint" 360 30; place "KCharSelect" 20 400; place "AbiWord" 600 300
+    # The accessories behind the menu entries (GTK programs).
+    asuser galculator & asuser drawing & asuser gucharmap & asuser abiword &
+    place "galculator" 20 30; place "Drawing" 360 30; place "Character Map" 20 400; place "AbiWord" 600 300
     sleep 8
-    for prog in kcalc kolourpaint kcharselect abiword; do pidof $prog > /dev/null && say "$prog running" || say "$prog NOT running"; done
+    for prog in galculator drawing gucharmap abiword; do pgrep -f "$prog" > /dev/null && say "$prog running" || say "$prog NOT running"; done
     shot apps
-    pkill kcalc; pkill kolourpaint; pkill kcharselect; pkill abiword; sleep 2 ;;
+    pkill galculator; pkill -f /usr/bin/drawing; pkill gucharmap; pkill abiword; sleep 2 ;;
 snip)
-    asuser ksnapshot &
+    asuser xfce4-screenshooter &
     sleep 10
-    pidof ksnapshot > /dev/null && say "ksnapshot running" || say "ksnapshot NOT running"
+    pidof xfce4-screenshooter > /dev/null && say "xfce4-screenshooter running" || say "xfce4-screenshooter NOT running"
     shot snip
-    pkill ksnapshot; sleep 1 ;;
+    pkill xfce4-screenshooter; sleep 1 ;;
+term)
+    # Terminal: does its shell start, and is what it prints drawn?
+    rm -f /tmp/term-ok
+    asuser xfce4-terminal --disable-server --title "Term check" -x sh -c 'echo TERMOK > /tmp/term-ok; echo "Hello from the Dusk terminal"; ls /; exec sh' &
+    place "Term check" 100 80
+    sleep 6
+    say "term: $(cat /tmp/term-ok 2>&1) children: $(ps -o pid,ppid,comm 2>/dev/null | grep -A3 xfce4-term | tr '\n' ' ')"
+    w=$(xdotool search --onlyvisible --name "Term check" 2>/dev/null | head -1)
+    [ -n "$w" ] && xdotool windowactivate "$w" 2>/dev/null; sleep 1
+    xdotool type --delay 50 'echo typed ok; tty'; xdotool key Return; sleep 2
+    shot term
+    pkill xfce4-terminal; sleep 1 ;;
+gtk)
+    # Files, Terminal, Code Editor, Personalize; the desktop's defaults.
+    say "defaults: dir=$(asuser xdg-mime query default inode/directory; tail -1 $LOG) text=$(asuser xdg-mime query default text/plain; tail -1 $LOG) x-terminal-emulator=$(readlink -f /usr/bin/x-terminal-emulator) x-www-browser=$(readlink -f /usr/bin/x-www-browser)"
+    asuser syluxium-open documents &
+    place "Documents" 20 30
+    asuser xfce4-terminal --title "Dusk terminal" -x sh -c 'ls --color=auto /usr/share; echo; printf "\033[31mred \033[32mgreen \033[33myellow \033[34mblue \033[35mmagenta \033[36mcyan\033[0m\n"; exec sh' &
+    place "Dusk terminal" 470 30
+    asuser mousepad /etc/os-release &
+    place "os-release" 20 420
+    asuser syluxium-personalize &
+    place "Personalize" 560 300
+    sleep 8
+    for prog in thunar xfce4-terminal mousepad syluxium-personalize; do pgrep -f "$prog" > /dev/null && say "$prog running" || say "$prog NOT running"; done
+    shot gtk
+    pkill thunar; pkill xfce4-terminal; pkill mousepad; pkill -f syluxium-personalize; sleep 2 ;;
 netconn)
     ip -4 -o addr > /dev/console
     asuser syluxium-netconn &
