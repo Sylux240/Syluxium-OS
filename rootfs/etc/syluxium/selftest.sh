@@ -113,6 +113,7 @@ d = os.read(m, 16); assert d == b"\0hi", d'
 check "futex stress (GIL handoff, condvars, timeouts)" /opt/syluxium/tests/futexstress 1
 check "pipe / fd stress (close races, dup, fork)"     /opt/syluxium/tests/pipestress 1
 check "futex wakeups while forking, WAKE_OP, PI, robust" /opt/syluxium/tests/futexfork 1
+check "timed sleeps woken by signals while threads come and go" /opt/syluxium/tests/schedstress 2
 check "copy_file_range, pidfd, sigtimedwait, mlock"   /opt/syluxium/tests/newsyscalls
 
 echo "selftest: $pass passed, $fail failed"
