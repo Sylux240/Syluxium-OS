@@ -66,8 +66,10 @@ void nmi(interrupts::Frame* f) {
 
 void thread(void*) {
     bool save_pending = false;
-    for (;;) {
+    for (u64 second = 1;; second++) {
         sched::sleep_ms(1000);
+        if (second % 5 == 0)
+            sched::sample_load(); // /proc/loadavg
         if (g_thread_dump_request) {
             g_thread_dump_request = false;
             sched::dump_threads();

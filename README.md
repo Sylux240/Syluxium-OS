@@ -37,6 +37,8 @@ From power-on to the desktop, in the order a computer shows them:
 | ![Desktop](docs/screenshots/5-desktop.png) | ![Installer](docs/screenshots/6-installer.png) |
 | **7. Start menu**: favourites, categories, search | **8. Terminal** in Dusk colours |
 | ![Start menu](docs/screenshots/7-start-menu.png) | ![Terminal](docs/screenshots/8-terminal.png) |
+| **9. App Store**: 70,000 Debian packages, featured programs, updates | **10. App Store settings**: software sources on and off, add a repository |
+| ![App Store](docs/screenshots/9-app-store.png) | ![App Store settings](docs/screenshots/10-app-store-sources.png) |
 
 ## Made On Linux (Arch / CachyOS) 
 
@@ -185,6 +187,10 @@ Legend: ✅ done · 🟡 partly done · ⬜ to do
 
 **Linux compatibility**
 - ✅ ELF loader, dynamic linking, Debian userland running unmodified
+- ✅ AppImages: FUSE in the kernel (/dev/fuse, Linux's protocol; fusermount3 and libfuse 2/3 unmodified),
+     double-click in Files runs them (offers to make a download executable), unpacked run when FUSE
+     isn't usable; pre-installed AppImages (`DGPUFG_APPIMAGE`, tools/install-appimage.sh) get a menu
+     entry and icon
 - 🟡 System-call coverage (grows with every phase)
 
 **Desktop** (Syluxium's own *Dusk* look: deep navy, the logo's cyan, glass panels)
@@ -198,8 +204,12 @@ Legend: ✅ done · 🟡 partly done · ⬜ to do
      and clipboard as Wayland apps; Android windows next): preview boot entries, rounded corners to do
 - ✅ Wayland programs in the Xfce desktop: syluxium-wayland-host (a wlroots compositor on its X11
      backend) shows each Wayland window as an X window: xfwm4 frame, taskbar entry and icon, menus,
-     resizing, keyboard, clipboard both ways; Wayland-only programs start through it from the menu
-     (`syluxium-wayland-run PROGRAM` forces any program onto Wayland)
+     resizing, keyboard, clipboard and drag and drop both ways, input methods, HiDPI scaling, GPU
+     rendering with dma-bufs (DRI3) or software; Wayland-only programs start through it from the
+     menu (`syluxium-wayland-run PROGRAM` forces any program onto Wayland)
+- ✅ Input methods: fcitx5 with Chinese (Pinyin), Japanese (Anthy) and Korean (Hangul), Ctrl+Space,
+     Dusk candidate list and taskbar icons; compose key; in X11 and Wayland programs alike
+- ✅ Scaling 100-300 % in Display Settings (whole factors and fractional for Wayland programs)
 - ✅ Right-click menus: Extract Here / Extract All, Send To compressed folder, Change Icon
 - ✅ File manager: Thunar in Dusk (trash, drives, archives extracted and created)
 - 🟡 Display settings: resolution and refresh rate change live (with a 15 s undo); multi-monitor to do
@@ -247,4 +257,4 @@ Legend: ✅ done · 🟡 partly done · ⬜ to do
 - ✅ Updates (Syluxium Update: Debian packages through apt) and a Recovery boot entry
      (repair disks and packages, reset settings or passwords, root prompt)
 
-Tally: 48 done · 12 partly done · 2 to do.
+Tally: 49 done · 12 partly done · 2 to do.

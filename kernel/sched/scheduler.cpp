@@ -633,6 +633,34 @@ extern "C" void sched_preempt_point() {
 
 namespace sched {
 
+// Load average, as Linux computes it: every 5 s, the number of runnable
+// threads (running or waiting for a CPU) folds into 1-, 5- and 15-minute
+// exponential averages (fixed point, 11 bits).
+namespace {
+u64 g_load[3];
+}
+
+void sample_load() {
+    u64 runnable = 0;
+    u32 n = percpu::count();
+    for (u32 i = 0; i < n; i++) {
+        Cpu* c = percpu::get(i);
+        if (!c || !__atomic_load_n(&c->online, __ATOMIC_ACQUIRE))
+            continue;
+        runnable += c->rq.ready.size(); // a racy read is fine for a statistic
+        if (c->current && c->current != c->rq.idle)
+            runnable++;
+    }
+    static const u64 exp[3] = {1884, 2014, 2037}; // 2048 * e^(-5s / 1, 5, 15 min)
+    for (int i = 0; i < 3; i++)
+        g_load[i] = (g_load[i] * exp[i] + runnable * 2048 * (2048 - exp[i])) / 2048;
+}
+
+void load_average(u64 out[3]) {
+    for (int i = 0; i < 3; i++)
+        out[i] = g_load[i];
+}
+
 void dump_threads() {
     constexpr usize CAP = 256 * 1024;
     char* buf = static_cast<char*>(kmalloc(CAP));

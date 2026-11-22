@@ -12,9 +12,14 @@ export XDG_MENU_PREFIX=xfce-
 # their own WAYLAND_DISPLAY (syluxium-x11-0) and toolkit choices.
 unset WAYLAND_DISPLAY WAYLAND_SOCKET
 export XDG_SESSION_TYPE=x11 GDK_BACKEND=x11
+# Input method (Chinese, Japanese, Korean, compose): fcitx5, started from
+# autostart (syluxium-input-method); X11 programs reach it through these.
+export XMODIFIERS=@im=fcitx GTK_IM_MODULE=fcitx QT_IM_MODULE=fcitx SDL_IM_MODULE=fcitx
 /usr/local/sbin/syluxium-diag mark "session: Syluxium (Xfce) starting for $USER"
 # On the GPU Test entry: does a program get the GPU? (gpu-clients.txt)
 (sleep 25; /usr/local/sbin/syluxium-diag gpu-clients) &
+# Test rounds (logs stick): does the pre-installed AppImage start? (appimage.txt)
+(sleep 45; /usr/local/sbin/syluxium-diag appimage) &
 # First login: wallpaper per monitor, desktop launchers.
 /usr/local/bin/syluxium-xfce-setup >/dev/null 2>&1 &
 exec startxfce4

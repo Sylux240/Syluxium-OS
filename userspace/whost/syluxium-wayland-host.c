@@ -40,6 +40,7 @@
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
+#include <math.h>
 
 #include <xcb/xcb.h>
 #include <xcb/render.h>
@@ -47,6 +48,8 @@
 #include <xcb/xinput.h>
 #include <xcb/randr.h>
 #include <xkbcommon/xkbcommon.h>
+#include <drm_fourcc.h>
+#include <xf86drm.h>
 #include <linux/input-event-codes.h>
 
 #include <wayland-server-core.h>
@@ -80,6 +83,9 @@
 #include <wlr/types/wlr_xdg_activation_v1.h>
 #include <wlr/types/wlr_xdg_decoration_v1.h>
 #include <wlr/types/wlr_xdg_shell.h>
+#include <wlr/types/wlr_text_input_v3.h>
+#include <wlr/types/wlr_input_method_v2.h>
+#include <wlr/types/wlr_virtual_keyboard_v1.h>
 #include <wlr/util/log.h>
 #include <wlr/xcursor.h>
 
@@ -101,7 +107,7 @@ struct x11_backend_prefix {
 	xcb_connection_t *xcb;
 };
 
-enum view_kind { VIEW_TOPLEVEL, VIEW_POPUP };
+enum view_kind { VIEW_TOPLEVEL, VIEW_POPUP, VIEW_IM /* an input method's candidate window */ };
 
 struct view {
 	struct wl_list link;            /* server.views */
@@ -118,7 +124,8 @@ struct view {
 	struct wlr_scene_output *sout;
 	xcb_window_t frame;             /* ours: what the window manager sees */
 	xcb_window_t child;             /* the backend's, inside the frame */
-	int w, h;                       /* frame/output size */
+	int w, h;                       /* frame/output size (pixels) */
+	double scale;                   /* pixels per Wayland unit (HiDPI) */
 	bool x_mapped;
 	uint32_t size_serial;           /* configure that carries our size */
 	int min_w, min_h, max_w, max_h;
@@ -153,7 +160,7 @@ struct pointer_dev {
 };
 
 /* Clipboard bridge */
-enum { SEL_CLIPBOARD, SEL_PRIMARY, SEL_N };
+enum { SEL_CLIPBOARD, SEL_PRIMARY, SEL_N, SEL_XDND = SEL_N /* drag and drop */ };
 struct x_proxy_source {        /* an X selection offered to Wayland programs */
 	struct wlr_data_source base;
 	int sel;
@@ -202,6 +209,14 @@ static struct {
 	struct wl_list views;
 	struct wl_list pointers;
 	struct view *pending_view;      /* the view whose output is being created */
+	bool test_output;               /* the start-up check's output is being created */
+	struct wlr_output *test_out;
+	bool test_presented;
+	char gpu_desc[160];             /* the rendering path, for the diagnostics */
+	double scale;                   /* the X session's scale (XSETTINGS), pixels per Wayland unit */
+	char scale_desc[96];
+	xcb_window_t xsettings_owner;
+	int cursor_size;
 	struct view *pointer_view;      /* under the pointer */
 	struct view *focused;           /* has the X keyboard focus */
 	const char *socket;
@@ -214,6 +229,7 @@ static struct {
 	struct wl_event_source *x_src, *x_idle;
 	xcb_render_pictformat_t argb32;
 	uint8_t xfixes_event;
+	uint8_t xinput_opcode;          /* our connection's XInput 2 (raw button presses) */
 	xcb_cursor_t cursor_default, cursor_hidden, cursor_current;
 	struct wlr_surface *cursor_surface;
 	int cursor_hx, cursor_hy;
@@ -221,9 +237,9 @@ static struct {
 	struct wl_event_source *focus_check;
 
 	/* clipboard */
-	xcb_atom_t sel_atom[SEL_N];
-	bool sel_we_own[SEL_N];
-	uint32_t owner_gen[SEL_N];
+	xcb_atom_t sel_atom[SEL_N + 1];
+	bool sel_we_own[SEL_N + 1];
+	uint32_t owner_gen[SEL_N + 1];
 	struct wl_list incoming, outgoing;
 	struct wl_event_source *incoming_timer;
 	xcb_timestamp_t last_time;
@@ -260,6 +276,24 @@ static void diag(const char *fmt, ...) {
 		fflush(S.diag);
 	}
 }
+
+static uint32_t now_msec(void) {
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (uint32_t)(ts.tv_sec * 1000 + ts.tv_nsec / 1000000);
+}
+
+/* (drag and drop, further down) */
+static xcb_atom_t XdndAware;
+static struct wlr_data_source *dnd_wayland_source(void);
+static bool w_drag_motion(uint32_t time);
+static bool w_drag_button_release(uint32_t time);
+static void scale_changed(void);
+static void schedule_keymap_reload(void);
+static bool im_take_key(struct wlr_keyboard_key_event *ev);
+static bool im_take_modifiers(void);
+static void im_focus_changed(struct wlr_surface *surface);
+static void read_scale(void);
 
 static xcb_atom_t intern(const char *name) {
 	xcb_intern_atom_reply_t *r = xcb_intern_atom_reply(S.x, xcb_intern_atom(S.x, 0, strlen(name), name), NULL);
@@ -330,9 +364,10 @@ static xcb_cursor_t make_cursor(const uint32_t *argb, int w, int h, int stride_p
 }
 
 static xcb_cursor_t theme_cursor(const char *name) {
-	struct wlr_xcursor *xc = S.xcursor ? wlr_xcursor_manager_get_xcursor(S.xcursor, name, 1) : NULL;
+	float sc = S.scale > 0 ? S.scale : 1;
+	struct wlr_xcursor *xc = S.xcursor ? wlr_xcursor_manager_get_xcursor(S.xcursor, name, sc) : NULL;
 	if (!xc && strcmp(name, "default"))
-		xc = S.xcursor ? wlr_xcursor_manager_get_xcursor(S.xcursor, "default", 1) : NULL;
+		xc = S.xcursor ? wlr_xcursor_manager_get_xcursor(S.xcursor, "default", sc) : NULL;
 	if (!xc || xc->image_count == 0)
 		return XCB_NONE;
 	struct wlr_xcursor_image *im = xc->images[0];
@@ -356,21 +391,32 @@ static void set_current_cursor(xcb_cursor_t c, bool owned) {
 	(void)owned;
 }
 
+/* An X cursor from a surface's picture (a cursor or a drag icon), read
+ * back from its texture: wlroots hands shared-memory buffers back to the
+ * program as soon as they are copied, so the buffer itself is often gone.
+ * XCB_NONE when it can't be read; the hidden cursor when there is none. */
+static xcb_cursor_t surface_cursor(struct wlr_surface *s, int hx, int hy) {
+	if (!s || !wlr_surface_has_buffer(s) || !s->buffer || !s->buffer->texture)
+		return S.cursor_hidden;
+	struct wlr_texture *t = s->buffer->texture;
+	if (t->width == 0 || t->height == 0 || t->width > 256 || t->height > 256)
+		return XCB_NONE;
+	uint32_t *px = calloc((size_t)t->width * t->height, 4);
+	if (!px)
+		return XCB_NONE;
+	xcb_cursor_t c = XCB_NONE;
+	if (wlr_texture_read_pixels(t, &(struct wlr_texture_read_pixels_options){
+			.data = px, .format = DRM_FORMAT_ARGB8888, .stride = t->width * 4 }))
+		c = make_cursor(px, t->width, t->height, t->width, hx, hy);
+	free(px);
+	return c;
+}
+
 static void cursor_surface_update(void) {
 	struct wlr_surface *s = S.cursor_surface;
 	if (!s)
 		return;
-	struct wlr_buffer *buf = s->current.buffer;
-	xcb_cursor_t c = XCB_NONE;
-	if (buf) {
-		void *data; uint32_t fmt; size_t stride;
-		if (wlr_buffer_begin_data_ptr_access(buf, WLR_BUFFER_DATA_PTR_ACCESS_READ, &data, &fmt, &stride)) {
-			c = make_cursor(data, buf->width, buf->height, stride / 4, S.cursor_hx, S.cursor_hy);
-			wlr_buffer_end_data_ptr_access(buf);
-		}
-	} else {
-		c = S.cursor_hidden;
-	}
+	xcb_cursor_t c = surface_cursor(s, S.cursor_hx * s->current.scale, S.cursor_hy * s->current.scale);
 	if (c == XCB_NONE)
 		c = S.cursor_default;
 	set_current_cursor(c, true);
@@ -458,16 +504,26 @@ static struct view *view_by_output_name(const char *name) {
 	return NULL;
 }
 
+/* Pixels (X) from Wayland units of a window, and back (HiDPI). */
+static int px(struct view *v, double units) {
+	return (int)lround(units * v->scale);
+}
+static int units(struct view *v, double pixels) {
+	return (int)lround(pixels / v->scale);
+}
+
 static void view_render_resize(struct view *v, int w, int h) {
 	if (w < 1) w = 1;
 	if (h < 1) h = 1;
-	if (!v->output || (w == v->w && h == v->h))
+	bool rescale = v->output && v->output->scale != (float)v->scale;
+	if (!v->output || (w == v->w && h == v->h && !rescale))
 		return;
 	v->w = w; v->h = h;
-	wlr_scene_rect_set_size(v->bg, w, h);
+	wlr_scene_rect_set_size(v->bg, (int)ceil(w / v->scale), (int)ceil(h / v->scale));
 	struct wlr_output_state st;
 	wlr_output_state_init(&st);
 	wlr_output_state_set_custom_mode(&st, w, h, 0);
+	wlr_output_state_set_scale(&st, v->scale);
 	if (!wlr_scene_output_build_state(v->sout, &st, NULL) || !wlr_output_commit_state(v->output, &st))
 		diag("resizing the window of %s to %dx%d failed", v->toplevel && v->toplevel->app_id ?
 			v->toplevel->app_id : "a popup", w, h);
@@ -486,13 +542,13 @@ static void view_update_size_hints(struct view *v) {
 	uint32_t hints[18] = {0};
 	if (v->min_w > 0 || v->min_h > 0) {
 		hints[0] |= 16;  /* PMinSize */
-		hints[5] = v->min_w > 0 ? v->min_w : 1;
-		hints[6] = v->min_h > 0 ? v->min_h : 1;
+		hints[5] = v->min_w > 0 ? px(v, v->min_w) : 1;
+		hints[6] = v->min_h > 0 ? px(v, v->min_h) : 1;
 	}
 	if (v->max_w > 0 || v->max_h > 0) {
 		hints[0] |= 32;  /* PMaxSize */
-		hints[7] = v->max_w > 0 ? v->max_w : 32767;
-		hints[8] = v->max_h > 0 ? v->max_h : 32767;
+		hints[7] = v->max_w > 0 ? px(v, v->max_w) : 32767;
+		hints[8] = v->max_h > 0 ? px(v, v->max_h) : 32767;
 	}
 	set_prop(v->frame, XCB_ATOM_WM_NORMAL_HINTS, XCB_ATOM_WM_SIZE_HINTS, 32, 18, hints);
 }
@@ -657,9 +713,10 @@ static void popup_unconstrain(struct view *v) {
 	}
 	struct wlr_box geo;
 	wlr_xdg_surface_get_geometry(top ? top->xdg : v->xdg, &geo);
-	box.x = wa.x - ox + geo.x;
-	box.y = wa.y - oy + geo.y;
-	box.width = wa.width; box.height = wa.height;
+	struct view *u = top ? top : v;
+	box.x = units(u, wa.x - ox) + geo.x;
+	box.y = units(u, wa.y - oy) + geo.y;
+	box.width = units(u, wa.width); box.height = units(u, wa.height);
 	wlr_xdg_popup_unconstrain_from_box(v->popup, &box);
 }
 
@@ -671,8 +728,8 @@ static bool popup_screen_pos(struct view *v, int *x, int *y) {
 	struct wlr_box geo;
 	wlr_xdg_surface_get_geometry(top->xdg, &geo);
 	wlr_xdg_popup_get_toplevel_coords(v->popup, 0, 0, &tx, &ty);
-	*x = ox + tx - geo.x;
-	*y = oy + ty - geo.y;
+	*x = ox + px(top, tx - geo.x);
+	*y = oy + px(top, ty - geo.y);
 	return true;
 }
 
@@ -820,9 +877,20 @@ static void output_destroy(struct wl_listener *l, void *data) {
 	}
 }
 
+static void test_present(struct wl_listener *l, void *data) {
+	S.test_presented = true;
+}
+static struct wl_listener l_test_present = { .notify = test_present };
+
 static void server_new_output(struct wl_listener *l, void *data) {
 	struct wlr_output *out = data;
 	struct view *v = S.pending_view;
+	if (S.test_output && wlr_output_is_x11(out)) {
+		S.test_output = false;
+		wlr_output_init_render(out, S.allocator, S.renderer);
+		S.test_out = out;
+		return;
+	}
 	if (!v || !wlr_output_is_x11(out))
 		return;
 	S.pending_view = NULL;
@@ -860,10 +928,13 @@ static bool child_window_ok(xcb_window_t w) {
 	return false;
 }
 
+static bool view_attach_x(struct view *v, int w, int h, bool popup, struct wlr_surface *enter);
+
 static bool view_map_x(struct view *v) {
 	struct wlr_box geo;
 	wlr_xdg_surface_get_geometry(v->xdg, &geo);
-	int w = geo.width > 0 ? geo.width : 1, h = geo.height > 0 ? geo.height : 1;
+	v->scale = S.scale;
+	int w = geo.width > 0 ? px(v, geo.width) : 1, h = geo.height > 0 ? px(v, geo.height) : 1;
 	int x = 0, y = 0;
 	bool popup = v->kind == VIEW_POPUP;
 	if (popup && !popup_screen_pos(v, &x, &y))
@@ -897,6 +968,8 @@ static bool view_map_x(struct view *v) {
 	} else {
 		xcb_atom_t protos[] = { A.WM_DELETE_WINDOW };
 		set_prop(v->frame, A.WM_PROTOCOLS, XCB_ATOM_ATOM, 32, 1, protos);
+		uint32_t xdnd_version = 5;  /* X11 programs can drop on it */
+		set_prop(v->frame, XdndAware, XCB_ATOM_ATOM, 32, 1, &xdnd_version);
 		uint32_t wmhints[9] = { 1 | 2, 1, 1 };  /* InputHint | StateHint, input, NormalState */
 		set_prop(v->frame, XCB_ATOM_WM_HINTS, XCB_ATOM_WM_HINTS, 32, 9, wmhints);
 		v->min_w = -1;
@@ -917,7 +990,12 @@ static bool view_map_x(struct view *v) {
 	}
 	xcb_flush(S.x);
 
-	/* The backend's window, inside ours. */
+	return view_attach_x(v, w, h, popup, v->xdg->surface);
+}
+
+/* The backend's window (a wlroots output) inside our frame window, the
+ * first frame drawn, the frame shown. */
+static bool view_attach_x(struct view *v, int w, int h, bool popup, struct wlr_surface *enter) {
 	S.pending_view = v;
 	struct wlr_output *out = wlr_x11_output_create(S.backend);
 	S.pending_view = NULL;
@@ -958,11 +1036,12 @@ static bool view_map_x(struct view *v) {
 	x_after_blocking();
 
 	v->w = w; v->h = h;
-	wlr_scene_rect_set_size(v->bg, w, h);
+	wlr_scene_rect_set_size(v->bg, (int)ceil(w / v->scale), (int)ceil(h / v->scale));
 	struct wlr_output_state st;
 	wlr_output_state_init(&st);
 	wlr_output_state_set_enabled(&st, true);
 	wlr_output_state_set_custom_mode(&st, w, h, 0);
+	wlr_output_state_set_scale(&st, v->scale);
 	bool ok = wlr_scene_output_build_state(v->sout, &st, NULL) && wlr_output_commit_state(out, &st);
 	wlr_output_state_finish(&st);
 	if (!ok)
@@ -970,8 +1049,8 @@ static bool view_map_x(struct view *v) {
 	xcb_map_window(S.x, v->frame);
 	xcb_flush(S.x);
 	v->x_mapped = true;
-	if (S.screen_output)
-		wlr_surface_send_enter(v->xdg->surface, S.screen_output);
+	if (S.screen_output && enter)
+		wlr_surface_send_enter(enter, S.screen_output);
 	return true;
 }
 
@@ -980,7 +1059,7 @@ static void view_unmap_x(struct view *v) {
 		S.pointer_view = NULL;
 	if (S.focused == v) {
 		S.focused = NULL;
-		if (S.seat->keyboard_state.focused_surface == v->xdg->surface)
+		if (v->xdg && S.seat->keyboard_state.focused_surface == v->xdg->surface)
 			wlr_seat_keyboard_notify_clear_focus(S.seat);
 	}
 	if (S.seat->pointer_state.focused_surface &&
@@ -1025,8 +1104,11 @@ static void handle_map(struct wl_listener *l, void *data) {
 	if (v->kind == VIEW_TOPLEVEL) {
 		S.hosted++;
 		char *id = view_app_id(v);
-		diag("hosted: %s (pid %d) \"%s\" %dx%d, %s frame", id, (int)view_pid(v),
-			v->toplevel->title ? v->toplevel->title : "", v->w, v->h, v->csd ? "its own" : "xfwm4");
+		struct wlr_dmabuf_attributes dmabuf;
+		bool gpu = v->xdg->surface->buffer && wlr_buffer_get_dmabuf(&v->xdg->surface->buffer->base, &dmabuf);
+		diag("hosted: %s (pid %d) \"%s\" %dx%d, %s frame, draws into %s", id, (int)view_pid(v),
+			v->toplevel->title ? v->toplevel->title : "", v->w, v->h, v->csd ? "its own" : "xfwm4",
+			gpu ? "dma-bufs (GPU)" : "shared memory");
 		free(id);
 	}
 }
@@ -1047,7 +1129,7 @@ static void handle_commit(struct wl_listener *l, void *data) {
 			if (xdg->client->shell->version >= 4) {
 				struct wlr_box wa;
 				work_area(&wa);
-				wlr_xdg_toplevel_set_bounds(t, wa.width, wa.height);
+				wlr_xdg_toplevel_set_bounds(t, (int)(wa.width / S.scale), (int)(wa.height / S.scale));
 			}
 			if (xdg->client->shell->version >= 5)
 				wlr_xdg_toplevel_set_wm_capabilities(t, WLR_XDG_TOPLEVEL_WM_CAPABILITIES_WINDOW_MENU |
@@ -1070,17 +1152,19 @@ static void handle_commit(struct wl_listener *l, void *data) {
 		view_update_size_hints(v);
 		/* The program's own size, once it has seen our latest one. */
 		int32_t d = (int32_t)(xdg->current.configure_serial - v->size_serial);
-		if ((v->size_serial == 0 || d >= 0) && (geo.width != v->w || geo.height != v->h) &&
-		    geo.width > 0 && geo.height > 0) {
-			uint32_t vals[2] = { geo.width, geo.height };
+		int pw = px(v, geo.width), ph = px(v, geo.height);
+		if ((v->size_serial == 0 || d >= 0) && (pw != v->w || ph != v->h) && geo.width > 0 && geo.height > 0 &&
+		    (units(v, v->w) != geo.width || units(v, v->h) != geo.height)) {
+			uint32_t vals[2] = { pw, ph };
 			xcb_configure_window(S.x, v->frame, XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT, vals);
 			xcb_flush(S.x);
-			view_render_resize(v, geo.width, geo.height);
+			view_render_resize(v, pw, ph);
 		}
 	} else {
 		int x, y;
 		if (popup_screen_pos(v, &x, &y)) {
-			uint32_t vals[4] = { x, y, geo.width > 0 ? geo.width : 1, geo.height > 0 ? geo.height : 1 };
+			v->scale = root_view(v) ? root_view(v)->scale : S.scale;
+			uint32_t vals[4] = { x, y, geo.width > 0 ? px(v, geo.width) : 1, geo.height > 0 ? px(v, geo.height) : 1 };
 			xcb_configure_window(S.x, v->frame, XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y |
 				XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT, vals);
 			xcb_flush(S.x);
@@ -1230,6 +1314,7 @@ static struct view *view_create(struct wlr_xdg_surface *xdg) {
 	struct view *v = calloc(1, sizeof(*v));
 	v->xdg = xdg;
 	v->icon_fd = -1;
+	v->scale = 1;
 	xdg->data = v;
 	v->scene = wlr_scene_create();
 	const float bg[4] = { 0.114f, 0.145f, 0.322f, 1.0f };
@@ -1352,13 +1437,19 @@ static void request_activate(struct wl_listener *l, void *data) {
 /* ------------------------------------------------------------------------
  * Keyboard focus follows the X focus (xfwm4 decides).
  */
+/* Close open menus: each menu whose parent is a window (its submenus go
+ * with it). The list changes with every one closed, so start over. */
 static void dismiss_popups(void) {
-	struct view *v, *tmp;
-	wl_list_for_each_safe(v, tmp, &S.views, link)
-		if (v->kind == VIEW_POPUP && v->popup->seat) {
-			wlr_xdg_popup_destroy(v->popup);
-			return;  /* the list changed; the rest go with their parent */
-		}
+	for (bool again = true; again;) {
+		again = false;
+		struct view *v;
+		wl_list_for_each(v, &S.views, link)
+			if (v->kind == VIEW_POPUP && v->popup->seat && !wlr_xdg_popup_try_from_wlr_surface(v->popup->parent)) {
+				wlr_xdg_popup_destroy(v->popup);
+				again = true;
+				break;
+			}
+	}
 }
 
 static void focus_check(void *data) {
@@ -1388,6 +1479,40 @@ static void focus_check(void *data) {
 	} else {
 		wlr_seat_keyboard_notify_clear_focus(S.seat);
 	}
+	im_focus_changed(S.seat->keyboard_state.focused_surface);
+}
+
+/* The topmost of our windows under the pointer, if any. */
+static struct view *view_under_pointer(int16_t *root_x, int16_t *root_y) {
+	struct view *found = NULL;
+	xcb_window_t w = S.root;
+	for (int depth = 0; depth < 8 && w; depth++) {
+		xcb_query_pointer_reply_t *p = xcb_query_pointer_reply(S.x, xcb_query_pointer(S.x, w), NULL);
+		if (!p)
+			break;
+		if (depth == 0 && root_x) {
+			*root_x = p->root_x;
+			*root_y = p->root_y;
+		}
+		w = p->child;
+		free(p);
+		struct view *v = view_by_window(w);
+		if (v) {
+			found = v;
+			break;
+		}
+	}
+	x_after_blocking();
+	return found;
+}
+
+static void raw_button_press(void) {
+	bool open = false;
+	struct view *v;
+	wl_list_for_each(v, &S.views, link)
+		open |= v->kind == VIEW_POPUP && v->popup->seat != NULL;
+	if (open && !view_under_pointer(NULL, NULL))
+		dismiss_popups();
 }
 
 static void schedule_focus_check(void) {
@@ -1405,10 +1530,14 @@ static void keyboard_key(struct wl_listener *l, void *data) {
 		wl_event_source_remove(S.focus_check);
 		focus_check(NULL);
 	}
+	if (im_take_key(ev))
+		return;
 	wlr_seat_set_keyboard(S.seat, S.keyboard);
 	wlr_seat_keyboard_notify_key(S.seat, ev->time_msec, ev->keycode, ev->state);
 }
 static void keyboard_modifiers(struct wl_listener *l, void *data) {
+	if (im_take_modifiers())
+		return;
 	wlr_seat_set_keyboard(S.seat, S.keyboard);
 	wlr_seat_keyboard_notify_modifiers(S.seat, &S.keyboard->modifiers);
 }
@@ -1425,12 +1554,37 @@ static struct xkb_keymap *x_keymap(struct xkb_context *ctx) {
 	int32_t (*core_id)(xcb_connection_t *) = dlsym(lib, "xkb_x11_get_core_keyboard_device_id");
 	struct xkb_keymap *(*from_dev)(struct xkb_context *, xcb_connection_t *, int32_t, int) =
 		dlsym(lib, "xkb_x11_keymap_new_from_device");
-	if (!setup || !core_id || !from_dev || !setup(S.x, 1, 0, 0, NULL, NULL, NULL, NULL))
-		return NULL;
-	int32_t id = core_id(S.x);
-	struct xkb_keymap *km = id >= 0 ? from_dev(ctx, S.x, id, 0) : NULL;
-	x_after_blocking();
+	/* (on a connection of its own: a connection that uses XKB no longer gets
+	 * the core MappingNotify that tells us the keymap changed) */
+	xcb_connection_t *c = xcb_connect(NULL, NULL);
+	struct xkb_keymap *km = NULL;
+	if (!xcb_connection_has_error(c) && setup && core_id && from_dev && setup(c, 1, 0, 0, NULL, NULL, NULL, NULL)) {
+		int32_t id = core_id(c);
+		km = id >= 0 ? from_dev(ctx, c, id, 0) : NULL;
+	}
+	xcb_disconnect(c);
 	return km;
+}
+
+/* The X keyboard mapping changed (Xfce's keyboard settings, setxkbmap, a
+ * compose key option): the same keymap for Wayland programs and the input
+ * method. */
+static struct wl_event_source *keymap_idle;
+static void reload_keymap(void *data) {
+	keymap_idle = NULL;
+	if (!S.keyboard)
+		return;
+	struct xkb_context *ctx = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
+	struct xkb_keymap *km = x_keymap(ctx);
+	if (km) {
+		wlr_keyboard_set_keymap(S.keyboard, km);
+		xkb_keymap_unref(km);
+	}
+	xkb_context_unref(ctx);
+}
+static void schedule_keymap_reload(void) {
+	if (!keymap_idle)
+		keymap_idle = wl_event_loop_add_idle(S.loop, reload_keymap, NULL);
 }
 
 static void setup_keyboard(struct wlr_keyboard *kb) {
@@ -1455,6 +1609,8 @@ static void setup_keyboard(struct wlr_keyboard *kb) {
 }
 
 static void pointer_motion(struct pointer_dev *p, uint32_t time, double nx, double ny) {
+	if (w_drag_motion(time))
+		return;  /* a Wayland program's drag: maybe over X11 windows */
 	struct view *v = view_by_output_name(p->pointer->output_name);
 	if (!v || !v->output)
 		return;
@@ -1462,7 +1618,7 @@ static void pointer_motion(struct pointer_dev *p, uint32_t time, double nx, doub
 		S.pointer_view = v;
 		apply_cursor(v);
 	}
-	double lx = nx * v->output->width, ly = ny * v->output->height, sx, sy;
+	double lx = nx * v->output->width / v->scale, ly = ny * v->output->height / v->scale, sx, sy;
 	struct wlr_scene_node *n = wlr_scene_node_at(&v->scene->tree.node, lx, ly, &sx, &sy);
 	struct wlr_surface *surface = NULL;
 	if (n && n->type == WLR_SCENE_NODE_BUFFER) {
@@ -1485,6 +1641,8 @@ static void ptr_motion_abs(struct wl_listener *l, void *data) {
 }
 static void ptr_button(struct wl_listener *l, void *data) {
 	struct wlr_pointer_button_event *ev = data;
+	if (ev->state == WL_POINTER_BUTTON_STATE_RELEASED && w_drag_button_release(ev->time_msec))
+		return;  /* dropped on an X11 window: finished when it has the data */
 	wlr_seat_pointer_notify_button(S.seat, ev->time_msec, ev->button, ev->state);
 }
 static void ptr_axis(struct wl_listener *l, void *data) {
@@ -1532,7 +1690,8 @@ static void server_new_input(struct wl_listener *l, void *data) {
  * Clipboard and primary selection, X <-> Wayland.
  */
 static int sel_index(xcb_atom_t a) {
-	return a == A.CLIPBOARD ? SEL_CLIPBOARD : a == XCB_ATOM_PRIMARY ? SEL_PRIMARY : -1;
+	return a == A.CLIPBOARD ? SEL_CLIPBOARD : a == XCB_ATOM_PRIMARY ? SEL_PRIMARY :
+		a && a == S.sel_atom[SEL_XDND] ? SEL_XDND : -1;
 }
 
 static int writer_ready(int fd, uint32_t mask, void *data) {
@@ -1657,6 +1816,8 @@ static void add_mime(struct wl_array *arr, const char *m) {
 		*p = strdup(m);
 }
 
+static void fill_mimes(struct wl_array *mimes, const xcb_atom_t *targets, int n);
+
 /* A new X owner: offer what it has (its TARGETS) to Wayland programs. */
 static void offer_x_selection(int sel, xcb_atom_t *targets, int n) {
 	struct wl_array *mimes;
@@ -1673,6 +1834,15 @@ static void offer_x_selection(int sel, xcb_atom_t *targets, int n) {
 		wlr_primary_selection_source_init(&ps->base, &proxy_primary_impl);
 		mimes = &ps->base.mime_types;
 	}
+	fill_mimes(mimes, targets, n);
+	if (ds)
+		wlr_seat_set_selection(S.seat, &ds->base, wl_display_next_serial(S.display));
+	else
+		wlr_seat_set_primary_selection(S.seat, &ps->base, wl_display_next_serial(S.display));
+}
+
+/* Wayland MIME types for X selection targets (TARGETS, XdndTypeList). */
+static void fill_mimes(struct wl_array *mimes, const xcb_atom_t *targets, int n) {
 	bool text = n == 0;
 	for (int i = 0; i < n; i++) {
 		xcb_atom_t t = targets[i];
@@ -1694,10 +1864,6 @@ static void offer_x_selection(int sel, xcb_atom_t *targets, int n) {
 		add_mime(mimes, "STRING");
 		add_mime(mimes, "TEXT");
 	}
-	if (ds)
-		wlr_seat_set_selection(S.seat, &ds->base, wl_display_next_serial(S.display));
-	else
-		wlr_seat_set_primary_selection(S.seat, &ps->base, wl_display_next_serial(S.display));
 }
 
 static void handle_selection_notify(xcb_selection_notify_event_t *ev) {
@@ -1828,6 +1994,8 @@ static void seat_request_set_primary(struct wl_listener *l, void *data) {
 }
 
 static struct wl_array *wayland_mimes(int sel) {
+	if (sel == SEL_XDND)
+		return dnd_wayland_source() ? &dnd_wayland_source()->mime_types : NULL;
 	if (sel == SEL_CLIPBOARD)
 		return S.seat->selection_source ? &S.seat->selection_source->mime_types : NULL;
 	return S.seat->primary_selection_source ? &S.seat->primary_selection_source->mime_types : NULL;
@@ -1951,7 +2119,7 @@ static void handle_selection_request(xcb_selection_request_event_t *req) {
 	int sel = sel_index(req->selection);
 	struct wl_array *mimes = sel >= 0 ? wayland_mimes(sel) : NULL;
 	xcb_atom_t property = req->property ? req->property : req->target;
-	if (sel < 0 || !S.sel_we_own[sel] || !mimes) {
+	if (sel < 0 || (!S.sel_we_own[sel] && sel != SEL_XDND) || !mimes) {
 		selection_reply(req, XCB_ATOM_NONE);
 		return;
 	}
@@ -2013,10 +2181,968 @@ static void handle_selection_request(xcb_selection_request_event_t *req) {
 	o->src = wl_event_loop_add_fd(S.loop, p[0], WL_EVENT_READABLE, outgoing_readable, o);
 	o->timer = wl_event_loop_add_timer(S.loop, outgoing_timeout, o);
 	wl_event_source_timer_update(o->timer, 5000);
-	if (sel == SEL_CLIPBOARD)
+	if (sel == SEL_XDND)
+		wlr_data_source_send(dnd_wayland_source(), mime, p[1]);
+	else if (sel == SEL_CLIPBOARD)
 		wlr_data_source_send(S.seat->selection_source, mime, p[1]);
 	else
 		wlr_primary_selection_source_send(S.seat->primary_selection_source, mime, p[1]);
+}
+
+/* ------------------------------------------------------------------------
+ * Input methods (Chinese, Japanese, Korean, compose): Wayland programs ask
+ * for text input (text-input-v3), an input method (fcitx5, connected to the
+ * host by syluxium-wayland-run through its D-Bus controller) answers
+ * through input-method-v2; the host relays between them, as sway does.
+ * The input method's candidate list (an input popup surface) becomes an
+ * override-redirect X window under the text cursor.
+ */
+struct text_input {
+	struct wl_list link;
+	struct wlr_text_input_v3 *ti;
+	struct wl_listener enable, commit, disable, destroy;
+};
+
+struct im_popup {
+	struct wl_list link;
+	struct wlr_input_popup_surface_v2 *popup;
+	struct view *view;
+	struct wl_listener commit, destroy;
+};
+
+static struct {
+	struct wlr_text_input_manager_v3 *ti_mgr;
+	struct wlr_input_method_manager_v2 *im_mgr;
+	struct wl_list text_inputs;
+	struct wl_list popups;
+	struct wlr_input_method_v2 *im;
+	struct wlr_input_method_keyboard_grab_v2 *grab;
+	struct wl_listener im_commit, im_new_popup, im_grab, im_destroy, grab_destroy;
+	bool logged_use;
+} IM;
+
+/* The enabled text input of the window with the keyboard focus. */
+static struct text_input *im_focused_text_input(void) {
+	struct text_input *t;
+	wl_list_for_each(t, &IM.text_inputs, link)
+		if (t->ti->current_enabled && t->ti->focused_surface &&
+		    t->ti->focused_surface == S.seat->keyboard_state.focused_surface)
+			return t;
+	return NULL;
+}
+
+static void im_send_state(struct text_input *t) {
+	struct wlr_input_method_v2 *im = IM.im;
+	struct wlr_text_input_v3 *ti = t->ti;
+	if (ti->active_features & WLR_TEXT_INPUT_V3_FEATURE_SURROUNDING_TEXT)
+		wlr_input_method_v2_send_surrounding_text(im, ti->current.surrounding.text ? ti->current.surrounding.text : "",
+			ti->current.surrounding.cursor, ti->current.surrounding.anchor);
+	wlr_input_method_v2_send_text_change_cause(im, ti->current.text_change_cause);
+	if (ti->active_features & WLR_TEXT_INPUT_V3_FEATURE_CONTENT_TYPE)
+		wlr_input_method_v2_send_content_type(im, ti->current.content_type.hint, ti->current.content_type.purpose);
+	wlr_input_method_v2_send_done(im);
+}
+
+static void im_place_popups(void);
+
+static void ti_enable(struct wl_listener *l, void *data) {
+	struct text_input *t = wl_container_of(l, t, enable);
+	if (!IM.im)
+		return;
+	wlr_input_method_v2_send_activate(IM.im);
+	im_send_state(t);
+	if (!IM.logged_use) {
+		IM.logged_use = true;
+		diag("input method: in use by a Wayland program");
+	}
+}
+static void ti_commit(struct wl_listener *l, void *data) {
+	struct text_input *t = wl_container_of(l, t, commit);
+	if (!IM.im || !t->ti->current_enabled)
+		return;
+	im_send_state(t);
+	im_place_popups();
+}
+static void ti_disable(struct wl_listener *l, void *data) {
+	if (!IM.im)
+		return;
+	wlr_input_method_v2_send_deactivate(IM.im);
+	wlr_input_method_v2_send_done(IM.im);
+}
+static void ti_destroy(struct wl_listener *l, void *data) {
+	struct text_input *t = wl_container_of(l, t, destroy);
+	wl_list_remove(&t->enable.link);
+	wl_list_remove(&t->commit.link);
+	wl_list_remove(&t->disable.link);
+	wl_list_remove(&t->destroy.link);
+	wl_list_remove(&t->link);
+	free(t);
+}
+
+/* Keyboard focus moved: the text inputs of the window's program learn it. */
+static void im_focus_changed(struct wlr_surface *surface) {
+	struct text_input *t;
+	wl_list_for_each(t, &IM.text_inputs, link) {
+		if (t->ti->focused_surface && t->ti->focused_surface != surface) {
+			if (t->ti->current_enabled && IM.im) {
+				wlr_input_method_v2_send_deactivate(IM.im);
+				wlr_input_method_v2_send_done(IM.im);
+			}
+			wlr_text_input_v3_send_leave(t->ti);
+		}
+		if (surface && !t->ti->focused_surface &&
+		    wl_resource_get_client(t->ti->resource) == wl_resource_get_client(surface->resource))
+			wlr_text_input_v3_send_enter(t->ti, surface);
+	}
+}
+
+static void new_text_input(struct wl_listener *l, void *data) {
+	struct text_input *t = calloc(1, sizeof(*t));
+	t->ti = data;
+	t->enable.notify = ti_enable;
+	wl_signal_add(&t->ti->events.enable, &t->enable);
+	t->commit.notify = ti_commit;
+	wl_signal_add(&t->ti->events.commit, &t->commit);
+	t->disable.notify = ti_disable;
+	wl_signal_add(&t->ti->events.disable, &t->disable);
+	t->destroy.notify = ti_destroy;
+	wl_signal_add(&t->ti->events.destroy, &t->destroy);
+	wl_list_insert(&IM.text_inputs, &t->link);
+	struct wlr_surface *focus = S.seat->keyboard_state.focused_surface;
+	if (focus && wl_resource_get_client(t->ti->resource) == wl_resource_get_client(focus->resource))
+		wlr_text_input_v3_send_enter(t->ti, focus);
+}
+
+/* The input method composed something: to the program. */
+static void im_commit(struct wl_listener *l, void *data) {
+	struct text_input *t = im_focused_text_input();
+	struct wlr_input_method_v2 *im = IM.im;
+	if (!t || !im)
+		return;
+	if (im->current.preedit.text)
+		wlr_text_input_v3_send_preedit_string(t->ti, im->current.preedit.text, im->current.preedit.cursor_begin,
+			im->current.preedit.cursor_end);
+	if (im->current.commit_text)
+		wlr_text_input_v3_send_commit_string(t->ti, im->current.commit_text);
+	if (im->current.delete.before_length || im->current.delete.after_length)
+		wlr_text_input_v3_send_delete_surrounding_text(t->ti, im->current.delete.before_length,
+			im->current.delete.after_length);
+	wlr_text_input_v3_send_done(t->ti);
+}
+
+static void grab_destroyed(struct wl_listener *l, void *data) {
+	wl_list_remove(&IM.grab_destroy.link);
+	IM.grab = NULL;
+	if (S.keyboard)  /* the program gets the real modifiers back */
+		wlr_seat_keyboard_notify_modifiers(S.seat, &S.keyboard->modifiers);
+}
+
+static void im_grab_keyboard(struct wl_listener *l, void *data) {
+	IM.grab = data;
+	if (S.keyboard)
+		wlr_input_method_keyboard_grab_v2_set_keyboard(IM.grab, S.keyboard);
+	IM.grab_destroy.notify = grab_destroyed;
+	wl_signal_add(&IM.grab->events.destroy, &IM.grab_destroy);
+}
+
+/* -- the candidate window -- */
+
+static void im_popup_position(struct im_popup *p, int *x, int *y, int w, int h) {
+	struct text_input *t = im_focused_text_input();
+	*x = 0; *y = 0;
+	struct view *v = t ? root_view(view_from_surface(wlr_surface_get_root_surface(t->ti->focused_surface))) : NULL;
+	int ox, oy;
+	if (!v || !view_root_origin(v, &ox, &oy))
+		return;
+	struct wlr_box geo = {0}, r = t->ti->current.cursor_rectangle;
+	wlr_xdg_surface_get_geometry(v->xdg, &geo);
+	*x = ox + px(v, r.x - geo.x);
+	*y = oy + px(v, r.y + r.height - geo.y);
+	if (*x + w > S.screen->width_in_pixels)
+		*x = S.screen->width_in_pixels - w;
+	if (*y + h > S.screen->height_in_pixels)  /* no room below the text: above it */
+		*y = oy + px(v, r.y - geo.y) - h;
+	if (*x < 0) *x = 0;
+	if (*y < 0) *y = 0;
+	wlr_input_popup_surface_v2_send_text_input_rectangle(p->popup, &r);
+}
+
+static void im_popup_update(struct im_popup *p) {
+	struct wlr_surface *s = p->popup->surface;
+	struct view *v = p->view;
+	if (getenv("SYLUXIUM_WAYLAND_HOST_DEBUG"))
+		diag("debug: candidate window: buffer %d, text input %p, size %dx%d", wlr_surface_has_buffer(s),
+			(void *)im_focused_text_input(), s->current.width, s->current.height);
+	if (!wlr_surface_has_buffer(s) || !im_focused_text_input()) {
+		if (v->frame)
+			view_unmap_x(v);
+		return;
+	}
+	v->scale = S.scale;
+	int w = px(v, s->current.width), h = px(v, s->current.height), x, y;
+	if (w < 1 || h < 1)
+		return;
+	im_popup_position(p, &x, &y, w, h);
+	if (!v->frame) {
+		v->frame = xcb_generate_id(S.x);
+		uint32_t mask = XCB_CW_BACK_PIXEL | XCB_CW_OVERRIDE_REDIRECT;
+		uint32_t vals[] = { 0x1d2552, 1 };
+		xcb_create_window(S.x, XCB_COPY_FROM_PARENT, v->frame, S.root, x, y, w, h, 0,
+			XCB_WINDOW_CLASS_INPUT_OUTPUT, S.screen->root_visual, mask, vals);
+		uint32_t type = A._NET_WM_WINDOW_TYPE_POPUP_MENU;
+		set_prop(v->frame, A._NET_WM_WINDOW_TYPE, XCB_ATOM_ATOM, 32, 1, &type);
+		set_text(v->frame, A._NET_WM_NAME, A.UTF8_STRING, "Input method");
+		set_prop(v->frame, XCB_ATOM_WM_CLASS, XCB_ATOM_STRING, 8, 12, "fcitx5\0Fcitx");
+		if (!view_attach_x(v, w, h, true, s))
+			v->frame = 0;
+		return;
+	}
+	uint32_t vals[4] = { x, y, w, h };
+	xcb_configure_window(S.x, v->frame, XCB_CONFIG_WINDOW_X | XCB_CONFIG_WINDOW_Y | XCB_CONFIG_WINDOW_WIDTH |
+		XCB_CONFIG_WINDOW_HEIGHT, vals);
+	xcb_flush(S.x);
+	view_render_resize(v, w, h);
+}
+
+static void im_place_popups(void) {
+	struct im_popup *p;
+	wl_list_for_each(p, &IM.popups, link)
+		im_popup_update(p);
+}
+
+static void im_popup_commit(struct wl_listener *l, void *data) {
+	struct im_popup *p = wl_container_of(l, p, commit);
+	im_popup_update(p);
+}
+
+static void im_popup_destroy(struct wl_listener *l, void *data) {
+	struct im_popup *p = wl_container_of(l, p, destroy);
+	if (p->view->frame)
+		view_unmap_x(p->view);
+	wl_list_remove(&p->view->link);
+	wlr_scene_node_destroy(&p->view->scene->tree.node);
+	free(p->view);
+	wl_list_remove(&p->commit.link);
+	wl_list_remove(&p->destroy.link);
+	wl_list_remove(&p->link);
+	free(p);
+}
+
+static void im_new_popup(struct wl_listener *l, void *data) {
+	struct im_popup *p = calloc(1, sizeof(*p));
+	p->popup = data;
+	struct view *v = calloc(1, sizeof(*v));
+	v->kind = VIEW_IM;
+	v->scale = S.scale;
+	v->icon_fd = -1;
+	v->scene = wlr_scene_create();
+	const float bg[4] = { 0.114f, 0.145f, 0.322f, 1.0f };
+	v->bg = wlr_scene_rect_create(&v->scene->tree, 1, 1, bg);
+	v->surface_tree = wlr_scene_subsurface_tree_create(&v->scene->tree, p->popup->surface);
+	wl_list_insert(&S.views, &v->link);
+	p->view = v;
+	p->commit.notify = im_popup_commit;
+	wl_signal_add(&p->popup->surface->events.commit, &p->commit);
+	p->destroy.notify = im_popup_destroy;
+	wl_signal_add(&p->popup->events.destroy, &p->destroy);
+	wl_list_insert(&IM.popups, &p->link);
+	im_popup_update(p);
+}
+
+static void im_destroyed(struct wl_listener *l, void *data) {
+	wl_list_remove(&IM.im_commit.link);
+	wl_list_remove(&IM.im_new_popup.link);
+	wl_list_remove(&IM.im_grab.link);
+	wl_list_remove(&IM.im_destroy.link);
+	IM.im = NULL;
+	diag("input method: disconnected");
+}
+
+static void new_input_method(struct wl_listener *l, void *data) {
+	struct wlr_input_method_v2 *im = data;
+	if (IM.im) {
+		wlr_input_method_v2_send_unavailable(im);
+		return;
+	}
+	IM.im = im;
+	IM.im_commit.notify = im_commit;
+	wl_signal_add(&im->events.commit, &IM.im_commit);
+	IM.im_new_popup.notify = im_new_popup;
+	wl_signal_add(&im->events.new_popup_surface, &IM.im_new_popup);
+	IM.im_grab.notify = im_grab_keyboard;
+	wl_signal_add(&im->events.grab_keyboard, &IM.im_grab);
+	IM.im_destroy.notify = im_destroyed;
+	wl_signal_add(&im->events.destroy, &IM.im_destroy);
+	pid_t pid = 0; uid_t uid; gid_t gid;
+	wl_client_get_credentials(wl_resource_get_client(im->resource), &pid, &uid, &gid);
+	char comm[64] = "?", path[64];
+	snprintf(path, sizeof(path), "/proc/%d/comm", (int)pid);
+	FILE *f = fopen(path, "r");
+	if (f) {
+		if (fgets(comm, sizeof(comm), f))
+			comm[strcspn(comm, "\n")] = 0;
+		fclose(f);
+	}
+	diag("input method: %s (pid %d) connected", comm, (int)pid);
+	struct text_input *t = im_focused_text_input();
+	if (t) {
+		wlr_input_method_v2_send_activate(im);
+		im_send_state(t);
+	}
+}
+
+/* Virtual keyboards (the input method passing on keys it doesn't use):
+ * straight to the program with the focus. */
+struct virtual_kb {
+	struct wlr_virtual_keyboard_v1 *vk;
+	struct wl_listener key, modifiers, destroy;
+};
+static void vk_key(struct wl_listener *l, void *data) {
+	struct virtual_kb *k = wl_container_of(l, k, key);
+	struct wlr_keyboard_key_event *ev = data;
+	wlr_seat_set_keyboard(S.seat, &k->vk->keyboard);
+	wlr_seat_keyboard_notify_key(S.seat, ev->time_msec, ev->keycode, ev->state);
+}
+static void vk_modifiers(struct wl_listener *l, void *data) {
+	struct virtual_kb *k = wl_container_of(l, k, modifiers);
+	wlr_seat_set_keyboard(S.seat, &k->vk->keyboard);
+	wlr_seat_keyboard_notify_modifiers(S.seat, &k->vk->keyboard.modifiers);
+}
+static void vk_destroy(struct wl_listener *l, void *data) {
+	struct virtual_kb *k = wl_container_of(l, k, destroy);
+	wl_list_remove(&k->key.link);
+	wl_list_remove(&k->modifiers.link);
+	wl_list_remove(&k->destroy.link);
+	if (S.keyboard)
+		wlr_seat_set_keyboard(S.seat, S.keyboard);
+	free(k);
+}
+static void new_virtual_keyboard(struct wl_listener *l, void *data) {
+	struct virtual_kb *k = calloc(1, sizeof(*k));
+	k->vk = data;
+	k->key.notify = vk_key;
+	wl_signal_add(&k->vk->keyboard.events.key, &k->key);
+	k->modifiers.notify = vk_modifiers;
+	wl_signal_add(&k->vk->keyboard.events.modifiers, &k->modifiers);
+	k->destroy.notify = vk_destroy;
+	wl_signal_add(&k->vk->keyboard.base.events.destroy, &k->destroy);
+}
+
+static struct wl_listener l_new_ti = { .notify = new_text_input }, l_new_im = { .notify = new_input_method },
+	l_new_vk = { .notify = new_virtual_keyboard };
+
+static void im_setup(void) {
+	wl_list_init(&IM.text_inputs);
+	wl_list_init(&IM.popups);
+	IM.ti_mgr = wlr_text_input_manager_v3_create(S.display);
+	wl_signal_add(&IM.ti_mgr->events.text_input, &l_new_ti);
+	IM.im_mgr = wlr_input_method_manager_v2_create(S.display);
+	wl_signal_add(&IM.im_mgr->events.input_method, &l_new_im);
+	struct wlr_virtual_keyboard_manager_v1 *vkm = wlr_virtual_keyboard_manager_v1_create(S.display);
+	wl_signal_add(&vkm->events.new_virtual_keyboard, &l_new_vk);
+}
+
+/* The input method of the X session (fcitx5) is asked to connect to us too. */
+static void im_invite(void) {
+	pid_t pid = fork();
+	if (pid == 0) {
+		int null = open("/dev/null", O_RDWR);
+		if (null >= 0) {
+			dup2(null, 1);
+			dup2(null, 2);
+		}
+		char arg[128];
+		snprintf(arg, sizeof(arg), "string:%s", S.socket);
+		execlp("dbus-send", "dbus-send", "--session", "--type=method_call", "--dest=org.fcitx.Fcitx5", "/controller",
+			"org.fcitx.Fcitx.Controller1.OpenWaylandConnection", arg, (char *)NULL);
+		_exit(127);
+	}
+}
+
+/* Keys go to the input method while it has the keyboard (it passes the
+ * rest back through its virtual keyboard). */
+static bool im_take_key(struct wlr_keyboard_key_event *ev) {
+	if (!IM.grab || !im_focused_text_input())
+		return false;
+	wlr_input_method_keyboard_grab_v2_set_keyboard(IM.grab, S.keyboard);
+	wlr_input_method_keyboard_grab_v2_send_key(IM.grab, ev->time_msec, ev->keycode, ev->state);
+	return true;
+}
+static bool im_take_modifiers(void) {
+	if (!IM.grab || !im_focused_text_input())
+		return false;
+	wlr_input_method_keyboard_grab_v2_send_modifiers(IM.grab, &S.keyboard->modifiers);
+	return true;
+}
+
+/* ------------------------------------------------------------------------
+ * Drag and drop between Wayland programs and X11 programs (XDND, version 5).
+ *
+ * X11 -> Wayland: our frame windows are XDND targets. The X program's drag
+ * becomes a Wayland drag (wlr_drag) of an X-backed data source, started on
+ * the Wayland program under the pointer and moved by XdndPosition; the drop
+ * fetches the data from XdndSelection.
+ *
+ * Wayland -> X11: while a Wayland program drags and the pointer is outside
+ * our windows, we are the XDND source: the window under the pointer gets
+ * XdndEnter/Position, the drop is held back from wlroots until the X
+ * program has fetched the data (XdndFinished), and the drag icon is the
+ * pointer's picture over the whole screen.
+ */
+struct x_dnd_source {
+	struct wlr_data_source base;
+};
+
+static struct {
+	/* X11 -> Wayland */
+	xcb_window_t in_source;          /* the X program's XDND source window */
+	struct x_dnd_source *in_src;
+	struct wlr_drag *in_drag;
+	struct wl_listener in_drag_destroy;
+	bool in_dropped, in_finished;
+	xcb_timestamp_t in_time;
+	struct wl_event_source *in_timer;
+
+	/* Wayland -> X11 */
+	struct wlr_drag *w_drag;
+	struct wl_listener w_drag_destroy, w_icon_commit;
+	struct view *w_origin;           /* the window the drag started in (its grab) */
+	xcb_window_t w_target;           /* the X window the pointer is over, if any */
+	bool w_target_accepts, w_dropping, w_grabbed;
+	xcb_atom_t w_target_action;
+	int w_icon_x, w_icon_y;          /* the icon's offset from the pointer */
+	xcb_cursor_t w_icon_cursor;
+	struct wl_event_source *w_timer;
+	uint32_t w_serial;
+	int16_t w_root_x, w_root_y;
+	xcb_input_device_id_t pointer_id; /* the master pointer (XInput 2) */
+} D;
+
+static xcb_atom_t XdndEnter, XdndPosition, XdndStatus, XdndLeave, XdndDrop, XdndFinished,
+	XdndSelection, XdndTypeList, XdndActionCopy, XdndActionMove, XdndActionLink, XdndActionAsk;
+
+static void dnd_atoms(void) {
+#define DATOM(n) n = intern(#n)
+	DATOM(XdndAware); DATOM(XdndEnter); DATOM(XdndPosition); DATOM(XdndStatus); DATOM(XdndLeave);
+	DATOM(XdndDrop); DATOM(XdndFinished); DATOM(XdndSelection); DATOM(XdndTypeList);
+	DATOM(XdndActionCopy); DATOM(XdndActionMove); DATOM(XdndActionLink); DATOM(XdndActionAsk);
+#undef DATOM
+	S.sel_atom[SEL_XDND] = XdndSelection;
+	/* the master pointer's XInput 2 id (for the grab with the drag icon) */
+	D.pointer_id = 2;
+	xcb_input_xi_query_device_reply_t *r = xcb_input_xi_query_device_reply(S.x,
+		xcb_input_xi_query_device(S.x, XCB_INPUT_DEVICE_ALL_MASTER), NULL);
+	if (r) {
+		xcb_input_xi_device_info_iterator_t it = xcb_input_xi_query_device_infos_iterator(r);
+		for (; it.rem; xcb_input_xi_device_info_next(&it))
+			if (it.data->type == XCB_INPUT_DEVICE_TYPE_MASTER_POINTER) {
+				D.pointer_id = it.data->deviceid;
+				break;
+			}
+		free(r);
+	}
+}
+
+static uint32_t action_from_atom(xcb_atom_t a) {
+	if (a == XdndActionMove)
+		return WL_DATA_DEVICE_MANAGER_DND_ACTION_MOVE;
+	if (a == XdndActionAsk)
+		return WL_DATA_DEVICE_MANAGER_DND_ACTION_ASK;
+	if (a == XdndActionLink)
+		return WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY;  /* no links on Wayland */
+	return WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY;  /* copy, private */
+}
+
+static xcb_atom_t atom_from_action(uint32_t a) {
+	if (a & WL_DATA_DEVICE_MANAGER_DND_ACTION_MOVE)
+		return XdndActionMove;
+	if (a & WL_DATA_DEVICE_MANAGER_DND_ACTION_ASK)
+		return XdndActionAsk;
+	if (a & WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY)
+		return XdndActionCopy;
+	return XCB_ATOM_NONE;
+}
+
+static void xdnd_send(xcb_window_t to, xcb_atom_t type, uint32_t d0, uint32_t d1, uint32_t d2, uint32_t d3,
+		uint32_t d4) {
+	xcb_client_message_event_t ev = {0};
+	ev.response_type = XCB_CLIENT_MESSAGE;
+	ev.format = 32;
+	ev.window = to;
+	ev.type = type;
+	ev.data.data32[0] = d0; ev.data.data32[1] = d1; ev.data.data32[2] = d2;
+	ev.data.data32[3] = d3; ev.data.data32[4] = d4;
+	xcb_send_event(S.x, 0, to, XCB_EVENT_MASK_NO_EVENT, (const char *)&ev);
+	xcb_flush(S.x);
+}
+
+/* -- X11 -> Wayland -- */
+
+static void in_status(void) {
+	if (!D.in_source || !D.in_src)
+		return;
+	struct view *v = D.in_drag && D.in_drag->focus ? root_view(view_from_surface(D.in_drag->focus)) : NULL;
+	bool ok = D.in_src->base.accepted && D.in_src->base.current_dnd_action;
+	xdnd_send(D.in_source, XdndStatus, v && v->frame ? v->frame : S.selwin, (ok ? 1 : 0) | 2, 0, 0,
+		ok ? atom_from_action(D.in_src->base.current_dnd_action) : XCB_ATOM_NONE);
+}
+
+static void in_reset(void) {
+	if (D.in_timer)
+		wl_event_source_remove(D.in_timer);
+	D.in_timer = NULL;
+	D.in_source = 0;
+	D.in_dropped = D.in_finished = false;
+}
+
+static void in_finish(bool accepted) {
+	if (D.in_source && !D.in_finished) {
+		D.in_finished = true;
+		xdnd_send(D.in_source, XdndFinished, S.selwin, accepted ? 1 : 0,
+			accepted && D.in_src ? atom_from_action(D.in_src->base.current_dnd_action) : XCB_ATOM_NONE, 0, 0);
+	}
+}
+
+static void xsrc_send(struct wlr_data_source *src, const char *mime, int fd) {
+	incoming_add(SEL_XDND, mime_to_target(mime), fd);
+}
+static void xsrc_accept(struct wlr_data_source *src, uint32_t serial, const char *mime) {
+	in_status();  /* the X program learns at once whether a drop would be taken */
+}
+static void xsrc_action(struct wlr_data_source *src, enum wl_data_device_manager_dnd_action a) {
+	in_status();
+}
+static void xsrc_drop(struct wlr_data_source *src) {
+}
+static void xsrc_finish(struct wlr_data_source *src) {
+	in_finish(true);
+	diag("drag and drop: an X11 program's drop taken by a Wayland program");
+}
+static void xsrc_destroy(struct wlr_data_source *src) {
+	struct x_dnd_source *x = wl_container_of(src, x, base);
+	if (D.in_src == x) {
+		if (D.in_dropped)
+			in_finish(false);
+		D.in_src = NULL;
+		in_reset();
+	}
+	free(x);
+}
+static const struct wlr_data_source_impl x_dnd_source_impl = {
+	.send = xsrc_send, .accept = xsrc_accept, .destroy = xsrc_destroy,
+	.dnd_drop = xsrc_drop, .dnd_finish = xsrc_finish, .dnd_action = xsrc_action,
+};
+
+static void in_drag_destroyed(struct wl_listener *l, void *data) {
+	wl_list_remove(&D.in_drag_destroy.link);
+	D.in_drag = NULL;
+}
+
+static int in_timeout(void *data) {
+	D.in_timer = NULL;
+	if (D.in_src) {
+		diag("drag and drop: the Wayland program did not finish the drop in time");
+		in_finish(false);
+		wlr_data_source_destroy(&D.in_src->base);
+	}
+	return 0;
+}
+
+static void in_cancel(void) {
+	if (D.in_src)
+		wlr_data_source_destroy(&D.in_src->base);  /* ends the wlroots drag too */
+	if (S.seat->pointer_state.button_count)
+		wlr_seat_pointer_notify_button(S.seat, now_msec(), BTN_LEFT, WL_POINTER_BUTTON_STATE_RELEASED);
+	in_reset();
+}
+
+static void in_enter(xcb_client_message_event_t *ev) {
+	in_cancel();
+	D.in_source = ev->data.data32[0];
+	xcb_atom_t types[64];
+	int n = 0;
+	if (ev->data.data32[1] & 1) {
+		xcb_get_property_reply_t *r = xcb_get_property_reply(S.x,
+			xcb_get_property(S.x, 0, D.in_source, XdndTypeList, XCB_ATOM_ATOM, 0, 64), NULL);
+		x_after_blocking();
+		if (r) {
+			n = xcb_get_property_value_length(r) / 4;
+			if (n > 64)
+				n = 64;
+			memcpy(types, xcb_get_property_value(r), n * 4);
+			free(r);
+		}
+	} else {
+		for (int i = 2; i < 5; i++)
+			if (ev->data.data32[i])
+				types[n++] = ev->data.data32[i];
+	}
+	struct x_dnd_source *x = calloc(1, sizeof(*x));
+	wlr_data_source_init(&x->base, &x_dnd_source_impl);
+	fill_mimes(&x->base.mime_types, types, n);
+	x->base.actions = WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY | WL_DATA_DEVICE_MANAGER_DND_ACTION_MOVE |
+		WL_DATA_DEVICE_MANAGER_DND_ACTION_ASK;
+	D.in_src = x;
+}
+
+static void in_position(struct view *v, xcb_client_message_event_t *ev) {
+	if (!D.in_src || ev->data.data32[0] != D.in_source)
+		return;
+	int rx = ev->data.data32[2] >> 16, ry = ev->data.data32[2] & 0xffff;
+	D.in_time = ev->data.data32[3];
+	D.in_src->base.compositor_action = action_from_atom(ev->data.data32[4]);
+	int ox, oy;
+	struct wlr_surface *surface = NULL;
+	double sx = 0, sy = 0;
+	if (v && view_root_origin(v, &ox, &oy)) {
+		struct wlr_scene_node *n = wlr_scene_node_at(&v->scene->tree.node, (rx - ox) / v->scale,
+			(ry - oy) / v->scale, &sx, &sy);
+		struct wlr_scene_surface *ss = n && n->type == WLR_SCENE_NODE_BUFFER ?
+			wlr_scene_surface_try_from_buffer(wlr_scene_buffer_from_node(n)) : NULL;
+		surface = ss ? ss->surface : NULL;
+	}
+	if (surface && !D.in_drag && !S.seat->drag) {
+		struct wlr_seat_client *sc = wlr_seat_client_for_wl_client(S.seat, wl_resource_get_client(surface->resource));
+		if (sc) {
+			D.in_drag = wlr_drag_create(sc, &D.in_src->base, NULL);
+			if (D.in_drag) {
+				D.in_drag_destroy.notify = in_drag_destroyed;
+				wl_signal_add(&D.in_drag->events.destroy, &D.in_drag_destroy);
+				wlr_seat_start_pointer_drag(S.seat, D.in_drag, wl_display_next_serial(S.display));
+				/* the drop is the release of the button the drag "started" with */
+				wlr_seat_pointer_notify_button(S.seat, now_msec(), BTN_LEFT, WL_POINTER_BUTTON_STATE_PRESSED);
+			}
+		}
+	}
+	if (D.in_drag) {
+		if (surface) {
+			wlr_seat_pointer_notify_enter(S.seat, surface, sx, sy);
+			wlr_seat_pointer_notify_motion(S.seat, now_msec(), sx, sy);
+		} else {
+			wlr_seat_pointer_notify_clear_focus(S.seat);
+		}
+	}
+	in_status();
+}
+
+static void in_drop(xcb_client_message_event_t *ev) {
+	if (!D.in_src || ev->data.data32[0] != D.in_source)
+		return;
+	D.in_time = ev->data.data32[2];
+	bool ok = D.in_drag && D.in_drag->focus && D.in_src->base.accepted && D.in_src->base.current_dnd_action;
+	if (!ok) {
+		in_finish(false);
+		in_cancel();
+		return;
+	}
+	D.in_dropped = true;
+	wlr_seat_pointer_notify_button(S.seat, now_msec(), BTN_LEFT, WL_POINTER_BUTTON_STATE_RELEASED);
+	if (!D.in_timer)
+		D.in_timer = wl_event_loop_add_timer(S.loop, in_timeout, NULL);
+	wl_event_source_timer_update(D.in_timer, 10000);
+}
+
+/* -- Wayland -> X11 -- */
+
+static void w_leave_target(void) {
+	if (D.w_target)
+		xdnd_send(D.w_target, XdndLeave, S.selwin, 0, 0, 0, 0);
+	D.w_target = 0;
+	D.w_target_accepts = false;
+}
+
+static bool xdnd_aware(xcb_window_t w) {
+	xcb_get_property_reply_t *r = xcb_get_property_reply(S.x,
+		xcb_get_property(S.x, 0, w, XdndAware, XCB_ATOM_ATOM, 0, 1), NULL);
+	bool aware = r && xcb_get_property_value_length(r) >= 4 && *(uint32_t *)xcb_get_property_value(r) >= 3;
+	free(r);
+	return aware;
+}
+
+/* What is under the pointer: one of our windows, an XDND-aware X window, or nothing. */
+static void drop_target_at(struct view **view, xcb_window_t *xwin, int16_t *rx, int16_t *ry) {
+	*view = NULL;
+	*xwin = 0;
+	xcb_window_t w = S.root;
+	for (int depth = 0; depth < 10 && w; depth++) {
+		xcb_query_pointer_reply_t *p = xcb_query_pointer_reply(S.x, xcb_query_pointer(S.x, w), NULL);
+		if (!p)
+			break;
+		if (depth == 0) {
+			*rx = p->root_x;
+			*ry = p->root_y;
+		}
+		w = p->child;
+		free(p);
+		if (!w)
+			break;
+		if ((*view = view_by_window(w)))
+			break;
+		if (xdnd_aware(w)) {
+			*xwin = w;
+			break;
+		}
+	}
+	x_after_blocking();
+}
+
+static xcb_atom_t w_action(void) {
+	struct wlr_data_source *src = D.w_drag ? D.w_drag->source : NULL;
+	uint32_t acts = src ? src->actions : WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY;
+	uint32_t mods = S.keyboard ? wlr_keyboard_get_modifiers(S.keyboard) : 0;
+	if ((mods & WLR_MODIFIER_SHIFT) && (acts & WL_DATA_DEVICE_MANAGER_DND_ACTION_MOVE))
+		return XdndActionMove;
+	if (acts & WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY)
+		return XdndActionCopy;
+	if (acts & WL_DATA_DEVICE_MANAGER_DND_ACTION_MOVE)
+		return XdndActionMove;
+	return XdndActionAsk;
+}
+
+static void w_enter_target(xcb_window_t w) {
+	struct wlr_data_source *src = D.w_drag->source;
+	xcb_atom_t types[64];
+	int n = 0;
+	char **m;
+	wl_array_for_each(m, &src->mime_types) {
+		if (n >= 60)
+			break;
+		if (!strcmp(*m, "text/plain;charset=utf-8") || !strcmp(*m, "text/plain")) {
+			types[n++] = A.UTF8_STRING;
+			types[n++] = XCB_ATOM_STRING;
+		}
+		xcb_atom_t a = intern(*m);
+		if (a)
+			types[n++] = a;
+	}
+	x_after_blocking();
+	set_prop(S.selwin, XdndTypeList, XCB_ATOM_ATOM, 32, n, types);
+	xdnd_send(w, XdndEnter, S.selwin, (5u << 24) | (n > 3 ? 1 : 0), n > 0 ? types[0] : 0, n > 1 ? types[1] : 0,
+		n > 2 ? types[2] : 0);
+	D.w_target = w;
+	D.w_target_accepts = false;
+}
+
+/* The pointer moved during a Wayland program's drag (lx, ly: in the window
+ * the events come from, the one that has the grab). */
+static bool w_drag_motion(uint32_t time) {
+	if (!D.w_drag || D.w_dropping)
+		return false;
+	struct view *tv;
+	xcb_window_t xw;
+	drop_target_at(&tv, &xw, &D.w_root_x, &D.w_root_y);
+	if (tv) {
+		w_leave_target();
+		int ox, oy;
+		if (!view_root_origin(tv, &ox, &oy))
+			return true;
+		double sx, sy;
+		struct wlr_scene_node *n = wlr_scene_node_at(&tv->scene->tree.node, (D.w_root_x - ox) / tv->scale,
+			(D.w_root_y - oy) / tv->scale, &sx, &sy);
+		struct wlr_scene_surface *ss = n && n->type == WLR_SCENE_NODE_BUFFER ?
+			wlr_scene_surface_try_from_buffer(wlr_scene_buffer_from_node(n)) : NULL;
+		if (ss) {
+			wlr_seat_pointer_notify_enter(S.seat, ss->surface, sx, sy);
+			wlr_seat_pointer_notify_motion(S.seat, time, sx, sy);
+		} else {
+			wlr_seat_pointer_notify_clear_focus(S.seat);
+		}
+		return true;
+	}
+	wlr_seat_pointer_notify_clear_focus(S.seat);
+	if (xw != D.w_target) {
+		w_leave_target();
+		if (xw)
+			w_enter_target(xw);
+	}
+	if (D.w_target)
+		xdnd_send(D.w_target, XdndPosition, S.selwin, 0, ((uint32_t)D.w_root_x << 16) | (uint16_t)D.w_root_y,
+			XCB_CURRENT_TIME, w_action());
+	return true;
+}
+
+static void w_end(bool finished_ok, xcb_atom_t action) {
+	struct wlr_drag *drag = D.w_drag;
+	struct wlr_data_source *src = drag ? drag->source : NULL;
+	if (D.w_timer)
+		wl_event_source_remove(D.w_timer);
+	D.w_timer = NULL;
+	if (src && finished_ok) {
+		wlr_data_source_dnd_action(src, action_from_atom(action));
+		wlr_data_source_dnd_drop(src);
+		wlr_data_source_dnd_finish(src);
+		diag("drag and drop: a Wayland program's drop taken by an X11 program (%s)",
+			action == XdndActionMove ? "move" : "copy");
+	}
+	D.w_dropping = false;
+	D.w_target = 0;
+	if (drag) {
+		if (finished_ok) {
+			/* ends the drag without cancelling the (finished) source */
+			wlr_seat_pointer_end_grab(S.seat);
+			if (S.seat->pointer_state.button_count)
+				wlr_seat_pointer_notify_button(S.seat, now_msec(), BTN_LEFT, WL_POINTER_BUTTON_STATE_RELEASED);
+		} else if (src) {
+			wlr_data_source_destroy(src);  /* cancelled: the program gets it back */
+		}
+	}
+}
+
+static int w_timeout(void *data) {
+	D.w_timer = NULL;
+	diag("drag and drop: the X11 program did not finish the drop in time");
+	w_end(false, 0);
+	return 0;
+}
+
+/* The button was released during a Wayland program's drag. True if we
+ * took it over (dropping on an X11 window). */
+static bool w_drag_button_release(uint32_t time) {
+	if (!D.w_drag || !D.w_target || D.w_dropping)
+		return false;
+	if (!D.w_target_accepts) {
+		w_leave_target();
+		return false;  /* wlroots cancels the drag (no Wayland target either) */
+	}
+	D.w_dropping = true;
+	xcb_set_selection_owner(S.x, S.selwin, XdndSelection, XCB_CURRENT_TIME);
+	xdnd_send(D.w_target, XdndDrop, S.selwin, 0, XCB_CURRENT_TIME, 0, 0);
+	if (!D.w_timer)
+		D.w_timer = wl_event_loop_add_timer(S.loop, w_timeout, NULL);
+	wl_event_source_timer_update(D.w_timer, 5000);
+	return true;
+}
+
+static void w_status(xcb_client_message_event_t *ev) {
+	if (!D.w_drag || ev->data.data32[0] != D.w_target)
+		return;
+	D.w_target_accepts = ev->data.data32[1] & 1;
+	D.w_target_action = ev->data.data32[4];
+	struct wlr_data_source *src = D.w_drag->source;
+	if (src && !D.w_dropping) {
+		const char *mime = NULL;
+		if (D.w_target_accepts && src->mime_types.size)
+			mime = *(char **)src->mime_types.data;
+		wlr_data_source_accept(src, D.w_serial, mime);
+		wlr_data_source_dnd_action(src, D.w_target_accepts ? action_from_atom(D.w_target_action) : 0);
+	}
+}
+
+static void w_finished(xcb_client_message_event_t *ev) {
+	if (!D.w_drag || !D.w_dropping)
+		return;
+	bool ok = ev->data.data32[1] & 1;
+	w_end(ok, ev->data.data32[2] ? ev->data.data32[2] : D.w_target_action);
+}
+
+/* The drag icon as the pointer's picture, over every window. */
+static void w_update_icon(void) {
+	struct wlr_drag_icon *icon = D.w_drag ? D.w_drag->icon : NULL;
+	xcb_cursor_t c = icon ? surface_cursor(icon->surface, -D.w_icon_x, -D.w_icon_y) : XCB_NONE;
+	if (c == S.cursor_hidden || c == XCB_NONE)
+		c = S.cursor_current ? S.cursor_current : S.cursor_default;
+	if (D.w_origin && D.w_origin->child && S.bx) {
+		struct {
+			xcb_input_event_mask_t head;
+			uint32_t mask;
+		} m = { { D.pointer_id, 1 }, XCB_INPUT_XI_EVENT_MASK_MOTION | XCB_INPUT_XI_EVENT_MASK_BUTTON_PRESS |
+			XCB_INPUT_XI_EVENT_MASK_BUTTON_RELEASE };
+		/* (the backend's own connection holds the button grab: it changes it) */
+		xcb_input_xi_grab_device(S.bx->xcb, D.w_origin->child, XCB_CURRENT_TIME, c, D.pointer_id,
+			XCB_INPUT_GRAB_MODE_22_ASYNC, XCB_INPUT_GRAB_MODE_22_ASYNC, 1, 1, &m.mask);
+		xcb_flush(S.bx->xcb);
+		D.w_grabbed = true;
+	}
+	if (D.w_icon_cursor && D.w_icon_cursor != c && D.w_icon_cursor != S.cursor_default &&
+	    D.w_icon_cursor != S.cursor_hidden && D.w_icon_cursor != S.cursor_current)
+		xcb_free_cursor(S.x, D.w_icon_cursor);
+	D.w_icon_cursor = c;
+}
+
+static void w_icon_commit(struct wl_listener *l, void *data) {
+	struct wlr_surface *s = data;
+	D.w_icon_x += s->current.dx;
+	D.w_icon_y += s->current.dy;
+	w_update_icon();
+	struct timespec now;
+	clock_gettime(CLOCK_MONOTONIC, &now);
+	wlr_surface_send_frame_done(s, &now);
+}
+
+static void w_drag_destroyed(struct wl_listener *l, void *data) {
+	wl_list_remove(&D.w_drag_destroy.link);
+	wl_list_remove(&D.w_icon_commit.link);
+	wl_list_init(&D.w_icon_commit.link);
+	if (D.w_target && !D.w_dropping)
+		w_leave_target();
+	if (D.w_grabbed && S.bx) {
+		xcb_input_xi_ungrab_device(S.bx->xcb, XCB_CURRENT_TIME, D.pointer_id);
+		xcb_flush(S.bx->xcb);
+	}
+	D.w_grabbed = false;
+	D.w_drag = NULL;
+	D.w_origin = NULL;
+	D.w_dropping = false;
+	apply_cursor(S.pointer_view);
+}
+
+static void seat_request_start_drag(struct wl_listener *l, void *data) {
+	struct wlr_seat_request_start_drag_event *ev = data;
+	if (!wlr_seat_validate_pointer_grab_serial(S.seat, ev->origin, ev->serial)) {
+		if (ev->drag->source)
+			wlr_data_source_destroy(ev->drag->source);
+		return;
+	}
+	wlr_seat_start_pointer_drag(S.seat, ev->drag, ev->serial);
+}
+
+static void seat_start_drag(struct wl_listener *l, void *data) {
+	struct wlr_drag *drag = data;
+	if (drag == D.in_drag)
+		return;  /* ours, from an X11 program */
+	D.w_drag = drag;
+	D.w_serial = S.seat->pointer_state.grab_serial;
+	D.w_origin = S.pointer_view;
+	D.w_target = 0;
+	D.w_icon_x = D.w_icon_y = 0;
+	D.w_drag_destroy.notify = w_drag_destroyed;
+	wl_signal_add(&drag->events.destroy, &D.w_drag_destroy);
+	wl_list_init(&D.w_icon_commit.link);
+	if (drag->icon) {
+		D.w_icon_commit.notify = w_icon_commit;
+		wl_signal_add(&drag->icon->surface->events.commit, &D.w_icon_commit);
+		D.w_icon_x = drag->icon->surface->current.dx;
+		D.w_icon_y = drag->icon->surface->current.dy;
+	}
+	w_update_icon();
+}
+
+static struct wl_listener l_req_drag = { .notify = seat_request_start_drag },
+	l_start_drag = { .notify = seat_start_drag };
+
+/* XDND messages to our windows (frames) and to the selection window. */
+static bool dnd_client_message(xcb_client_message_event_t *ev) {
+	struct view *v = view_by_window(ev->window);
+	if (ev->type == XdndEnter)
+		in_enter(ev);
+	else if (ev->type == XdndPosition)
+		in_position(v && v->kind == VIEW_TOPLEVEL ? v : NULL, ev);
+	else if (ev->type == XdndLeave) {
+		if (ev->data.data32[0] == D.in_source && !D.in_dropped)
+			in_cancel();
+	} else if (ev->type == XdndDrop)
+		in_drop(ev);
+	else if (ev->type == XdndStatus)
+		w_status(ev);
+	else if (ev->type == XdndFinished)
+		w_finished(ev);
+	else
+		return false;
+	return true;
+}
+
+static struct wlr_data_source *dnd_wayland_source(void) {
+	return D.w_drag ? D.w_drag->source : NULL;
 }
 
 /* ------------------------------------------------------------------------
@@ -2032,7 +3158,7 @@ static void x_event(xcb_generic_event_t *e) {
 			break;
 		if (ev->width != v->w || ev->height != v->h) {
 			/* the user (or xfwm4) resized the window */
-			v->size_serial = wlr_xdg_toplevel_set_size(v->toplevel, ev->width, ev->height);
+			v->size_serial = wlr_xdg_toplevel_set_size(v->toplevel, units(v, ev->width), units(v, ev->height));
 			view_render_resize(v, ev->width, ev->height);
 		}
 		break;
@@ -2063,6 +3189,10 @@ static void x_event(xcb_generic_event_t *e) {
 					break;
 				}
 		}
+		if (ev->window && ev->window == S.xsettings_owner) {
+			scale_changed();
+			break;
+		}
 		struct view *v = view_by_window(ev->window);
 		if (v && v->frame == ev->window && ev->atom == A._NET_WM_STATE && v->kind == VIEW_TOPLEVEL) {
 			xcb_get_property_reply_t *r = xcb_get_property_reply(S.x,
@@ -2089,6 +3219,8 @@ static void x_event(xcb_generic_event_t *e) {
 	}
 	case XCB_CLIENT_MESSAGE: {
 		xcb_client_message_event_t *ev = (void *)e;
+		if (dnd_client_message(ev))
+			break;
 		struct view *v = view_by_window(ev->window);
 		if (v && v->kind == VIEW_TOPLEVEL && ev->type == A.WM_PROTOCOLS && ev->data.data32[0] == A.WM_DELETE_WINDOW)
 			wlr_xdg_toplevel_send_close(v->toplevel);
@@ -2097,6 +3229,12 @@ static void x_event(xcb_generic_event_t *e) {
 	case XCB_SELECTION_NOTIFY:
 		handle_selection_notify((void *)e);
 		break;
+	case XCB_MAPPING_NOTIFY: {
+		xcb_mapping_notify_event_t *ev = (void *)e;
+		if (ev->request == XCB_MAPPING_KEYBOARD || ev->request == XCB_MAPPING_MODIFIER)
+			schedule_keymap_reload();
+		break;
+	}
 	case XCB_SELECTION_REQUEST:
 		handle_selection_request((void *)e);
 		break;
@@ -2109,6 +3247,12 @@ static void x_event(xcb_generic_event_t *e) {
 	}
 	case 0:
 		break;  /* errors: windows of programs that went away, etc. */
+	case XCB_GE_GENERIC: {
+		xcb_ge_generic_event_t *ge = (void *)e;
+		if (S.xinput_opcode && ge->extension == S.xinput_opcode && ge->event_type == XCB_INPUT_RAW_BUTTON_PRESS)
+			raw_button_press();
+		break;
+	}
 	default:
 		if (S.xfixes_event && type == S.xfixes_event + XCB_XFIXES_SELECTION_NOTIFY) {
 			xcb_xfixes_selection_notify_event_t *ev = (void *)e;
@@ -2170,11 +3314,16 @@ static bool x_setup(void) {
 	ATOM(UTF8_STRING); ATOM(CLIPBOARD); ATOM(TARGETS); ATOM(TIMESTAMP); ATOM(MULTIPLE); ATOM(TEXT); ATOM(INCR);
 	ATOM(_SYLUXIUM_WAYLAND); ATOM(RESOURCE_MANAGER);
 #undef ATOM
+	/* The X11 backend looks this atom up without creating it (only if it
+	 * exists) and set a property with atom 0 otherwise: an X error per window. */
+	intern("_VARIABLE_REFRESH");
 	A.MIME_UTF8 = intern("text/plain;charset=utf-8");
 	A.MIME_TEXT = intern("text/plain");
 	A.SYLUXIUM_SELECTION = intern("_SYLUXIUM_SELECTION");
+	XdndAware = intern("XdndAware");
 	S.sel_atom[SEL_CLIPBOARD] = A.CLIPBOARD;
 	S.sel_atom[SEL_PRIMARY] = XCB_ATOM_PRIMARY;
+	dnd_atoms();
 
 	/* ARGB32 for cursors */
 	xcb_render_query_version_reply_t *rv = xcb_render_query_version_reply(S.x,
@@ -2213,8 +3362,144 @@ static bool x_setup(void) {
 	} else {
 		diag("clipboard: no XFIXES, X programs' copies are not seen");
 	}
+	/* Clicks anywhere (XInput 2 raw events reach every client, whoever has the
+	 * pointer): a click outside our windows closes an open menu, as on X11 (the
+	 * taskbar takes no focus, so the focus doesn't say so). */
+	const xcb_query_extension_reply_t *xi = xcb_get_extension_data(S.x, &xcb_input_id);
+	if (xi && xi->present) {
+		xcb_input_xi_query_version_reply_t *v = xcb_input_xi_query_version_reply(S.x,
+			xcb_input_xi_query_version(S.x, 2, 2), NULL);
+		if (v && (v->major_version > 2 || (v->major_version == 2 && v->minor_version >= 0))) {
+			S.xinput_opcode = xi->major_opcode;
+			struct {
+				xcb_input_event_mask_t head;
+				uint32_t mask;
+			} raw = { { XCB_INPUT_DEVICE_ALL_MASTER, 1 }, XCB_INPUT_XI_EVENT_MASK_RAW_BUTTON_PRESS };
+			xcb_input_xi_select_events(S.x, S.root, 1, &raw.head);
+		}
+		free(v);
+	}
 	xcb_flush(S.x);
 	return true;
+}
+
+/* The X session's scale, from XSETTINGS (xfsettingsd): Gdk/WindowScalingFactor
+ * (Xfce's "Window Scaling", whole numbers) and Xft/DPI (fonts; a DPI of 144
+ * is 1.5). The larger of the two, to 1/8. SYLUXIUM_WAYLAND_HOST_SCALE overrides. */
+static bool xsettings_int(const uint8_t *d, size_t len, const char *want, int32_t *out) {
+	if (len < 12)
+		return false;
+	bool big = d[0] == 1;  /* MSBFirst */
+#define RD32(o) (big ? (uint32_t)d[o] << 24 | d[(o) + 1] << 16 | d[(o) + 2] << 8 | d[(o) + 3] : \
+	(uint32_t)d[(o) + 3] << 24 | d[(o) + 2] << 16 | d[(o) + 1] << 8 | d[o])
+#define RD16(o) (big ? (uint16_t)(d[o] << 8 | d[(o) + 1]) : (uint16_t)(d[(o) + 1] << 8 | d[o]))
+	uint32_t n = RD32(8);
+	size_t o = 12;
+	for (uint32_t i = 0; i < n && o + 8 <= len; i++) {
+		uint8_t type = d[o];
+		uint16_t nlen = RD16(o + 2);
+		size_t name = o + 4;
+		o = name + ((nlen + 3) & ~3u) + 4;  /* name, padding, last-change serial */
+		if (o > len)
+			return false;
+		if (type == 0) {
+			if (o + 4 > len)
+				return false;
+			if (nlen == strlen(want) && memcmp(d + name, want, nlen) == 0) {
+				*out = (int32_t)RD32(o);
+				return true;
+			}
+			o += 4;
+		} else if (type == 1) {
+			if (o + 4 > len)
+				return false;
+			o += 4 + ((RD32(o) + 3) & ~3u);
+		} else if (type == 2) {
+			o += 8;
+		} else {
+			return false;
+		}
+	}
+	return false;
+#undef RD32
+#undef RD16
+}
+
+static void read_scale(void) {
+	int32_t factor = 1, dpi = 0;
+	char sel[32];
+	snprintf(sel, sizeof(sel), "_XSETTINGS_S%d", 0);
+	xcb_get_selection_owner_reply_t *o = xcb_get_selection_owner_reply(S.x,
+		xcb_get_selection_owner(S.x, intern(sel)), NULL);
+	xcb_window_t owner = o ? o->owner : 0;
+	free(o);
+	if (owner && owner != S.xsettings_owner) {
+		uint32_t m = XCB_EVENT_MASK_PROPERTY_CHANGE | XCB_EVENT_MASK_STRUCTURE_NOTIFY;
+		xcb_change_window_attributes(S.x, owner, XCB_CW_EVENT_MASK, &m);
+	}
+	S.xsettings_owner = owner;
+	if (owner) {
+		xcb_get_property_reply_t *r = xcb_get_property_reply(S.x, xcb_get_property(S.x, 0, owner,
+			intern("_XSETTINGS_SETTINGS"), XCB_GET_PROPERTY_TYPE_ANY, 0, 65536), NULL);
+		if (r) {
+			xsettings_int(xcb_get_property_value(r), xcb_get_property_value_length(r), "Gdk/WindowScalingFactor", &factor);
+			xsettings_int(xcb_get_property_value(r), xcb_get_property_value_length(r), "Xft/DPI", &dpi);
+			free(r);
+		}
+	}
+	x_after_blocking();
+	double by_dpi = dpi > 0 ? dpi / 1024.0 / 96.0 : 1;
+	double scale = factor > 1 ? factor : 1;
+	if (by_dpi > scale + 0.05)
+		scale = by_dpi;
+	scale = round(scale * 8) / 8;
+	const char *e = getenv("SYLUXIUM_WAYLAND_HOST_SCALE");
+	if (e && atof(e) >= 0.5 && atof(e) <= 4)
+		scale = atof(e);
+	if (scale < 1)
+		scale = 1;
+	S.scale = scale;
+	snprintf(S.scale_desc, sizeof(S.scale_desc), "scale %.3g (window scaling %d, font DPI %.0f)", scale, (int)factor,
+		dpi > 0 ? dpi / 1024.0 : 96.0);
+}
+
+/* The session's scale changed (Xfce settings): windows keep their size on
+ * the screen and get the new scale. */
+static void scale_changed(void) {
+	double old = S.scale;
+	read_scale();
+	if (S.scale == old)
+		return;
+	diag("scale changed: %s", S.scale_desc);
+	if (S.xcursor)
+		wlr_xcursor_manager_load(S.xcursor, S.scale);
+	xcb_cursor_t def = theme_cursor("default");
+	if (def) {
+		S.cursor_default = def;
+		set_current_cursor(def, false);
+	}
+	if (S.screen_output) {
+		struct wlr_output_state st;
+		wlr_output_state_init(&st);
+		wlr_output_state_set_scale(&st, S.scale);
+		wlr_output_commit_state(S.screen_output, &st);
+		wlr_output_state_finish(&st);
+	}
+	dismiss_popups();
+	struct view *v;
+	wl_list_for_each(v, &S.views, link)
+		if (v->kind == VIEW_TOPLEVEL && v->x_mapped) {
+			/* the same size in units, as X11 programs do with Window Scaling */
+			int uw = units(v, v->w), uh = units(v, v->h);
+			v->scale = S.scale;
+			uint32_t vals[2] = { px(v, uw), px(v, uh) };
+			xcb_configure_window(S.x, v->frame, XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT, vals);
+			view_render_resize(v, vals[0], vals[1]);
+			v->size_serial = wlr_xdg_toplevel_set_size(v->toplevel, uw, uh);
+			v->min_w = -1;
+			view_update_size_hints(v);
+		}
+	xcb_flush(S.x);
 }
 
 /* The cursor theme and size the X desktop uses (Xcursor.* resources). */
@@ -2261,6 +3546,7 @@ static void make_screen_output(void) {
 	wlr_output_state_init(&st);
 	wlr_output_state_set_enabled(&st, true);
 	wlr_output_state_set_custom_mode(&st, S.screen->width_in_pixels, S.screen->height_in_pixels, 0);
+	wlr_output_state_set_scale(&st, S.scale);
 	wlr_output_commit_state(o, &st);
 	wlr_output_state_finish(&st);
 	wlr_output_create_global(o, S.display);
@@ -2283,6 +3569,79 @@ static struct wl_listener l_new_output = { .notify = server_new_output }, l_new_
 	l_set_sel = { .notify = seat_set_selection }, l_set_prim = { .notify = seat_set_primary },
 	l_new_deco = { .notify = new_xdg_decoration }, l_new_kde = { .notify = new_kde_decoration },
 	l_activate = { .notify = request_activate };
+
+/* How windows are drawn, in words for wayland-host.txt: GPU (GLES2 on a
+ * render node, dma-bufs to the X server through DRI3, programs offered
+ * linux-dmabuf) or software (pixman, MIT-SHM). */
+static void describe_gpu_path(void) {
+	int bfd = wlr_backend_get_drm_fd(S.backend);
+	const char *forced = getenv("WLR_RENDERER");
+	if (wlr_renderer_is_gles2(S.renderer)) {
+		int fd = wlr_renderer_get_drm_fd(S.renderer);
+		char *node = fd >= 0 ? drmGetDeviceNameFromFd2(fd) : NULL;
+		drmVersion *ver = fd >= 0 ? drmGetVersion(fd) : NULL;
+		bool dmabuf = wlr_renderer_get_texture_formats(S.renderer, WLR_BUFFER_CAP_DMABUF) != NULL;
+		snprintf(S.gpu_desc, sizeof(S.gpu_desc), "GPU rendering (GLES2 on %s, driver %s), %s to the X server, "
+			"programs %s dma-bufs", node ? node : "?", ver && ver->name ? ver->name : "?",
+			bfd >= 0 ? "dma-bufs (DRI3)" : "shared memory", dmabuf ? "can draw into" : "can't use");
+		free(node);
+		if (ver)
+			drmFreeVersion(ver);
+	} else {
+		snprintf(S.gpu_desc, sizeof(S.gpu_desc), "software rendering (pixman), shared memory (MIT-SHM) to the X "
+			"server (%s)", forced && *forced ? "forced" : bfd >= 0 ? "no OpenGL on the GPU" :
+			"the X server has no DRI3 / GPU");
+	}
+}
+
+/* Before programs connect: one frame through the chosen path into a
+ * window nobody sees, and the X server must say it was shown (Present).
+ * A GPU path that fails here (DRI3 import, modifiers, a broken driver)
+ * would leave every window black. */
+static bool gpu_check(void) {
+	if (wlr_renderer_is_pixman(S.renderer) || getenv("SYLUXIUM_WAYLAND_HOST_NOCHECK"))
+		return true;
+	xcb_window_t hidden = xcb_generate_id(S.x);
+	xcb_create_window(S.x, XCB_COPY_FROM_PARENT, hidden, S.root, -200, -200, 64, 64, 0,
+		XCB_WINDOW_CLASS_INPUT_OUTPUT, S.screen->root_visual, 0, NULL);
+	xcb_flush(S.x);
+	S.test_output = true;
+	struct wlr_output *out = wlr_x11_output_create(S.backend);
+	S.test_output = false;
+	if (!out || out != S.test_out) {
+		xcb_destroy_window(S.x, hidden);
+		return false;
+	}
+	xcb_window_t child = ((struct x11_output_prefix *)out)->win;
+	bool ok = child_window_ok(child);
+	if (ok) {
+		xcb_reparent_window(S.x, child, hidden, 0, 0);
+		free(xcb_get_input_focus_reply(S.x, xcb_get_input_focus(S.x), NULL));
+		struct wlr_scene *scene = wlr_scene_create();
+		const float c[4] = { 0.1f, 0.2f, 0.4f, 1 };
+		wlr_scene_rect_create(&scene->tree, 64, 64, c);
+		struct wlr_scene_output *so = wlr_scene_output_create(scene, out);
+		wl_signal_add(&out->events.present, &l_test_present);
+		S.test_presented = false;
+		struct wlr_output_state st;
+		wlr_output_state_init(&st);
+		wlr_output_state_set_enabled(&st, true);
+		wlr_output_state_set_custom_mode(&st, 64, 64, 0);
+		ok = wlr_scene_output_build_state(so, &st, NULL) && wlr_output_commit_state(out, &st);
+		wlr_output_state_finish(&st);
+		for (int i = 0; ok && !S.test_presented && i < 40; i++)
+			wl_event_loop_dispatch(S.loop, 50);
+		ok = ok && S.test_presented;
+		wl_list_remove(&l_test_present.link);
+		wlr_scene_output_destroy(so);
+		wlr_scene_node_destroy(&scene->tree.node);
+	}
+	wlr_output_destroy(out);
+	S.test_out = NULL;
+	xcb_destroy_window(S.x, hidden);
+	xcb_flush(S.x);
+	return ok;
+}
 
 static int on_signal(int sig, void *data) {
 	wl_display_terminate(S.display);
@@ -2313,6 +3672,11 @@ int main(int argc, char **argv) {
 		diag("ERROR: cannot connect to the X display %s", dpy);
 		return 1;
 	}
+	/* SYLUXIUM_WAYLAND_HOST_RENDERER=pixman|gles2 (the starter sets it for
+	 * the software fallback and the whostsoft boot option) */
+	const char *want = getenv("SYLUXIUM_WAYLAND_HOST_RENDERER");
+	if (want && *want)
+		setenv("WLR_RENDERER", want, 1);
 	S.display = wl_display_create();
 	S.loop = wl_display_get_event_loop(S.display);
 	S.backend = wlr_x11_backend_create(S.loop, NULL);
@@ -2332,6 +3696,7 @@ int main(int argc, char **argv) {
 		diag("ERROR: no buffer allocator");
 		return 1;
 	}
+	describe_gpu_path();
 	wl_signal_add(&S.backend->events.new_output, &l_new_output);
 	wl_signal_add(&S.backend->events.new_input, &l_new_input);
 
@@ -2359,19 +3724,24 @@ int main(int argc, char **argv) {
 	wl_signal_add(&shape->events.request_set_shape, &l_cursor_shape);
 
 	S.seat = wlr_seat_create(S.display, "seat0");
+	im_setup();
 	wl_signal_add(&S.seat->events.request_set_cursor, &l_req_cursor);
 	wl_signal_add(&S.seat->events.request_set_selection, &l_req_sel);
 	wl_signal_add(&S.seat->events.request_set_primary_selection, &l_req_prim);
 	wl_signal_add(&S.seat->events.set_selection, &l_set_sel);
 	wl_signal_add(&S.seat->events.set_primary_selection, &l_set_prim);
+	wl_signal_add(&S.seat->events.request_start_drag, &l_req_drag);
+	wl_signal_add(&S.seat->events.start_drag, &l_start_drag);
 	wlr_seat_set_capabilities(S.seat, WL_SEAT_CAPABILITY_POINTER);
 
 	char theme[128];
 	int csize;
 	cursor_theme(theme, sizeof(theme), &csize);
+	S.cursor_size = csize;
+	read_scale();
 	S.xcursor = wlr_xcursor_manager_create(theme[0] ? theme : NULL, csize);
 	if (S.xcursor)
-		wlr_xcursor_manager_load(S.xcursor, 1);
+		wlr_xcursor_manager_load(S.xcursor, S.scale);
 	S.cursor_default = theme_cursor("default");
 	uint32_t blank = 0;
 	S.cursor_hidden = make_cursor(&blank, 1, 1, 1, 0, 0);
@@ -2404,15 +3774,20 @@ int main(int argc, char **argv) {
 	}
 	x_after_blocking();
 
+	if (!gpu_check()) {
+		diag("ERROR: drawing through %s failed (no frame shown in a test window); exiting so the starter "
+			"runs the host in software (pixman)", S.gpu_desc);
+		return 3;
+	}
+
 	if (wl_display_add_socket(S.display, S.socket) != 0) {
 		diag("socket %s is in use (another host is running?)", S.socket);
 		return 2;
 	}
-	const char *rend = wlr_renderer_is_pixman(S.renderer) ? "software (pixman)" :
-		wlr_renderer_is_gles2(S.renderer) ? "GPU (GLES2)" : "other";
-	diag("started on %s as WAYLAND_DISPLAY=%s: %s rendering, %s buffers, screen %dx%d at %.1f Hz, cursor theme %s %d",
-		dpy, S.socket, rend, (S.backend->impl && wlr_backend_get_drm_fd(S.backend) >= 0) ? "dma-buf (DRI3)" : "MIT-SHM",
-		S.screen->width_in_pixels, S.screen->height_in_pixels, 1e9 / S.frame_ns, theme[0] ? theme : "default", csize);
+	diag("started on %s as WAYLAND_DISPLAY=%s: %s; screen %dx%d at %.1f Hz, %s, cursor theme %s %d",
+		dpy, S.socket, S.gpu_desc, S.screen->width_in_pixels, S.screen->height_in_pixels, 1e9 / S.frame_ns,
+		S.scale_desc, theme[0] ? theme : "default", csize);
+	im_invite();
 	/* tell the starter we are ready */
 	if (getenv("SYLUXIUM_WAYLAND_HOST_READY_FD")) {
 		int fd = atoi(getenv("SYLUXIUM_WAYLAND_HOST_READY_FD"));

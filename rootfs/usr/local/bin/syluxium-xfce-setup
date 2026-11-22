@@ -41,7 +41,7 @@ fi
 DESK=$(xdg-user-dir DESKTOP 2>/dev/null || echo "$HOME/Desktop")
 mkdir -p "$DESK"
 if [ ! -f "$DONE" ]; then
-    for app in syluxium-mydocuments syluxium-network syluxium-system firefox-esr; do
+    for app in syluxium-mydocuments syluxium-network syluxium-system firefox-esr dgpufg; do
         src=/usr/share/applications/$app.desktop
         [ -f "$src" ] || continue
         dst="$DESK/$app.desktop"

@@ -62,6 +62,7 @@ public:
     isize read(u64 offset, void* buf, usize count) override;
     isize write(u64 offset, const void* buf, usize count) override;
     long truncate(u64 new_size) override;
+    long punch_hole(u64 offset, u64 len) override;
     long mmap_phys(u64 offset, u64* phys) override;
     bool shared_mappable() const override { return true; }
     void mmap_ref(int delta) override;

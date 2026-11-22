@@ -67,6 +67,8 @@ public:
     virtual isize read(u64 offset, void* buf, usize count) { return -err::INVAL; }
     virtual isize write(u64 offset, const void* buf, usize count) { return -err::INVAL; }
     virtual long truncate(u64 new_size) { return -err::INVAL; }
+    // fallocate(FALLOC_FL_PUNCH_HOLE): the range reads as zeros and its memory is freed.
+    virtual long punch_hole(u64 offset, u64 len) { return -err::OPNOTSUPP; }
     virtual long ioctl(u64 request, u64 arg) { return -err::NOTTY; }
     // ioctl through an open file (sys_ioctl calls this). The default checks
     // the argument buffer (size from the ioctl number) and calls ioctl().
@@ -139,6 +141,13 @@ public:
         return 0;
     }
     virtual bool seekable() const { return true; }
+    // Before stat/statx report the fields above: file systems whose
+    // attributes live elsewhere (FUSE servers) bring them up to date, or
+    // fail (ENOTCONN when the server is gone).
+    virtual long revalidate() { return 0; }
+    // Message devices (/dev/fuse): a writev() must arrive as one write
+    // (libfuse sends each reply's header and data as separate iovecs).
+    virtual bool whole_writes() const { return false; }
 
     // Reads/writes through an open file. Most inodes only care about the
     // offset; pipes and sockets also need the file (non-blocking mode, ends).
@@ -250,7 +259,8 @@ u64 next_fs_dev(); // a fresh st_dev for a newly mounted file system
 // ---- Mounts ----
 // Attach a file system's root over the directory at `path` (on any file
 // system). source/type are what /proc/mounts shows.
-long mount_at(const char* path, Inode* fs_root, const char* source, const char* type);
+long mount_at(const char* path, Inode* fs_root, const char* source, const char* type,
+              const char* options = nullptr); // options: what /proc/mounts lists (default "rw,relatime")
 long unmount(const char* path);
 long unmount_at(const char* path, Inode* cwd, const char* canon); // umount2: relative to cwd
 void mount_source(const char* path, char* out, usize size); // what /proc/mounts shows as its device
@@ -273,6 +283,8 @@ void set_root(Inode* new_root, const char* source, const char* type);
 Inode* ram_root(); // the RAM file system created at boot (the root until set_root)
 // Permission check used while walking paths (directories need search/x).
 void set_permission_hook(long (*fn)(Inode*, int));
-void for_each_mount(void (*fn)(const char* source, const char* path, const char* type, void* ctx), void* ctx);
+void for_each_mount(void (*fn)(const char* source, const char* path, const char* type, const char* options,
+                               void* ctx),
+                    void* ctx);
 
 } // namespace vfs

@@ -125,6 +125,23 @@ DEBIAN_PKGS  += foot wayland-utils
 # wl-clipboard) and xprop/xwininfo/xdpyinfo (~1.5 MB). Test programs for
 # xwayland-test: an SDL 2 game (sopwith) and a Qt 5 one (kcheckers).
 DEBIAN_PKGS  += xsettingsd x11-utils xclip wl-clipboard sopwith kcheckers
+# AppImages: fusermount3 (setuid mount helper) for the type-2 runtime's FUSE
+# mount of its squashfs; libfuse2 for older AppImages whose runtime loads
+# libfuse.so.2.
+DEBIAN_PKGS  += fuse3 libfuse2t64
+# Vulkan drivers (Mesa: lavapipe as the software fallback, RADV/ANV/NVK) and
+# vulkaninfo, for Vulkan programs such as dGPUFG.
+# (mesa-vulkan-drivers and vulkan-tools are in the GPU packages above.)
+# Pre-installed AppImages (not in the repository; skipped with a warning when
+# missing). dGPUFG: frame generation and upscaling. DGPUFG_APPIMAGE=<path> to
+# use another build.
+DGPUFG_APPIMAGE ?= $(lastword $(sort $(wildcard $(HOME)/CLionProjects/dGPUFG-Linux/build/dGPUFG-*-x86_64.AppImage)))
+# Input method: fcitx5 (X11 programs through its GTK module and XIM, Wayland
+# programs through syluxium-wayland-host) with Pinyin (Chinese), Anthy
+# (Japanese) and Hangul (Korean) (~100 MB, most of it the dictionaries).
+DEBIAN_PKGS  += fcitx5 fcitx5-frontend-gtk3 fcitx5-module-xorg fcitx5-chinese-addons fcitx5-anthy fcitx5-hangul
+# Chinese, Japanese and Korean characters (WenQuanYi Micro Hei, ~5 MB)
+DEBIAN_PKGS  += fonts-wqy-microhei
 XFCE_APPS_EXCLUDE := udisks2
 DEBIAN_ROOT  := $(BUILD)/rootfs-debian
 DEBIAN_STAMP := $(DEBIAN_ROOT)/.fetched
@@ -454,8 +471,8 @@ $(WHOST): userspace/whost/syluxium-wayland-host.c $(WHOST_GEN)/xdg-shell-protoco
 	@echo "  CC    $<"
 	@clang --target=x86_64-linux-gnu --sysroot=$(SHELL_SYSROOT) --gcc-install-dir=$(SHELL_SYSROOT)/usr/lib/gcc/x86_64-linux-gnu/14 \
 	    -std=gnu11 -O2 -Wall -Wno-unused-parameter -DWLR_USE_UNSTABLE -I$(WHOST_GEN) \
-	    $$($(SHELL_PKGCONFIG) --cflags wlroots-0.18 xcb xcb-render xcb-xfixes xcb-xinput xcb-randr xkbcommon pixman-1) \
-	    $< -o $@ -fuse-ld=lld -Wl,--as-needed $$($(SHELL_PKGCONFIG) --libs wlroots-0.18 wayland-server xcb xcb-render xcb-xfixes xcb-xinput xcb-randr xkbcommon pixman-1) -ldl
+	    $$($(SHELL_PKGCONFIG) --cflags wlroots-0.18 xcb xcb-render xcb-xfixes xcb-xinput xcb-randr xkbcommon pixman-1 libdrm) \
+	    $< -o $@ -fuse-ld=lld -Wl,--as-needed $$($(SHELL_PKGCONFIG) --libs wlroots-0.18 wayland-server xcb xcb-render xcb-xfixes xcb-xinput xcb-randr xkbcommon pixman-1 libdrm) -ldl -lm
 
 $(SHELL_GLSYNC): userspace/shell/glsync.c
 	@echo "  SO    $<"
@@ -570,7 +587,7 @@ $(WINE_I386_STAMP): tools/debian-fetch.py Makefile
 	@python3 tools/debian-fetch.py --arch i386 --suite $(DEBIAN_SUITE) --out $(WINE_I386_ROOT) --cache deps/debian --no-deps libwine
 	@touch $@
 
-$(INITRAMFS): $(KERNEL) $(PICKER) $(DEBIAN_CONFIGURED) tools/merge-accounts.py tools/mkfontdir.py tools/debrand-tde.py tools/syluxium_names.py tools/run-triggers.sh tools/wine-setup.sh tools/wine-prefix-links.py $(DEBIAN_STAMP) $(DEBIAN_I386_STAMP) $(WINE_I386_STAMP) $(FIRMWARE_STAMP) $(USER_PROGS) $(USER32_PROGS) $(WIN_PROGS) $(SHELL_GLSYNC) $(SHELL_DECOR) $(WHOST) $(shell find rootfs -type f 2>/dev/null) $(shell find rootfs -type d 2>/dev/null) Makefile
+$(INITRAMFS): $(KERNEL) $(PICKER) $(DEBIAN_CONFIGURED) tools/merge-accounts.py tools/mkfontdir.py tools/debrand-tde.py tools/syluxium_names.py tools/run-triggers.sh tools/wine-setup.sh tools/wine-prefix-links.py tools/install-appimage.sh $(wildcard $(DGPUFG_APPIMAGE)) $(DEBIAN_STAMP) $(DEBIAN_I386_STAMP) $(WINE_I386_STAMP) $(FIRMWARE_STAMP) $(USER_PROGS) $(USER32_PROGS) $(WIN_PROGS) $(SHELL_GLSYNC) $(SHELL_DECOR) $(WHOST) $(shell find rootfs -type f 2>/dev/null) $(shell find rootfs -type d 2>/dev/null) Makefile
 	@echo "  ROOT  $(ROOTFS)"
 	@rm -rf $(ROOTFS)
 	@cp -a $(DEBIAN_ROOT) $(ROOTFS)
@@ -598,6 +615,8 @@ $(INITRAMFS): $(KERNEL) $(PICKER) $(DEBIAN_CONFIGURED) tools/merge-accounts.py t
 	@python3 tools/debrand-tde.py $(ROOTFS)
 	@# Wayland-only programs' menu entries through syluxium-wayland-run.
 	@python3 rootfs/usr/local/sbin/syluxium-wayland-apps --root $(ROOTFS) | sed 's/^/  WAYL  /'
+	@# Pre-installed AppImages (before the triggers: menu and icon caches include them).
+	@tools/install-appimage.sh $(ROOTFS) dgpufg "$(DGPUFG_APPIMAGE)"
 	@# What Debian's install scripts and triggers would build (MIME types, image loaders, schemas, icons).
 	@tools/run-triggers.sh $(ROOTFS)
 	@# /var/run and /var/lock point into /run, as on Debian (programs look for

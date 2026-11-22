@@ -134,6 +134,26 @@ void send(proc::Process* p, int sig, i32 code) {
         return;
     if (is_ignored(p, sig) && (p->sigactions[sig].handler == SIG_IGN || !blocked_somewhere(p, sig)))
         return; // would be discarded on delivery anyway
+    // A signal with a handler goes to the main thread when it doesn't block
+    // it, as Linux's complete_signal() chooses: a thread of the process that
+    // sends one to its own process (kill(getpid())) mustn't take it itself
+    // while the main thread sleeps in a system call that the signal is meant
+    // to interrupt (an AppImage's runtime stops its FUSE loop that way: with
+    // the handler run by the sender, read(/dev/fuse) never returned EINTR and
+    // the mount outlived the program).
+    if (sig != SIGKILL && sig != SIGSTOP && sig != SIGCONT && p->sigactions[sig].handler > SIG_IGN) {
+        sched::Thread* main = nullptr;
+        {
+            LockGuard guard(p->thread_lock);
+            for (sched::Thread* t : p->threads)
+                if (t == p->main_thread && !(t->sigmask & bit(sig)))
+                    main = t;
+        }
+        if (main && main != sched::current()) {
+            send_thread(main, sig, code);
+            return;
+        }
+    }
     sender_info(code, &p->sig_code[sig], &p->sig_pid[sig], &p->sig_uid[sig], p);
     __atomic_or_fetch(&p->sig_pending, bit(sig), __ATOMIC_RELEASE);
     wake_process(p);

@@ -1,0 +1,73 @@
+#!/bin/sh
+# The session's input method (typing Chinese, Japanese and Korean, and
+# compose sequences): fcitx5, for X11 programs (its GTK module and XIM) and
+# for Wayland programs in the Xfce desktop (syluxium-wayland-host connects
+# it through input-method-v2). Started from autostart at login.
+# First login: a profile with the X keyboard layout, Pinyin, Anthy and
+# Hangul (Ctrl+Space switches between typing plain text and the last
+# input method; the taskbar icon lists them all), the Dusk look, no
+# online services (cloud pinyin sends what is typed to a server).
+cfg=$HOME/.config/fcitx5
+mkdir -p "$cfg/conf"
+if [ ! -f "$cfg/profile" ]; then
+    q=$(setxkbmap -query 2>/dev/null)
+    layout=$(echo "$q" | awk '/^layout:/ {print $2}' | cut -d, -f1)
+    variant=$(echo "$q" | awk '/^variant:/ {print $2}' | cut -d, -f1)
+    kb=keyboard-${layout:-us}${variant:+-$variant}
+    cat > "$cfg/profile" <<EOF
+[Groups/0]
+Name=Default
+Default Layout=${layout:-us}${variant:+-$variant}
+DefaultIM=pinyin
+
+[Groups/0/Items/0]
+Name=$kb
+Layout=
+
+[Groups/0/Items/1]
+Name=pinyin
+Layout=
+
+[Groups/0/Items/2]
+Name=anthy
+Layout=
+
+[Groups/0/Items/3]
+Name=hangul
+Layout=
+
+[GroupOrder]
+0=Default
+EOF
+fi
+[ -f "$cfg/config" ] || cat > "$cfg/config" <<'EOF'
+[Hotkey]
+EnumerateWithTriggerKeys=True
+EnumerateSkipFirst=False
+
+[Hotkey/TriggerKeys]
+0=Control+space
+1=Zenkaku_Hankaku
+2=Hangul
+
+[Hotkey/EnumerateForwardKeys]
+0=Control+Shift+space
+
+[Behavior]
+ShareInputState=No
+ShowInputMethodInformation=True
+DisabledAddons=cloudpinyin
+EOF
+[ -f "$cfg/conf/classicui.conf" ] || cat > "$cfg/conf/classicui.conf" <<'EOF'
+Vertical Candidate List=False
+Font="Inter 11"
+MenuFont="Inter 10"
+TrayFont="Inter Bold 9"
+Theme=dusk
+DarkTheme=dusk
+UseDarkTheme=False
+PerScreenDPI=True
+EOF
+pgrep -u "$(id -u)" -x fcitx5 > /dev/null && exit 0
+/usr/local/sbin/syluxium-diag mark "input method: fcitx5 starting" 2>/dev/null
+exec fcitx5 -d --replace > /dev/null 2>&1

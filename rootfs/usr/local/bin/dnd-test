@@ -1,0 +1,65 @@
+#!/usr/bin/python3
+"""Test aid: drag and drop between programs (wayland-host-test phase "dnd").
+    dnd-test source TEXT [TITLE]   a window to drag TEXT (and a file URI) from
+    dnd-test target [TITLE]        a window that takes drops: prints
+                                   "DND DROP <action> <type>: <data>" and writes it to /tmp/dnd-drop.txt
+Runs on X11 or Wayland (GDK_BACKEND), so it can test every direction."""
+import sys
+
+import gi
+
+gi.require_version("Gtk", "3.0")
+gi.require_version("Gdk", "3.0")
+from gi.repository import Gdk, GLib, Gtk  # noqa: E402
+
+mode = sys.argv[1] if len(sys.argv) > 1 else "target"
+win = Gtk.Window(title=sys.argv[3] if mode == "source" and len(sys.argv) > 3 else
+                 sys.argv[2] if mode == "target" and len(sys.argv) > 2 else f"DnD {mode}")
+win.set_default_size(320, 220)
+box = Gtk.EventBox()
+label = Gtk.Label()
+box.add(label)
+win.add(box)
+targets = [Gtk.TargetEntry.new("text/uri-list", 0, 1), Gtk.TargetEntry.new("UTF8_STRING", 0, 0),
+           Gtk.TargetEntry.new("text/plain;charset=utf-8", 0, 0), Gtk.TargetEntry.new("text/plain", 0, 0)]
+
+
+def say(text):
+    print(text, flush=True)
+    with open("/tmp/dnd-drop.txt", "a") as f:
+        f.write(text + "\n")
+
+
+if mode == "source":
+    text = sys.argv[2] if len(sys.argv) > 2 else "dragged text"
+    label.set_markup(f"<big>Drag me:\n<b>{GLib.markup_escape_text(text)}</b></big>")
+    box.drag_source_set(Gdk.ModifierType.BUTTON1_MASK, targets,
+                        Gdk.DragAction.COPY | Gdk.DragAction.MOVE)
+
+    def get(_w, _ctx, data, info, _time):
+        if info == 1:
+            data.set_uris(["file:///etc/hostname"])
+        else:
+            data.set_text(text, -1)
+
+    def end(_w, ctx):
+        say(f"DND SOURCE END action={ctx.get_selected_action()}")
+
+    box.connect("drag-data-get", get)
+    box.connect("drag-end", end)
+else:
+    label.set_markup("<big>Drop here</big>")
+    box.drag_dest_set(Gtk.DestDefaults.ALL, targets[1:] + targets[:1], Gdk.DragAction.COPY | Gdk.DragAction.MOVE)
+
+    def received(_w, ctx, _x, _y, data, _info, _time):
+        uris = data.get_uris()
+        payload = " ".join(uris) if uris else (data.get_text() or "")
+        say(f"DND DROP {ctx.get_selected_action().value_nicks[0] if ctx.get_selected_action() else '?'} "
+            f"{data.get_data_type().name()}: {payload}")
+        label.set_markup(f"<big>Dropped:\n<b>{GLib.markup_escape_text(payload)}</b></big>")
+
+    box.connect("drag-data-received", received)
+win.connect("destroy", Gtk.main_quit)
+win.show_all()
+GLib.timeout_add_seconds(120, Gtk.main_quit)
+Gtk.main()

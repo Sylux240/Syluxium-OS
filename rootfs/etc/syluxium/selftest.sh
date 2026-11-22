@@ -85,6 +85,22 @@ assert libc.mincore(ctypes.c_void_p(a), 3 * 4096, v) == 0, ctypes.get_errno()
 assert v[0] == 1 and v[2] == 0, list(v)
 libc.munmap(ctypes.c_void_p(a), 3 * 4096)
 assert libc.mincore(ctypes.c_void_p(a), 4096, v) == -1 and ctypes.get_errno() == errno.ENOMEM, ctypes.get_errno()'
+# Punched holes in a memfd (fallocate PUNCH_HOLE|KEEP_SIZE; foot's scrolling
+# buffer): zeros through read() and through a shared mapping made before,
+# the edges kept, the page usable again.
+check "memfd hole punching (fallocate)"     python3 -c 'import ctypes, mmap, os
+libc = ctypes.CDLL(None, use_errno=True)
+fd = os.memfd_create("punch")
+os.write(fd, b"A" * 4096 + b"B" * 8192 + b"C" * 4096)
+m = mmap.mmap(fd, 4 * 4096, mmap.MAP_SHARED, mmap.PROT_READ | mmap.PROT_WRITE)
+assert m[5000] == ord("B")
+r = libc.fallocate(fd, 3, ctypes.c_long(100), ctypes.c_long(3 * 4096))
+assert r == 0, ctypes.get_errno()
+assert m[99] == ord("A") and m[100] == 0 and m[5000] == 0 and m[12387] == 0 and m[12388] == ord("C"), (m[99], m[100], m[5000], m[12388])
+assert os.pread(fd, 4096, 4096) == bytes(4096)
+assert os.fstat(fd).st_size == 4 * 4096
+m[6000] = 7
+assert os.pread(fd, 1, 6000) == b"\x07"'
 # Terminal emulators on VTE (xfce4-terminal) read the pty in packet mode.
 # (In a session of its own: closing the master hangs up the slave's group.)
 check "pty packet mode (TIOCPKT)"           setsid python3 -c 'import os, fcntl, struct

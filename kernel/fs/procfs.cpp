@@ -647,6 +647,23 @@ public:
     }
     isize read(u64, void*, usize) override { return -err::ISDIR; }
 
+    // st_nlink = 2 + threads, as on Linux: Chromium's sandbox (Electron
+    // apps) tells "single-threaded" by /proc/self/task having 3 links and
+    // CHECK-fails on anything below.
+    long revalidate() override {
+        u32 threads = 0;
+        LockGuard guard(proc::table_lock());
+        if (Process* p = proc::find(m_pid)) {
+            LockGuard tguard(p->thread_lock);
+            for (sched::Thread* t : p->threads) {
+                (void)t;
+                threads++;
+            }
+        }
+        nlink = 2 + threads;
+        return 0;
+    }
+
     vfs::Inode* lookup(const char* name, usize len) override {
         int tid;
         if (!parse_number(name, len, &tid))
@@ -910,7 +927,15 @@ bool gen_stat_global(TextBuffer& out, const void*) {
 }
 
 bool gen_loadavg(TextBuffer& out, const void*) {
-    out.printf("0.00 0.00 0.00 1/%u %u\n", proc::count(), proc::count());
+    u64 l[3];
+    sched::load_average(l);
+    u32 running = 0;
+    for (u32 i = 0; i < percpu::count(); i++)
+        if (Cpu* c = percpu::get(i); c && c->online)
+            running += static_cast<u32>(c->rq.ready.size()) + (c->current && c->current != c->rq.idle ? 1 : 0);
+    out.printf("%lu.%02lu %lu.%02lu %lu.%02lu %u/%lu %u\n", l[0] >> 11, ((l[0] & 2047) * 100) >> 11,
+               l[1] >> 11, ((l[1] & 2047) * 100) >> 11, l[2] >> 11, ((l[2] & 2047) * 100) >> 11,
+               running ? running : 1, sched::thread_count(), proc::count());
     return true;
 }
 
@@ -981,9 +1006,9 @@ bool gen_cpuinfo(TextBuffer& out, const void*) {
 }
 
 bool gen_mounts(TextBuffer& out, const void*) {
-    vfs::for_each_mount([](const char* source, const char* path, const char* type, void* arg) {
+    vfs::for_each_mount([](const char* source, const char* path, const char* type, const char* options, void* arg) {
         auto* o = static_cast<TextBuffer*>(arg);
-        o->printf("%s %s %s rw,relatime 0 0\n", source, path, type);
+        o->printf("%s %s %s %s 0 0\n", source, path, type, options[0] ? options : "rw,relatime");
     }, &out);
     if (vfs::root() == vfs::ram_root()) // on a disk root they're real mount entries
         out.append("proc /proc proc rw,nosuid,nodev,noexec 0 0\nsysfs /sys sysfs rw,nosuid,nodev,noexec 0 0\n"
@@ -999,9 +1024,11 @@ bool gen_mountinfo(TextBuffer& out, const void*) {
         int id;
     } ctx{&out, 2};
     out.append("1 0 0:1 / / rw,relatime shared:1 - rootfs rootfs rw\n");
-    vfs::for_each_mount([](const char* source, const char* path, const char* type, void* arg) {
+    vfs::for_each_mount([](const char* source, const char* path, const char* type, const char* options,
+                           void* arg) {
         auto* c = static_cast<Ctx*>(arg);
-        c->o->printf("%d 1 0:%d / %s rw,relatime shared:%d - %s %s rw\n", c->id, c->id, path, c->id, type, source);
+        c->o->printf("%d 1 0:%d / %s rw,relatime shared:%d - %s %s %s\n", c->id, c->id, path, c->id, type, source,
+                     options && *options ? options : "rw");
         c->id++;
     }, &ctx);
     if (vfs::root() == vfs::ram_root())
@@ -1069,7 +1096,7 @@ void init() {
         snprintf(cmdline, sizeof(cmdline), "%s\n", boot::cmdline());
         genfs::static_file("/proc/cmdline", cmdline);
     }
-    genfs::static_file("/proc/filesystems", "nodev\tramfs\nnodev\tproc\nnodev\tsysfs\nnodev\tdevtmpfs\nnodev\ttmpfs\nnodev\tdevpts\nnodev\tcgroup\nnodev\tcgroup2\nnodev\tmqueue\nnodev\tbinder\n\tvfat\n\texfat\n\text4\n\text3\n\text2\n");
+    genfs::static_file("/proc/filesystems", "nodev\tramfs\nnodev\tproc\nnodev\tsysfs\nnodev\tdevtmpfs\nnodev\ttmpfs\nnodev\tdevpts\nnodev\tcgroup\nnodev\tcgroup2\nnodev\tmqueue\nnodev\tbinder\nnodev\tfuse\n\tvfat\n\texfat\n\text4\n\text3\n\text2\n");
     add("mounts", new GeneratedFile(gen_mounts, nullptr));
     vfs::mkdir_p("/proc/sys/kernel");
     genfs::static_file("/proc/sys/kernel/hostname", "syluxium\n");

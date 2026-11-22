@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Input Method
+Comment=Typing Chinese, Japanese and Korean (fcitx5)
+Exec=syluxium-input-method
+NoDisplay=true
+OnlyShowIn=XFCE;
