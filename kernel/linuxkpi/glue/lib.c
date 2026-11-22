@@ -931,6 +931,7 @@ void lkpi_bus_device_added(struct device* dev);
 void lkpi_bus_device_removed(struct device* dev);
 void lkpi_sysfs_char_device(unsigned int major, unsigned int minor, const char *devname, const char *pci_bus_id);
 void lkpi_sysfs_char_device_platform(unsigned int major, unsigned int minor, const char *devname, const char *platform_name);
+void lkpi_sysfs_char_device_remove(unsigned int major, unsigned int minor);
 int device_add(struct device* dev)
 {
 	if (dev->init_name) {
@@ -982,6 +983,7 @@ void device_del(struct device* dev)
 		snprintf(path, sizeof(path), "/dev/%s", name ? name : dev_name(dev));
 		kfree(name);
 		lkpi_chrdev_node_remove(path);
+		lkpi_sysfs_char_device_remove(MAJOR(dev->devt), MINOR(dev->devt));
 		if (!strncmp(path, "/dev/dri/card", 13))
 			lkpi_drm_card_added(-1);
 	}

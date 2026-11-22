@@ -18,6 +18,9 @@ void populate_devices(); // /sys/bus/pci + /sys/kernel/syluxium/devices (after d
 // A character device node (/sys/dev/char/<major>:<minor>) belonging to a PCI device.
 void add_char_device(u32 major, u32 minor, const char* devname, const char* pci_bus_id);
 void add_char_device(u32 major, u32 minor, const char* devname, const char* parent_name, bool pci);
+// The node went away (its driver unbound): its /sys/dev/char, /sys/class and
+// <device>/drm entries go too.
+void remove_char_device(u32 major, u32 minor);
 
 // Is this inode /sys or a directory below it? statfs then reports sysfs
 // (libudev, and so desktop hardware libraries, only accept device
