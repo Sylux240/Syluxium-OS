@@ -651,6 +651,12 @@ static struct usb_device* udev_for(void* sylux, const u8* config, unsigned int c
 		static struct usb_device blank_hub;
 		udev->parent = &blank_hub;
 	}
+	/* The bus: usbnet prints its name, mt76 asks whether it does
+	 * scatter-gather URBs (no: sg_tablesize 0). */
+	{
+		static struct usb_bus bus = { .busnum = 1, .bus_name = "usb" };
+		udev->bus = &bus;
+	}
 	r = lkpi_sylux_usb_control(sylux, USB_DIR_IN, USB_REQ_GET_DESCRIPTOR, USB_DT_DEVICE << 8, 0, &udev->descriptor,
 				   sizeof(udev->descriptor));
 	if (r < (long)sizeof(udev->descriptor)) {

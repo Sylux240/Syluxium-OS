@@ -67,6 +67,8 @@ struct usb_host_config {
 struct usb_bus {
     int busnum;
     const char* bus_name;
+    unsigned short sg_tablesize;  /* appended: 0 = no scatter-gather URBs (drivers use linear buffers) */
+    unsigned no_sg_constraint:1;  /* appended */
 };
 
 struct usb_device {
