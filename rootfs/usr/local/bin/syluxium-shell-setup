@@ -12,12 +12,13 @@ WALL=/opt/trinity/share/wallpapers/syluxium-default.jpg
     i=0
     while [ $i -lt 120 ] && ! pgrep -u "$(id -u)" -x xfce4-panel >/dev/null; do sleep 0.5; i=$((i + 1)); done
     /usr/local/sbin/syluxium-diag mark "shell: taskbar (xfce4-panel) started"
+    while [ $i -lt 120 ] && ! pgrep -u "$(id -u)" -x xfdesktop >/dev/null; do sleep 0.5; i=$((i + 1)); done
+    /usr/local/sbin/syluxium-diag mark "shell: desktop (xfdesktop) started"
 ) &
 /usr/local/bin/syluxium-xfce-setup >/dev/null 2>&1
 
 i=0
 while [ $i -lt 30 ] && ! pgrep -u "$(id -u)" -x xfdesktop >/dev/null; do sleep 1; i=$((i + 1)); done
-/usr/local/sbin/syluxium-diag mark "shell: desktop (xfdesktop) started"
 props=$(xfconf-query -c xfce4-desktop -l 2>/dev/null | grep '/workspace0/last-image$')
 ref=
 for p in $props; do
