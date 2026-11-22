@@ -104,6 +104,31 @@ int main(void) {
     child_status(c);
     struct shmid_ds ds;
     CHECK(shmctl(id, IPC_STAT, &ds) == 0 && ds.shm_segsz == 65536, "shmctl IPC_STAT");
+    CHECK(ds.shm_perm.uid == geteuid() && ds.shm_perm.cuid == geteuid() && ds.shm_perm.gid == getegid() &&
+          (ds.shm_perm.mode & 0777) == 0600, "IPC_STAT: owner and creator are the creating user, mode 0600");
+    // Permissions (the X server checks them before attaching a client's
+    // MIT-SHM segment): another user can't attach a 0600 segment, can a 0666 one.
+    {
+        int priv = shmget(IPC_PRIVATE, 4096, IPC_CREAT | 0600);
+        int open_ = shmget(IPC_PRIVATE, 4096, IPC_CREAT | 0666);
+        pid_t u = fork();
+        if (u == 0) {
+            if (setgid(1000) || setuid(1000))
+                _exit(9);
+            struct shmid_ds d2;
+            int r = 0;
+            if (shmat(priv, NULL, 0) != (void*)-1 || errno != EACCES) r |= 1;
+            if (shmctl(priv, IPC_STAT, &d2) != -1 || errno != EACCES) r |= 2;
+            if (shmctl(priv, IPC_RMID, NULL) != -1 || errno != EPERM) r |= 4;
+            if (shmat(open_, NULL, 0) == (void*)-1) r |= 8;
+            if (shmctl(open_, IPC_STAT, &d2) != 0 || d2.shm_perm.uid != 0) r |= 16;
+            _exit(r);
+        }
+        int r = child_status(u);
+        CHECK(r == 0, "another user: a 0600 segment is EACCES (attach, IPC_STAT) / EPERM (IPC_RMID), a 0666 one attaches");
+        shmctl(priv, IPC_RMID, NULL);
+        shmctl(open_, IPC_RMID, NULL);
+    }
     CHECK(shmctl(id, IPC_RMID, NULL) == 0 && strcmp(s + 60000, "sysv shared") == 0, "IPC_RMID while attached: still usable");
     CHECK(shmdt(s) == 0 && shmat(id, NULL, 0) == (void*)-1, "shmdt; the removed segment is gone");
     struct sembuf nowait = {0, -1, IPC_NOWAIT};
