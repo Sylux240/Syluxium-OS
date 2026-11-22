@@ -944,15 +944,25 @@ long sys_reboot(SYSCALL_ARGS) {
         return 0;
     if (cmd != RESTART && cmd != RESTART2 && cmd != HALT && cmd != POWER_OFF)
         return -err::INVAL;
-    klog::info("System %s: flushing disks...", cmd == POWER_OFF ? "power off" : cmd == HALT ? "halt" : "restart");
+    // Each step is logged and the boot log saved after it, so a shutdown
+    // that hangs (a disk that never answers, firmware that ignores the
+    // power-off) shows where on the stick.
+    const char* what = cmd == POWER_OFF ? "power off" : cmd == HALT ? "halt" : "restart";
+    klog::info("System %s: flushing disks...", what);
     bootlog::save();
     block::sync_all();
+    klog::info("System %s: disks flushed; closing file system journals", what);
+    bootlog::save();
     ext2::shutdown_all();
     block::sync_all();
+    klog::info("System %s: file systems clean; asking the firmware (ACPI)", what);
+    bootlog::save();
     if (cmd == RESTART || cmd == RESTART2)
         acpi::restart();
     if (cmd == POWER_OFF)
         acpi::power_off();
+    klog::warn("System %s: the firmware didn't act on the request", what);
+    bootlog::save();
     klog::ok("System halted: it's safe to turn the computer off.");
     arch::cli();
     for (;;)

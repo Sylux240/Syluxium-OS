@@ -12,6 +12,7 @@
 #include <acpi/acpi.hpp>
 #include <acpi/power.hpp>
 #include <arch/x86_64/cpu.hpp>
+#include <core/bootlog.hpp>
 #include <core/log.hpp>
 #include <lib/string.hpp>
 #include <mm/layout.hpp>
@@ -168,14 +169,25 @@ void enable_acpi_mode() {
     // With the AML interpreter: the firmware's full sequence (_PTS, wake
     // events disabled, then S5) - without it some machines wake right up
     // again, which looks like a reboot. Falls through if it fails.
-    if (interpreter_ready())
+    if (interpreter_ready()) {
+        klog::info("Power off: ACPI S5 through the firmware's methods (_PTS, _S5)");
+        bootlog::save();
         enter_s5();
+        klog::warn("Power off: the firmware's S5 sequence returned; writing the sleep registers directly");
+        bootlog::save();
+    }
     arch::cli();
     if (g_fadt.pm1a_cnt && g_s5.found) {
+        klog::info("Power off: PM1a 0x%llx PM1b 0x%llx, S5 sleep type %u/%u", static_cast<unsigned long long>(g_fadt.pm1a_cnt),
+                   static_cast<unsigned long long>(g_fadt.pm1b_cnt), g_s5.a, g_s5.b);
+        bootlog::save();
         enable_acpi_mode();
         constexpr u16 SLP_EN = 1u << 13;
-        u16 a = arch::inw(static_cast<u16>(g_fadt.pm1a_cnt)) & ~(7u << 10);
-        u16 b = g_fadt.pm1b_cnt ? (arch::inw(static_cast<u16>(g_fadt.pm1b_cnt)) & ~(7u << 10)) : 0;
+        u16 a = arch::inw(static_cast<u16>(g_fadt.pm1a_cnt)) & ~(7u << 10 | SLP_EN);
+        u16 b = g_fadt.pm1b_cnt ? (arch::inw(static_cast<u16>(g_fadt.pm1b_cnt)) & ~(7u << 10 | SLP_EN)) : 0;
+        // As Linux does: the sleep type first, then the same with SLP_EN
+        // (some firmware, Apple's among it, only acts on that order).
+        write_pm1(static_cast<u16>(a | (g_s5.a << 10)), static_cast<u16>(b | (g_s5.b << 10)));
         write_pm1(static_cast<u16>(a | (g_s5.a << 10) | SLP_EN), static_cast<u16>(b | (g_s5.b << 10) | SLP_EN));
         for (int k = 0; k < 1000000; k++)
             arch::io_wait();
