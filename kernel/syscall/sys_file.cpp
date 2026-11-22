@@ -397,6 +397,33 @@ long vectored(u64 fd, u64 user_iov, u64 count, bool write) {
         return -err::BADF;
     if (count > 1024)
         return -err::INVAL;
+    if (write && f->inode->whole_writes()) {
+        // Gathered into one buffer and written at once.
+        IoVec vecs[64];
+        if (count > 64)
+            return -err::INVAL;
+        if (long r = uaccess::copy_from(vecs, reinterpret_cast<const void*>(user_iov), count * sizeof(IoVec)); r < 0)
+            return r;
+        u64 len = 0;
+        for (u64 i = 0; i < count; i++)
+            len += vecs[i].len;
+        if (len > 16 * MiB)
+            return -err::INVAL;
+        auto* buf = static_cast<u8*>(kmalloc(len ? len : 1));
+        if (!buf)
+            return -err::NOMEM;
+        u64 at = 0;
+        for (u64 i = 0; i < count; i++) {
+            if (vecs[i].len && uaccess::copy_from(buf + at, reinterpret_cast<const void*>(vecs[i].base), vecs[i].len) < 0) {
+                kfree(buf);
+                return -err::FAULT;
+            }
+            at += vecs[i].len;
+        }
+        long n = can_write(f.get()) ? f->inode->write_file(f.get(), 0, buf, len) : -err::BADF;
+        kfree(buf);
+        return n;
+    }
     long total = 0;
     for (u64 i = 0; i < count; i++) {
         IoVec v;

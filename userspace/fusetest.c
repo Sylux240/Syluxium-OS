@@ -22,6 +22,7 @@
 #include <sys/mount.h>
 #include <sys/stat.h>
 #include <sys/statfs.h>
+#include <sys/uio.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -116,17 +117,17 @@ static void build_tree(const char* prog_path) {
         close(fd);
 }
 
+// Header and payload as two iovecs, as libfuse sends them: the kernel must
+// take a writev as one reply.
 static void reply(int fd, uint64_t unique, int error, const void* data, size_t len) {
-    char buf[sizeof(struct fuse_out_header) + 65536 + 4096];
-    struct fuse_out_header* h = (struct fuse_out_header*)buf;
+    struct fuse_out_header h;
     if (error)
         len = 0;
-    h->len = sizeof(*h) + len;
-    h->error = error;
-    h->unique = unique;
-    if (len)
-        memcpy(buf + sizeof(*h), data, len);
-    if (write(fd, buf, h->len) != (ssize_t)h->len)
+    h.len = sizeof(h) + len;
+    h.error = error;
+    h.unique = unique;
+    struct iovec iov[2] = {{&h, sizeof(h)}, {(void*)data, len}};
+    if (writev(fd, iov, len ? 2 : 1) != (ssize_t)h.len)
         fprintf(stderr, "fusetest server: reply write failed: %s\n", strerror(errno));
 }
 

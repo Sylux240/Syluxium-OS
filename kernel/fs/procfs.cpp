@@ -586,6 +586,23 @@ public:
     }
     isize read(u64, void*, usize) override { return -err::ISDIR; }
 
+    // st_nlink = 2 + threads, as on Linux: Chromium's sandbox (Electron
+    // apps) tells "single-threaded" by /proc/self/task having 3 links and
+    // CHECK-fails on anything below.
+    long revalidate() override {
+        u32 threads = 0;
+        LockGuard guard(proc::table_lock());
+        if (Process* p = proc::find(m_pid)) {
+            LockGuard tguard(p->thread_lock);
+            for (sched::Thread* t : p->threads) {
+                (void)t;
+                threads++;
+            }
+        }
+        nlink = 2 + threads;
+        return 0;
+    }
+
     vfs::Inode* lookup(const char* name, usize len) override {
         int tid;
         if (!parse_number(name, len, &tid))

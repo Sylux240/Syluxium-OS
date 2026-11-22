@@ -332,6 +332,8 @@ void abort(Conn* c) {
     poll::notify();
 }
 
+void root_attr_reply(Conn* c, Request* r);
+
 void init_reply(Conn* c, Request* r) {
     auto* o = static_cast<InitOut*>(r->out);
     i32 e = r->error;
@@ -351,6 +353,11 @@ void init_reply(Conn* c, Request* r) {
     if (e)
         klog::warn("fuse: the server rejected INIT (%d)", e);
     c->wq.wake_all();
+    // The root's real attributes (mount(2) only gave its type).
+    if (!e) {
+        GetattrIn in{};
+        call_background(c, OP_GETATTR, ROOT_ID, &in, sizeof(in), sizeof(AttrOut), root_attr_reply);
+    }
 }
 
 // ---- Inodes ----
@@ -1143,6 +1150,7 @@ public:
         atime = mtime = ctime = vfs::now();
     }
     bool seekable() const override { return false; }
+    bool whole_writes() const override { return true; } // one reply per writev
 
     void on_release(vfs::File* f) override {
         auto* c = static_cast<Conn*>(f->private_data);
@@ -1325,6 +1333,12 @@ u64 parse_num(const char* s, int base) {
     return v;
 }
 
+void root_attr_reply(Conn* c, Request* r) {
+    auto* o = static_cast<AttrOut*>(r->out);
+    if (!r->error && r->out_len >= sizeof(AttrOut) && (o->attr.mode & vfs::S_IFMT) == vfs::S_IFDIR)
+        c->root->invalidate_if_needed(o->attr, expiry(o->attr_valid, o->attr_valid_nsec));
+}
+
 } // namespace
 
 void Node::invalidate_if_needed(const Attr& a, u64 attr_expires) {
@@ -1378,7 +1392,9 @@ long mount(const char* data, vfs::Inode** root, char* shown, usize shown_size) {
     c->dev = vfs::next_fs_dev();
     c->mounted = true;
     Attr a{};
-    a.mode = rootmode;
+    // fusermount gives only the type (040000): until the server's own
+    // attributes arrive (GETATTR after INIT), the owner may enter and list it.
+    a.mode = (rootmode & 07777) ? rootmode : rootmode | 0755;
     a.nlink = 2;
     a.uid = user_id;
     a.gid = group_id;

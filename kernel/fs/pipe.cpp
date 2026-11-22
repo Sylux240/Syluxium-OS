@@ -40,6 +40,10 @@ public:
     Pipe() {
         ino = vfs::next_ino();
         mode = vfs::S_IFIFO | 0600;
+        // Owned by its creator, as on Linux (fstat shows the user, and
+        // permission checks on the pipe itself see the right owner).
+        uid = proc::cred().fsuid;
+        gid = proc::cred().fsgid;
         atime = mtime = ctime = vfs::now();
         m_buf = static_cast<u8*>(kmalloc(CAPACITY));
     }

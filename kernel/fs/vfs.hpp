@@ -143,6 +143,9 @@ public:
     // attributes live elsewhere (FUSE servers) bring them up to date, or
     // fail (ENOTCONN when the server is gone).
     virtual long revalidate() { return 0; }
+    // Message devices (/dev/fuse): a writev() must arrive as one write
+    // (libfuse sends each reply's header and data as separate iovecs).
+    virtual bool whole_writes() const { return false; }
 
     // Reads/writes through an open file. Most inodes only care about the
     // offset; pipes and sockets also need the file (non-blocking mode, ends).
