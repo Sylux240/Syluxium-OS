@@ -193,6 +193,11 @@ public:
 
     // ---- Symlinks ----
     virtual isize readlink(char* buf, usize bufsize) { return -err::INVAL; }
+    // Linux's "magic links" (/proc/<pid>/fd/N, /proc/<pid>/exe): following
+    // one lands on the inode itself, not on what its text names (a pipe, a
+    // socket, a deleted file). *out = the inode, or the error to report;
+    // returns false for ordinary symlinks.
+    virtual bool magic_follow(long* error, Inode** out) { return false; }
 };
 
 // An open file description (shared by dup'ed and fork'ed descriptors).

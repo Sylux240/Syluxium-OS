@@ -435,7 +435,7 @@ public:
         LockGuard guard(m_lock);
         if (!m_links[fd]) {
             auto* ctx = new LinkCtx{m_pid, fd};
-            m_links[fd] = new GeneratedLink(fd_target, ctx);
+            m_links[fd] = new FdLink(fd_target, ctx);
         }
         return m_links[fd];
     }
@@ -462,6 +462,32 @@ public:
 private:
     struct LinkCtx {
         int pid, fd;
+    };
+
+    // /proc/<pid>/fd/N: reads as the path (or "pipe:[ino]"), but opening it
+    // opens the very inode the descriptor refers to, as on Linux: bash's
+    // <(...) and >(...) hand out /dev/fd/63, fexecve() runs /proc/self/fd/N,
+    // and a deleted file stays reachable. Sockets can't be reopened (ENXIO).
+    class FdLink : public GeneratedLink {
+    public:
+        FdLink(Target t, const LinkCtx* ctx) : GeneratedLink(t, ctx), m_ctx(ctx) {}
+        bool magic_follow(long* error, vfs::Inode** out) override {
+            LockGuard guard(proc::table_lock());
+            Process* p = proc::find(m_ctx->pid);
+            vfs::File* f = p ? p->fds[m_ctx->fd] : nullptr;
+            if (!f) {
+                *error = -err::NOENT;
+            } else if ((f->inode->mode & vfs::S_IFMT) == vfs::S_IFSOCK) {
+                *error = -err::NXIO;
+            } else {
+                *error = 0;
+                *out = f->inode;
+            }
+            return true;
+        }
+
+    private:
+        const LinkCtx* m_ctx;
     };
 
     bool fd_open(int fd) {

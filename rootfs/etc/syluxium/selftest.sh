@@ -58,6 +58,11 @@ check "/proc/meminfo has MemTotal"          sh -c 'grep -q "^MemTotal:" /proc/me
 check "ps sees this shell"                  sh -c 'ps -A -o args | grep -q selftest'
 check "/proc/<pid>/cmdline"                 sh -c 'sleep 3 & p=$!; tr "\\0" " " < /proc/$p/cmdline | grep -q "^sleep 3"; r=$?; kill $p; exit $r'
 check "/proc/<pid>/fd lists open files"     sh -c 'exec 7</etc/hostname; [ "$(readlink /proc/$$/fd/7)" = /etc/hostname ]'
+# /proc/<pid>/fd/N are magic links: opening one opens the descriptor's own inode.
+check "bash <(...) through /dev/fd"         bash -c '[ "$(cat <(echo subst))" = subst ]'
+check "bash >(...) through /dev/fd"         bash -c 'echo out > >(cat > /tmp/procsubst); sleep 0.5; [ "$(cat /tmp/procsubst)" = out ]'
+check "<(...) as a normal user"             su syluxium -s /bin/bash -c '[ "$(cat <(echo subst))" = subst ]'
+check "a deleted file through /proc/self/fd" sh -c 'echo kept > /tmp/gone; exec 5</tmp/gone; rm /tmp/gone; [ "$(cat /proc/self/fd/5)" = kept ]'
 check "free / uptime work"                  sh -c 'free >/dev/null && uptime >/dev/null'
 check "/sys/devices/system/cpu/online"      sh -c 'grep -q "^0" /sys/devices/system/cpu/online'
 # GPU buffers shared between programs (dma-buf): its own mapping and the
