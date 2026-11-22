@@ -351,6 +351,19 @@ void deliver(interrupts::Frame* frame) {
     }
     proc::SigAction act = p->sigactions[sig];
 
+    // Ignored (SIG_IGN, or a default of "ignore": SIGCHLD, SIGWINCH, ...):
+    // pending() drops those, but another child's SIGCHLD can be queued again
+    // between that check and here (while some thread blocks it, as glibc
+    // does around fork and pthread_create). It was taken for a fatal default
+    // and killed the process ("Child exited", status 145).
+    if (sig != SIGKILL && is_ignored(p, sig)) {
+        if (t->restore_sigmask) {
+            t->sigmask = t->saved_sigmask;
+            t->restore_sigmask = false;
+        }
+        return;
+    }
+
     if (act.handler == SIG_DFL || sig == SIGKILL) {
         arch::sti();
         // Signals whose default is a core dump mean the program crashed or
