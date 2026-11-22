@@ -122,6 +122,7 @@ def main():
     ap.add_argument("-j", type=int, default=os.cpu_count() or 4)
     ap.add_argument("-v", "--verbose", action="store_true", help="also print every compiler error")
     ap.add_argument("--top", type=int, default=40, help="entries shown per list")
+    ap.add_argument("--no-stubs", action="store_true", help="stop at missing headers (no empty stand-ins)")
     a = ap.parse_args()
 
     base = ROOT if a.ours else a.upstream
@@ -151,15 +152,38 @@ def main():
         r = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True)
         return f, r.returncode, r.stderr, obj
 
-    counters = collections.defaultdict(collections.Counter)
-    examples = {}
-    ok, failed = [], []
-    with concurrent.futures.ThreadPoolExecutor(a.j) as ex:
-        for f, rc, err, obj in ex.map(compile_one, files):
-            classify(err, counters, examples)
-            (ok if rc == 0 else failed).append((f, obj, err))
-            if a.verbose and err:
-                print(err)
+    # A missing header stops the compiler at once and hides everything
+    # behind it. Unless --no-stubs, each missing header gets an empty stand-in
+    # (build/lkpi-check/<name>/stubs, searched after our headers) and the
+    # files are compiled again, so one run shows the whole picture; the
+    # stubbed headers are still reported as missing.
+    stubdir = os.path.join(out, "stubs")
+    if os.path.isdir(stubdir):
+        subprocess.run(["rm", "-rf", stubdir])
+    stubbed = collections.Counter()
+    for _round in range(1 if a.no_stubs else 12):
+        counters = collections.defaultdict(collections.Counter)
+        examples = {}
+        ok, failed = [], []
+        with concurrent.futures.ThreadPoolExecutor(a.j) as ex:
+            for f, rc, err, obj in ex.map(compile_one, files):
+                classify(err, counters, examples)
+                (ok if rc == 0 else failed).append((f, obj, err))
+        new = [h for h in counters.get("missing headers", {}) if h not in stubbed]
+        if a.no_stubs or not new:
+            break
+        for h in new:
+            stubbed[h] += counters["missing headers"][h]
+            p = os.path.join(stubdir, h)
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            open(p, "w").close()
+        if "-idirafter" + stubdir not in flags:
+            flags.append("-idirafter" + stubdir)
+    if stubbed:
+        counters["missing headers"] = stubbed + counters.get("missing headers", collections.Counter())
+    if a.verbose:
+        for _, _, err in failed:
+            print(err)
 
     lines = [f"lkpi-check {a.dir} ({'ours' if a.ours else base})",
              f"compiled: {len(ok)}/{len(files)} files"]
