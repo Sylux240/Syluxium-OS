@@ -120,6 +120,11 @@ enum { K_SYLUXIUM, K_CONSOLE, K_SAFE, K_WINDOWS, K_LINUX, K_MACOS, K_EFI };
 struct entry { char title[128]; char label[24]; int kind; EFI_HANDLE dev; CHAR16 path[96]; };
 static struct entry ENTRIES[12];
 static int NENTRIES, DEFAULT, TIMEOUT = 5;
+/* Every entry (Limine's and other systems'), for the Esc text list; the
+ * picture shows only ENTRIES: Text Console, the default and GPU Test, plus
+ * other systems found on the disks. */
+static struct entry ALL[12];
+static int NALL;
 
 static void limine_entries(void)
 {
@@ -163,6 +168,34 @@ static void limine_entries(void)
             DEFAULT = v > 0 ? v - 1 : 0;
         }
     }
+}
+
+/* The picture's entries: Text Console, the default (labelled "Default")
+ * and GPU Test, in that order, then other systems; everything stays in
+ * ALL for the Esc text list. */
+static void choose_shown(void)
+{
+    int i, n = 0, def = -1;
+    for (i = 0; i < NENTRIES; i++) ALL[i] = ENTRIES[i];
+    NALL = NENTRIES;
+    for (i = 0; i < NALL; i++)
+        if (!ALL[i].dev && ALL[i].kind == K_CONSOLE) { ENTRIES[n++] = ALL[i]; break; }
+    if (DEFAULT < NALL && !ALL[DEFAULT].dev) {
+        def = n;
+        ENTRIES[n] = ALL[DEFAULT];
+        const char *d = "Default";
+        UINTN k = 0;
+        for (; d[k]; k++) ENTRIES[n].label[k] = d[k];
+        ENTRIES[n].label[k] = 0;
+        n++;
+    }
+    for (i = 0; i < NALL; i++)
+        if (!ALL[i].dev && has(ALL[i].title, "GPU")) { ENTRIES[n++] = ALL[i]; break; }
+    for (i = 0; i < NALL && n < 12; i++)
+        if (ALL[i].dev) ENTRIES[n++] = ALL[i];
+    if (!n) { for (i = 0; i < NALL; i++) ENTRIES[i] = ALL[i]; n = NALL; def = DEFAULT; }
+    NENTRIES = n;
+    DEFAULT = def >= 0 ? def : 0;
 }
 
 /* Other systems' boot loaders on every EFI partition. */
@@ -295,20 +328,12 @@ static void register_boot_entry(void)
     if (root) root->Close(root);
 }
 
-static EFI_STATUS limine(int entry)
+static EFI_STATUS limine(const struct entry *e)
 {
-    if (entry == -2) {
-        /* Esc: Limine's own menu, waiting for a choice (no countdown that
-         * would start the default entry while the menu is hard to see). */
-        static const CHAR16 force[] = {'m', 'e', 'n', 'u', '-', 'f', 'o', 'r', 'c', 'e', 0};
-        u32 attrs = EFI_VARIABLE_BOOTSERVICE_ACCESS | EFI_VARIABLE_RUNTIME_ACCESS;
-        RT->SetVariable(L"LoaderConfigTimeoutOneShot", &LOADER_GUID, attrs, sizeof(force), force);
-        entry = -1;
-    }
-    if (entry >= 0) {
+    if (e) {
         /* "menu-hidden": boot the one-shot entry without showing the menu. */
         CHAR16 name[128], zero[] = {'m', 'e', 'n', 'u', '-', 'h', 'i', 'd', 'd', 'e', 'n', 0};
-        a2w(name, ENTRIES[entry].title, 128);
+        a2w(name, e->title, 128);
         u32 attrs = EFI_VARIABLE_BOOTSERVICE_ACCESS | EFI_VARIABLE_RUNTIME_ACCESS;
         RT->SetVariable(L"LoaderEntryOneShot", &LOADER_GUID, attrs, (wlen(name) + 1) * 2, name);
         RT->SetVariable(L"LoaderConfigTimeoutOneShot", &LOADER_GUID, attrs, sizeof(zero), zero);
@@ -530,12 +555,13 @@ static int hit_button(int x, int y)
     return -1;
 }
 
-static void boot(int i)
+static void boot_entry(const struct entry *e)
 {
-    if (ENTRIES[i].dev) start(ENTRIES[i].dev, ENTRIES[i].path);
-    else limine(i);
+    if (e->dev) start(e->dev, e->path);
+    else limine(e);
     /* Only reached if it failed: back to the picker. */
 }
+static void boot(int i) { boot_entry(&ENTRIES[i]); }
 
 /* ---- input ---- */
 static EFI_SIMPLE_POINTER *SPTR[8];
@@ -601,7 +627,8 @@ static void text_out(const char *a)
 }
 static void text_menu(void)
 {
-    int sel = SEL;
+    int sel = 0;
+    for (int i = 0; i < NALL; i++) if (!__builtin_memcmp(ALL[i].title, ENTRIES[SEL].title, sizeof(ALL[i].title))) sel = i;
     /* The console may cover only part of the screen (its mode is the
      * firmware's, not the picture's): black out the rest first. */
     for (UINTN p = 0; p < (UINTN)W * H; p++) SCENE[p] = 0;
@@ -609,12 +636,12 @@ static void text_menu(void)
     for (;;) {
         ST->ConOut->ClearScreen(ST->ConOut);
         text_out("\r\n  Syluxium boot menu\r\n\r\n");
-        for (int i = 0; i < NENTRIES; i++) {
+        for (int i = 0; i < NALL; i++) {
             char line[140] = "    1. ";
             line[2] = i == sel ? '>' : ' ';
             line[4] = (char)('1' + i);
             UINTN n = 7;
-            for (const char *t = ENTRIES[i].title; *t && n < 136; t++) line[n++] = *t;
+            for (const char *t = ALL[i].title; *t && n < 136; t++) line[n++] = *t;
             line[n++] = '\r', line[n++] = '\n', line[n] = 0;
             text_out(line);
         }
@@ -625,11 +652,11 @@ static void text_menu(void)
             for (int k = -1; k < NKBD && !got; k++)
                 got = (k < 0 ? ST->ConIn : KBD[k])->ReadKeyStroke(k < 0 ? ST->ConIn : KBD[k], &key) == EFI_SUCCESS;
             if (!got) { BS->Stall(10000); continue; }
-            if (key.ScanCode == 1) { sel = (sel + NENTRIES - 1) % NENTRIES; break; }
-            if (key.ScanCode == 2) { sel = (sel + 1) % NENTRIES; break; }
-            if (key.ScanCode == 0x17) { SEL = sel; return; }
-            if (key.UnicodeChar == '\r') { SEL = sel; boot(sel); break; }
-            if (key.UnicodeChar >= '1' && key.UnicodeChar < '1' + NENTRIES) { SEL = key.UnicodeChar - '1'; boot(SEL); break; }
+            if (key.ScanCode == 1) { sel = (sel + NALL - 1) % NALL; break; }
+            if (key.ScanCode == 2) { sel = (sel + 1) % NALL; break; }
+            if (key.ScanCode == 0x17) return;
+            if (key.UnicodeChar == '\r') { boot_entry(&ALL[sel]); break; }
+            if (key.UnicodeChar >= '1' && key.UnicodeChar < '1' + NALL) { boot_entry(&ALL[key.UnicodeChar - '1']); break; }
         }
     }
 }
@@ -688,17 +715,18 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     find_self();
     register_boot_entry();
     limine_entries();
-    if (!NENTRIES) return limine(-1); /* no configuration: Limine knows what to do */
+    if (!NENTRIES) return limine(0); /* no configuration: Limine knows what to do */
     connect_all();
     other_systems();
     if (DEFAULT >= NENTRIES) DEFAULT = 0;
+    choose_shown();
     SEL = DEFAULT;
 
-    if (BS->LocateProtocol(&GOP_GUID, 0, (void **)&GOP) || !GOP->Mode || !GOP->Mode->Info) return limine(-1);
+    if (BS->LocateProtocol(&GOP_GUID, 0, (void **)&GOP) || !GOP->Mode || !GOP->Mode->Info) return limine(0);
     best_mode();
     W = GOP->Mode->Info->HorizontalResolution, H = GOP->Mode->Info->VerticalResolution;
     BGBUF = alloc((UINTN)W * H * 4), SCENE = alloc((UINTN)W * H * 4);
-    if (!BGBUF || !SCENE) return limine(-1);
+    if (!BGBUF || !SCENE) return limine(0);
     st->ConOut->EnableCursor(st->ConOut, 0);
     scale_background();
     find_pointers();
