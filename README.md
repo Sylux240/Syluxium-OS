@@ -15,8 +15,9 @@ Highlights:
 - **A complete desktop** in Syluxium's own *Dusk* look, built on Xfce: a see-through glass taskbar, a
   start menu with search, rounded windows with real transparency and shadows, adjustable live from
   Personalize, plus a polished login screen, a graphical boot picker and splash.
-- **Native Wayland too**: a Syluxium shell on the Wayfire compositor (glass panel, blur, Xwayland for
-  X11 programs) is in preview alongside the Xfce desktop.
+- **Native Wayland too**: Wayland programs open as ordinary windows in the Xfce desktop (Dusk frames,
+  taskbar, clipboard), and a Syluxium shell on the Wayfire compositor (glass panel, blur, Xwayland for
+  X11 programs) is in preview alongside it.
 - **Ready to use**: a step-by-step installer (alongside Windows too), App Store and updates through apt,
   Device Manager, Disk Management, recovery mode, and Windows programs through Wine.
 - **Runs from a USB stick**: boots in seconds straight from the stick, and collects boot logs from
@@ -112,6 +113,7 @@ tools/psf2cpp.py      converts a PSF console font into kernel/video/font_*.cpp
 tools/smoke-test.sh   headless QEMU boot: serial log + screenshot
 tools/wine-setup.sh   finishes Wine in the rootfs: WoW64 DLLs, stripping, template prefix (+ wine-prefix-links.py)
 userspace/windows/    Windows test programs (clang + lld-link) for Wine
+userspace/whost/      syluxium-wayland-host: Wayland programs as X windows in the Xfce desktop
 ```
 
 ## Checklist
@@ -191,6 +193,10 @@ Legend: ✅ done · 🟡 partly done · ⬜ to do
      "Syluxium Classic" in the login screen
 - 🟡 Syluxium shell on native Wayland (Wayfire compositor: glass panel, blur with a GPU driver,
      X11 apps through Xwayland; Android windows next): preview boot entries, rounded corners to do
+- ✅ Wayland programs in the Xfce desktop: syluxium-wayland-host (a wlroots compositor on its X11
+     backend) shows each Wayland window as an X window: xfwm4 frame, taskbar entry and icon, menus,
+     resizing, keyboard, clipboard both ways; Wayland-only programs start through it from the menu
+     (`syluxium-wayland-run PROGRAM` forces any program onto Wayland)
 - ✅ Right-click menus: Extract Here / Extract All, Send To compressed folder, Change Icon
 - ✅ File manager: Thunar in Dusk (trash, drives, archives extracted and created)
 - 🟡 Display settings: resolution and refresh rate change live (with a 15 s undo); multi-monitor to do
