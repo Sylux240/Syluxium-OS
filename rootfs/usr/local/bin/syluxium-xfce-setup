@@ -11,6 +11,7 @@ WALL=/opt/trinity/share/wallpapers/syluxium-default.jpg
 i=0
 while [ $i -lt 60 ] && ! pgrep -u "$(id -u)" -x xfdesktop >/dev/null; do sleep 1; i=$((i + 1)); done
 sleep 3
+/usr/local/sbin/syluxium-diag mark "session: desktop ready (xfdesktop running)"
 
 # Wallpaper: every monitor xfdesktop knows, plus the outputs X reports
 # (xfdesktop 4.20 names them monitor<output>), workspace 0.

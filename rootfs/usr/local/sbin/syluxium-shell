@@ -11,6 +11,7 @@ mkdir -p "$RT" && chown "$U" "$RT" && chmod 700 "$RT"
 pgrep -x seatd > /dev/null || { seatd -g video > /var/log/seatd.log 2>&1 & sleep 1; }
 chmod 666 /run/seatd.sock 2>/dev/null
 LOG=/var/log/syluxium-shell.log
+syluxium-diag mark "session: Wayland shell (Wayfire) starting for $U"
 # Wayfire runs from the user's own copy of the configuration (Personalize
 # switches blur there; Wayfire reloads it by itself). Blur needs a GPU
 # driver: on the firmware framebuffer (software rendering) it misplaces the

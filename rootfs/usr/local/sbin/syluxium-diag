@@ -1,0 +1,124 @@
+#!/bin/sh
+# Test-round diagnostics: everything useful for working out what happened on
+# a machine goes into this boot's folder on the stick (/boot/logs, next to
+# the kernel log), so a stick brought back after a round tells the story.
+#
+#   syluxium-diag hardware        hardware.txt: PCI/USB devices and their drivers,
+#                                 displays, network, disks, CPU, memory (once)
+#   syluxium-diag status          status.txt / status-history.txt: load, memory,
+#                                 busiest processes, zombies (every 15 s)
+#   syluxium-diag logs            copy the session's logs (X, login, shell, Wi-Fi, ...)
+#   syluxium-diag mark <text>     milestones.txt: "<seconds since boot> <text>"
+#   syluxium-diag gpu-clients     gpu-clients.txt: why programs do or don't get the
+#                                 GPU (Mesa's own explanation); GPU Test entry only
+#
+# Never copies secrets: wpa_supplicant's configuration (the Wi-Fi key) is not
+# read, and passwords are scrubbed from what is copied.
+L=/boot/logs
+grep -q " /boot/logs-stick " /proc/mounts || exit 0
+# The desktop user can't write to the stick (or even look into /boot/logs):
+# their parts (milestones, GPU check) go to /run/syluxium-diag, which root's
+# "logs" step copies over.
+if [ "$(id -u)" != 0 ]; then
+    L=/run/syluxium-diag
+    [ -d "$L" ] || exit 0
+else
+    [ -d "$L" ] || exit 0
+fi
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/opt/trinity/bin
+up() { cut -d' ' -f1 /proc/uptime; }
+
+case "$1" in
+hardware)
+    {
+        echo "== $(uname -srv) at $(up) s"
+        echo "cmdline: $(cat /proc/cmdline)"
+        echo; echo "== CPU / memory"
+        grep -m1 "model name" /proc/cpuinfo; echo "cpus: $(grep -c ^processor /proc/cpuinfo)"
+        grep -E "MemTotal|MemAvailable" /proc/meminfo
+        echo; echo "== PCI (lspci -nnk)"; lspci -nnk 2>&1
+        echo; echo "== USB devices (vendor:product, name, driver per interface)"
+        for d in /sys/bus/usb/devices/*; do
+            [ -f "$d/idVendor" ] || continue
+            printf '%s  %s:%s  %s %s\n' "$(basename "$d")" "$(cat "$d/idVendor")" "$(cat "$d/idProduct")" \
+                "$(cat "$d/manufacturer" 2>/dev/null)" "$(cat "$d/product" 2>/dev/null)"
+            for i in "$d"/*:*; do
+                [ -d "$i" ] || continue
+                drv=$(basename "$(readlink "$i/driver" 2>/dev/null)" 2>/dev/null)
+                printf '    if %s class %s -> %s\n' "${i##*:}" "$(cat "$i/bInterfaceClass" 2>/dev/null)" "${drv:-no driver}"
+            done
+        done
+        echo; echo "== Displays (DRM)"
+        for c in /sys/class/drm/card*; do
+            [ -e "$c" ] || continue
+            echo "$(basename "$c"): $(basename "$(readlink "$c/device/driver" 2>/dev/null)" 2>/dev/null) $(cat "$c/status" 2>/dev/null)"
+        done
+        ls -l /dev/dri 2>&1
+        echo; echo "== Network"
+        ip -br link 2>&1; ip -br addr 2>&1; ip route 2>&1
+        command -v iw >/dev/null && iw dev 2>&1
+        echo; echo "== Disks"
+        cat /proc/partitions; grep -E "^/dev" /proc/mounts
+        echo; echo "== Input devices"
+        grep -E "^N: Name=|^H: Handlers=" /proc/bus/input/devices 2>/dev/null
+        echo; echo "== Sound"
+        cat /proc/asound/cards 2>/dev/null
+        echo; echo "== Power"
+        for b in /sys/class/power_supply/*; do [ -e "$b" ] && echo "$(basename "$b"): $(cat "$b/type" 2>/dev/null) $(cat "$b/status" 2>/dev/null) $(cat "$b/capacity" 2>/dev/null)%"; done
+        ls /sys/class/backlight 2>/dev/null
+    } > "$L/hardware.txt" 2>&1
+    ;;
+status)
+    {
+        echo "== $(up) s  load $(cut -d' ' -f1-3 /proc/loadavg)  $(grep -E 'MemAvailable' /proc/meminfo | tr -s ' ')"
+        ps -eo pid,stat,pcpu,rss,etime,comm --sort=-pcpu 2>/dev/null | head -9
+        z=$(ps -eo stat,pid,comm 2>/dev/null | awk '$1 ~ /^Z/ {print $2 "/" $3}' | tr '\n' ' ')
+        [ -n "$z" ] && echo "zombies: $z"
+        d=$(ps -eo stat,pid,comm 2>/dev/null | awk '$1 ~ /^D/ {print $2 "/" $3}' | tr '\n' ' ')
+        [ -n "$d" ] && echo "waiting on disk/device (D): $d"
+    } > "$L/status.txt" 2>&1
+    cat "$L/status.txt" >> "$L/status-history.txt"
+    # Keep the history to the last ~2000 lines.
+    if [ "$(wc -l < "$L/status-history.txt")" -gt 2400 ]; then
+        tail -n 2000 "$L/status-history.txt" > "$L/status-history.tmp" && mv "$L/status-history.tmp" "$L/status-history.txt"
+    fi
+    ;;
+logs)
+    for f in /var/log/Xorg.0.log /var/log/Xorg.0.log.old /var/log/tdm.log /var/log/tdm.out \
+             /var/log/syluxium-shell.log /var/log/seatd.log /var/log/bluetoothd.log /var/log/bluealsa.log \
+             /var/log/syluxium-netconfig.log /var/log/syluxium-wifi.log /var/log/wpa_supplicant.log \
+             /var/log/dbus-system.log /var/log/polkitd.log /var/log/cups/error_log; do
+        [ -f "$f" ] && sed -E 's/(psk|password|passphrase)=[^ ]*/\1=********/Ig' "$f" > "$L/$(basename "$f")" 2>/dev/null
+    done
+    [ -d /run/syluxium-diag ] && cp /run/syluxium-diag/* "$L/" 2>/dev/null
+    for h in /home/*/.xsession-errors; do
+        [ -f "$h" ] && cp "$h" "$L/xsession-errors-$(basename "$(dirname "$h")").txt" 2>/dev/null
+    done
+    ;;
+mark)
+    # One file for root and the desktop user alike (in /run: both can write
+    # it); "logs" copies it to the stick.
+    shift
+    mkdir -p /run/syluxium-diag 2>/dev/null
+    echo "$(up) $* (as $(id -un))" >> /run/syluxium-diag/milestones.txt
+    chmod 666 /run/syluxium-diag/milestones.txt 2>/dev/null
+    [ "$(id -u)" = 0 ] && cp /run/syluxium-diag/milestones.txt "$L/" 2>/dev/null
+    ;;
+gpu-clients)
+    # Run as the desktop user inside the session (DISPLAY set). Only with the
+    # "gpu" boot option: a broken GPU path may crash the X server, which the
+    # marker line then shows.
+    grep -qw gpu /proc/cmdline || exit 0
+    out="$L/gpu-clients.txt"
+    {
+        echo "== $(up) s: about to run glxinfo -B (if nothing follows, it crashed the session)"
+    } > "$out"
+    sync
+    LIBGL_DEBUG=verbose MESA_DEBUG=1 timeout 30 glxinfo -B >> "$out" 2>&1
+    echo "== exit $? at $(up) s" >> "$out"
+    echo "== eglinfo -B" >> "$out"
+    EGL_LOG_LEVEL=debug timeout 30 eglinfo -B >> "$out" 2>&1
+    echo "== exit $? at $(up) s" >> "$out"
+    sync
+    ;;
+esac

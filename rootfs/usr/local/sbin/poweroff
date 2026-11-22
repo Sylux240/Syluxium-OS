@@ -5,9 +5,16 @@
 # Whoever started us (the login screen, a shell) goes away with everyone
 # else: don't let its hangup or TERM stop us before the disks are flushed.
 trap '' HUP INT TERM
+# Each step goes into milestones.txt on the stick: a shutdown that hangs
+# shows how far it got (the kernel logs its own steps after this).
+mark() { syluxium-diag mark "poweroff: $*" 2>/dev/null; syluxium-diag logs 2>/dev/null; sync; }
+mark "asked by $(cat /proc/$PPID/comm 2>/dev/null) (pid $PPID)"
 sync
+mark "disks synced, asking programs to quit (TERM)"
 kill -TERM -1 2>/dev/null
 sleep 2
+mark "stopping what's left (KILL)"
 kill -KILL -1 2>/dev/null
 sync
+mark "handing over to the kernel"
 exec busybox poweroff -f

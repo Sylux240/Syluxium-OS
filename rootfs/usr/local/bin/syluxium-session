@@ -6,6 +6,9 @@
 export XDG_CONFIG_DIRS=/etc/xdg/syluxium:/etc/xdg
 export XDG_CURRENT_DESKTOP=XFCE XDG_SESSION_DESKTOP=syluxium DESKTOP_SESSION=syluxium
 export XDG_MENU_PREFIX=xfce-
+/usr/local/sbin/syluxium-diag mark "session: Syluxium (Xfce) starting for $USER"
+# On the GPU Test entry: does a program get the GPU? (gpu-clients.txt)
+(sleep 25; /usr/local/sbin/syluxium-diag gpu-clients) &
 # First login: wallpaper per monitor, desktop launchers.
 /usr/local/bin/syluxium-xfce-setup >/dev/null 2>&1 &
 exec startxfce4

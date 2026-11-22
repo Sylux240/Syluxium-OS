@@ -1,0 +1,26 @@
+#!/usr/bin/python3
+# Test aid: ask polkit about every connection on the system bus (as Xfce's
+# shutdown does for xfce4-session) and print what D-Bus and polkit see.
+import os
+from gi.repository import Gio, GLib
+b = Gio.bus_get_sync(Gio.BusType.SYSTEM)
+def call(dest, path, iface, method, args):
+    return b.call_sync(dest, path, iface, method, args, None, 0, -1, None)
+names = call("org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "ListNames", None)[0]
+for n in names:
+    if not n.startswith(":"):
+        continue
+    try:
+        cr = call("org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "GetConnectionUnixProcessID",
+                  GLib.Variant("(s)", (n,)))[0]
+        comm = open(f"/proc/{cr}/comm").read().strip() if os.path.exists(f"/proc/{cr}/comm") else "?"
+    except Exception as e:
+        cr, comm = "?", f"pid? {e}"
+    subj = ("system-bus-name", {"name": GLib.Variant("s", n)})
+    try:
+        r = call("org.freedesktop.PolicyKit1", "/org/freedesktop/PolicyKit1/Authority", "org.freedesktop.PolicyKit1.Authority",
+                 "CheckAuthorization", GLib.Variant("((sa{sv})sa{ss}us)", (subj, "org.xfce.session.xfsm-shutdown-helper", {}, 0, "")))
+        res = r[0][0]
+    except Exception as e:
+        res = str(e).split(":")[-1].strip()
+    print(f"{n:8} pid {cr} {comm:18} -> {res}")
