@@ -240,6 +240,7 @@ public:
         proc::Process* p = proc::current();
         u32 perms = 0777 & ~(p ? p->umask : 022);
         vfs::Inode* node = nullptr;
+        parent = vfs::unwrap(parent); // through a bind mount: the real directory
         if (parent->is_ramfs_dir()) {
             auto* n = new SockNode(perms);
             if (long r = static_cast<ramfs::Dir*>(parent)->attach(leaf, leaf_len, n); r < 0) {

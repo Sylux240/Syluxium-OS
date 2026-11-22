@@ -258,6 +258,14 @@ long mount_at(const char* path, Inode* fs_root, const char* source, const char* 
 long unmount(const char* path);
 void mount_source(const char* path, char* out, usize size); // what /proc/mounts shows as its device
 long move_mount(const char* from, const char* to); // MS_MOVE
+// MS_BIND: what to mount for a bind of `src` (directories: a wrapper whose
+// directories are inodes of their own, so mounts below the bind stay there).
+Inode* bind_source(Inode* src);
+// The real directory behind a bind-mount wrapper (others: unchanged); for
+// file systems that cast inodes of their own type (rename, link, sockets).
+Inode* unwrap(Inode* n);
+// pivot_root: rename the caller's (private) mount points as seen from the new root.
+void pivot_mounts(const char* new_root, const char* put_old);
 // chroot/pivot_root: the process layer says where the caller's "/" is.
 void set_process_root_hook(Inode* (*fn)());
 // Resolve from the system's "/" whatever the caller's root (proc, sys, dev

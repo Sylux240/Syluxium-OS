@@ -119,6 +119,12 @@ open("/tmp/madv", "wb").write(b"file" * 1024)
 fd = open("/tmp/madv", "rb")
 f = mmap.mmap(fd.fileno(), 4096, mmap.MAP_PRIVATE, mmap.PROT_READ | mmap.PROT_WRITE)
 f[:4] = b"COPY"; f.madvise(mmap.MADV_DONTNEED); assert f[:4] == b"file", "file"'
+# bubblewrap as a normal user: user, mount, PID, IPC and UTS namespaces,
+# a new root of bind mounts with its own /proc, /dev and /tmp.
+command -v bwrap >/dev/null && check "bwrap sandbox as a user" su syluxium -s /bin/sh -c '
+out=$(bwrap --ro-bind / / --proc /proc --dev /dev --tmpfs /tmp --unshare-all --share-net --uid 0 --gid 0 --hostname sandbox \
+    sh -c "echo \$(id -u) \$(hostname) \$\$; touch /tmp/inside") || exit 1
+echo "$out"; [ ! -e /tmp/inside ] && case "$out" in "0 sandbox 1"|"0 sandbox 2") exit 0;; esac; exit 1'
 # Terminal emulators on VTE (xfce4-terminal) read the pty in packet mode.
 # (In a session of its own: closing the master hangs up the slave's group.)
 check "pty packet mode (TIOCPKT)"           setsid python3 -c 'import os, fcntl, struct

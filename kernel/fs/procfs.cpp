@@ -154,6 +154,132 @@ class TaskDir;
 // /proc/<pid>/oom_score_adj (-1000..1000) and the older oom_adj (-17..15):
 // readable and writable; TDE's start_tdeinit protects its core processes
 // through them (and waits until it has).
+// /proc/<pid>/uid_map, gid_map, setgroups: a user namespace's id maps,
+// written once, with Linux's rules. An unprivileged owner may map exactly
+// its own id (and gid_map only after "deny" went into setgroups); root, or
+// a process with capabilities in the parent namespace, may map any ids.
+class UserNsFile : public vfs::Inode {
+public:
+    enum Kind { UID_MAP, GID_MAP, SETGROUPS };
+    UserNsFile(int p, Kind k) : m_pid(p), m_kind(k) {
+        ino = vfs::next_ino();
+        mode = vfs::S_IFREG | 0644;
+        atime = mtime = ctime = vfs::now();
+    }
+    bool seekable() const override { return true; }
+
+    isize read(u64 offset, void* buf, usize count) override {
+        char text[256];
+        usize n = 0;
+        {
+            LockGuard guard(proc::table_lock());
+            Process* p = proc::find(m_pid);
+            if (!p)
+                return -err::SRCH;
+            proc::UserNs* ns = p->userns;
+            if (m_kind == SETGROUPS) {
+                n = static_cast<usize>(snprintf(text, sizeof(text), "%s\n", ns && ns->setgroups_deny ? "deny" : "allow"));
+            } else if (!ns) {
+                n = static_cast<usize>(snprintf(text, sizeof(text), "%10u %10u %10u\n", 0u, 0u, 4294967295u));
+            } else {
+                const proc::UserNs::Extent* e = m_kind == UID_MAP ? ns->uid : ns->gid;
+                u32 count_e = m_kind == UID_MAP ? ns->nuid : ns->ngid;
+                for (u32 i = 0; i < count_e && n < sizeof(text) - 40; i++)
+                    n += static_cast<usize>(snprintf(text + n, sizeof(text) - n, "%10u %10u %10u\n", e[i].first,
+                                                     e[i].lower, e[i].count));
+            }
+        }
+        if (offset >= n)
+            return 0;
+        n = min<usize>(n - offset, count);
+        memcpy(buf, text + offset, n);
+        return static_cast<isize>(n);
+    }
+
+    isize write(u64 offset, const void* buf, usize count) override {
+        if (offset != 0 || count == 0 || count > 200)
+            return -err::INVAL;
+        char text[201] = {};
+        memcpy(text, buf, count);
+        Process* me = proc::current();
+        LockGuard guard(proc::table_lock());
+        Process* p = proc::find(m_pid);
+        if (!p)
+            return -err::SRCH;
+        proc::UserNs* ns = p->userns;
+        if (!ns)
+            return -err::PERM; // the system's own maps are fixed
+        if (m_kind == SETGROUPS) {
+            if (ns->gid_written)
+                return -err::PERM;
+            if (strncmp(text, "deny", 4) == 0)
+                ns->setgroups_deny = true;
+            else if (strncmp(text, "allow", 5) == 0) {
+                if (ns->setgroups_deny)
+                    return -err::PERM;
+            } else
+                return -err::INVAL;
+            return static_cast<isize>(count);
+        }
+        bool uid = m_kind == UID_MAP;
+        if (uid ? ns->uid_written : ns->gid_written)
+            return -err::PERM;
+        // Writer: inside the namespace (with its capabilities) or in its parent.
+        bool in_ns = me->userns == ns, in_parent = me->userns == ns->parent;
+        if (!in_parent && !(in_ns && me->ns_caps))
+            return -err::PERM;
+        bool privileged = in_parent && (ns->parent ? me->ns_caps : me->cred.euid == 0);
+        proc::UserNs::Extent ext[proc::UserNs::MAX_EXTENTS];
+        u32 n = 0;
+        for (const char* q = text; *q;) {
+            while (*q == ' ' || *q == '\n')
+                q++;
+            if (!*q)
+                break;
+            u64 v[3];
+            for (int i = 0; i < 3; i++) {
+                while (*q == ' ' || *q == '\t')
+                    q++;
+                if (*q < '0' || *q > '9')
+                    return -err::INVAL;
+                v[i] = 0;
+                while (*q >= '0' && *q <= '9')
+                    v[i] = v[i] * 10 + static_cast<u64>(*q++ - '0');
+            }
+            if (n == proc::UserNs::MAX_EXTENTS || v[2] == 0 || v[0] + v[2] > 0xFFFFFFFFull ||
+                v[1] + v[2] > 0xFFFFFFFFull)
+                return -err::INVAL;
+            ext[n++] = {static_cast<u32>(v[0]), static_cast<u32>(v[1]), static_cast<u32>(v[2])};
+            while (*q && *q != '\n')
+                q++;
+        }
+        if (n == 0)
+            return -err::INVAL;
+        if (!privileged) {
+            // Only the owner, and only its own id as the parent namespace names it.
+            u32 own = proc::id_in_ns(ns->parent, uid ? me->cred.euid : me->cred.egid, !uid);
+            if (me->cred.euid != ns->owner || n != 1 || ext[0].count != 1 || ext[0].lower != own)
+                return -err::PERM;
+            if (!uid && !ns->setgroups_deny)
+                return -err::PERM;
+        }
+        if (uid) {
+            memcpy(ns->uid, ext, n * sizeof(ext[0]));
+            ns->nuid = n;
+            ns->uid_written = true;
+        } else {
+            memcpy(ns->gid, ext, n * sizeof(ext[0]));
+            ns->ngid = n;
+            ns->gid_written = true;
+        }
+        return static_cast<isize>(count);
+    }
+
+private:
+    int m_pid;
+    Kind m_kind;
+};
+
 class OomFile : public vfs::Inode {
 public:
     OomFile(int p, bool legacy) : m_pid(p), m_legacy(legacy) {
@@ -226,7 +352,7 @@ private:
         const char* name;
         vfs::Inode* inode;
     };
-    Entry m_entries[16];
+    Entry m_entries[24];
 
 public:
     void set_entry_owner(u32 u, u32 g) {
@@ -714,6 +840,9 @@ private:
     NsFile* m_files[COUNT];
 };
 
+bool gen_mounts(TextBuffer& out, const void*);
+bool gen_mountinfo(TextBuffer& out, const void*);
+
 PidDir::PidDir(int p, int t) : pid(p), tid(t) {
     ino = vfs::next_ino();
     mode = vfs::S_IFDIR | 0555;
@@ -733,6 +862,11 @@ PidDir::PidDir(int p, int t) : pid(p), tid(t) {
     add("fd", new FdDir(pid));
     add("fdinfo", new FdInfoDir(pid));
     add("ns", new NsDir(pid));
+    add("uid_map", new UserNsFile(pid, UserNsFile::UID_MAP));
+    add("gid_map", new UserNsFile(pid, UserNsFile::GID_MAP));
+    add("setgroups", new UserNsFile(pid, UserNsFile::SETGROUPS));
+    add("mounts", new GeneratedFile(gen_mounts, nullptr));       // the caller's mount namespace
+    add("mountinfo", new GeneratedFile(gen_mountinfo, nullptr));
     if (!tid)
         add("task", new TaskDir(pid));
 }
@@ -946,6 +1080,52 @@ bool gen_mounts(TextBuffer& out, const void*) {
     return true;
 }
 
+// /proc/<pid>/mountinfo (libmount, findmnt, bubblewrap): one line per mount
+// of the caller's mount namespace, as Linux writes them:
+//   ID PARENT-ID MAJ:MIN ROOT MOUNT-POINT OPTIONS - TYPE SOURCE SUPER-OPTIONS
+// The parent is the mount whose point is the longest prefix of this one's.
+bool gen_mountinfo(TextBuffer& out, const void*) {
+    struct Entry {
+        char path[256];
+    };
+    struct Ctx {
+        TextBuffer* out;
+        Entry* seen;
+        int count;
+    };
+    static constexpr int MAX = 300;
+    auto* seen = static_cast<Entry*>(kmalloc(sizeof(Entry) * MAX));
+    if (!seen)
+        return false;
+    Ctx ctx{&out, seen, 0};
+    vfs::for_each_mount([](const char* source, const char* path, const char* type, const char* options, void* arg) {
+        auto* c = static_cast<Ctx*>(arg);
+        if (c->count >= MAX)
+            return;
+        int parent = 0;
+        usize best = 0;
+        for (int i = 0; i < c->count; i++) {
+            const char* q = c->seen[i].path;
+            usize n = strlen(q);
+            bool prefix = strcmp(q, "/") == 0 ? path[0] == '/' : strncmp(path, q, n) == 0 && (path[n] == '/' || !path[n]);
+            if (prefix && n >= best && strcmp(q, path) != 0) {
+                best = n;
+                parent = i;
+            }
+        }
+        int id = 20 + c->count;
+        snprintf(c->seen[c->count].path, sizeof(c->seen[0].path), "%s", path);
+        c->count++;
+        // The first (root) mount's parent isn't in the list, as on Linux (a
+        // mount that is its own parent sends tree walkers like bubblewrap's
+        // into endless recursion).
+        c->out->printf("%d %d 0:%d / %s %s - %s %s rw\n", id, c->count == 1 ? 1 : 20 + parent, id, path,
+                       options[0] ? options : "rw,relatime", type, source[0] ? source : "none");
+    }, &ctx);
+    kfree(seen);
+    return true;
+}
+
 bool link_self(char* out, usize size, const void*) {
     Process* p = proc::current();
     if (!p)
@@ -996,6 +1176,12 @@ void init() {
     genfs::static_file("/proc/sys/kernel/ostype", "Linux\n");
     genfs::static_file("/proc/sys/kernel/osrelease", "6.12.0-syluxium\n");
     genfs::static_file("/proc/sys/kernel/pid_max", "4194304\n");
+    // Unprivileged user namespaces are available (bubblewrap and Chromium look).
+    genfs::static_file("/proc/sys/kernel/unprivileged_userns_clone", "1\n");
+    genfs::static_file("/proc/sys/kernel/overflowuid", "65534\n"); // what unmapped ids show as
+    genfs::static_file("/proc/sys/kernel/overflowgid", "65534\n");
+    vfs::mkdir_p("/proc/sys/user");
+    genfs::static_file("/proc/sys/user/max_user_namespaces", "63635\n");
     vfs::mkdir_p("/etc");
     // Many tools read /etc/mtab; on Linux it's a link to /proc/self/mounts.
     vfs::Inode* etc;
