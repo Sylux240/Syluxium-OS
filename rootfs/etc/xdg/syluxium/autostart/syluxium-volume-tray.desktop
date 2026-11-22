@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Volume (Wayland)
+Comment=Volume control in the taskbar in the Syluxium shell (volumeicon in X11)
+Exec=syluxium-volume-tray
+OnlyShowIn=XFCE;
+NoDisplay=true

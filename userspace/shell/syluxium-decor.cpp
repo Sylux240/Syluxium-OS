@@ -804,7 +804,7 @@ class syluxium_frame_node_t : public wf::scene::node_t, public wf::pointer_inter
     void update_region()
     {
         cached_region.clear();
-        if (fullscreen)
+        if (fullscreen || (size.width <= left() + right()) || (size.height <= top() + bottom()))
         {
             return;
         }

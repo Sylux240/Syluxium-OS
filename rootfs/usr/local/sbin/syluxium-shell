@@ -42,6 +42,8 @@ if grep -qs "simple-framebuffer" /sys/class/drm/card0/device/uevent; then
 elif ! grep -qs "^blur *= *false" "$SET"; then
     sed -i 's/^plugins = autostart /plugins = autostart blur /' "$CONF"
 fi
+# Personalize's "Shadows under windows" switch.
+grep -qs "^shadows *= *false" "$SET" && sed -i 's/^\(plugins = .*\) winshadows/\1/' "$CONF"
 chown -R "$U" "$HOME_/.config/syluxium-shell"
 exec su "$U" -s /bin/bash -c "export XDG_RUNTIME_DIR=$RT XDG_SESSION_TYPE=wayland LIBSEAT_BACKEND=seatd \
     WLR_RENDERER_ALLOW_SOFTWARE=1 GDK_BACKEND=wayland,x11 MOZ_ENABLE_WAYLAND=1 \

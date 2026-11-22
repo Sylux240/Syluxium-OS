@@ -5,7 +5,7 @@
 # shellscene=<name>).
 #   apps  Files (Documents) and a terminal
 #   menu  the same, then the start menu
-#   pers  Personalize
+#   pers  Personalize and a notification
 case "$1" in
 apps|menu)
     syluxium-open documents &
@@ -16,6 +16,8 @@ apps|menu)
     ;;
 pers)
     syluxium-personalize &
+    sleep 5
+    notify-send -i dialog-information "Syluxium" "A notification bubble, the same in both sessions."
     ;;
 esac
 sleep 2
