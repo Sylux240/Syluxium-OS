@@ -645,6 +645,12 @@ clean:
 distclean: clean
 	rm -rf deps
 
+# The flags Linux driver sources are compiled with (tools/lkpi-check.py uses
+# them to try upstream driver directories against the LinuxKPI headers).
+.PHONY: print-lkpi-cflags
+print-lkpi-cflags:
+	@echo $(filter-out -isystem $(LKPI_INCLUDE) -MD -MP,$(CFLAGS)) $(LKPI_LINUX_CFLAGS)
+
 -include $(DEPS)
 
 # The graphical boot picker (UEFI): \EFI\BOOT\BOOTX64.EFI, Limine next to it as limine.efi.
