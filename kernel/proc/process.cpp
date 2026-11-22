@@ -745,6 +745,9 @@ long exec_impl(interrupts::Frame* frame, const char* path, const char* const* ar
         LockGuard guard(table_lock()); // as in finish_process: /proc takes references under it
         old = p->mem;
         p->mem = mem;
+    }
+    {
+        InterruptGuard guard; // the address space switch outside the table lock
         t->aspace = as;
         as->activate();
     }
