@@ -51,6 +51,8 @@ USER32_CFLAGS := --sysroot=$(LIBC_SYSROOT32) -isystem $(LIBC_SYSROOT32)/usr/incl
 USER32_PROGS  := $(patsubst userspace/ia32/%.c,$(TESTS_DIR)/%,$(wildcard userspace/ia32/*.c))
 # Windows test programs for Wine (x86-64 and i386 PE), built with clang +
 # lld-link against import libraries made from userspace/windows/*.def.
+# The shell's software-rendering fix (userspace/shell/glsync.c): no libc needed.
+SHELL_GLSYNC  := $(BUILD)/libsyluxium-glsync.so
 WIN_PROGS     := $(TESTS_DIR)/winhello64.exe $(TESTS_DIR)/winhello32.exe $(TESTS_DIR)/winbox32.exe
 
 # Official Debian packages (and their dependencies) that make up the userland.
@@ -371,6 +373,10 @@ $(TESTS_DIR)/%: userspace/%.c | $(LIBC_SYSROOT)/.done
 	@echo "  USER  $<"
 	@$(USER_CC) $(USER_CFLAGS) $< -o $@ -lm
 
+$(SHELL_GLSYNC): userspace/shell/glsync.c
+	@echo "  SO    $<"
+	@$(USER_CC) -shared -fPIC -nostdlib -O2 -Wall $< -o $@
+
 $(TESTS_DIR)/%: userspace/ia32/%.c | $(LIBC_SYSROOT32)/.done
 	@mkdir -p $(dir $@)
 	@echo "  USER32 $<"
@@ -476,7 +482,7 @@ $(WINE_I386_STAMP): tools/debian-fetch.py Makefile
 	@python3 tools/debian-fetch.py --arch i386 --suite $(DEBIAN_SUITE) --out $(WINE_I386_ROOT) --cache deps/debian --no-deps libwine
 	@touch $@
 
-$(INITRAMFS): $(KERNEL) $(PICKER) $(DEBIAN_CONFIGURED) tools/merge-accounts.py tools/mkfontdir.py tools/debrand-tde.py tools/syluxium_names.py tools/run-triggers.sh tools/wine-setup.sh tools/wine-prefix-links.py $(DEBIAN_STAMP) $(DEBIAN_I386_STAMP) $(WINE_I386_STAMP) $(FIRMWARE_STAMP) $(USER_PROGS) $(USER32_PROGS) $(WIN_PROGS) $(shell find rootfs -type f 2>/dev/null) $(shell find rootfs -type d 2>/dev/null) Makefile
+$(INITRAMFS): $(KERNEL) $(PICKER) $(DEBIAN_CONFIGURED) tools/merge-accounts.py tools/mkfontdir.py tools/debrand-tde.py tools/syluxium_names.py tools/run-triggers.sh tools/wine-setup.sh tools/wine-prefix-links.py $(DEBIAN_STAMP) $(DEBIAN_I386_STAMP) $(WINE_I386_STAMP) $(FIRMWARE_STAMP) $(USER_PROGS) $(USER32_PROGS) $(WIN_PROGS) $(SHELL_GLSYNC) $(shell find rootfs -type f 2>/dev/null) $(shell find rootfs -type d 2>/dev/null) Makefile
 	@echo "  ROOT  $(ROOTFS)"
 	@rm -rf $(ROOTFS)
 	@cp -a $(DEBIAN_ROOT) $(ROOTFS)
@@ -488,6 +494,7 @@ $(INITRAMFS): $(KERNEL) $(PICKER) $(DEBIAN_CONFIGURED) tools/merge-accounts.py t
 	@ln -sf busybox $(ROOTFS)/usr/bin/sh
 	@mkdir -p $(ROOTFS)/opt/syluxium/tests
 	@cp $(USER_PROGS) $(USER32_PROGS) $(WIN_PROGS) $(ROOTFS)/opt/syluxium/tests/
+	@mkdir -p $(ROOTFS)/usr/lib/syluxium && cp $(SHELL_GLSYNC) $(ROOTFS)/usr/lib/syluxium/
 	@# 32-bit Debian userland (multiarch, as on Debian): libraries in
 	@# /usr/lib/i386-linux-gnu, ld-linux.so.2, programs installed as <name>-i386
 	@mkdir -p $(ROOTFS)/usr/lib/i386-linux-gnu
