@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Syluxium: Ctrl+Esc (and the Windows key, through xcape) opens the
+     start menu; a few familiar shortcuts. -->
+<channel name="xfce4-keyboard-shortcuts" version="1.0">
+  <property name="commands" type="empty">
+    <property name="custom" type="empty">
+      <property name="override" type="bool" value="true"/>
+      <property name="&lt;Primary&gt;Escape" type="string" value="xfce4-popup-whiskermenu"/>
+      <property name="&lt;Primary&gt;&lt;Shift&gt;Escape" type="string" value="syluxium-taskmgr"/>
+      <property name="&lt;Super&gt;e" type="string" value="thunar"/>
+      <property name="&lt;Super&gt;r" type="string" value="xfce4-appfinder --collapsed"/>
+      <property name="&lt;Super&gt;d" type="string" value="xfdesktop --windowlist"/>
+      <property name="&lt;Primary&gt;&lt;Alt&gt;t" type="string" value="exo-open --launch TerminalEmulator"/>
+      <property name="Print" type="string" value="xfce4-screenshooter"/>
+      <property name="&lt;Primary&gt;&lt;Alt&gt;Delete" type="string" value="xfce4-session-logout"/>
+    </property>
+  </property>
+</channel>

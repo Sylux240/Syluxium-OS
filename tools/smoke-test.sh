@@ -14,7 +14,7 @@
 # USB=1 adds an xHCI controller with a USB keyboard, mouse and the FAT32
 # stick from tools/make-test-disks.sh (as /dev/sdb).
 # $TYPE: text typed on the (PS/2) keyboard after the boot wait, then a few
-# more seconds pass before the screenshot. "\n" = Enter, "\c" = Ctrl+C, "\w" = wait 2 s, "\m" = mouse moves/clicks/scroll, "\s" = Alt+SysRq+W (thread dump), "\o" = Alt+F1 (launcher menu), "\t" = Ctrl+Alt+Del (Task Manager),
+# more seconds pass before the screenshot. "\n" = Enter, "\c" = Ctrl+C, "\w" = wait 2 s, "\m" = mouse moves/clicks/scroll, "\s" = Alt+SysRq+W (thread dump), "\o" = Alt+F1 (launcher menu), "\e" = Ctrl+Esc (start menu), "\t" = Ctrl+Alt+Del (Task Manager),
 # "\{cmd}" = run a QEMU monitor command (e.g. "\{device_add usb-kbd,bus=xhci.0,id=k2}" for hot-plug tests).
 set -euo pipefail
 
@@ -113,7 +113,7 @@ names = {" ": "spc", "\n": "ret", "-": "minus", "=": "equal", ".": "dot", ",": "
 shifted = {"|": "backslash", "_": "minus", "+": "equal", ">": "dot", "<": "comma", "?": "slash", ":": "semicolon",
            '"': "apostrophe", "{": "bracket_left", "}": "bracket_right", "~": "grave_accent", "!": "1", "@": "2",
            "#": "3", "$": "4", "%": "5", "^": "6", "&": "7", "*": "8", "(": "9", ")": "0"}
-text = sys.argv[3].replace("\\n", "\n").replace("\\c", "\x03").replace("\\w", "\x01").replace("\\m", "\x02").replace("\\s", "\x04").replace("\\o", "\x05").replace("\\t", "\x06")
+text = sys.argv[3].replace("\\n", "\n").replace("\\c", "\x03").replace("\\w", "\x01").replace("\\m", "\x02").replace("\\s", "\x04").replace("\\o", "\x05").replace("\\t", "\x06").replace("\\e", "\x07")
 # "\{monitor command}": pulled out first, executed in order with the keys.
 pieces, rest = [], text
 while "\\{" in rest:
@@ -128,6 +128,8 @@ for ch in pieces:
         s.sendall(b"sendkey ctrl-c\n"); time.sleep(0.3); continue
     if ch == "\x06":       # \t in $TYPE: Ctrl+Alt+Del
         s.sendall(b"sendkey ctrl-alt-delete\n"); time.sleep(0.5); continue
+    if ch == "\x07":       # \e in $TYPE: Ctrl+Esc (Xfce start menu)
+        s.sendall(b"sendkey ctrl-esc\n"); time.sleep(0.5); continue
     if ch == "\x05":       # \o in $TYPE: Alt+F1 (launcher menu)
         s.sendall(b"sendkey alt-f1\n"); time.sleep(0.5); continue
     if ch == "\x04":       # \s in $TYPE: Alt+SysRq+W

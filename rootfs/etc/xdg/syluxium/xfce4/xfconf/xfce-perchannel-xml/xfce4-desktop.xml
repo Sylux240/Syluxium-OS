@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Syluxium Dusk desktop: file icons (Desktop folder launchers, drives,
+     trash); the wallpaper is set per monitor at first login
+     (syluxium-xfce-setup). -->
+<channel name="xfce4-desktop" version="1.0">
+  <property name="desktop-icons" type="empty">
+    <property name="style" type="int" value="2"/>
+    <property name="icon-size" type="uint" value="48"/>
+    <property name="tooltip-size" type="double" value="64"/>
+    <property name="use-custom-font-size" type="bool" value="false"/>
+    <property name="file-icons" type="empty">
+      <property name="show-home" type="bool" value="false"/>
+      <property name="show-filesystem" type="bool" value="false"/>
+      <property name="show-removable" type="bool" value="true"/>
+      <property name="show-trash" type="bool" value="true"/>
+    </property>
+  </property>
+  <property name="desktop-menu" type="empty">
+    <property name="show-delete" type="bool" value="false"/>
+  </property>
+</channel>

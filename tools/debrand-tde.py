@@ -16,9 +16,9 @@ KEY = re.compile(r"^(Name|GenericName|Comment)(\[en[^\]]*\])?=(.*)$")
 HIDE = {"kcalc.desktop", "kolourpaint.desktop", "KCharSelect.desktop", "ksnapshot.desktop", "abiword.desktop",
         "konsole.desktop",
         # the GTK programs behind them (Calculator, Paint, Character Map,
-        # Snipping Tool, Code Editor, Terminal, Files)
+        # Snipping Tool, Code Editor, Terminal; Thunar stays: a Start menu favourite)
         "galculator.desktop", "com.github.maoschanz.drawing.desktop", "gucharmap.desktop",
-        "xfce4-screenshooter.desktop", "org.xfce.mousepad.desktop", "xfce4-terminal.desktop", "thunar.desktop",
+        "xfce4-screenshooter.desktop", "org.xfce.mousepad.desktop", "xfce4-terminal.desktop",
         "yad-icon-browser.desktop"}
 
 

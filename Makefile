@@ -81,12 +81,17 @@ DEBIAN_PKGS  += b43-fwcutter
 # network printer discovery (mDNS: avahi-daemon, cups-browsed, .local names).
 DEBIAN_PKGS  += abiword libnotify-bin avahi-daemon avahi-utils cups-browsed libnss-mdns
 TRINITY_PKGS += kcalc-trinity kcharselect-trinity kolourpaint-trinity ksnapshot-trinity
+# Xfce session: core (the Dusk desktop; Trinity stays as the "Classic" session).
+DEBIAN_PKGS  += xfce4-session xfwm4 xfce4-panel xfdesktop4 xfce4-settings xfconf thunar \
+                xfce4-whiskermenu-plugin volumeicon-alsa xfce4-power-manager \
+                xfce4-appfinder libxfce4ui-utils gvfs gvfs-daemons xdg-user-dirs
 # Xfce session: applications (GTK replacements for the Trinity apps)
 # Terminal, Calculator, Paint, Character Map, Snipping Tool, text editor
 # (~28 MB); yad: GTK dialogs for our shell scripts (zenity 4 would pull GTK 4
-# and libadwaita, ~42 MB); xdg-utils: xdg-open / xdg-mime; gvfs: Thunar's
-# trash (udisks2 left out: no udev, and syluxium-automount mounts sticks).
-DEBIAN_PKGS  += xfce4-terminal galculator drawing gucharmap xfce4-screenshooter mousepad yad xdg-utils gvfs
+# and libadwaita, ~42 MB); xdg-utils: xdg-open / xdg-mime.
+# udisks2 (pulled in by GVfs) is left out: no udev, and syluxium-automount
+# mounts USB sticks.
+DEBIAN_PKGS  += xfce4-terminal galculator drawing gucharmap xfce4-screenshooter mousepad yad xdg-utils
 XFCE_APPS_EXCLUDE := udisks2
 DEBIAN_ROOT  := $(BUILD)/rootfs-debian
 DEBIAN_STAMP := $(DEBIAN_ROOT)/.fetched
