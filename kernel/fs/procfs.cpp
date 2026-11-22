@@ -885,9 +885,9 @@ bool gen_cpuinfo(TextBuffer& out, const void*) {
 }
 
 bool gen_mounts(TextBuffer& out, const void*) {
-    vfs::for_each_mount([](const char* source, const char* path, const char* type, void* arg) {
+    vfs::for_each_mount([](const char* source, const char* path, const char* type, const char* options, void* arg) {
         auto* o = static_cast<TextBuffer*>(arg);
-        o->printf("%s %s %s rw,relatime 0 0\n", source, path, type);
+        o->printf("%s %s %s %s 0 0\n", source, path, type, options[0] ? options : "rw,relatime");
     }, &out);
     if (vfs::root() == vfs::ram_root()) // on a disk root they're real mount entries
         out.append("proc /proc proc rw,nosuid,nodev,noexec 0 0\nsysfs /sys sysfs rw,nosuid,nodev,noexec 0 0\n"
@@ -938,7 +938,7 @@ void init() {
         snprintf(cmdline, sizeof(cmdline), "%s\n", boot::cmdline());
         genfs::static_file("/proc/cmdline", cmdline);
     }
-    genfs::static_file("/proc/filesystems", "nodev\tramfs\nnodev\tproc\nnodev\tsysfs\nnodev\tdevtmpfs\nnodev\ttmpfs\n\tvfat\n\texfat\n\text4\n\text3\n\text2\n");
+    genfs::static_file("/proc/filesystems", "nodev\tramfs\nnodev\tproc\nnodev\tsysfs\nnodev\tdevtmpfs\nnodev\ttmpfs\nnodev\tfuse\n\tvfat\n\texfat\n\text4\n\text3\n\text2\n");
     add("mounts", new GeneratedFile(gen_mounts, nullptr));
     vfs::mkdir_p("/proc/sys/kernel");
     genfs::static_file("/proc/sys/kernel/hostname", "syluxium\n");

@@ -7,6 +7,7 @@
 #include <fs/exfat.hpp>
 #include <fs/inotify.hpp>
 #include <fs/fat.hpp>
+#include <fs/fuse.hpp>
 #include <fs/pipe.hpp>
 #include <block/loop.hpp>
 #include <fs/cgroupfs.hpp>
@@ -284,6 +285,8 @@ long stat_target(long dirfd, u64 user_path, u32 flags, Inode** out) {
         if (long r = resolve(path.c_str(), base, !(flags & AT_SYMLINK_NOFOLLOW), &inode); r < 0)
             return r;
     }
+    if (long r = inode->revalidate(); r < 0)
+        return r;
     *out = inode;
     return 0;
 }
@@ -460,6 +463,8 @@ long sys_fstat(SYSCALL_ARGS) {
     FileRef f(proc::current(), static_cast<long>(a0));
     if (!f)
         return -err::BADF;
+    if (long r = f->inode->revalidate(); r < 0)
+        return r;
     LinuxStat st;
     fill_stat(f->inode, &st);
     return uaccess::put(reinterpret_cast<LinuxStat*>(a1), st);
@@ -1814,6 +1819,21 @@ long sys_mount(SYSCALL_ARGS) {
             return r;
         return vfs::mount_at(abs, root, source.c_str(), kind);
     }
+    // FUSE (fusermount3: "fuse.<subtype>", source = the server's name).
+    if (strcmp(t, "fuse") == 0 || strncmp(t, "fuse.", 5) == 0 || strcmp(t, "fuseblk") == 0) {
+        UserPath data(a4);
+        if (!a4 || data.error())
+            return -err::INVAL;
+        Inode* root;
+        char shown[80];
+        if (long r = fuse::mount(data.c_str(), &root, shown, sizeof(shown)); r < 0)
+            return r;
+        if (long r = vfs::mount_at(abs, root, source.error() ? t : source.c_str(), t, shown); r < 0) {
+            fuse::unmounted(root);
+            return r;
+        }
+        return 0;
+    }
     if (strcmp(t, "tmpfs") == 0 || strcmp(t, "ramfs") == 0) {
         auto* root = new ramfs::Dir;
         root->mode = S_IFDIR | 01777;
@@ -1855,9 +1875,13 @@ long sys_umount2(SYSCALL_ARGS) {
     block::sync_all();
     char source[64];
     vfs::mount_source(abs, source, sizeof(source));
+    Inode* mounted = nullptr;
+    vfs::resolve(abs, nullptr, true, &mounted);
     long r = vfs::unmount(abs);
-    if (r == 0)
+    if (r == 0) {
         loop::unmounted(source); // mount -o loop's device goes with it
+        fuse::unmounted(mounted); // a FUSE server's loop ends
+    }
     return r;
 }
 
