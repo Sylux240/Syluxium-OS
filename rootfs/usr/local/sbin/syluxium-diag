@@ -128,6 +128,7 @@ appimage)
     # Run as the desktop user inside the session. Nothing shows on screen:
     # the window is drawn off screen (dGPUFG's screenshot mode).
     [ -x /usr/local/bin/dgpufg ] || exit 0
+    export SYLUXIUM_APPIMAGE_NOGUI=1   # failures go into the file, never onto the screen
     out="$L/appimage.txt"
     shots=$(mktemp -d)
     {

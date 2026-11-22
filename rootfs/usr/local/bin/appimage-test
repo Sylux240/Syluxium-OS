@@ -70,7 +70,9 @@ phases="$*"
 say "session: $XDG_SESSION_DESKTOP ${WAYLAND_DISPLAY:+wayland=$WAYLAND_DISPLAY} ${DISPLAY:+x11=$DISPLAY}; phases: $phases"
 D=$HOME/Downloads
 mkdir -p "$D"
-keep=; case " $phases " in *" keep "*) keep=1;; esac
+# "keep": the last program phase leaves its window open; the others close theirs.
+want_keep=; case " $phases " in *" keep "*) want_keep=1;; esac
+lastapp=$(echo $phases | tr ' ' '\n' | grep -vx keep | tail -n 1)
 
 stick() { # the stick's folder: /media/APPTEST (automounter), or /data (an ext4 disk present at boot)
     for i in $(seq 1 40); do
@@ -121,7 +123,9 @@ run_app() { # run_app <label> <file> <window regex> [args]
     finish "$file" $pid
 }
 
-for p in $phases; do case $p in
+for p in $phases; do
+keep=; [ -n "$want_keep" ] && [ "$p" = "$lastapp" ] && keep=1
+case $p in
 dgpufg)
     say "dgpufg: $(cat /opt/apps/dgpufg/GLIBC-MISMATCH 2>/dev/null || echo 'glibc ok')"
     /usr/local/bin/dgpufg cli gpus > /tmp/apptest-dgpufg-cli.out 2>&1

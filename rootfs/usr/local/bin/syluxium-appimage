@@ -29,7 +29,8 @@ note() {
         chmod 666 /run/syluxium-diag/appimage-launches.txt 2>/dev/null
     fi
 }
-gui() { [ -n "$DISPLAY$WAYLAND_DISPLAY" ] && command -v yad >/dev/null 2>&1 && ! [ -t 2 ]; }
+# Dialogs only for a desktop user without a terminal (SYLUXIUM_APPIMAGE_NOGUI=1: never, for scripts).
+gui() { [ -z "$SYLUXIUM_APPIMAGE_NOGUI" ] && [ -n "$DISPLAY$WAYLAND_DISPLAY" ] && command -v yad >/dev/null 2>&1 && ! [ -t 2 ]; }
 fail() {
     note "$name: $1"
     if gui; then
