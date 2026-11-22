@@ -2,8 +2,8 @@
 Type=Application
 Name=Control Panel
 Comment=Change the settings of this computer
-Exec=kcontrol
+Exec=syluxium-controlpanel
 Icon=kcontrol
 Terminal=false
-# Shown only at the top level of the Start menu (tde-applications.menu).
-Categories=X-Syluxium-StartMenu;
+# Xfce's Settings Manager in Xfce, TDE's Control Center in the Trinity session.
+Categories=X-Syluxium-StartMenu;Settings;

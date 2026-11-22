@@ -69,7 +69,7 @@ def draw(name, p):
         p.rect(3, 4, 21, 16, 2)
         p.line((8, 20), (16, 20))
         p.line((12, 16), (12, 20))
-    elif name in ("folder", "folder_home", "folder_wordprocessing", "syluxium-files", "folder_open"):
+    elif name in ("folder", "folder_home", "folder_wordprocessing", "syluxium-files", "folder_open", "org.xfce.thunar"):
         folder(p, CYAN)
     elif name == "folder_image":
         folder(p, PINK)
@@ -103,7 +103,7 @@ def draw(name, p):
         for a in range(0, 360, 45):
             c, s = math.cos(math.radians(a)), math.sin(math.radians(a))
             p.line((12 + 6.5 * c, 12 + 6.5 * s), (12 + 9.5 * c, 12 + 9.5 * s))
-    elif name in ("konsole", "utilities-terminal"):
+    elif name in ("konsole", "utilities-terminal", "org.xfce.terminal"):
         p.rect(3, 4, 21, 20, 2)
         p.line((7, 9), (10, 12), (7, 15))
         p.line((13, 15), (17, 15))
@@ -115,13 +115,13 @@ def draw(name, p):
         p.line((7, 9), (7, 4), (17, 4), (17, 9))
         p.rect(7, 14, 17, 20, 1)
     # Accessories
-    elif name in ("syluxium-calculator", "kcalc", "accessories-calculator"):
+    elif name in ("syluxium-calculator", "kcalc", "accessories-calculator", "galculator"):
         p.rect(5, 3, 19, 21, 2)
         p.rect(8, 6, 16, 9.5, 1)
         for y in (13.5, 17.5):
             for x in (9, 12, 15):
                 p.circle(x, y, 0.6, fill=True)
-    elif name in ("syluxium-paint", "kolourpaint"):
+    elif name in ("syluxium-paint", "kolourpaint", "com.github.maoschanz.drawing"):
         p.arc(12, 12, 9, 9, 30, 330)
         p.line((19.8, 7.5), (16.5, 9.8), (16.5, 14.2), (19.8, 16.5))
         for x, y in ((8, 9), (12.5, 6.8), (7.5, 14), (11.5, 17.2)):
@@ -132,7 +132,7 @@ def draw(name, p):
         p.line((7.8, 13.2), (12.2, 13.2))
         for x, y in ((17, 8.5), (17, 12), (17, 15.5)):
             p.circle(x, y, 0.7, fill=True)
-    elif name in ("syluxium-snip", "ksnapshot", "applets-screenshooter"):
+    elif name in ("syluxium-snip", "ksnapshot", "applets-screenshooter", "org.xfce.screenshooter"):
         p.line((3, 8), (3, 3), (8, 3))
         p.line((16, 3), (21, 3), (21, 8))
         p.line((21, 16), (21, 21), (16, 21))
@@ -169,12 +169,12 @@ ICONS = {
     "syluxium-network": CYAN, "trashcan_empty": PINK, "trashcan_full": PINK, "user-trash": PINK,
     "user-trash-full": PINK, "syluxium-web": CYAN, "system-software-install": CYAN, "syluxium-installer": CYAN,
     "system-software-update": CYAN, "kcontrol": CYAN, "syluxium-settings": CYAN, "konsole": CYAN,
-    "utilities-terminal": CYAN, "media-flash": CYAN, "printer": LAV,
+    "utilities-terminal": CYAN, "org.xfce.terminal": CYAN, "org.xfce.thunar": CYAN, "media-flash": CYAN, "printer": LAV,
     # Accessories (and the programs behind them, so their windows match)
-    "syluxium-calculator": CYAN, "kcalc": CYAN, "accessories-calculator": CYAN,
-    "syluxium-paint": PINK, "kolourpaint": PINK,
+    "syluxium-calculator": CYAN, "kcalc": CYAN, "accessories-calculator": CYAN, "galculator": CYAN,
+    "syluxium-paint": PINK, "kolourpaint": PINK, "com.github.maoschanz.drawing": PINK,
     "syluxium-charmap": LAV, "kcharselect": LAV, "accessories-character-map": LAV,
-    "syluxium-snip": CYAN, "ksnapshot": CYAN, "applets-screenshooter": CYAN,
+    "syluxium-snip": CYAN, "ksnapshot": CYAN, "applets-screenshooter": CYAN, "org.xfce.screenshooter": CYAN,
     "syluxium-wordpad": GOLD, "abiword": GOLD,
     "syluxium-network-connections": CYAN, "network-wired": CYAN,
     "syluxium-notification": GOLD, "preferences-desktop-notification": GOLD,

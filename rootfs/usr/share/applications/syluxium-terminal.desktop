@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Terminal
+GenericName=Terminal
+Comment=Type commands (xfce4-terminal in the Dusk colours)
+Exec=xfce4-terminal
+Icon=utilities-terminal
+Terminal=false
+StartupNotify=true
+Categories=System;TerminalEmulator;
+Keywords=terminal;shell;command;prompt;console;

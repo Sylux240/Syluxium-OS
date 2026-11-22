@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Syluxium: Terminal (xfce4-terminal) in the Dusk colours: navy
+     background, light text, cyan cursor and selection, DejaVu Sans Mono.
+     The same scheme can be picked again in Preferences > Colors > Presets
+     ("Syluxium Dusk", /usr/share/xfce4/terminal/colorschemes). -->
+<channel name="xfce4-terminal" version="1.0">
+  <property name="color-use-theme" type="bool" value="false"/>
+  <property name="color-foreground" type="string" value="#eef2ff"/>
+  <property name="color-background" type="string" value="#141a3a"/>
+  <property name="color-cursor-use-default" type="bool" value="false"/>
+  <property name="color-cursor" type="string" value="#6fe3f0"/>
+  <property name="color-cursor-foreground" type="string" value="#141a3a"/>
+  <property name="color-selection-use-default" type="bool" value="false"/>
+  <property name="color-selection" type="string" value="#141a3a"/>
+  <property name="color-selection-background" type="string" value="#6fe3f0"/>
+  <property name="color-bold-use-default" type="bool" value="true"/>
+  <property name="color-palette" type="string" value="#1b2148;#e8708f;#7ee0b0;#f6c96b;#7fb2ff;#b9a3e3;#6fe3f0;#c8cfee;#4a5590;#f29ab6;#a3ecc8;#f9da98;#a6caff;#d0c1f0;#9cecf5;#ffffff"/>
+  <property name="font-use-system" type="bool" value="false"/>
+  <property name="font-name" type="string" value="DejaVu Sans Mono 10"/>
+  <property name="misc-cursor-shape" type="string" value="TERMINAL_CURSOR_SHAPE_IBEAM"/>
+  <property name="misc-default-geometry" type="string" value="96x28"/>
+  <property name="scrolling-bar" type="string" value="TERMINAL_SCROLLBAR_RIGHT"/>
+</channel>
