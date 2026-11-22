@@ -132,6 +132,12 @@ DEBIAN_PKGS  += fuse3 libfuse2t64
 # missing). dGPUFG: frame generation and upscaling. DGPUFG_APPIMAGE=<path> to
 # use another build.
 DGPUFG_APPIMAGE ?= $(lastword $(sort $(wildcard $(HOME)/CLionProjects/dGPUFG-Linux/build/dGPUFG-*-x86_64.AppImage)))
+# Input method: fcitx5 (X11 programs through its GTK module and XIM, Wayland
+# programs through syluxium-wayland-host) with Pinyin (Chinese), Anthy
+# (Japanese) and Hangul (Korean) (~100 MB, most of it the dictionaries).
+DEBIAN_PKGS  += fcitx5 fcitx5-frontend-gtk3 fcitx5-module-xorg fcitx5-chinese-addons fcitx5-anthy fcitx5-hangul
+# Chinese, Japanese and Korean characters (WenQuanYi Micro Hei, ~5 MB)
+DEBIAN_PKGS  += fonts-wqy-microhei
 XFCE_APPS_EXCLUDE := udisks2
 DEBIAN_ROOT  := $(BUILD)/rootfs-debian
 DEBIAN_STAMP := $(DEBIAN_ROOT)/.fetched
@@ -461,8 +467,8 @@ $(WHOST): userspace/whost/syluxium-wayland-host.c $(WHOST_GEN)/xdg-shell-protoco
 	@echo "  CC    $<"
 	@clang --target=x86_64-linux-gnu --sysroot=$(SHELL_SYSROOT) --gcc-install-dir=$(SHELL_SYSROOT)/usr/lib/gcc/x86_64-linux-gnu/14 \
 	    -std=gnu11 -O2 -Wall -Wno-unused-parameter -DWLR_USE_UNSTABLE -I$(WHOST_GEN) \
-	    $$($(SHELL_PKGCONFIG) --cflags wlroots-0.18 xcb xcb-render xcb-xfixes xcb-xinput xcb-randr xkbcommon pixman-1) \
-	    $< -o $@ -fuse-ld=lld -Wl,--as-needed $$($(SHELL_PKGCONFIG) --libs wlroots-0.18 wayland-server xcb xcb-render xcb-xfixes xcb-xinput xcb-randr xkbcommon pixman-1) -ldl
+	    $$($(SHELL_PKGCONFIG) --cflags wlroots-0.18 xcb xcb-render xcb-xfixes xcb-xinput xcb-randr xkbcommon pixman-1 libdrm) \
+	    $< -o $@ -fuse-ld=lld -Wl,--as-needed $$($(SHELL_PKGCONFIG) --libs wlroots-0.18 wayland-server xcb xcb-render xcb-xfixes xcb-xinput xcb-randr xkbcommon pixman-1 libdrm) -ldl -lm
 
 $(SHELL_GLSYNC): userspace/shell/glsync.c
 	@echo "  SO    $<"

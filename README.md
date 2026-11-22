@@ -204,8 +204,12 @@ Legend: ✅ done · 🟡 partly done · ⬜ to do
      and clipboard as Wayland apps; Android windows next): preview boot entries, rounded corners to do
 - ✅ Wayland programs in the Xfce desktop: syluxium-wayland-host (a wlroots compositor on its X11
      backend) shows each Wayland window as an X window: xfwm4 frame, taskbar entry and icon, menus,
-     resizing, keyboard, clipboard both ways; Wayland-only programs start through it from the menu
-     (`syluxium-wayland-run PROGRAM` forces any program onto Wayland)
+     resizing, keyboard, clipboard and drag and drop both ways, input methods, HiDPI scaling, GPU
+     rendering with dma-bufs (DRI3) or software; Wayland-only programs start through it from the
+     menu (`syluxium-wayland-run PROGRAM` forces any program onto Wayland)
+- ✅ Input methods: fcitx5 with Chinese (Pinyin), Japanese (Anthy) and Korean (Hangul), Ctrl+Space,
+     Dusk candidate list and taskbar icons; compose key; in X11 and Wayland programs alike
+- ✅ Scaling 100-300 % in Display Settings (whole factors and fractional for Wayland programs)
 - ✅ Right-click menus: Extract Here / Extract All, Send To compressed folder, Change Icon
 - ✅ File manager: Thunar in Dusk (trash, drives, archives extracted and created)
 - 🟡 Display settings: resolution and refresh rate change live (with a 15 s undo); multi-monitor to do

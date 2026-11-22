@@ -67,6 +67,8 @@ public:
     virtual isize read(u64 offset, void* buf, usize count) { return -err::INVAL; }
     virtual isize write(u64 offset, const void* buf, usize count) { return -err::INVAL; }
     virtual long truncate(u64 new_size) { return -err::INVAL; }
+    // fallocate(FALLOC_FL_PUNCH_HOLE): the range reads as zeros and its memory is freed.
+    virtual long punch_hole(u64 offset, u64 len) { return -err::OPNOTSUPP; }
     virtual long ioctl(u64 request, u64 arg) { return -err::NOTTY; }
     // ioctl through an open file (sys_ioctl calls this). The default checks
     // the argument buffer (size from the ioctl number) and calls ioctl().

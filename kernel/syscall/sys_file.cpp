@@ -923,7 +923,8 @@ long sys_readahead(SYSCALL_ARGS) { SYSCALL_UNUSED; return 0; } // a hint: the ca
 
 // fallocate(fd, mode, offset, len): mode 0 makes sure the range exists
 // (the file grows; blocks are allocated as it's written); KEEP_SIZE (1)
-// is a pure reservation hint. Punching holes etc. isn't supported.
+// is a pure reservation hint; PUNCH_HOLE|KEEP_SIZE (3) frees the range
+// (RAM files: tmpfs, memfd). Other modes aren't supported.
 long sys_fallocate(SYSCALL_ARGS) {
     SYSCALL_UNUSED;
     FileRef f(proc::current(), static_cast<long>(a0));
@@ -938,6 +939,8 @@ long sys_fallocate(SYSCALL_ARGS) {
         return -err::INVAL;
     if (a1 == 1)
         return 0;
+    if (a1 == 3)
+        return f->inode->punch_hole(static_cast<u64>(offset), static_cast<u64>(len));
     if (a1 != 0)
         return -err::OPNOTSUPP;
     u64 end = static_cast<u64>(offset + len);

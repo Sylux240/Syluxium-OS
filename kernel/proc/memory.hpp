@@ -53,6 +53,11 @@ struct Vma {
 // access faults and asks the driver (Inode::mmap_phys) again.
 void zap_device_range(u64 offset, u64 len);
 
+// A RAM file (tmpfs, memfd) gives up one of its pages (a punched hole):
+// every user mapping of `file` at `offset` that still maps `phys` loses it
+// (and its reference); private copies made by writing stay.
+void zap_file_page(vfs::Inode* file, u64 offset, u64 phys);
+
 class Memory {
 public:
     explicit Memory(vmm::AddressSpace* as) : m_as(as) {}
