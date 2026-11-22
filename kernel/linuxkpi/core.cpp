@@ -7,6 +7,8 @@
 // code above); then the C-linkage implementations.
 
 #include <fs/poll.hpp>
+#include <fs/genfs.hpp>
+#include <fs/vfs.hpp>
 #include <proc/process.hpp>
 #include <arch/x86_64/cpu.hpp>
 #include <arch/x86_64/fpu.hpp>
@@ -1603,10 +1605,74 @@ bool flush_delayed_work(struct delayed_work* d) {
 
 extern "C" const struct lkpi_param __lkpi_params_start[];
 extern "C" const struct lkpi_param __lkpi_params_end[];
+extern "C" long lkpi_drm_debug_budget; // drm_print.c
 
 namespace {
 
 // <module>.<param>=<value> on the kernel command line.
+namespace {
+bool gen_param(genfs::TextBuffer& o, const void* ctx) {
+    auto* p = static_cast<const struct lkpi_param*>(ctx);
+    switch (p->type) {
+    case 'i': o.printf("%d\n", *static_cast<int*>(p->var)); break;
+    case 'u': o.printf("%u\n", *static_cast<unsigned*>(p->var)); break;
+    case 'l': o.printf("%ld\n", *static_cast<long*>(p->var)); break;
+    case 'L': o.printf("%lu\n", *static_cast<unsigned long*>(p->var)); break;
+    case 's': o.printf("%d\n", *static_cast<short*>(p->var)); break;
+    case 'S': o.printf("%u\n", *static_cast<unsigned short*>(p->var)); break;
+    case 'b': o.printf("%u\n", *static_cast<unsigned char*>(p->var)); break;
+    case 'B': o.printf("%c\n", *static_cast<bool*>(p->var) ? 'Y' : 'N'); break;
+    case 'I': o.printf("%c\n", *static_cast<bool*>(p->var) ? 'N' : 'Y'); break;
+    case 'c': {
+        const char* v = *static_cast<char**>(p->var);
+        o.printf("%s\n", v ? v : "(null)");
+        break;
+    }
+    }
+    return true;
+}
+isize write_param(const char* text, usize len, const void* ctx) {
+    auto* p = static_cast<const struct lkpi_param*>(ctx);
+    char buf[32];
+    usize n = len < sizeof(buf) - 1 ? len : sizeof(buf) - 1;
+    memcpy(buf, text, n);
+    buf[n] = 0;
+    while (n && (buf[n - 1] == '\n' || buf[n - 1] == ' '))
+        buf[--n] = 0;
+    bool yes = buf[0] == 'y' || buf[0] == 'Y' || buf[0] == '1';
+    long value = static_cast<long>(simple_strtoul(buf[0] == '-' ? buf + 1 : buf, nullptr, 0));
+    if (buf[0] == '-')
+        value = -value;
+    switch (p->type) {
+    case 'i': case 'u': *static_cast<int*>(p->var) = static_cast<int>(value); break;
+    case 'l': case 'L': *static_cast<long*>(p->var) = value; break;
+    case 's': case 'S': *static_cast<short*>(p->var) = static_cast<short>(value); break;
+    case 'b': *static_cast<unsigned char*>(p->var) = static_cast<unsigned char>(value); break;
+    case 'B': *static_cast<bool*>(p->var) = yes; break;
+    case 'I': *static_cast<bool*>(p->var) = !yes; break;
+    default: return -EINVAL; // strings: boot option only
+    }
+    // Set by hand: drm.debug isn't cut off after its first 30000 messages.
+    if (!strcmp(p->name, "drm.debug"))
+        lkpi_drm_debug_budget = -1;
+    klog::info("linuxkpi: %s = %s (set at run time)", p->name, buf);
+    return static_cast<isize>(len);
+}
+} // namespace
+
+void publish_module_params() {
+    for (const struct lkpi_param* p = __lkpi_params_start; p < __lkpi_params_end; p++) {
+        const char* dot = strchr(p->name, '.');
+        if (!dot)
+            continue;
+        char dir[128], path[192];
+        snprintf(dir, sizeof(dir), "/sys/module/%.*s/parameters", static_cast<int>(dot - p->name), p->name);
+        vfs::mkdir_p(dir, 0755);
+        snprintf(path, sizeof(path), "%s/%s", dir, dot + 1);
+        vfs::add_node(path, new genfs::ControlFile(gen_param, write_param, p, p->type == 'c' ? 0444 : 0644));
+    }
+}
+
 void apply_module_params() {
     const char* cmd = boot::cmdline();
     for (const struct lkpi_param* p = __lkpi_params_start; p < __lkpi_params_end; p++) {
@@ -1702,6 +1768,8 @@ extern "C" lkpi_initcall_t __lkpi_initcalls_start[];
 extern "C" lkpi_initcall_t __lkpi_initcalls_end[];
 
 namespace linuxkpi {
+
+void publish_params() { publish_module_params(); }
 
 void init() {
     lkpi_jiffies_var = clock::now_ms();
