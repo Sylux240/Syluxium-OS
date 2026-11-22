@@ -9,6 +9,9 @@
 #   halt  shut down through the session (xfce4-session-logout --halt)
 #   reboot / logout  the same for restarting and logging out
 #   tm    Files and a terminal, then Task Manager
+#   files Thunar's file operations: files made, copied (Thunar's D-Bus
+#         service), moved to the trash (Thunar, GVfs); results in ~/scene.log;
+#         Thunar shows the trash
 #   run:PROGRAM  start one program (e.g. run:syluxium-taskmgr)
 case "$1" in
 apps|menu|tm)
@@ -23,6 +26,23 @@ pers)
     syluxium-personalize &
     sleep 5
     notify-send -i dialog-information "Syluxium" "A notification bubble, the same in both sessions."
+    ;;
+files)
+    log=$HOME/scene.log; : > "$log"
+    d=$HOME/Documents/scene; mkdir -p "$d"; rm -rf "$d"/*
+    echo hello > "$d/one.txt"; echo world > "$d/two.txt"
+    thunar --daemon & sleep 3
+    dbus-send --session --print-reply --dest=org.xfce.FileManager /org/xfce/FileManager \
+        org.xfce.FileManager.CopyTo string:"$d" array:string:"$d/one.txt" array:string:"$d/copy.txt" \
+        string:"" string:"" >> "$log" 2>&1
+    sleep 3
+    echo "copy: $(cat "$d/copy.txt" 2>&1)" >> "$log"
+    dbus-send --session --print-reply --dest=org.xfce.FileManager /org/xfce/FileManager \
+        org.xfce.Trash.MoveToTrash array:string:"file://$d/two.txt" string:"" string:"" >> "$log" 2>&1
+    sleep 3
+    echo "trash: $(ls "$HOME/.local/share/Trash/files" 2>&1 | tr '\n' ' ') two.txt left: $([ -e "$d/two.txt" ] && echo yes || echo no)" >> "$log"
+    thunar trash:/// & sleep 3
+    thunar "$d" & sleep 5
     ;;
 run:*) ${1#run:} & sleep 20 ;;
 halt) xfce4-session-logout --halt ;;
