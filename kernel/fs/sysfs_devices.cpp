@@ -77,6 +77,8 @@ bool gen_uevent(TextBuffer& o, const void* c) {
         o.printf("DRIVER=%s\n", d->driver_name);
     o.printf("PCI_CLASS=%X\nPCI_ID=%04X:%04X\nPCI_SUBSYS_ID=%04X:%04X\nPCI_SLOT_NAME=%s\n", d->class_code, d->vendor,
              d->device, d->subsystem_vendor, d->subsystem_device, d->bus_id);
+    o.printf("MODALIAS=pci:v%08Xd%08Xsv%08Xsd%08Xbc%02Xsc%02Xi%02X\n", d->vendor, d->device, d->subsystem_vendor,
+             d->subsystem_device, (d->class_code >> 16) & 0xFF, (d->class_code >> 8) & 0xFF, d->class_code & 0xFF);
     return true;
 }
 

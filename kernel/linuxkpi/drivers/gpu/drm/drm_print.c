@@ -211,13 +211,35 @@ void __drm_printfn_info(struct drm_printer *p, struct va_format *vaf)
 }
 EXPORT_SYMBOL(__drm_printfn_info);
 
+/* LinuxKPI: the modesetting debug a GPU Test boot turns on by itself (no
+ * drm.debug=) stops after this many messages - start-up and the X server's
+ * first mode set are in by then; after that the desktop's page flips
+ * (several messages a frame) only flooded the log and the serial port.
+ * Negative: no limit. */
+long lkpi_drm_debug_budget = -1;
+
+static bool lkpi_drm_debug_spend(void)
+{
+	long left = __atomic_load_n(&lkpi_drm_debug_budget, __ATOMIC_RELAXED);
+
+	if (left < 0)
+		return true;
+	if (left > 0 && __atomic_sub_fetch(&lkpi_drm_debug_budget, 1, __ATOMIC_RELAXED) > 0)
+		return true;
+	/* Exhausted: stays at (or is put back to) 0 - "none left", not "no limit". */
+	__atomic_store_n(&lkpi_drm_debug_budget, 0, __ATOMIC_RELAXED);
+	if (__atomic_exchange_n(&__drm_debug, 0, __ATOMIC_RELAXED))
+		pr_info("drm: modesetting debug messages off now (boot option drm.debug=0x04 keeps them on)\n");
+	return false;
+}
+
 void __drm_printfn_dbg(struct drm_printer *p, struct va_format *vaf)
 {
 	const struct drm_device *drm = p->arg;
 	const struct device *dev = drm ? drm->dev : NULL;
 	enum drm_debug_category category = p->category;
 
-	if (!__drm_debug_enabled(category))
+	if (!__drm_debug_enabled(category) || !lkpi_drm_debug_spend())
 		return;
 
 	__drm_dev_vprintk(dev, KERN_DEBUG, p->origin, p->prefix, vaf);
@@ -320,7 +342,7 @@ void __drm_dev_dbg(struct _ddebug *desc, const struct device *dev,
 	struct va_format vaf;
 	va_list args;
 
-	if (!__drm_debug_enabled(category))
+	if (!__drm_debug_enabled(category) || !lkpi_drm_debug_spend())
 		return;
 
 	/* we know we are printing for either syslog, tracefs, or both */
