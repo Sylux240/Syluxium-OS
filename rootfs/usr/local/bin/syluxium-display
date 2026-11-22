@@ -1,6 +1,7 @@
 #!/bin/bash
-# Display Settings: screen resolution, refresh rate and, with several
-# screens, their arrangement and the main display.
+# Display Settings: screen resolution, refresh rate, scaling (the size of
+# text and windows) and, with several screens, their arrangement and the
+# main display.
 #   With a GPU driver (X's modesetting driver, xrandr lists modes): changed
 #   at once, kept only if confirmed within 15 seconds (like Windows), and
 #   restored at every login (syluxium-display --restore, from autostart).
@@ -9,6 +10,10 @@
 #   syluxium-display            graphical
 #   syluxium-display --set WxH  boot resolution directly (root, no restart)
 #   syluxium-display --restore  re-apply the saved live layout (login)
+#   syluxium-display --scale N  scaling in percent (100, 125, ... 300), live
+#   Scaling: whole factors are Xfce's Window Scaling (Gdk/WindowScalingFactor);
+#   125/150/175 % make text larger (Xft/DPI) for X11 programs, and Wayland
+#   programs (syluxium-wayland-host) are scaled by exactly that much.
 export PATH=${SYLUXIUM_DISPLAY_TEST_PATH:+$SYLUXIUM_DISPLAY_TEST_PATH:}/opt/trinity/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 TITLE="Display Settings"
 SYS=/sys/class/graphics/fb0
@@ -125,6 +130,41 @@ if [ "$1" = "--set" ]; then
     exit $?
 fi
 
+# Scaling in percent, through Xfce's settings (xfsettingsd applies them at once).
+current_scale() {
+    local f d
+    f=$(xfconf-query -c xsettings -p /Gdk/WindowScalingFactor 2>/dev/null || echo 1)
+    d=$(xfconf-query -c xsettings -p /Xft/DPI 2>/dev/null || echo -1)
+    if [ "${d:--1}" -gt 96 ] 2>/dev/null && [ "$f" -le 1 ]; then echo $(( (d * 100 + 48) / 96 ))
+    else echo $(( ${f:-1} * 100 )); fi
+}
+set_scale() {
+    local pct=$1 factor dpi
+    case $pct in 100|200|300) factor=$((pct / 100)); dpi=-1 ;;
+                 125|150|175) factor=1; dpi=$((96 * pct / 100)) ;;
+                 *) echo "scaling: 100, 125, 150, 175, 200 or 300" >&2; return 1 ;; esac
+    xfconf-query -c xsettings -p /Gdk/WindowScalingFactor -n -t int -s "$factor"
+    if [ "$dpi" = -1 ]; then xfconf-query -c xsettings -p /Xft/DPI -r 2>/dev/null
+    else xfconf-query -c xsettings -p /Xft/DPI -n -t int -s "$dpi"; fi
+    # (whole factors scale the pointer by themselves; between them, a larger theme size)
+    xfconf-query -c xsettings -p /Gtk/CursorThemeSize -n -t int -s $(( factor > 1 ? 24 : 24 * pct / 100 ))
+}
+change_scaling() {
+    local cur choice
+    cur=$(current_scale)
+    choice=$(dlg_menu "Size of text, apps and other items (now ${cur} %):" \
+             100 "100 %" 125 "125 %" 150 "150 %" 175 "175 %" 200 "200 % (HiDPI screens)" 300 "300 %") || return 0
+    [ "$choice" = "$cur" ] && return 0
+    set_scale "$choice" || return 1
+    dlg --image dialog-information --text "Scaling is now $choice %. Programs started from now on use it fully;
+open windows of some programs change only when they are restarted." --button "OK:0"
+}
+
+if [ "$1" = "--scale" ]; then
+    set_scale "$2"
+    exit $?
+fi
+
 if [ "$1" = "--restore" ]; then
     [ -f "$SAVED" ] || exit 0
     read -r first rest < "$SAVED"
@@ -145,7 +185,8 @@ if [ ${#outs[@]} -ge 2 ]; then
     action=$(dlg_menu "Screens: ${outs[*]}" \
              layout "Arrangement (extend, duplicate, one screen only)..." \
              primary "Main display (taskbar, new windows)..." \
-             resolution "Resolution and refresh rate...") || exit 0
+             resolution "Resolution and refresh rate..." \
+             scaling "Scaling (size of text and windows)...") || exit 0
     old=$(xr_layout)
     case $action in
     layout)
@@ -174,6 +215,9 @@ if [ ${#outs[@]} -ge 2 ]; then
         choice=$(dlg_menu "Main display:" "${menu[@]}") || exit 0
         apply_and_confirm "--output $choice --primary" "$old"
         ;;
+    scaling)
+        change_scaling
+        ;;
     resolution)
         menu=()
         for o in "${outs[@]}"; do menu+=("$o" "$o ($(xr_current "$o" | awk '{ print $1 }'))"); done
@@ -185,6 +229,11 @@ if [ ${#outs[@]} -ge 2 ]; then
 fi
 
 out=${outs[0]}
+action=$(dlg_menu "Display" resolution "Screen resolution..." scaling "Scaling (size of text and windows)...") || exit 0
+if [ "$action" = scaling ]; then
+    change_scaling
+    exit 0
+fi
 if [ -n "$out" ] && [ "$(xr_modes "$out" | wc -l)" -gt 1 ]; then
     # ---- live change (GPU driver) ----
     change_resolution "$out"

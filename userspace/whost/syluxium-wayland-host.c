@@ -3053,11 +3053,17 @@ static void scale_changed(void) {
 	struct view *v;
 	wl_list_for_each(v, &S.views, link)
 		if (v->kind == VIEW_TOPLEVEL && v->x_mapped) {
+			/* the same size in units, as X11 programs do with Window Scaling */
+			int uw = units(v, v->w), uh = units(v, v->h);
 			v->scale = S.scale;
-			view_render_resize(v, v->w, v->h);
-			v->size_serial = wlr_xdg_toplevel_set_size(v->toplevel, units(v, v->w), units(v, v->h));
+			uint32_t vals[2] = { px(v, uw), px(v, uh) };
+			xcb_configure_window(S.x, v->frame, XCB_CONFIG_WINDOW_WIDTH | XCB_CONFIG_WINDOW_HEIGHT, vals);
+			view_render_resize(v, vals[0], vals[1]);
+			v->size_serial = wlr_xdg_toplevel_set_size(v->toplevel, uw, uh);
+			v->min_w = -1;
 			view_update_size_hints(v);
 		}
+	xcb_flush(S.x);
 }
 
 /* The cursor theme and size the X desktop uses (Xcursor.* resources). */
