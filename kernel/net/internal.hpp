@@ -257,7 +257,7 @@ constexpr int MSG_PEEK = 0x2, MSG_DONTWAIT = 0x40, MSG_WAITALL = 0x100, MSG_NOSI
 constexpr u16 AF_UNIX = 1, AF_NETLINK = 16;
 constexpr int SOCK_SEQPACKET = 5;
 constexpr int MSG_CTRUNC = 0x8, MSG_EOR = 0x80, MSG_CMSG_CLOEXEC = 0x40000000;
-constexpr long EPROTOTYPE = 91, ENOPROTOOPT = 92, EAFNOSUPPORT = 97;
+constexpr long EPROTOTYPE = 91, ENOPROTOOPT = 92, EAFNOSUPPORT = 97, ERANGE = 34, ENODATA = 61;
 
 // A socket address exactly as programs pass it (struct sockaddr_storage).
 // Families other than AF_INET (Unix paths, netlink port ids) are
@@ -273,6 +273,13 @@ struct Ucred {
     i32 pid = 0;
     u32 uid = 0, gid = 0;
 };
+// A socket peer's supplementary groups (SO_PEERGROUPS: D-Bus reports them,
+// polkit's group rules use them).
+struct PeerGroups {
+    u32 n = 0;
+    u32 g[32] = {};
+};
+PeerGroups current_groups();
 
 // Ancillary data of sendmsg/recvmsg (control messages). `files` is a heap
 // array of file references owned by whoever holds the Control;

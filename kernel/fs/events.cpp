@@ -868,15 +868,23 @@ long sys_pidfd_send_signal(SYSCALL_ARGS) {
 
 } // namespace
 
+long pidfd_file_pid(vfs::File* f);
+
 // waitid(P_PIDFD, fd, ...): the pid a pidfd refers to (as the caller's PID
 // namespace numbers it), -EBADF if fd isn't a pidfd.
 long pidfd_to_pid(int fd) {
     vfs::File* f = proc::fd_get(proc::current(), fd);
     if (!f)
         return -err::BADF;
-    long r = f->inode->anon_kind == KIND_PIDFD ? static_cast<PidFd*>(f->inode)->pid : -err::BADF;
+    long r = pidfd_file_pid(f);
     vfs::file_put(f);
-    return r;
+    return r < 0 ? -err::BADF : r;
+}
+
+// The pid a pidfd file refers to, or -1 if f isn't a pidfd (for
+// /proc/<pid>/fdinfo's "Pid:" line, which polkit's pkexec checks).
+long pidfd_file_pid(vfs::File* f) {
+    return f && f->inode->anon_kind == KIND_PIDFD ? static_cast<PidFd*>(f->inode)->pid : -1;
 }
 
 } // namespace events
