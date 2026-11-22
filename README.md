@@ -3,7 +3,7 @@
 **A from-scratch x86_64 operating system** written in C, C++20 and Python: its own monolithic kernel,
 booted by [Limine](https://github.com/limine-bootloader/limine), aided with AI for a more efficient workflow.
 
-Syluxium runs **Linux applications out of the box**: Firefox, Wine, the Trinity desktop, CUPS, apt and the whole
+Syluxium runs **Linux applications out of the box**: Firefox, Wine, the Xfce desktop, CUPS, apt and the whole
 Debian package archive, unmodified, on top of a kernel written from scratch. **Android app support**
 (binder IPC and container support in the kernel, for Waydroid) is being built now.
 
@@ -12,8 +12,11 @@ Highlights:
   with IPv6, and the Linux system-call interface, so real Linux binaries run as they are.
 - **Real hardware drivers**: USB plug and play, NVMe/SATA, HD audio, touchpads, Wi-Fi with WPA2, and
   Linux 6.12's GPU drivers (Intel, AMD, NVIDIA) through a driver compatibility layer.
-- **A complete desktop** in Syluxium's own *Dusk* look: see-through taskbar, launcher with search,
-  rounded windows, a polished login screen, a graphical boot picker and splash.
+- **A complete desktop** in Syluxium's own *Dusk* look, built on Xfce: a see-through glass taskbar, a
+  start menu with search, rounded windows with real transparency and shadows, adjustable live from
+  Personalize, plus a polished login screen, a graphical boot picker and splash.
+- **Native Wayland too**: a Syluxium shell on the Wayfire compositor (glass panel, blur, Xwayland for
+  X11 programs) is in preview alongside the Xfce desktop.
 - **Ready to use**: a step-by-step installer (alongside Windows too), App Store and updates through apt,
   Device Manager, Disk Management, recovery mode, and Windows programs through Wine.
 - **Runs from a USB stick**: boots in seconds straight from the stick, and collects boot logs from
@@ -29,8 +32,10 @@ From power-on to the desktop, in the order a computer shows them:
 | ![Boot picker](docs/screenshots/1-boot-picker.png) | ![Boot splash](docs/screenshots/2-boot-splash.png) |
 | **3. Verbose boot** (press Esc during the splash) | **4. Login screen** |
 | ![Verbose boot](docs/screenshots/3-verbose-boot.png) | ![Login screen](docs/screenshots/4-login.png) |
-| **5. Desktop** (Dusk theme) | **6. Installer**: installation type, next to Windows |
+| **5. Desktop** (Dusk theme on Xfce) | **6. Installer**: installation type, next to Windows |
 | ![Desktop](docs/screenshots/5-desktop.png) | ![Installer](docs/screenshots/6-installer.png) |
+| **7. Start menu**: favourites, categories, search | **8. Terminal** in Dusk colours |
+| ![Start menu](docs/screenshots/7-start-menu.png) | ![Terminal](docs/screenshots/8-terminal.png) |
 
 ## Made On Linux (Arch / CachyOS) 
 
@@ -67,9 +72,9 @@ partitions: the EFI partition (picker, Limine, kernel), SYLUXLOGS (one boot-log 
 stick collects logs from several machines) and SYLUXLIVE (the system itself, ext4, read as needed:
 boots don't wait for a big RAM disk to load). The "In Memory" entry loads everything into RAM instead.
 
-Booting: on UEFI machines a graphical **boot picker** comes first (large icons for Syluxium,
-Text Console, Safe Mode and any Windows/macOS/Linux found on the disks; arrow keys, Enter,
-mouse; Esc = Limine's text menu), then the **boot splash** (logo, progress bar and the boot
+Booting: on UEFI machines a graphical **boot picker** comes first (large icons for Text Console,
+Default and GPU Test, plus any Windows/macOS/Linux found on the disks; arrow keys, Enter, mouse;
+**Esc** lists every entry as text: safe mode, recovery, the Wayland shell, in memory), then the **boot splash** (logo, progress bar and the boot
 stage) until the login screen. Press **Esc** during the splash for the verbose boot log. A
 desktop that freezes while the kernel still runs: **Alt+PrintScreen+W** writes every thread's
 state into the boot log on the stick. Boot options (Limine entry,
@@ -179,25 +184,29 @@ Legend: ✅ done · 🟡 partly done · ⬜ to do
 - 🟡 System-call coverage (grows with every phase)
 
 **Desktop** (Syluxium's own *Dusk* look: deep navy, the logo's cyan, glass panels)
-- ✅ Desktop: Trinity (TDE) on Xorg with the Dusk theme (original artwork): see-through taskbar
-     (transparency adjustable), hex-logo launcher with search, rounded window frames, Dusk login
-     screen and splash; keyboard shortcuts (Win, Win+E/R/D/L, Ctrl+Alt+Del)
-- ⬜ Syluxium shell on Wayland (compositor with real blur, transparency and rounded corners; X11
-     apps through Xwayland; Android windows) - next
+- ✅ Desktop: Xfce on Xorg in the Dusk theme (original artwork): Dusk window frames with rounded
+     corners, compositor transparency and shadows, glass taskbar (transparency adjustable) with the
+     hex-logo start menu, pinned apps, window list, tray and clock; Dusk login screen and splash;
+     keyboard shortcuts (Win, Win+E/R/D, Ctrl+Esc, Ctrl+Shift+Esc). Trinity stays available as
+     "Syluxium Classic" in the login screen
+- 🟡 Syluxium shell on native Wayland (Wayfire compositor: glass panel, blur with a GPU driver,
+     X11 apps through Xwayland; Android windows next): preview boot entries, rounded corners to do
 - ✅ Right-click menus: Extract Here / Extract All, Send To compressed folder, Change Icon
-- ✅ File manager: Konqueror with the Address bar, archives extracted and created
+- ✅ File manager: Thunar in Dusk (trash, drives, archives extracted and created)
 - 🟡 Display settings: resolution and refresh rate change live (with a 15 s undo); multi-monitor to do
-- 🟡 Personalize: themes, colors, wallpapers, icons (TDE Appearance & Themes), Dusk icon set
-- 🟡 Control Panel: TDE Control Center with plain category names; restyle with the new shell
+- ✅ Personalize: taskbar and window transparency, shadows, accent colour (applied live), wallpaper;
+     works in both the Xfce desktop and the Wayland shell; Dusk icon set
+- 🟡 Control Panel: Xfce Settings Manager in Dusk; our own Control Panel to come
 - ✅ Task Manager (Ctrl+Alt+Del / Ctrl+Shift+Esc): Applications (End Task, Switch To), Processes
      (End Process, priority), Performance and Networking graphs
 - ✅ System page: Syluxium version, processor, memory, graphics, storage
 - ✅ Device Manager: every device by category, driver and status, problem devices flagged
 - ✅ Computer Management (Event Viewer, Services, Local Users, Device Manager, Disk Management)
      and Disk Management with partitioning and formatting (GParted)
-- ✅ Accessories: Files (Konqueror), Media Player (Kaffeine), E-mail (KMail), Notepad (Wine), WordPad
-     (AbiWord: .rtf, .doc, .docx, .odt), Paint (KolourPaint), Calculator (KCalc), Character Map
-     (KCharSelect), Snipping Tool (KSnapshot: region, window or full screen; save or copy), Dusk icons
+- ✅ Accessories (GTK, in Dusk): Files (Thunar), Terminal (xfce4-terminal), Code Editor (Mousepad),
+     WordPad (AbiWord: .rtf, .doc, .docx, .odt), Paint (Drawing), Calculator (galculator), Character
+     Map (gucharmap), Snipping Tool (xfce4-screenshooter), Notepad (Wine); Media Player (Kaffeine) and
+     E-mail (KMail) from the classic desktop for now; Dusk icons
 - ✅ Magnifier, On-Screen Keyboard (KMag, KVkbd)
 - 🟡 Networking UI: Wi-Fi chooser by the clock; Network Connections (every adapter's status, IPv4/IPv6
      addresses, gateway, DNS, MAC, link speed; DHCP or static address; enable/disable); firewall
@@ -224,7 +233,7 @@ Legend: ✅ done · 🟡 partly done · ⬜ to do
 - 🟡 Security: NX, kernel W^X, guard pages, per-user permissions done; ASLR, SMEP/SMAP to do
 - 🟡 Power management: power off / restart, power button, battery icon, lid switch, idle CPU states,
      CPU frequency scaling (AMD); sleep (S3) to do
-- ✅ Updates (Syluxium Update: Debian and Trinity through apt) and a Recovery boot entry
+- ✅ Updates (Syluxium Update: Debian packages through apt) and a Recovery boot entry
      (repair disks and packages, reset settings or passwords, root prompt)
 
 Tally: 48 done · 12 partly done · 2 to do.
