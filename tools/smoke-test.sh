@@ -15,7 +15,9 @@
 # stick from tools/make-test-disks.sh (as /dev/sdb).
 # $TYPE: text typed on the (PS/2) keyboard after the boot wait, then a few
 # more seconds pass before the screenshot. "\n" = Enter, "\c" = Ctrl+C, "\w" = wait 2 s, "\m" = mouse moves/clicks/scroll, "\s" = Alt+SysRq+W (thread dump), "\o" = Alt+F1 (launcher menu), "\e" = Ctrl+Esc (start menu), "\t" = Ctrl+Alt+Del (Task Manager),
-# "\{cmd}" = run a QEMU monitor command (e.g. "\{device_add usb-kbd,bus=xhci.0,id=k2}" for hot-plug tests).
+# "\{cmd}" = run a QEMU monitor command (e.g. "\{device_add usb-kbd,bus=xhci.0,id=k2}" for hot-plug tests),
+# "\[text]" = wait until the serial log shows <text> (at most MARK_WAIT seconds, default 180): a test
+# inside the system says when it's ready for keys or a screenshot ("\{screendump build/smoke/x.ppm}").
 set -euo pipefail
 
 MODE=${1:-bios}
@@ -114,14 +116,29 @@ shifted = {"|": "backslash", "_": "minus", "+": "equal", ">": "dot", "<": "comma
            '"': "apostrophe", "{": "bracket_left", "}": "bracket_right", "~": "grave_accent", "!": "1", "@": "2",
            "#": "3", "$": "4", "%": "5", "^": "6", "&": "7", "*": "8", "(": "9", ")": "0"}
 text = sys.argv[3].replace("\\n", "\n").replace("\\c", "\x03").replace("\\w", "\x01").replace("\\m", "\x02").replace("\\s", "\x04").replace("\\o", "\x05").replace("\\t", "\x06").replace("\\e", "\x07")
-# "\{monitor command}": pulled out first, executed in order with the keys.
-pieces, rest = [], text
-while "\\{" in rest:
-    before, _, after = rest.partition("\\{")
-    cmd, _, rest = after.partition("}")
-    pieces += list(before) + [("monitor", cmd)]
-pieces += list(rest)
+# "\{monitor command}" and "\[serial text]": pulled out first, executed in order with the keys.
+import re as _re
+pieces = []
+for tok in _re.split(r"(\\\{[^}]*\}|\\\[[^\]]*\])", text):
+    if tok.startswith("\\{") and tok.endswith("}"):
+        pieces.append(("monitor", tok[2:-1]))
+    elif tok.startswith("\\[") and tok.endswith("]"):
+        pieces.append(("wait", tok[2:-1]))
+    else:
+        pieces += list(tok)
 for ch in pieces:
+    if isinstance(ch, tuple) and ch[0] == "wait":  # \[text]: wait for it on the serial log
+        end = time.time() + float(os.environ.get("MARK_WAIT", "180"))
+        while time.time() < end:
+            try:
+                if ch[1].encode() in open(sys.argv[4], "rb").read():
+                    break
+            except OSError:
+                pass
+            time.sleep(0.25)
+        else:
+            print(f"smoke-test: no \"{ch[1]}\" on the serial log", file=sys.stderr)
+        continue
     if isinstance(ch, tuple):  # \{cmd}: its reply goes to monitor-<mode>.log
         s.sendall((ch[1] + "\n").encode()); time.sleep(1)
         s.setblocking(False)

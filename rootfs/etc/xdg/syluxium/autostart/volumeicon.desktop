@@ -2,6 +2,7 @@
 Type=Application
 Name=Volume
 Comment=Volume control in the taskbar (ALSA)
-Exec=volumeicon
+# X11 only (a tray icon): the Wayland shell has syluxium-volume-tray.
+Exec=sh -c '[ "$XDG_SESSION_TYPE" = wayland ] || exec volumeicon'
 Icon=audio-volume-high
 OnlyShowIn=XFCE;

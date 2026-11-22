@@ -192,7 +192,8 @@ Legend: ✅ done · 🟡 partly done · ⬜ to do
      keyboard shortcuts (Win, Win+E/R/D, Ctrl+Esc, Ctrl+Shift+Esc). Trinity stays available as
      "Syluxium Classic" in the login screen
 - 🟡 Syluxium shell on native Wayland (Wayfire compositor: glass panel, blur with a GPU driver,
-     X11 apps through Xwayland; Android windows next): preview boot entries, rounded corners to do
+     X11 apps through Xwayland, started on demand, with the same theme, frames, taskbar icons
+     and clipboard as Wayland apps; Android windows next): preview boot entries, rounded corners to do
 - ✅ Wayland programs in the Xfce desktop: syluxium-wayland-host (a wlroots compositor on its X11
      backend) shows each Wayland window as an X window: xfwm4 frame, taskbar entry and icon, menus,
      resizing, keyboard, clipboard both ways; Wayland-only programs start through it from the menu

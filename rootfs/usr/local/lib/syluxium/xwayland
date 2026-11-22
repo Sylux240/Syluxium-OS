@@ -1,0 +1,44 @@
+#!/bin/sh
+# Xwayland for the Syluxium shell: Wayfire (wlroots, WLR_XWAYLAND) runs this
+# instead of /usr/bin/Xwayland, with the same arguments (":0 -rootless ...
+# -listenfd N -displayfd N -wm N"). With "xwayland = lazy" that happens when
+# the first X11 program connects, not at login, so the desktop comes up
+# without waiting for it; Xwayland ends ~10 s after the last X11 program and
+# starts again for the next one.
+#
+# Here: a milestone (and one if it fails), its log in the stick's log folder
+# (/run/syluxium-diag/xwayland.log), software rendering without glamor when
+# the shell draws in software, and, once it answers, what xfsettingsd gives
+# X11 programs in the Xfce desktop: the XSETTINGS (GTK theme, icons, fonts,
+# cursor: xsettingsd, kept up to date from xfconf) and the X resources
+# (Xft.dpi, Xcursor.theme/size: xrdb), so X11 windows look like the others.
+D=$1
+LOG=/run/syluxium-diag/xwayland.log
+[ -w /run/syluxium-diag ] || LOG=/dev/null
+DIAG=/usr/local/sbin/syluxium-diag
+start=$(cut -d' ' -f1 /proc/uptime)
+$DIAG mark "shell: Xwayland starting on $D (first X11 program)"
+ARGS= HOW="GPU (glamor)"
+# Software rendering (no render node, or the GPU start failed): glamor would
+# draw X11 windows with llvmpipe through EGL, slower than Xwayland's own
+# software drawing into shared memory.
+[ "$SYLUXIUM_SHELL_SOFTWARE" = 1 ] && ARGS=-shm HOW="software (shared memory)"
+echo "== Xwayland on $D, started $start s after boot, $HOW: Xwayland $* $ARGS" >> "$LOG" 2>/dev/null
+(
+    # Wait for Xwayland to answer (at most 20 s).
+    i=0
+    until DISPLAY=$D xprop -root -len 0 _NET_SUPPORTING_WM_CHECK > /dev/null 2>&1; do
+        i=$((i + 1))
+        if [ $i -ge 80 ]; then
+            $DIAG mark "shell: Xwayland FAILED: no answer on $D after 20 s (xwayland.log)"
+            exit 0
+        fi
+        sleep 0.25
+    done
+    $DIAG mark "shell: Xwayland ready on $D after $(awk -v s="$start" '{printf "%.2f", $1 - s}' /proc/uptime) s"
+    # (returns when Xwayland is gone: its settings client loses the display)
+    /usr/local/lib/syluxium/xwayland-settings "$D" >> "$LOG" 2>&1
+    kill -0 $$ 2>/dev/null && exit 0
+    $DIAG mark "shell: Xwayland on $D ended after $(awk -v s="$start" '{printf "%.0f", $1 - s}' /proc/uptime) s (xwayland.log)"
+) &
+exec /usr/bin/Xwayland "$@" $ARGS >> "$LOG" 2>&1

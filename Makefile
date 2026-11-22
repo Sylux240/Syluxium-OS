@@ -110,7 +110,13 @@ DEBIAN_PKGS  += gir1.2-libxfce4windowing-0.0
 # Wayland programs in the Xfce desktop (syluxium-wayland-host): foot (a
 # Wayland-only terminal, ~1 MB), wl-clipboard (wl-copy / wl-paste),
 # wayland-info, and xprop / xwininfo to look at the windows (~1 MB together).
-DEBIAN_PKGS  += foot wl-clipboard wayland-utils x11-utils
+DEBIAN_PKGS  += foot wayland-utils
+# X11 programs in the Wayland shell (Xwayland): xsettingsd gives them the
+# Dusk theme, icons, fonts and cursor (XSETTINGS, which xfsettingsd only
+# provides on a real X server); clipboard tools for both sides (xclip,
+# wl-clipboard) and xprop/xwininfo/xdpyinfo (~1.5 MB). Test programs for
+# xwayland-test: an SDL 2 game (sopwith) and a Qt 5 one (kcheckers).
+DEBIAN_PKGS  += xsettingsd x11-utils xclip wl-clipboard sopwith kcheckers
 XFCE_APPS_EXCLUDE := udisks2
 DEBIAN_ROOT  := $(BUILD)/rootfs-debian
 DEBIAN_STAMP := $(DEBIAN_ROOT)/.fetched
@@ -124,8 +130,10 @@ DEBIAN_I386_PKGS  := hello busybox bash
 # Wine (9-wine): libwine links the multimedia/hardware libraries below only
 # from optional Unix-side modules (winegstreamer, winepulse, gphoto2, wpcap,
 # capi, opencl); without them those modules don't load and the rest
-# of Wine works. FFmpeg + GStreamer alone would add ~150 MB.
-WINE_EXCLUDE := libavcodec61,libavformat61,libavutil59,libgstreamer-plugins-base1.0-0,libgstreamer1.0-0,libgphoto2-6t64,libgphoto2-port12t64,libpcap0.8t64,libpulse0,libcapi20-3t64,ocl-icd-libopencl1
+# of Wine works. FFmpeg + GStreamer alone would add ~150 MB. (libpulse0 is
+# kept: Debian's SDL 2 links it, and without it no SDL 2 program, game or
+# emulator starts; ~3 MB with libsndfile.)
+WINE_EXCLUDE := libavcodec61,libavformat61,libavutil59,libgstreamer-plugins-base1.0-0,libgstreamer1.0-0,libgphoto2-6t64,libgphoto2-port12t64,libpcap0.8t64,libcapi20-3t64,ocl-icd-libopencl1
 DEBIAN_EXCLUDE := cpp,cpp-14,cpp-14-x86-64-linux-gnu,cpp-x86-64-linux-gnu,man-db,groff-base,systemd,udev,xbase-clients,systemd-sysv,libpam-systemd,dbus-user-session,$(WINE_EXCLUDE),$(XFCE_APPS_EXCLUDE)
 DEBIAN_I386_EXCLUDE := base-files,debianutils,gawk,libmpfr6,libgmp10,libsigsegv2,readline-common,libreadline8t64
 DEBIAN_I386_PROGS := hello busybox bash

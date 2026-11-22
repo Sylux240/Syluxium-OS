@@ -127,6 +127,9 @@ fi
 
 if [ "$1" = "--restore" ]; then
     [ -f "$SAVED" ] || exit 0
+    # An X layout: nothing to restore in the Wayland shell (xrandr would only
+    # start Xwayland, whose screens can't be changed).
+    [ "$XDG_SESSION_TYPE" = wayland ] && exit 0
     read -r first rest < "$SAVED"
     if [ "$first" = "--output" ]; then
         # shellcheck disable=SC2046

@@ -14,9 +14,17 @@ sleep 1
 /usr/local/sbin/syluxium-diag mark "session: desktop ready (xfdesktop running)"
 
 # Wallpaper: every monitor xfdesktop knows, plus the outputs X reports
-# (xfdesktop 4.20 names them monitor<output>), workspace 0.
+# (xfdesktop 4.20 names them monitor<output>), workspace 0. In the Wayland
+# shell the compositor's outputs (xrandr would start Xwayland just to ask).
+outputs() {
+    if [ "$XDG_SESSION_TYPE" = wayland ]; then
+        /usr/local/lib/syluxium/shell-outputs 2>/dev/null
+    else
+        xrandr --listmonitors 2>/dev/null | awk 'NR > 1 {print $NF}'
+    fi
+}
 props=$(xfconf-query -c xfce4-desktop -l 2>/dev/null | grep '/workspace0/last-image$')
-for out in $(xrandr --listmonitors 2>/dev/null | awk 'NR > 1 {print $NF}'); do
+for out in $(outputs); do
     props="$props
 /backdrop/screen0/monitor$out/workspace0/last-image"
 done
