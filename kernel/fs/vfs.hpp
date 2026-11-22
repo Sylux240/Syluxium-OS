@@ -158,6 +158,17 @@ public:
     // Readiness for poll/select (POLLIN/POLLOUT/POLLHUP/POLLERR bits).
     // Plain files and most devices never block, so they're always ready.
     virtual u16 poll(File* f) { return 0x001 | 0x004; }
+    // Regular files epoll may watch anyway (procfs: Android's init watches
+    // /proc/self/mountinfo); other regular files and directories it refuses.
+    virtual bool epoll_regular() const { return false; }
+    // A "magic" symlink (/proc/<pid>/ns/*): readlink shows its text, but lookups
+    // and open() take the link inode itself instead of following it.
+    virtual bool magic_link() const { return false; }
+    // A symlink that leads to an inode rather than a path (/proc/<pid>/exe,
+    // /proc/<pid>/fd/N): following it jumps there, as Linux's nd_jump_link
+    // does, so a deleted file or a memfd can still be reopened or executed.
+    // Null: follow the text readlink gives.
+    virtual Inode* jump_target() { return nullptr; }
 
     // An open file description referring to this inode was created / closed for good.
     virtual void on_open(File* f) {}
@@ -193,11 +204,6 @@ public:
 
     // ---- Symlinks ----
     virtual isize readlink(char* buf, usize bufsize) { return -err::INVAL; }
-    // Linux's "magic links" (/proc/<pid>/fd/N, /proc/<pid>/exe): following
-    // one lands on the inode itself, not on what its text names (a pipe, a
-    // socket, a deleted file). *out = the inode, or the error to report;
-    // returns false for ordinary symlinks.
-    virtual bool magic_follow(long* error, Inode** out) { return false; }
 };
 
 // An open file description (shared by dup'ed and fork'ed descriptors).
@@ -256,6 +262,7 @@ u64 next_fs_dev(); // a fresh st_dev for a newly mounted file system
 long mount_at(const char* path, Inode* fs_root, const char* source, const char* type,
               const char* options = nullptr); // options: what /proc/mounts lists (default "rw,relatime")
 long unmount(const char* path);
+long unmount_at(const char* path, Inode* cwd, const char* canon); // umount2: relative to cwd
 void mount_source(const char* path, char* out, usize size); // what /proc/mounts shows as its device
 long move_mount(const char* from, const char* to); // MS_MOVE
 // MS_BIND: what to mount for a bind of `src` (directories: a wrapper whose
@@ -266,6 +273,7 @@ Inode* bind_source(Inode* src);
 Inode* unwrap(Inode* n);
 // pivot_root: rename the caller's (private) mount points as seen from the new root.
 void pivot_mounts(const char* new_root, const char* put_old);
+void bind_replicate(const char* src, const char* dst); // MS_BIND | MS_REC: copies of the mounts below src
 // chroot/pivot_root: the process layer says where the caller's "/" is.
 void set_process_root_hook(Inode* (*fn)());
 // Resolve from the system's "/" whatever the caller's root (proc, sys, dev

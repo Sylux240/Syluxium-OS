@@ -452,6 +452,7 @@ long load_image(proc::Memory* mem, vfs::Inode* file, const char* exec_path, cons
     mem->env_end = execfn;
     out->entry = start_entry;
     out->stack_ptr = sb.sp();
+    mem->start_stack = out->stack_ptr;
     out->compat = layout.is32;
     kfree(env_ptrs);
     return 0;

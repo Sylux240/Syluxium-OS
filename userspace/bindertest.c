@@ -322,7 +322,13 @@ int main(int argc, char** argv) {
     if (argc > 1) {
         pingpong(argv[1]);
     } else {
-        pingpong("/dev/binder");
+        // /dev/binder: open + protocol version only. Becoming its context
+        // manager here would tie it to root for the rest of the boot (binder
+        // remembers the first manager's uid); the ping-pong runs on fresh
+        // binderfs devices instead.
+        struct conn c;
+        CHECK(conn_open(&c, "/dev/binder") == 0, "/dev/binder");
+        close(c.fd);
         binderfs_test();
     }
     printf("bindertest: %s\n", failures ? "FAILED" : "all binder tests passed");

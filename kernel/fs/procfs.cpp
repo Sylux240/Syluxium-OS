@@ -280,6 +280,37 @@ private:
     Kind m_kind;
 };
 
+// /proc/pressure/{cpu,memory,io}: pressure stall information. Nothing stalls
+// is measured yet: all zeros, and triggers (written by Android's lmkd) are
+// accepted but never fire.
+class PressureFile : public vfs::Inode {
+public:
+    explicit PressureFile(bool full) : m_full(full) {
+        ino = vfs::next_ino();
+        mode = vfs::S_IFREG | 0666;
+        atime = mtime = ctime = vfs::now();
+    }
+    isize read(u64 offset, void* buf, usize count) override {
+        static const char some[] = "some avg10=0.00 avg60=0.00 avg300=0.00 total=0\n";
+        static const char both[] = "some avg10=0.00 avg60=0.00 avg300=0.00 total=0\n"
+                                   "full avg10=0.00 avg60=0.00 avg300=0.00 total=0\n";
+        const char* text = m_full ? both : some;
+        usize n = strlen(text);
+        if (offset >= n)
+            return 0;
+        n = min<usize>(n - offset, count);
+        memcpy(buf, text + offset, n);
+        return static_cast<isize>(n);
+    }
+    isize write(u64, const void*, usize count) override { return static_cast<isize>(count); }
+    bool seekable() const override { return true; }
+    bool epoll_regular() const override { return true; }
+    u16 poll(vfs::File*) override { return 0x001 | 0x004; } // (no POLLPRI: no trigger fires)
+
+private:
+    bool m_full;
+};
+
 class OomFile : public vfs::Inode {
 public:
     OomFile(int p, bool legacy) : m_pid(p), m_legacy(legacy) {
@@ -419,7 +450,7 @@ bool gen_stat(TextBuffer& out, const void* ctx) {
                "%lu %lu %lu %lu %d\n",
                d->tid ? d->tid : s.pid, s.name, s.state, s.ppid, s.pgid, s.sid, 0x0501 /* tty: console */, -1,
                0u, 0ul, 0ul, 0ul, 0ul, s.utime, s.stime, 0l, 0l, 20l, 0l, s.threads, 0l, s.start_ticks, s.vsize,
-               s.rss, ~0ul, 0ul, 0ul, 0ul, 0ul, 0ul, s.sig_pending, s.sig_blocked, 0ul, 0ul, 0ul, 0ul, 0ul, 17,
+               s.rss, ~0ul, 0ul, 0ul, s.mem ? s.mem->start_stack : 0, 0ul, 0ul, s.sig_pending, s.sig_blocked, 0ul, 0ul, 0ul, 0ul, 0ul, 17,
                s.cpu, 0u, 0u, 0ul, 0ul, 0l, 0ul, 0ul, 0ul, s.mem ? s.mem->arg_start : 0, s.mem ? s.mem->arg_end : 0,
                s.mem ? s.mem->env_start : 0, s.mem ? s.mem->env_end : 0, 0);
     release(s);
@@ -535,6 +566,17 @@ bool link_exe(char* out, usize size, const void* ctx) {
     return true;
 }
 
+// /proc/<pid>/exe: opens and executes the program file itself (LXC re-runs
+// itself from a memfd and checks that it did through this link).
+class ExeLink : public GeneratedLink {
+public:
+    explicit ExeLink(const PidDir* dir) : GeneratedLink(link_exe, dir), m_dir(dir) {}
+    vfs::Inode* jump_target() override;
+
+private:
+    const PidDir* m_dir;
+};
+
 bool link_cwd(char* out, usize size, const void* ctx) {
     auto* d = static_cast<const PidDir*>(ctx);
     Snapshot s;
@@ -590,28 +632,23 @@ private:
         int pid, fd;
     };
 
-    // /proc/<pid>/fd/N: reads as the path (or "pipe:[ino]"), but opening it
-    // opens the very inode the descriptor refers to, as on Linux: bash's
-    // <(...) and >(...) hand out /dev/fd/63, fexecve() runs /proc/self/fd/N,
-    // and a deleted file stays reachable. Sockets can't be reopened (ENXIO).
+    // Regular files and directories are reopened by inode (memfds, deleted
+    // files, other mount namespaces), and so are pipes, sockets and devices.
     class FdLink : public GeneratedLink {
     public:
-        FdLink(Target t, const LinkCtx* ctx) : GeneratedLink(t, ctx), m_ctx(ctx) {}
-        bool magic_follow(long* error, vfs::Inode** out) override {
+        FdLink(Target target, const LinkCtx* ctx) : GeneratedLink(target, ctx), m_c(ctx) {}
+        vfs::Inode* jump_target() override {
+            const LinkCtx* c = m_c;
             LockGuard guard(proc::table_lock());
-            Process* p = proc::find(m_ctx->pid);
-            vfs::File* f = p ? p->fds[m_ctx->fd] : nullptr;
-            if (!f) {
-                *error = -err::NOENT;
-            } else { // (sockets too: stat works on them, open() refuses them with ENXIO)
-                *error = 0;
-                *out = f->inode;
-            }
-            return true;
+            Process* p = proc::find(c->pid);
+            if (!p || !p->fds[c->fd])
+                return nullptr;
+            vfs::Inode* inode = p->fds[c->fd]->inode;
+            return inode; // every kind: a pipe reopens as the same pipe (bash's <(...)), sockets stat (open() refuses them)
         }
 
     private:
-        const LinkCtx* m_ctx;
+        const LinkCtx* m_c;
     };
 
     bool fd_open(int fd) {
@@ -795,6 +832,9 @@ private:
     int m_pid;
 };
 
+bool gen_mountinfo(TextBuffer& out, const void*);
+bool gen_cgroup(TextBuffer& out, const void*);
+
 // /proc/<pid>/ns/<kind>: what setns() enters (containers: lxc-attach).
 // Plain readable files here (Linux's are nsfs magic links).
 constexpr u8 KIND_NSFS = 0xB5;
@@ -802,11 +842,35 @@ class NsFile : public vfs::Inode {
 public:
     NsFile(int pid, const char* kind) : m_pid(pid) {
         ino = vfs::next_ino();
-        mode = vfs::S_IFREG | 0444;
+        mode = vfs::S_IFLNK | 0777;
         anon_kind = KIND_NSFS;
         snprintf(m_kind, sizeof(m_kind), "%s", kind);
     }
     isize read(u64, void*, usize) override { return -err::INVAL; }
+    bool magic_link() const override { return true; }
+    // "mnt:[4026531840]": the system's namespaces have Linux's initial ids,
+    // private ones an id derived from the namespace object.
+    isize readlink(char* buf, usize size) override {
+        const void* ns = nullptr;
+        {
+            LockGuard guard(proc::table_lock());
+            Process* p = proc::find(m_pid);
+            if (!p)
+                return -err::NOENT;
+            if (!strcmp(m_kind, "mnt"))
+                ns = p->mntns;
+            else if (!strcmp(m_kind, "uts"))
+                ns = p->uts;
+            else if (!strcmp(m_kind, "pid"))
+                ns = p->pidns;
+        }
+        u32 id = ns ? 4026532000u + static_cast<u32>((reinterpret_cast<uptr>(ns) >> 4) & 0xFFFFF) : 4026531840u;
+        char text[48];
+        int n = snprintf(text, sizeof(text), "%s:[%u]", m_kind, id);
+        usize len = static_cast<usize>(n) < size ? static_cast<usize>(n) : size;
+        memcpy(buf, text, len);
+        return static_cast<isize>(len);
+    }
     int m_pid;
     char m_kind[16];
 };
@@ -828,7 +892,7 @@ public:
     long readdir(u64 index, vfs::DirEntry* out) override {
         if (index >= COUNT)
             return 0;
-        fill_entry(out, m_files[index]->ino, vfs::DT_REG, kinds[index]);
+        fill_entry(out, m_files[index]->ino, vfs::DT_LNK, kinds[index]);
         return 1;
     }
 
@@ -839,7 +903,12 @@ private:
 };
 
 bool gen_mounts(TextBuffer& out, const void*);
-bool gen_mountinfo(TextBuffer& out, const void*);
+
+vfs::Inode* ExeLink::jump_target() {
+    LockGuard guard(proc::table_lock());
+    Process* p = proc::find(m_dir->pid);
+    return p ? p->exe_inode : nullptr;
+}
 
 PidDir::PidDir(int p, int t) : pid(p), tid(t) {
     ino = vfs::next_ino();
@@ -855,7 +924,7 @@ PidDir::PidDir(int p, int t) : pid(p), tid(t) {
     add("cmdline", new GeneratedFile(gen_cmdline, this));
     add("environ", new GeneratedFile(gen_environ, this, 0400));
     add("maps", new GeneratedFile(gen_maps, this));
-    add("exe", new GeneratedLink(link_exe, this));
+    add("exe", new ExeLink(this));
     add("cwd", new GeneratedLink(link_cwd, this));
     add("fd", new FdDir(pid));
     add("fdinfo", new FdInfoDir(pid));
@@ -864,7 +933,8 @@ PidDir::PidDir(int p, int t) : pid(p), tid(t) {
     add("gid_map", new UserNsFile(pid, UserNsFile::GID_MAP));
     add("setgroups", new UserNsFile(pid, UserNsFile::SETGROUPS));
     add("mounts", new GeneratedFile(gen_mounts, nullptr));       // the caller's mount namespace
-    add("mountinfo", new GeneratedFile(gen_mountinfo, nullptr));
+    add("mountinfo", new GeneratedFile(gen_mountinfo, this));
+    add("cgroup", new GeneratedFile(gen_cgroup, this));
     if (!tid)
         add("task", new TaskDir(pid));
 }
@@ -1117,10 +1187,23 @@ bool gen_mountinfo(TextBuffer& out, const void*) {
         // The first (root) mount's parent isn't in the list, as on Linux (a
         // mount that is its own parent sends tree walkers like bubblewrap's
         // into endless recursion).
-        c->out->printf("%d %d 0:%d / %s %s - %s %s rw\n", id, c->count == 1 ? 1 : 20 + parent, id, path,
-                       options[0] ? options : "rw,relatime", type, source[0] ? source : "none");
+        c->out->printf("%d %d 0:%d / %s %s shared:%d - %s %s rw\n", id, c->count == 1 ? 1 : 20 + parent, id, path,
+                       options[0] ? options : "rw,relatime", id, type, source[0] ? source : "none");
     }, &ctx);
     kfree(seen);
+    if (vfs::root() == vfs::ram_root()) { // on a disk root they're real mount entries
+        int id = 20 + ctx.count;
+        out.printf("%d 20 0:%d / /proc rw,nosuid,nodev,noexec,relatime - proc proc rw\n"
+                   "%d 20 0:%d / /sys rw,nosuid,nodev,noexec,relatime - sysfs sysfs rw\n"
+                   "%d 20 0:%d / /dev rw,relatime - devtmpfs devtmpfs rw\n",
+                   id, id, id + 1, id + 1, id + 2, id + 2);
+    }
+    return true;
+}
+
+// /proc/<pid>/cgroup: everyone is in the root of the one (cgroup2) hierarchy.
+bool gen_cgroup(TextBuffer& out, const void*) {
+    out.append("0::/\n");
     return true;
 }
 
@@ -1157,6 +1240,14 @@ void init() {
     add("stat", new GeneratedFile(gen_stat_global, nullptr));
     add("loadavg", new GeneratedFile(gen_loadavg, nullptr));
     add("cpuinfo", new GeneratedFile(gen_cpuinfo, nullptr));
+    {
+        auto* pressure = new ramfs::Dir;
+        pressure->mode = vfs::S_IFDIR | 0555;
+        pressure->attach("cpu", 3, new PressureFile(false));
+        pressure->attach("memory", 6, new PressureFile(true));
+        pressure->attach("io", 2, new PressureFile(true));
+        add("pressure", pressure);
+    }
     add("self", new GeneratedLink(link_self, nullptr));
     add("thread-self", new GeneratedLink(link_thread_self, nullptr));
 
@@ -1167,7 +1258,7 @@ void init() {
         snprintf(cmdline, sizeof(cmdline), "%s\n", boot::cmdline());
         genfs::static_file("/proc/cmdline", cmdline);
     }
-    genfs::static_file("/proc/filesystems", "nodev\tramfs\nnodev\tproc\nnodev\tsysfs\nnodev\tdevtmpfs\nnodev\ttmpfs\nnodev\tfuse\n\tvfat\n\texfat\n\text4\n\text3\n\text2\n");
+    genfs::static_file("/proc/filesystems", "nodev\tramfs\nnodev\tproc\nnodev\tsysfs\nnodev\tdevtmpfs\nnodev\ttmpfs\nnodev\tdevpts\nnodev\tcgroup\nnodev\tcgroup2\nnodev\tmqueue\nnodev\tbinder\nnodev\tfuse\n\tvfat\n\texfat\n\text4\n\text3\n\text2\n");
     add("mounts", new GeneratedFile(gen_mounts, nullptr));
     vfs::mkdir_p("/proc/sys/kernel");
     genfs::static_file("/proc/sys/kernel/hostname", "syluxium\n");

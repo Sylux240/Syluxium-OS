@@ -413,6 +413,24 @@ struct IoVec32 { u32 base, len; };
 long vectored32(u64 fd, u64 user_iov, u64 count, bool write) {
     if (count > 1024)
         return -err::INVAL;
+    {
+        // Sockets: one message (see socket_vectored).
+        auto* iov = static_cast<KIoVec*>(kmalloc(sizeof(KIoVec) * (count ? count : 1)));
+        if (!iov)
+            return -err::NOMEM;
+        long r = 0;
+        for (u64 i = 0; i < count && r >= 0; i++) {
+            IoVec32 v;
+            r = uaccess::get(&v, uptr<IoVec32>(user_iov) + i);
+            iov[i] = KIoVec{v.base, v.len};
+        }
+        bool is_socket = false;
+        if (r >= 0)
+            r = socket_vectored(fd, iov, count, write, &is_socket);
+        kfree(iov);
+        if (is_socket || r < 0)
+            return r;
+    }
     long total = 0;
     for (u64 i = 0; i < count; i++) {
         IoVec32 v;
@@ -1187,7 +1205,21 @@ constexpr Mapping IDENTICAL[] = {
     {296, 258, "mkdirat"}, {298, 260, "fchownat"}, {301, 263, "unlinkat"}, {302, 264, "renameat"},
     {304, 266, "symlinkat"}, {305, 267, "readlinkat"}, {306, 268, "fchmodat"}, {307, 269, "faccessat"},
     {311, 273, "set_robust_list"}, {318, 309, "getcpu"}, {330, 292, "dup3"}, {331, 293, "pipe2"},
-    {340, 302, "prlimit64"}, {353, 316, "renameat2"}, {355, 318, "getrandom"}, {359, 41, "socket"},
+    {340, 302, "prlimit64"}, {136, 135, "personality"}, {154, 142, "sched_setparam"},
+    {155, 143, "sched_getparam"}, {156, 144, "sched_setscheduler"}, {157, 145, "sched_getscheduler"},
+    {159, 146, "sched_get_priority_max"}, {160, 147, "sched_get_priority_min"}, {178, 129, "rt_sigqueueinfo"},
+    {335, 297, "rt_tgsigqueueinfo"}, {353, 316, "renameat2"},
+    // Same argument layout as the native calls (Android's 32-bit userland uses them).
+    {9, 86, "link"}, {14, 133, "mknod"}, {61, 161, "chroot"}, {74, 170, "sethostname"}, {88, 169, "reboot"},
+    {96, 140, "getpriority"}, {97, 141, "setpriority"}, {121, 171, "setdomainname"}, {144, 26, "msync"},
+    {150, 149, "mlock"}, {151, 150, "munlock"}, {152, 151, "mlockall"}, {153, 152, "munlockall"},
+    {163, 25, "mremap"}, {184, 125, "capget"}, {185, 126, "capset"}, {217, 155, "pivot_root"},
+    {254, 213, "epoll_create"}, {255, 233, "epoll_ctl"}, {256, 232, "epoll_wait"}, {319, 281, "epoll_pwait"},
+    {289, 251, "ioprio_set"}, {290, 252, "ioprio_get"}, {291, 253, "inotify_init"},
+    {292, 254, "inotify_add_watch"}, {293, 255, "inotify_rm_watch"}, {332, 294, "inotify_init1"},
+    {297, 259, "mknodat"}, {310, 272, "unshare"}, {322, 283, "timerfd_create"}, {327, 289, "signalfd4"},
+    {328, 290, "eventfd2"}, {329, 291, "epoll_create1"}, {344, 306, "syncfs"}, {346, 308, "setns"},
+    {349, 312, "kcmp"}, {356, 319, "memfd_create"}, {375, 324, "membarrier"}, {355, 318, "getrandom"}, {359, 41, "socket"},
     {360, 53, "socketpair"}, {361, 49, "bind"}, {362, 42, "connect"}, {363, 50, "listen"},
     {364, 288, "accept4"}, {365, 55, "getsockopt"}, {366, 54, "setsockopt"}, {367, 51, "getsockname"},
     {368, 52, "getpeername"}, {369, 44, "sendto"}, {371, 45, "recvfrom"}, {373, 48, "shutdown"},

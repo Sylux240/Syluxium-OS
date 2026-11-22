@@ -156,6 +156,13 @@ def draw(name, p):
         p.line((17, 13), (17, 7.5), (11.5, 7.5))
     elif name in ("syluxium-bluetooth", "bluetooth", "preferences-system-bluetooth"):
         p.line((6.5, 7.5), (17, 16.5), (12, 21), (12, 3), (17, 7.5), (6.5, 16.5))
+    elif name in ("android", "syluxium-android", "waydroid"):
+        # mobile apps: a phone with a grid of app tiles
+        p.rect(6, 2.5, 18, 21.5, 2.5)
+        p.line((10.5, 19), (13.5, 19))
+        for y in (6.5, 11):
+            for x in (8.6, 12.9):
+                p.rect(x, y, x + 2.6, y + 2.6, 0.8)
     elif name in ("syluxium-notification", "preferences-desktop-notification"):
         p.line((6, 17), (6, 11))
         p.arc(12, 11, 6, 6, 180, 360)
@@ -180,6 +187,7 @@ ICONS = {
     "syluxium-network-connections": CYAN, "network-wired": CYAN,
     "syluxium-notification": GOLD, "preferences-desktop-notification": GOLD,
     "syluxium-bluetooth": CYAN, "bluetooth": CYAN, "preferences-system-bluetooth": CYAN,
+    "android": CYAN, "syluxium-android": CYAN, "waydroid": CYAN,
     # Xfce's names for the same things
     "org.xfce.thunar": CYAN, "thunar": CYAN, "system-file-manager": CYAN, "org.xfce.settings.manager": CYAN,
 }
