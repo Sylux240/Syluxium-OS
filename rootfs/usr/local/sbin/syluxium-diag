@@ -36,6 +36,19 @@ hardware)
         echo; echo "== CPU / memory"
         grep -m1 "model name" /proc/cpuinfo; echo "cpus: $(grep -c ^processor /proc/cpuinfo)"
         grep -E "MemTotal|MemAvailable" /proc/meminfo
+        echo; echo "== Drivers: every PCI/USB device (bound to <driver> / no driver / probe failed: <error>)"
+        awk -F'\t' '$2 == "pci" || $2 == "usb" {
+            if ($6 == "ok") s = "bound to " $7
+            else if ($6 == "error") s = "probe failed: " ($9 != "" ? $9 : $7)
+            else s = "no driver"
+            printf "%-14s %s  %-40s %s\n", $3, $5, substr($8, 1, 40), s
+        }' /sys/kernel/syluxium/devices 2>&1
+        echo; echo "== Firmware requested by drivers but missing (drivers often try several versions: a"
+        echo "   missing file is only a problem when no file of its family was loaded)"
+        awk -F'\t' '$1 == "missing" { printf "%-14s %s\n", $2, $3; n++ } END { if (!n) print "(none)" }' \
+            /sys/kernel/syluxium/firmware 2>&1
+        echo "-- loaded:"
+        awk -F'\t' '$1 == "loaded" { printf "%-14s %s\n", $2, $3 }' /sys/kernel/syluxium/firmware 2>&1
         echo; echo "== PCI (lspci -nnk)"; lspci -nnk 2>&1
         echo; echo "== USB devices (vendor:product, name, driver per interface)"
         for d in /sys/bus/usb/devices/*; do

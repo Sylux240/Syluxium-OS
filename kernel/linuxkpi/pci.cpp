@@ -968,7 +968,44 @@ sched::Thread* g_fw_boot_thread;      // the thread that mounts the root (never 
 volatile bool g_fw_root_pending;      // root= given and not yet mounted
 } // namespace
 
+// Firmware requests, for diagnostics.
+struct FwRecord {
+    char device[32];
+    char file[96];
+    bool loaded;
+};
+constexpr unsigned MAX_FW_RECORDS = 128;
+FwRecord g_fw_records[MAX_FW_RECORDS];
+unsigned g_fw_record_count;
+IrqSpinlock g_fw_record_lock;
+
+static void note_firmware(struct device* dev, const char* name, bool loaded) {
+    const char* who = dev ? dev_name(dev) : "-";
+    LockGuard guard(g_fw_record_lock);
+    for (unsigned i = 0; i < g_fw_record_count; i++) {
+        FwRecord& r = g_fw_records[i];
+        if (!strncmp(r.file, name, sizeof(r.file) - 1) && !strncmp(r.device, who, sizeof(r.device) - 1)) {
+            r.loaded = r.loaded || loaded;
+            return;
+        }
+    }
+    if (g_fw_record_count >= MAX_FW_RECORDS)
+        return;
+    FwRecord& r = g_fw_records[g_fw_record_count++];
+    snprintf(r.device, sizeof(r.device), "%s", who);
+    snprintf(r.file, sizeof(r.file), "%s", name);
+    r.loaded = loaded;
+}
+
+static int request_firmware_file(const struct firmware** out, const char* name, struct device* dev);
+
 int request_firmware(const struct firmware** out, const char* name, struct device* dev) {
+    int r = request_firmware_file(out, name, dev);
+    note_firmware(dev, name, r == 0);
+    return r;
+}
+
+static int request_firmware_file(const struct firmware** out, const char* name, struct device* dev) {
     *out = nullptr;
     char path[256];
     snprintf(path, sizeof(path), "/lib/firmware/%s", name);
@@ -1053,6 +1090,16 @@ void firmware_root_expected() {
     g_fw_root_pending = true;
 }
 void firmware_root_ready() { g_fw_root_pending = false; }
+
+bool firmware_record(unsigned i, const char** device, const char** file, bool* loaded) {
+    LockGuard guard(g_fw_record_lock);
+    if (i >= g_fw_record_count)
+        return false;
+    *device = g_fw_records[i].device;
+    *file = g_fw_records[i].file;
+    *loaded = g_fw_records[i].loaded;
+    return true;
+}
 
 // Test aid: "pci_fakeid=VVVV:DDDD=vvvv:dddd" makes the device VVVV:DDDD look
 // like vvvv:dddd to Linux drivers, so a driver's probe and its failure

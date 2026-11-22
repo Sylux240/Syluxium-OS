@@ -726,6 +726,7 @@ static struct {
 } deferred[MAX_DEFERRED];
 static int ndeferred;
 void lkpi_sylux_usb_bound(void* registry, const char* driver_name);
+void lkpi_sylux_usb_failed(void* registry, const char* driver_name, int error);
 
 static int probe_intf(void* sylux, struct usb_device* udev, struct usb_interface* intf, const char* path,
 		      bool retry, const char** driver_name);
@@ -816,6 +817,7 @@ static int probe_intf(void* sylux, struct usb_device* udev, struct usb_interface
 	r = drv->probe(intf, id);
 	if (r) {
 		printk(KERN_WARNING "usb %s: %s probe failed (%d)\n", path, drv->name, r);
+		lkpi_sylux_usb_failed(udev->dev.lkpi_registry, drv->name, r);
 		intf->lkpi_driver = NULL;
 		intf->condition = USB_INTERFACE_UNBOUND;
 		return r;
