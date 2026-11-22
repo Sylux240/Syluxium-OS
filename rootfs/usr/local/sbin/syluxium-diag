@@ -271,8 +271,7 @@ xwatch)
     done
     ;;
 appimage)
-    # Run as the desktop user inside the session. Nothing shows on screen:
-    # the window is drawn off screen (dGPUFG's screenshot mode).
+    # Run as the desktop user inside the session. Nothing shows on screen.
     [ -x /usr/local/bin/dgpufg ] || exit 0
     export SYLUXIUM_APPIMAGE_NOGUI=1   # failures go into the file, never onto the screen
     out="$L/appimage.txt"
@@ -286,18 +285,20 @@ appimage)
         rc=$?
         tail -n 40 "$shots.log"
         echo "== exit $rc at $(up) s"
-        echo "== GUI, off screen (QT_QPA_PLATFORM=offscreen DGPUFG_SCREENSHOT)"
-        QT_QPA_PLATFORM=offscreen DGPUFG_SCREENSHOT="$shots" timeout 90 /usr/local/bin/dgpufg > "$shots.log" 2>&1
-        gui=$?
-        tail -n 20 "$shots.log"
-        echo "== exit $gui at $(up) s, pages drawn: $(ls "$shots" 2>/dev/null | tr '\n' ' ')"
-        rm -f "$shots.log"
+        # The GUI: AppImages bundle only Qt's X11 plugin (no "offscreen"), so
+        # rather than open a window at every login, check that the GUI's
+        # program and every library it needs load from the AppImage itself.
+        echo "== GUI libraries (from the AppImage)"
+        ( cd "$shots" && "$(ls /opt/apps/dgpufg/*.AppImage | head -n 1)" --appimage-extract >/dev/null 2>&1 )
+        root="$shots/squashfs-root"
+        missing=$(LD_LIBRARY_PATH="$root/usr/lib" ldd "$root/usr/bin/dgpufg" 2>&1 | grep -E "not found")
+        echo "${missing:-every library found}"
+        [ -f "$root/usr/plugins/platforms/libqxcb.so" ] && echo "Qt X11 plugin: present" || echo "Qt X11 plugin: MISSING"
+        gui=1; [ -x "$root/usr/bin/dgpufg" ] && [ -z "$missing" ] && gui=0
+        echo "== at $(up) s"
     } > "$out" 2>&1
-    first=$(ls "$shots"/*.png 2>/dev/null | head -n 1)
-    [ -n "$first" ] && cp "$first" "$L/appimage-dgpufg.png" 2>/dev/null
-    n=$(ls "$shots"/*.png 2>/dev/null | wc -l)
     rm -rf "$shots"
-    if [ "$gui" = 0 ] && [ "$n" -gt 0 ]; then res="started, $n pages drawn"; else res="FAILED (exit $gui, see appimage.txt)"; fi
+    if [ "$rc" = 0 ] && [ "$gui" = 0 ]; then res="CLI ran, GUI libraries complete"; else res="FAILED (cli exit $rc, gui check $gui; see appimage.txt)"; fi
     "$0" mark "appimage: dGPUFG $res"
     ;;
 esac
