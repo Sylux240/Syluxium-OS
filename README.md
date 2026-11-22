@@ -37,6 +37,8 @@ From power-on to the desktop, in the order a computer shows them:
 | ![Desktop](docs/screenshots/5-desktop.png) | ![Installer](docs/screenshots/6-installer.png) |
 | **7. Start menu**: favourites, categories, search | **8. Terminal** in Dusk colours |
 | ![Start menu](docs/screenshots/7-start-menu.png) | ![Terminal](docs/screenshots/8-terminal.png) |
+| **9. App Store**: 70,000 Debian packages, featured programs, updates | **10. App Store settings**: software sources on and off, add a repository |
+| ![App Store](docs/screenshots/9-app-store.png) | ![App Store settings](docs/screenshots/10-app-store-sources.png) |
 
 ## Made On Linux (Arch / CachyOS) 
 
