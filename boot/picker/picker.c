@@ -416,10 +416,26 @@ static const u32 *icon_of(int kind)
     }
 }
 
+/* Entries in rows: as many as fit across the screen (at a low resolution
+ * eight entries don't fit in one row), the rows centred as a block. */
+#define ROW_H (ICON + 70)
+static int PER_ROW = 1, ROWS = 1;
+static void slot_pos(int i, int *x, int *y)
+{
+    int row = i / PER_ROW, col = i % PER_ROW;
+    int in_row = row == ROWS - 1 ? NENTRIES - row * PER_ROW : PER_ROW;
+    *x = (int)W / 2 - in_row * SLOT / 2 + col * SLOT;
+    *y = icons_y + row * ROW_H;
+}
 static void layout(void)
 {
-    icons_x0 = (int)W / 2 - NENTRIES * SLOT / 2;
-    icons_y = (int)H / 2 - ICON / 2 - 30;
+    PER_ROW = ((int)W - 32) / SLOT;
+    if (PER_ROW < 1) PER_ROW = 1;
+    if (PER_ROW > NENTRIES) PER_ROW = NENTRIES ? NENTRIES : 1;
+    ROWS = (NENTRIES + PER_ROW - 1) / PER_ROW;
+    icons_x0 = (int)W / 2 - PER_ROW * SLOT / 2;
+    icons_y = (int)H / 2 - ROWS * ROW_H / 2 - 10;
+    if (icons_y < 130) icons_y = 130; /* below the logo and the key hint */
     btn_y = (int)H - 120;
     btn_x[0] = (int)W / 2 - 70 - BTN_RESTART_W / 2;
     btn_x[1] = (int)W / 2 + 70 - BTN_SHUTDOWN_W / 2;
@@ -430,10 +446,12 @@ static void compose(void)
     memcpy(SCENE, BGBUF, (UINTN)W * H * 4);
     draw_argb(SCENE, (int)W / 2 - 32, 40, ICON_SYLUXIUM, ICON_SYLUXIUM_W, ICON_SYLUXIUM_H, 255);
     for (int i = 0; i < NENTRIES; i++) {
-        int x = icons_x0 + i * SLOT + (SLOT - ICON) / 2;
-        if (i == SEL) fill_round(SCENE, x - 14, icons_y - 14, ICON + 28, ICON + 28, 22, 0xffffff, 40, 150);
-        draw_argb(SCENE, x, icons_y, icon_of(ENTRIES[i].kind), ICON, ICON, i == SEL ? 255 : 190);
-        text_center(SCENE, icons_x0 + i * SLOT + SLOT / 2, icons_y + ICON + 34, ENTRIES[i].label,
+        int sx, sy;
+        slot_pos(i, &sx, &sy);
+        int x = sx + (SLOT - ICON) / 2;
+        if (i == SEL) fill_round(SCENE, x - 14, sy - 14, ICON + 28, ICON + 28, 22, 0xffffff, 40, 150);
+        draw_argb(SCENE, x, sy, icon_of(ENTRIES[i].kind), ICON, ICON, i == SEL ? 255 : 190);
+        text_center(SCENE, sx + SLOT / 2, sy + ICON + 34, ENTRIES[i].label,
                     i == SEL ? 0xffffff : 0xb8c0cc, 0);
     }
     if (COUNTDOWN > 0) {
@@ -444,14 +462,14 @@ static void compose(void)
         for (i = 0; in[i]; i++) msg[n++] = in[i];
         msg[n++] = (char)('0' + (COUNTDOWN > 9 ? 9 : COUNTDOWN));
         msg[n] = 0;
-        text_center(SCENE, (int)W / 2, icons_y + ICON + 90, msg, 0xdfe6f0, 0);
+        text_center(SCENE, (int)W / 2, icons_y + (ROWS - 1) * ROW_H + ICON + 66, msg, 0xdfe6f0, 0);
     }
     for (int b = 0; b < 2; b++) {
         draw_argb(SCENE, btn_x[b], btn_y, b ? BTN_SHUTDOWN : BTN_RESTART, BTN_RESTART_W, BTN_RESTART_H, HOVER_BTN == b ? 255 : 170);
         text_center(SCENE, btn_x[b] + BTN_RESTART_W / 2, btn_y + BTN_RESTART_H + 22, b ? "Shut Down" : "Restart",
                     HOVER_BTN == b ? 0xffffff : 0xaab2be, 0);
     }
-    draw_text(SCENE, 16, 26, "Esc: boot menu   Arrows/Enter or click", 0x8a93a0, 0);
+    draw_text(SCENE, 16, 26, "Esc: text menu   Arrows/Enter or click", 0x8a93a0, 0);
 }
 
 /* Cursor over the scene: only its rectangle is redrawn when it moves. */
@@ -499,8 +517,9 @@ static void move_cursor(int x, int y)
 static int hit_entry(int x, int y)
 {
     for (int i = 0; i < NENTRIES; i++) {
-        int ix = icons_x0 + i * SLOT;
-        if (x >= ix && x < ix + SLOT && y >= icons_y - 14 && y < icons_y + ICON + 50) return i;
+        int ix, iy;
+        slot_pos(i, &ix, &iy);
+        if (x >= ix && x < ix + SLOT && y >= iy - 14 && y < iy + ICON + 50) return i;
     }
     return -1;
 }
@@ -568,6 +587,99 @@ static void find_pointers(void)
     }
 }
 
+/* Esc: the entries as a plain text list on the firmware's console, with no
+ * countdown - for when the picture is wrong (a screen that cuts it off) or
+ * to read the entries' full names. Arrows + Enter or a number; Esc goes
+ * back to the picture. */
+static void text_out(const char *a)
+{
+    CHAR16 w[128];
+    UINTN n = 0;
+    for (; *a && n < 127; a++) w[n++] = (CHAR16)(unsigned char)*a;
+    w[n] = 0;
+    ST->ConOut->OutputString(ST->ConOut, w);
+}
+static void text_menu(void)
+{
+    int sel = SEL;
+    /* The console may cover only part of the screen (its mode is the
+     * firmware's, not the picture's): black out the rest first. */
+    for (UINTN p = 0; p < (UINTN)W * H; p++) SCENE[p] = 0;
+    present();
+    for (;;) {
+        ST->ConOut->ClearScreen(ST->ConOut);
+        text_out("\r\n  Syluxium boot menu\r\n\r\n");
+        for (int i = 0; i < NENTRIES; i++) {
+            char line[96] = "    1. ";
+            line[2] = i == sel ? '>' : ' ';
+            line[4] = (char)('1' + i);
+            UINTN n = 7;
+            for (const char *t = ENTRIES[i].title; *t && n < 92; t++) line[n++] = *t;
+            line[n++] = '\r', line[n++] = '\n', line[n] = 0;
+            text_out(line);
+        }
+        text_out("\r\n  Up/Down and Enter, or a number. Esc: back to the picture.\r\n");
+        for (;;) {
+            EFI_INPUT_KEY key;
+            int got = 0;
+            for (int k = -1; k < NKBD && !got; k++)
+                got = (k < 0 ? ST->ConIn : KBD[k])->ReadKeyStroke(k < 0 ? ST->ConIn : KBD[k], &key) == EFI_SUCCESS;
+            if (!got) { BS->Stall(10000); continue; }
+            if (key.ScanCode == 1) { sel = (sel + NENTRIES - 1) % NENTRIES; break; }
+            if (key.ScanCode == 2) { sel = (sel + 1) % NENTRIES; break; }
+            if (key.ScanCode == 0x17) { SEL = sel; return; }
+            if (key.UnicodeChar == '\r') { SEL = sel; boot(sel); break; }
+            if (key.UnicodeChar >= '1' && key.UnicodeChar < '1' + NENTRIES) { SEL = key.UnicodeChar - '1'; boot(SEL); break; }
+        }
+    }
+}
+
+/* Some firmware (a Gigabyte H97 with a GeForce) leaves the screen in a
+ * small mode such as 1024x768, where everything is huge. Below 1280x720,
+ * switch to the largest mode that fits the monitor (its EDID; 1920x1080
+ * without one), up to 2560x1600 so that drawing stays quick; the system
+ * then starts in that mode too. */
+static const EFI_GUID EDID_ACTIVE_GUID = {0xbd8c1056, 0x9f36, 0x44ec, {0x92, 0xa8, 0xa6, 0x33, 0x7f, 0x81, 0x79, 0x86}};
+static const EFI_GUID EDID_FOUND_GUID = {0x1c0c34f6, 0xd380, 0x41fa, {0xa0, 0x49, 0x8a, 0xd0, 0x6c, 0x1a, 0x66, 0xaa}};
+struct edid_proto { u32 size; u8 *edid; };
+
+/* The monitor's own resolution: the first detailed timing of its EDID. */
+static int monitor_size(u32 *w, u32 *h)
+{
+    struct edid_proto *e;
+    if (BS->LocateProtocol(&EDID_ACTIVE_GUID, 0, (void **)&e) && BS->LocateProtocol(&EDID_FOUND_GUID, 0, (void **)&e))
+        return 0;
+    if (!e || e->size < 128 || !e->edid) return 0;
+    const u8 *d = e->edid + 54;
+    if (d[0] == 0 && d[1] == 0) return 0; /* not a timing descriptor */
+    *w = d[2] | (u32)(d[4] & 0xf0) << 4;
+    *h = d[5] | (u32)(d[7] & 0xf0) << 4;
+    return *w >= 640 && *h >= 480;
+}
+
+static void best_mode(void)
+{
+    EFI_GOP_MODE_INFO *cur = GOP->Mode->Info;
+    if (cur->HorizontalResolution >= 1280 && cur->VerticalResolution >= 720) return;
+    /* Never above the monitor's resolution (it would show nothing); with no
+     * EDID, at most 1920x1080, which nearly every monitor takes. */
+    u32 maxw = 1920, maxh = 1080;
+    monitor_size(&maxw, &maxh);
+    if (maxw > 2560) maxw = 2560;
+    if (maxh > 1600) maxh = 1600;
+    u32 best = GOP->Mode->Mode, bw = cur->HorizontalResolution, bh = cur->VerticalResolution;
+    for (u32 m = 0; m < GOP->Mode->MaxMode; m++) {
+        EFI_GOP_MODE_INFO *info;
+        UINTN size;
+        if (GOP->QueryMode(GOP, m, &size, &info) != EFI_SUCCESS) continue;
+        u32 w = info->HorizontalResolution, h = info->VerticalResolution;
+        int ok = info->PixelFormat <= 1 && w <= maxw && h <= maxh && (u64)w * h > (u64)bw * bh;
+        if (ok) best = m, bw = w, bh = h;
+        BS->FreePool(info);
+    }
+    if (best != GOP->Mode->Mode) GOP->SetMode(GOP, best);
+}
+
 EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
 {
     ST = st, BS = st->BootServices, RT = st->RuntimeServices, IMAGE = image;
@@ -583,6 +695,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     SEL = DEFAULT;
 
     if (BS->LocateProtocol(&GOP_GUID, 0, (void **)&GOP) || !GOP->Mode || !GOP->Mode->Info) return limine(-1);
+    best_mode();
     W = GOP->Mode->Info->HorizontalResolution, H = GOP->Mode->Info->VerticalResolution;
     BGBUF = alloc((UINTN)W * H * 4), SCENE = alloc((UINTN)W * H * 4);
     if (!BGBUF || !SCENE) return limine(-1);
@@ -614,7 +727,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
             activity = 1;
             if (key.ScanCode == 4 || key.ScanCode == 1) SEL = (SEL + NENTRIES - 1) % NENTRIES, dirty = 1; /* left/up */
             else if (key.ScanCode == 3 || key.ScanCode == 2) SEL = (SEL + 1) % NENTRIES, dirty = 1;     /* right/down */
-            else if (key.ScanCode == 0x17) { BS->CloseEvent(tick); return limine(-2); }               /* Esc */
+            else if (key.ScanCode == 0x17) { COUNTDOWN = -1; text_menu(); compose(), present(); }  /* Esc */
             else if (key.UnicodeChar == '\r' || key.UnicodeChar == ' ') boot(SEL), dirty = 1;
             else if (key.UnicodeChar >= '1' && key.UnicodeChar < '1' + NENTRIES) SEL = key.UnicodeChar - '1', boot(SEL), dirty = 1;
         }
