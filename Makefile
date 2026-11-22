@@ -267,7 +267,7 @@ LKPI_LINUX_CFLAGS := -I$(LKPI_INCLUDE) -include linux/kconfig.h -Werror=implicit
 lkpi_modname = $(or $(lkpi_modname_list),$(lkpi_modname_old))
 lkpi_modname_old = $(if $(findstring /brcm80211/,$<),brcmfmac,$(lkpi_modname_net))
 # Drivers imported from Linux 7.4-rc3 (docs/drivers.md): "<path part>:<module name>".
-LKPI_MODNAMES := /ethernet/intel/igb/:igb /drivers/net/mdio.c:mdio
+LKPI_MODNAMES := /ethernet/intel/igb/:igb /drivers/net/mdio.c:mdio /ethernet/broadcom/bnx2:bnx2
 lkpi_modname_list = $(firstword $(foreach m,$(LKPI_MODNAMES),$(if $(findstring $(word 1,$(subst :, ,$(m))),$<),$(word 2,$(subst :, ,$(m))))))
 lkpi_modname_net = $(if $(findstring /drivers/net/usb/,$<),$(basename $(notdir $<)),$(lkpi_modname_net2))
 lkpi_modname_net2 = $(if $(findstring /iwlwifi/mvm/,$<),iwlmvm,$(if $(findstring /iwlwifi/,$<),iwlwifi,$(if $(findstring /ethernet/realtek/r8169,$<),r8169,$(if $(findstring /ethernet/broadcom/tg3,$<),tg3,$(if $(findstring /ethernet/intel/e1000e/,$<),e1000e,$(if $(findstring /ethernet/intel/igc/,$<),igc,$(if $(findstring /drivers/net/phy/realtek,$<),realtek,$(if $(findstring /drivers/net/phy/,$<),libphy,$(lkpi_modname_rest)))))))))
@@ -301,6 +301,8 @@ $(OBJDIR)/$(LKPI_NETDRV)/ethernet/intel/igb/%: LKPI_DRV_CFLAGS = -include net/lk
 # Qualcomm Atheros/Killer Ethernet (alx: AR8161/8171/E2200..; atl1c: AR813x/815x, L1c/L2c), Linux 7.4-rc3; MDIO library.
 $(OBJDIR)/$(LKPI_NETDRV)/ethernet/atheros/%: LKPI_DRV_CFLAGS = -include net/lkpi_netdrv.h
 $(OBJDIR)/$(LKPI_NETDRV)/mdio.c.o: LKPI_DRV_CFLAGS = -include net/lkpi_netdrv.h
+# Broadcom NetXtreme II (bnx2), Linux 7.4-rc3: tg3's helpers plus the 7.x set.
+$(OBJDIR)/$(LKPI_NETDRV)/ethernet/broadcom/bnx2.c.o: LKPI_DRV_CFLAGS = -include net/lkpi_netdrv.h -include net/lkpi_tg3.h
 # GPU drivers: their own include directory and Kconfig (drm/lkpi_<driver>_config.h).
 LKPI_I915 := kernel/linuxkpi/drivers/gpu/drm/i915
 $(OBJDIR)/$(LKPI_I915)/%: LKPI_DRV_CFLAGS = -I$(LKPI_I915) -DI915 -include drm/lkpi_i915_config.h -gline-tables-only
@@ -452,7 +454,7 @@ $(DEBIAN_CONFIGURED): $(DEBIAN_STAMP) tools/configure-packages.sh
 # Device firmware from Debian's non-free-firmware section: the packages are
 # huge (GPU firmware), so only the files our drivers load are kept.
 FIRMWARE_REPO  := http://deb.debian.org/debian|$(DEBIAN_SUITE)|non-free-firmware
-FIRMWARE_PKGS  := firmware-mediatek firmware-realtek firmware-misc-nonfree firmware-intel-graphics firmware-amd-graphics firmware-nvidia-graphics firmware-iwlwifi firmware-brcm80211 firmware-atheros
+FIRMWARE_PKGS  := firmware-mediatek firmware-realtek firmware-misc-nonfree firmware-intel-graphics firmware-amd-graphics firmware-nvidia-graphics firmware-iwlwifi firmware-brcm80211 firmware-atheros firmware-bnx2
 FIRMWARE_FILES = mediatek/mt7601u.bin rtlwifi/rtl8188eufw.bin rtlwifi/rtl8723bu_nic.bin rtl_bt/rtl8723b_fw.bin \
                   $(I915_FIRMWARE)
 # i915: display microcontroller (DMC) firmware for Skylake..Alder Lake, GuC/HuC
@@ -485,6 +487,7 @@ GPU_FIRMWARE   += amdgpu/vega10_* amdgpu/vega12_* amdgpu/vega20_* amdgpu/raven* 
 # MediaTek MT7921/MT7922 (mt7921e): ~2 MB.
 # Qualcomm ath10k: the laptop and PCIe-card chips QCA6174, QCA9377, QCA988x, QCA9887 (~6.5 MB).
 # Bluetooth (btusb): Intel (ibt-*, ~17 MB), Realtek (rtl_bt, ~1.5 MB), MediaTek MT7921/MT7922 (~1 MB).
+# Broadcom NetXtreme II (bnx2: BCM5706/5708/5709/5716, PowerEdge R610/R710 and other servers): ~0.4 MB.
 NET_FIRMWARE   := tigon/* intel/ibt-* rtl_bt/* mediatek/BT_RAM_CODE_MT7961_1_2_hdr.bin mediatek/BT_RAM_CODE_MT7922_1_1_hdr.bin ath10k/QCA6174/*/* ath10k/QCA9377/*/* ath10k/QCA988X/*/* ath10k/QCA9887/*/* mediatek/WIFI_RAM_CODE_MT7961_1.bin mediatek/WIFI_MT7961_patch_mcu_1_2_hdr.bin mediatek/WIFI_RAM_CODE_MT7922_1.bin mediatek/WIFI_MT7922_patch_mcu_1_1_hdr.bin rtw88/rtw8822b_fw.bin rtw88/rtw8822c_fw.bin rtw88/rtw8821c_fw.bin rtw88/rtw8723d_fw.bin brcm/brcmfmac*-pcie.* brcm/brcmfmac43143.bin brcm/brcmfmac43236b.bin brcm/brcmfmac43242a.bin \
                   brcm/brcmfmac43569.bin brcm/brcmfmac4373.bin \
                   iwlwifi-7260-17.ucode iwlwifi-3160-17.ucode iwlwifi-7265-17.ucode iwlwifi-7265D-29.ucode \
@@ -493,7 +496,8 @@ NET_FIRMWARE   := tigon/* intel/ibt-* rtl_bt/* mediatek/BT_RAM_CODE_MT7961_1_2_h
                   iwlwifi-QuZ-a0-??-b0-77.ucode iwlwifi-so-a0-hr-b0-89.ucode iwlwifi-so-a0-jf-b0-77.ucode \
                   iwlwifi-so-a0-gf-a0-89.ucode iwlwifi-so-a0-gf4-a0-89.ucode iwlwifi-ty-a0-gf-a0-89.ucode \
                   iwlwifi-ma-b0-*-89.ucode iwlwifi-bz-b0-gf-a0-92.ucode iwlwifi-bz-b0-fm-c0-93.ucode \
-                  iwlwifi-gl-c0-fm-c0-92.ucode iwlwifi-*.pnvm rtl_nic/*
+                  iwlwifi-gl-c0-fm-c0-92.ucode iwlwifi-*.pnvm rtl_nic/* \
+                  bnx2/bnx2-*
 GPU_FIRMWARE_SKIP := */gsp/* */gc_9_4_* */psp_13_0_6_* */psp_13_0_14_* */smu_13_0_6_* */smu_13_0_14_* */sdma_4_4_* */vcn_4_0_3_*
 FIRMWARE_ROOT  := $(BUILD)/firmware-debian
 FIRMWARE_STAMP := $(FIRMWARE_ROOT)/.fetched
