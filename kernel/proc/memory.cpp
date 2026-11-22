@@ -283,9 +283,11 @@ long Memory::map(uptr addr, usize len, u32 prot, u32 flags, vfs::Inode* file, u6
     v->file_bytes = v->file ? min<u64>(file_bytes, len) : 0;
     if (flags & MAP_GROWSDOWN)
         v->kind = VMA_STACK;
-    // Shared pages: device memory, or MAP_SHARED of a file whose pages can be
-    // shared (ramfs/tmpfs, memfd, shm). Other MAP_SHARED files get a private copy.
-    if (v->file && (!vfs::is_reg(v->file->mode) || ((flags & MAP_SHARED) && v->file->shared_mappable())))
+    // Shared pages: device memory (also Linux driver files that look regular,
+    // like dma-bufs), or MAP_SHARED of a file whose pages can be shared
+    // (ramfs/tmpfs, memfd, shm). Other MAP_SHARED files get a private copy.
+    if (v->file && (!vfs::is_reg(v->file->mode) || v->file->linux_file(nullptr) ||
+                    ((flags & MAP_SHARED) && v->file->shared_mappable())))
         v->kind = VMA_DEVICE;
     if (v->file) {
         v->file->mmap_ref(+1);

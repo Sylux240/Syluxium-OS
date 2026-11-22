@@ -10,6 +10,9 @@ takes. Run as root on the text console; screendumps show the result:
   phase 4: 120 flips, a box moving right, full damage, then 120 flips
            with only the box's strip as damage; ends on a cyan box at
            the right edge over navy (both buffers fully redrawn each frame).
+  phase 5: non-blocking flips with page-flip events (timing only).
+  phase 6: green screen: buffer A shared as a dma-buf (PRIME), written
+           through the dma-buf's mapping.
     drm-flip-test [phase-seconds]"""
 import ctypes as C
 import fcntl
@@ -125,7 +128,7 @@ for _ in range(2):
     m = mmap.mmap(fd, size, mmap.MAP_SHARED, mmap.PROT_READ | mmap.PROT_WRITE, offset=offset)
     fb = C.c_uint32()
     check(drm.drmModeAddFB(fd, W, H, 24, 32, pitch, handle, C.byref(fb)), "AddFB")
-    bufs.append({"map": m, "pitch": pitch, "fb": fb.value})
+    bufs.append({"map": m, "pitch": pitch, "fb": fb.value, "handle": handle})
 
 
 def fill(b, x0, y0, x1, y1, rgb):
@@ -211,5 +214,33 @@ for i in range(60):
 total = time.monotonic() - t0
 say(f"non-blocking + event: 60 frames in {total:.2f} s; commit returns after avg {sum(returns) / len(returns) * 1000:.2f} ms, "
     f"event after avg {sum(waits) / max(1, len(waits)) * 1000:.2f} ms (min {min(waits) * 1000:.2f})")
+# Phase 6: dma-buf (PRIME), as GPU clients and the compositor share buffers
+# (Wayland linux-dmabuf, X11 DRI3): export buffer A as a dma-buf, import it
+# back (the same object), write it through the dma-buf's own mapping with
+# DMA_BUF_IOCTL_SYNC around it, show it: the screen must turn green.
+prime = C.c_int(-1)
+hdl = C.c_uint32()
+r_exp = drm.drmPrimeHandleToFD(fd, bufs[0]["handle"], 0x80002, C.byref(prime))  # O_CLOEXEC | O_RDWR
+if r_exp:
+    say(f"dma-buf: export failed: {r_exp} {os.strerror(C.get_errno())}")
+else:
+    r_imp = drm.drmPrimeFDToHandle(fd, prime.value, C.byref(hdl))
+    say(f"dma-buf: exported fd {prime.value}, imported handle {hdl.value} (original {bufs[0]['handle']}, "
+        f"same object: {hdl.value == bufs[0]['handle']}), import result {r_imp}")
+    size = bufs[0]["pitch"] * H
+    try:
+        dm = mmap.mmap(prime.value, size, mmap.MAP_SHARED, mmap.PROT_READ | mmap.PROT_WRITE)
+        fcntl.ioctl(prime.value, 0x40086200, struct.pack("Q", 3))  # DMA_BUF_IOCTL_SYNC: START | RW
+        px = struct.pack("<I", GREEN) * W
+        for y in range(H):
+            o = y * bufs[0]["pitch"]
+            dm[o:o + len(px)] = px
+        fcntl.ioctl(prime.value, 0x40086200, struct.pack("Q", 4 | 3))  # END | RW
+        same = bufs[0]["map"][0:4] == struct.pack("<I", GREEN)
+        say(f"dma-buf: written through its own mapping; the dumb mapping sees it: {same}; "
+            f"flip {commit(bufs[0]) * 1000:.1f} ms (screen should be green)")
+    except OSError as e:
+        say(f"dma-buf: mapping or sync failed: {e}")
+    time.sleep(PHASE)
 say("done")
 time.sleep(PHASE * 2)

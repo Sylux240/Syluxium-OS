@@ -32,7 +32,10 @@ long sys_mmap(SYSCALL_ARGS) {
         f = fd_get(p, fd);
         if (!f)
             return -err::BADF;
-        if (!vfs::is_reg(f->inode->mode)) {
+        // Linux driver files count as devices even when they look like
+        // regular files (a dma-buf is S_IFREG so fstat/lseek give its size):
+        // mapping one as a plain file gave pages that faulted (SIGSEGV).
+        if (!vfs::is_reg(f->inode->mode) || f->inode->linux_file(f)) {
             // Device memory (sound buffers; framebuffers and GPUs later): the
             // driver must support it, and the mapping is always shared.
             // Check the first and last page now so mmap() fails cleanly.
