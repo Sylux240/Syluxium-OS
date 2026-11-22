@@ -327,6 +327,10 @@ $(OBJDIR)/$(LKPI_AMD)/%: LKPI_DRV_CFLAGS = -I$(AMD_ASIC_REG) -I$(LKPI_AMD)/inclu
 # and run inside kernel FPU sections (DC_FP_START/END -> kernel_fpu_begin/end).
 -include $(LKPI_AMD)/display/lkpi-fpu-objs.mk
 $(AMD_DC_FPU_OBJS): LKPI_FP_CFLAGS = -msse -msse2 -mno-soft-float
+# virtio core (virtio-pci) and virtio-gpu (QEMU's virgl/venus 3D: the test
+# bed for the GPU userspace path in VMs).
+$(OBJDIR)/kernel/linuxkpi/drivers/virtio/%: LKPI_DRV_CFLAGS = -include drm/lkpi_virtio_config.h
+$(OBJDIR)/kernel/linuxkpi/drivers/gpu/drm/virtio/%: LKPI_DRV_CFLAGS = -include drm/lkpi_virtio_config.h
 LKPI_NOUVEAU := kernel/linuxkpi/drivers/gpu/drm/nouveau
 $(OBJDIR)/$(LKPI_NOUVEAU)/%: LKPI_DRV_CFLAGS = -I$(LKPI_NOUVEAU)/include -I$(LKPI_NOUVEAU)/include/nvkm -I$(LKPI_NOUVEAU)/nvkm \
     -I$(LKPI_NOUVEAU) -include drm/lkpi_nouveau_config.h -gline-tables-only

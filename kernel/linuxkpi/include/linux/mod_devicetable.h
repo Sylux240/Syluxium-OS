@@ -10,6 +10,12 @@ struct pci_device_id {
     kernel_ulong_t driver_data;
 };
 
+struct virtio_device_id {
+    __u32 device;
+    __u32 vendor;
+};
+#define VIRTIO_DEV_ANY_ID 0xffffffff
+
 struct usb_device_id {
     u16 match_flags;
     u16 idVendor, idProduct;
