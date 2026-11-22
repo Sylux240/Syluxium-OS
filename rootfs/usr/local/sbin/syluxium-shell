@@ -54,7 +54,14 @@ else
 fi
 # shellscene=<name>: a test scene (scene-test) once the desktop is up.
 scene=$(tr ' ' '\n' < /proc/cmdline | sed -n 's/^shellscene=//p' | head -1)
-[ -n "$scene" ] && printf "scenetest = sh -c 'sleep 15; scene-test %s'\n" "$scene" >> "$CONF"
+if [ -n "$scene" ]; then
+    printf "scenetest = sh -c 'sleep 15; scene-test %s'\n" "$scene" >> "$CONF"
+    # Test steps the scene announces (/run/syluxium-diag/console.txt) go to
+    # the serial console, where tools/smoke-test.sh waits for them.
+    : > /run/syluxium-diag/console.txt && chmod 666 /run/syluxium-diag/console.txt
+    pgrep -f "tail -F /run/syluxium-diag/console.txt" > /dev/null || \
+        { tail -n 0 -F /run/syluxium-diag/console.txt > /dev/console 2>/dev/null & }
+fi
 # Software or GPU rendering: a GPU driver with 3D gives a render node
 # (/dev/dri/renderD*); without one (the firmware framebuffer, simpledrm, or
 # a display-only driver) Mesa draws with llvmpipe.
@@ -78,6 +85,16 @@ elif ! grep -qs "^blur *= *false" "$SET"; then
 fi
 # Personalize's "Shadows under windows" switch.
 grep -qs "^shadows *= *false" "$SET" && sed -i 's/^\(plugins = .*\) winshadows/\1/' "$CONF"
+# The keyboard layout chosen when Syluxium was installed (/etc/default/keyboard),
+# for Wayland and X11 programs alike (Xwayland takes Wayfire's keymap).
+if [ -f /etc/default/keyboard ]; then
+    kb() { sed -n "s/^$1=\"\{0,1\}\([^\"]*\)\"\{0,1\}$/\1/p" /etc/default/keyboard | head -1; }
+    { echo; echo "[input]"
+      [ -n "$(kb XKBLAYOUT)" ] && echo "xkb_layout = $(kb XKBLAYOUT)"
+      [ -n "$(kb XKBVARIANT)" ] && echo "xkb_variant = $(kb XKBVARIANT)"
+      [ -n "$(kb XKBMODEL)" ] && echo "xkb_model = $(kb XKBMODEL)"
+      [ -n "$(kb XKBOPTIONS)" ] && echo "xkb_options = $(kb XKBOPTIONS)"; } >> "$CONF"
+fi
 # For the stick's log folder (syluxium-diag copies /run/syluxium-diag):
 # display driver, screen mode, software or GPU rendering. The renderer
 # Wayfire really uses ("GL renderer: ...") is in syluxium-shell.log.
@@ -92,6 +109,7 @@ grep -qs "^shadows *= *false" "$SET" && sed -i 's/^\(plugins = .*\) winshadows/\
     [ "$SOFTWARE" = 1 ] && echo "rendering: software (llvmpipe)${PRELOAD:+, frames finished before the copy (glsync)}" \
         || echo "rendering: GPU driver"
     echo "wayfire: $SYLUXIUM_WAYFIRE_ARGS $(grep '^plugins' "$CONF")"
+    echo "X11 programs: Xwayland, started by the first one ($(grep '^xwayland' "$CONF"); milestones.txt, xwayland.log)"
     [ -n "$FPS_NOTE" ] && echo "$FPS_NOTE"
 } > /run/syluxium-diag/shell.txt 2>/dev/null
 chmod 666 /run/syluxium-diag/shell.txt 2>/dev/null
@@ -99,11 +117,14 @@ chown -R "$U" "$HOME_/.config/syluxium-shell"
 # Logging out ends Wayfire: a new session starts (the shell has no login screen).
 # If Wayfire fails right away on the GPU driver (its EGL/GLES setup), the
 # next start draws in software instead of leaving a black screen.
+# (/usr/games on the PATH as in the Xfce desktop: Debian's games live there.)
 while :; do
 started=$(cut -d. -f1 /proc/uptime)
 su "$U" -s /bin/bash -c "export XDG_RUNTIME_DIR=$RT XDG_SESSION_TYPE=wayland LIBSEAT_BACKEND=seatd \
     WLR_RENDERER_ALLOW_SOFTWARE=1 GDK_BACKEND=wayland,x11 MOZ_ENABLE_WAYLAND=1 \
-    XDG_CONFIG_DIRS=/etc/xdg/syluxium:/etc/xdg XDG_CURRENT_DESKTOP=XFCE XDG_MENU_PREFIX=xfce- $FALLBACK_ENV $SYLUXIUM_SHELL_ENV; \
+    WLR_XWAYLAND=/usr/local/lib/syluxium/xwayland SYLUXIUM_SHELL_SOFTWARE=$SOFTWARE \
+    XDG_CONFIG_DIRS=/etc/xdg/syluxium:/etc/xdg XDG_CURRENT_DESKTOP=XFCE XDG_MENU_PREFIX=xfce- $FALLBACK_ENV $SYLUXIUM_SHELL_ENV \
+    PATH=$PATH:/usr/local/games:/usr/games; \
     cd ~; exec dbus-run-session $PRELOAD wayfire $SYLUXIUM_WAYFIRE_ARGS -c $CONF" >> $LOG 2>&1
     status=$?
     ran=$(( $(cut -d. -f1 /proc/uptime) - started ))

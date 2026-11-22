@@ -190,7 +190,8 @@ Legend: ✅ done · 🟡 partly done · ⬜ to do
      keyboard shortcuts (Win, Win+E/R/D, Ctrl+Esc, Ctrl+Shift+Esc). Trinity stays available as
      "Syluxium Classic" in the login screen
 - 🟡 Syluxium shell on native Wayland (Wayfire compositor: glass panel, blur with a GPU driver,
-     X11 apps through Xwayland; Android windows next): preview boot entries, rounded corners to do
+     X11 apps through Xwayland, started on demand, with the same theme, frames, taskbar icons
+     and clipboard as Wayland apps; Android windows next): preview boot entries, rounded corners to do
 - ✅ Right-click menus: Extract Here / Extract All, Send To compressed folder, Change Icon
 - ✅ File manager: Thunar in Dusk (trash, drives, archives extracted and created)
 - 🟡 Display settings: resolution and refresh rate change live (with a 15 s undo); multi-monitor to do

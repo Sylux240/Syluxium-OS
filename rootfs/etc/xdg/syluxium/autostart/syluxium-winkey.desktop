@@ -1,5 +1,7 @@
 [Desktop Entry]
 Type=Application
 Name=Windows key opens the start menu
-Exec=xcape -e 'Super_L=Control_L|Escape;Super_R=Control_L|Escape'
+# X11 only: the Wayland shell binds the key itself (wayfire.ini), and xcape
+# would only start Xwayland there.
+Exec=sh -c '[ "$XDG_SESSION_TYPE" = wayland ] || exec xcape -e "Super_L=Control_L|Escape;Super_R=Control_L|Escape"'
 OnlyShowIn=XFCE;

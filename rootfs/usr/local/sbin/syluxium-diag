@@ -7,7 +7,8 @@
 #                                 displays, network, disks, CPU, memory (once)
 #   syluxium-diag status          status.txt / status-history.txt: load, memory,
 #                                 busiest processes, zombies (every 15 s)
-#   syluxium-diag logs            copy the session's logs (X, login, shell, Wi-Fi, ...)
+#   syluxium-diag logs            copy the session's logs (X, login, shell, Wi-Fi, ...;
+#                                 the Wayland shell's Xwayland: xwayland.log)
 #   syluxium-diag mark <text>     milestones.txt: "<seconds since boot> <text>"
 #   syluxium-diag gpu-clients     gpu-clients.txt: why programs do or don't get the
 #                                 GPU (Mesa's own explanation); GPU Test entry only

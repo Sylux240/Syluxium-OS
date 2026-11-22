@@ -103,6 +103,12 @@ DEBIAN_PKGS  += xfce4-session xfwm4 xfce4-panel xfdesktop4 xfce4-settings xfconf
 DEBIAN_PKGS  += xfce4-terminal galculator drawing gucharmap xfce4-screenshooter mousepad yad xdg-utils
 # Task Manager's window list in the Wayland shell (Xfce's window library from Python).
 DEBIAN_PKGS  += gir1.2-libxfce4windowing-0.0
+# X11 programs in the Wayland shell (Xwayland): xsettingsd gives them the
+# Dusk theme, icons, fonts and cursor (XSETTINGS, which xfsettingsd only
+# provides on a real X server); clipboard tools for both sides (xclip,
+# wl-clipboard) and xprop/xwininfo/xdpyinfo (~1.5 MB). Test programs for
+# xwayland-test: an SDL 2 game (sopwith) and a Qt 5 one (kcheckers).
+DEBIAN_PKGS  += xsettingsd x11-utils xclip wl-clipboard sopwith kcheckers
 XFCE_APPS_EXCLUDE := udisks2
 DEBIAN_ROOT  := $(BUILD)/rootfs-debian
 DEBIAN_STAMP := $(DEBIAN_ROOT)/.fetched
