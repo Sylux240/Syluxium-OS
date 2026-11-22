@@ -1,0 +1,13 @@
+#!/bin/sh
+# shutdown [-h|-P|-H|-r] [now|+0] [message]: Syluxium has no systemd; this
+# turns the usual command (which Xfce's shutdown helper runs) into our
+# poweroff/reboot, which close programs, flush disks and log each step.
+action=poweroff
+for a in "$@"; do
+    case "$a" in
+        -r|--reboot) action=reboot ;;
+        -h|-P|--poweroff|-H|--halt) action=poweroff ;;
+        -c) echo "shutdown: nothing scheduled" >&2; exit 0 ;;
+    esac
+done
+exec /usr/local/sbin/$action

@@ -1,0 +1,14 @@
+// Syluxium has no logind, so polkit can't tell that the desktop user is the
+// one at the computer ("local", "active" are unknown). Let the computer's
+// own users (the "users" group, which the installer and live system give
+// every desktop account) shut down and restart without a password, as on a
+// desktop distribution.
+polkit.addRule(function (action, subject) {
+    polkit.log("syluxium-power: " + action.id + " for " + subject);
+    if ((action.id == "org.xfce.session.xfsm-shutdown-helper" ||
+         action.id.indexOf("org.freedesktop.login1.power-off") == 0 ||
+         action.id.indexOf("org.freedesktop.login1.reboot") == 0) &&
+        subject.isInGroup("users")) {
+        return polkit.Result.YES;
+    }
+});
