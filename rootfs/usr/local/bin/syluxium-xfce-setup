@@ -1,0 +1,57 @@
+#!/bin/sh
+# First login to the Syluxium (Xfce) session, as the user: the Dusk wallpaper
+# on every monitor and the desktop icons (Files, Network, System, Web), marked
+# trusted so Xfce runs them without asking. Runs again only if
+# ~/.config/syluxium/xfce-setup-done is removed. Started by syluxium-session.
+DONE="$HOME/.config/syluxium/xfce-setup-done"
+WALL=/opt/trinity/share/wallpapers/syluxium-default.jpg
+[ -f "$WALL" ] || WALL=/usr/share/syluxium/dusk/wallpaper.jpg
+
+# Wait for the desktop (xfdesktop creates its per-monitor properties).
+i=0
+while [ $i -lt 60 ] && ! pgrep -u "$(id -u)" -x xfdesktop >/dev/null; do sleep 1; i=$((i + 1)); done
+sleep 1
+/usr/local/sbin/syluxium-diag mark "session: desktop ready (xfdesktop running)"
+
+# Wallpaper: every monitor xfdesktop knows, plus the outputs X reports
+# (xfdesktop 4.20 names them monitor<output>), workspace 0. In the Wayland
+# shell the compositor's outputs (xrandr would start Xwayland just to ask).
+outputs() {
+    if [ "$XDG_SESSION_TYPE" = wayland ]; then
+        /usr/local/lib/syluxium/shell-outputs 2>/dev/null
+    else
+        xrandr --listmonitors 2>/dev/null | awk 'NR > 1 {print $NF}'
+    fi
+}
+props=$(xfconf-query -c xfce4-desktop -l 2>/dev/null | grep '/workspace0/last-image$')
+for out in $(outputs); do
+    props="$props
+/backdrop/screen0/monitor$out/workspace0/last-image"
+done
+if [ ! -f "$DONE" ]; then
+    echo "$props" | sort -u | while read -r p; do
+        [ -n "$p" ] || continue
+        xfconf-query -c xfce4-desktop -p "$p" -n -t string -s "$WALL"
+        xfconf-query -c xfce4-desktop -p "${p%last-image}image-style" -n -t int -s 5   # zoomed (cover)
+    done
+fi
+
+# Desktop icons: launchers in ~/Desktop, trusted (Xfce 4.18+ checks a
+# checksum kept in GIO metadata).
+DESK=$(xdg-user-dir DESKTOP 2>/dev/null || echo "$HOME/Desktop")
+mkdir -p "$DESK"
+if [ ! -f "$DONE" ]; then
+    for app in syluxium-mydocuments syluxium-network syluxium-system firefox-esr; do
+        src=/usr/share/applications/$app.desktop
+        [ -f "$src" ] || continue
+        dst="$DESK/$app.desktop"
+        [ "$app" = firefox-esr ] && sed 's/^Name=.*/Name=Web/;/^Name\[/d' "$src" > "$dst" || cp "$src" "$dst"
+        chmod +x "$dst"
+    done
+fi
+for f in "$DESK"/*.desktop; do
+    [ -f "$f" ] || continue
+    gio set -t string "$f" metadata::xfce-exe-checksum "$(sha256sum "$f" | cut -d' ' -f1)" 2>/dev/null
+done
+
+mkdir -p "$(dirname "$DONE")" && touch "$DONE"

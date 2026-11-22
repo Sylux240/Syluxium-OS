@@ -227,6 +227,11 @@ struct xdp_frame;
 struct skb_shared_hwtstamps;
 struct xdp_metadata_ops;
 struct xsk_tx_metadata_ops;
+struct ndmsg;
+struct nlattr;
+struct ifla_vf_info;
+struct ifla_vf_stats;
+struct kernel_hwtstamp_config;
 struct net_device_ops {
     int (*ndo_init)(struct net_device* dev);
     void (*ndo_uninit)(struct net_device* dev);
@@ -258,7 +263,40 @@ struct net_device_ops {
     int (*ndo_xdp_xmit)(struct net_device* dev, int n, struct xdp_frame** xdp, u32 flags);
     int (*ndo_xsk_wakeup)(struct net_device* dev, u32 queue_id, u32 flags);
     ktime_t (*ndo_get_tstamp)(struct net_device* dev, const struct skb_shared_hwtstamps* hwtstamps, bool cycles);
+    /* appended: SR-IOV virtual function management (no SR-IOV here: never called) */
+    int (*ndo_set_vf_mac)(struct net_device* dev, int queue, u8* mac);
+    int (*ndo_set_vf_vlan)(struct net_device* dev, int queue, u16 vlan, u8 qos, __be16 proto);
+    int (*ndo_set_vf_rate)(struct net_device* dev, int vf, int min_tx_rate, int max_tx_rate);
+    int (*ndo_set_vf_spoofchk)(struct net_device* dev, int vf, bool setting);
+    int (*ndo_set_vf_trust)(struct net_device* dev, int vf, bool setting);
+    int (*ndo_get_vf_config)(struct net_device* dev, int vf, struct ifla_vf_info* ivf);
+    int (*ndo_set_vf_link_state)(struct net_device* dev, int vf, int link_state);
+    int (*ndo_get_vf_stats)(struct net_device* dev, int vf, struct ifla_vf_stats* vf_stats);
+    int (*ndo_fdb_add)(struct ndmsg* ndm, struct nlattr* tb[], struct net_device* dev, const unsigned char* addr,
+                       u16 vid, u16 flags, bool* notified, struct netlink_ext_ack* extack);
+    int (*ndo_hwtstamp_get)(struct net_device* dev, struct kernel_hwtstamp_config* kernel_config);
+    int (*ndo_hwtstamp_set)(struct net_device* dev, struct kernel_hwtstamp_config* kernel_config,
+                            struct netlink_ext_ack* extack);
 };
+
+/* SR-IOV virtual function description (include/linux/if_link.h). */
+struct ifla_vf_info {
+    __u32 vf;
+    __u8 mac[32];
+    __u32 vlan;
+    __u32 qos;
+    __u32 spoofchk;
+    __u32 linkstate;
+    __u32 min_tx_rate;
+    __u32 max_tx_rate;
+    __u32 rss_query_en;
+    __u32 trusted;
+    __be16 vlan_proto;
+};
+struct ifla_vf_stats {
+    __u64 rx_packets, tx_packets, rx_bytes, tx_bytes, broadcast, multicast, rx_dropped, tx_dropped;
+};
+enum { IFLA_VF_LINK_STATE_AUTO, IFLA_VF_LINK_STATE_ENABLE, IFLA_VF_LINK_STATE_DISABLE };
 
 /* Hardware address lists (multicast filters). */
 struct netdev_hw_addr {
@@ -309,6 +347,7 @@ struct netdev_queue {
     struct net_device* dev;
     unsigned long state;
     unsigned long trans_start;
+    spinlock_t _xmit_lock; /* appended: drivers name it in lockdep assertions (no XDP transmit here) */
 };
 
 struct header_ops;
@@ -531,6 +570,7 @@ void netif_napi_del(struct napi_struct* napi);
 void napi_enable(struct napi_struct* napi);
 void napi_disable(struct napi_struct* napi);
 bool napi_schedule_prep(struct napi_struct* napi);
+bool napi_is_scheduled(struct napi_struct* napi); /* appended */
 void __napi_schedule(struct napi_struct* napi);
 #define __napi_schedule_irqoff __napi_schedule
 static inline bool napi_schedule(struct napi_struct* n) { if (napi_schedule_prep(n)) { __napi_schedule(n); return true; } return false; }

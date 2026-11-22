@@ -1199,7 +1199,7 @@ constexpr Mapping IDENTICAL[] = {
     {200, 104, "getgid32"}, {201, 107, "geteuid32"}, {202, 108, "getegid32"}, {203, 105, "setreuid32"},
     {204, 106, "setregid32"}, {207, 93, "fchown32"}, {208, 105, "setresuid32"}, {210, 106, "setresgid32"},
     {212, 92, "chown32"}, {213, 105, "setuid32"}, {214, 106, "setgid32"}, {215, 122, "setfsuid32"},
-    {216, 123, "setfsgid32"}, {219, 28, "madvise"}, {220, 217, "getdents64"}, {221, 72, "fcntl64"},
+    {216, 123, "setfsgid32"}, {218, 27, "mincore"}, {219, 28, "madvise"}, {220, 217, "getdents64"}, {221, 72, "fcntl64"},
     {224, 186, "gettid"}, {238, 200, "tkill"}, {239, 40, "sendfile64"}, {242, 204, "sched_getaffinity"},
     {252, 231, "exit_group"}, {258, 218, "set_tid_address"}, {270, 234, "tgkill"}, {295, 257, "openat"},
     {296, 258, "mkdirat"}, {298, 260, "fchownat"}, {301, 263, "unlinkat"}, {302, 264, "renameat"},

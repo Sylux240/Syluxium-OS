@@ -378,6 +378,13 @@ void wake(Thread* t) {
     Cpu* c;
     for (;;) {
         c = __atomic_load_n(&t->cpu, __ATOMIC_ACQUIRE);
+        if (!c) {
+            // Created but not started yet (a new thread of a process that a
+            // signal wakes: clone() lists it in the process before start()
+            // gives it a CPU). start() queues it; nothing to do.
+            irq_restore(flags);
+            return;
+        }
         c->rq.lock.lock();
         if (t->cpu == c)
             break;

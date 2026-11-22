@@ -1,0 +1,78 @@
+#!/bin/sh
+# Test aid: start the desktop, log in, then check that programs in the session
+# get the GPU (glxinfo/eglinfo/vulkaninfo, glxgears frame rate) and what the
+# X server uses (glamor, DRI3). Results go to the console ("GPUTEST ...").
+# A screenshot of the desktop with glxgears follows on the console as base64
+# between "GPUSHOT-BEGIN" and "GPUSHOT-END" (QEMU can't take one of a GL
+# scanout), plus the full syluxium-diag gpu report between GPUDIAG markers.
+# Boot with "gpu" (QEMU: -device virtio-vga-gl, virgl).
+say() { echo "GPUTEST $*" > /dev/console; }
+( while :; do sleep 15; say "..."; done ) &
+beat=$!
+startdesktop > /dev/null 2>&1 &
+export DISPLAY=:0
+for i in $(seq 1 120); do
+    XAUTHORITY="$(ls /var/run/xauth/A:0-* 2>/dev/null | head -1)"
+    [ -n "$XAUTHORITY" ] && [ -S /tmp/.X11-unix/X0 ] && break
+    sleep 1
+done
+export XAUTHORITY
+say "X up after $i s"
+sleep 10
+xdotool key Return    # log in (the login screen's user has no password)
+for i in $(seq 1 120); do pidof xfce4-panel > /dev/null && break; sleep 1; done
+sleep 15
+say "desktop up"
+say "Xorg: $(grep -E 'glamor|DRI3|DRI2|AIGLX|GLX|Acceleration|modeset\(0\): (Output|Using)|EGL|renderer' /var/log/Xorg.0.log | sed 's/^\[ *[0-9.]*\] //' | head -25 | tr '\n' '|')"
+asuser() {
+    ( exec python3 -c 'import os, sys
+os.initgroups("syluxium", 1000); os.setgid(1000); os.setuid(1000)
+os.environ["HOME"] = "/home/syluxium"
+os.execvp(sys.argv[1], sys.argv[1:])' "$@" ) < /dev/null 2>&1
+}
+say "glxinfo -B: $(asuser env LIBGL_DEBUG=verbose timeout 30 glxinfo -B | tr '\n' '|' | cut -c1-1500)"
+say "eglinfo -B (X11): $(asuser timeout 30 eglinfo -B -p x11 2>&1 | grep -E 'renderer|version string|rror' | tr '\n' '|' | cut -c1-600)"
+if command -v vulkaninfo > /dev/null; then
+    say "vulkaninfo --summary: $(asuser timeout 30 vulkaninfo --summary 2>&1 | grep -E 'deviceName|driverName|driverInfo|apiVersion|rror|GPU' | tr '\n' '|' | cut -c1-800)"
+fi
+command -v vainfo > /dev/null && say "vainfo: $(asuser timeout 20 vainfo --display drm 2>&1 | grep -E 'Driver version|VAProfile|rror' | head -8 | tr '\n' '|')"
+asuser timeout 40 glxgears -info > /tmp/glxgears.txt 2>&1 &
+sleep 11
+say "glxgears: $(grep -E 'GL_RENDERER|frames in' /tmp/glxgears.txt | tr '\n' '|')"
+python3 - <<'EOF' 2>/dev/console
+import gi
+gi.require_version("Gdk", "3.0")
+from gi.repository import Gdk
+w = Gdk.get_default_root_window()
+pb = Gdk.pixbuf_get_from_window(w, 0, 0, w.get_width(), w.get_height())
+pb.savev("/tmp/gpushot.png", "png", [], [])
+EOF
+[ -s /tmp/gpushot.png ] || say "screenshot failed"
+# The full GPU report (as the GPU Test entry writes it to the stick).
+GPU_OUT=/tmp/gpu.txt syluxium-diag gpu
+# Line by line, waiting whenever the console is full (a big write in one go
+# came out empty).
+python3 - <<'EOF'
+import base64, errno, os, time
+fd = os.open("/dev/console", os.O_WRONLY | os.O_NOCTTY)
+def put(line):
+    data = (line + "\n").encode()
+    while data:
+        try:
+            data = data[os.write(fd, data):]
+        except OSError as e:
+            if e.errno not in (errno.EAGAIN, errno.EINTR):
+                raise
+            time.sleep(0.01)
+put("GPUDIAG-BEGIN")
+for line in open("/tmp/gpu.txt", errors="replace"):
+    put(line.rstrip("\n"))
+put("GPUDIAG-END")
+put("GPUSHOT-BEGIN")
+b = base64.b64encode(open("/tmp/gpushot.png", "rb").read()).decode()
+for i in range(0, len(b), 76):
+    put(b[i:i + 76])
+put("GPUSHOT-END")
+EOF
+kill $beat
+say "done"

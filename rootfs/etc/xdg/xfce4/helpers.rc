@@ -1,0 +1,10 @@
+#
+# Syluxium's preferred applications for Xfce (Settings > Default
+# Applications; exo-open and the panel's launchers use them): Firefox,
+# Terminal (xfce4-terminal), Files (Thunar).
+#
+
+WebBrowser=firefox-esr
+MailReader=kmail
+TerminalEmulator=xfce4-terminal
+FileManager=thunar

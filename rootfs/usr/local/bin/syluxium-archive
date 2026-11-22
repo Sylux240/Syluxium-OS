@@ -238,7 +238,7 @@ def main():
                 return 0
             if not run_job("Extract", f"Extracting {os.path.basename(f)}...", lambda f=f, d=dest: extract(f, d)):
                 return 1
-            subprocess.Popen(["kfmclient", "openProfile", "filemanagement", dest], stderr=subprocess.DEVNULL)
+            subprocess.Popen(["xdg-open", dest], stderr=subprocess.DEVNULL)
     elif mode in ("zip", "targz"):
         names = ", ".join(os.path.basename(f.rstrip("/")) for f in files[:3]) + ("..." if len(files) > 3 else "")
         if not run_job("Compress", f"Compressing {names}...", lambda: compress(files, mode)):

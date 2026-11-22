@@ -122,6 +122,18 @@ def is_admin():
     return os.geteuid() == 0
 
 
+def desktop_session():
+    """"xfce", "tde", "wayland" (the Syluxium shell) or "" (unknown)."""
+    if os.environ.get("XDG_SESSION_TYPE") == "wayland" or os.environ.get("WAYLAND_DISPLAY"):
+        return "wayland"
+    current = os.environ.get("XDG_CURRENT_DESKTOP", "").upper()
+    if "XFCE" in current:
+        return "xfce"
+    if "TDE" in current or "TRINITY" in current or os.environ.get("TDE_FULL_SESSION"):
+        return "tde"
+    return ""
+
+
 # ---- GTK helpers ----
 def window(title, w=640, h=480, icon="computer"):
     win = Gtk.Window(title=title)
@@ -305,7 +317,7 @@ class DiskView(Gtk.Box):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         bar = Gtk.Box(spacing=4)
         edit = Gtk.Button(label="Partition and Format...")
-        edit.connect("clicked", lambda *_: launch("tdesudo", "gparted") if not is_admin() else launch("gparted"))
+        edit.connect("clicked", lambda *_: launch("syluxium-sudo", "gparted") if not is_admin() else launch("gparted"))
         refresh = Gtk.Button(label="Refresh")
         refresh.connect("clicked", lambda *_: self.refresh())
         bar.pack_start(edit, False, False, 0)

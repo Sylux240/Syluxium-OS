@@ -51,6 +51,19 @@ USER32_CFLAGS := --sysroot=$(LIBC_SYSROOT32) -isystem $(LIBC_SYSROOT32)/usr/incl
 USER32_PROGS  := $(patsubst userspace/ia32/%.c,$(TESTS_DIR)/%,$(wildcard userspace/ia32/*.c))
 # Windows test programs for Wine (x86-64 and i386 PE), built with clang +
 # lld-link against import libraries made from userspace/windows/*.def.
+# The shell's software-rendering fix (userspace/shell/glsync.c): no libc needed.
+SHELL_GLSYNC  := $(BUILD)/libsyluxium-glsync.so
+# The shell's window frames (userspace/shell/syluxium-decor.cpp): a Wayfire
+# plugin, built with clang against Debian's Wayfire/wlroots headers and
+# libraries (a sysroot of their -dev packages in deps/shell-sysroot).
+SHELL_SYSROOT := $(CURDIR)/deps/shell-sysroot
+SHELL_SYSROOT_PKGS := wayfire-dev libwlroots-0.18-dev libcairo2-dev libpango1.0-dev libglm-dev libstdc++-14-dev libgles-dev libc6-dev
+SHELL_PKGCONFIG := PKG_CONFIG_SYSROOT_DIR=$(SHELL_SYSROOT) PKG_CONFIG_LIBDIR=$(SHELL_SYSROOT)/usr/lib/x86_64-linux-gnu/pkgconfig:$(SHELL_SYSROOT)/usr/share/pkgconfig pkg-config
+SHELL_DECOR   := $(BUILD)/libsyluxium-decor.so
+# Wayland programs in the Xfce (X11) session (userspace/whost): a wlroots
+# compositor on its X11 backend, against the same Debian sysroot.
+WHOST         := $(BUILD)/syluxium-wayland-host
+WHOST_GEN     := $(BUILD)/whost-gen
 WIN_PROGS     := $(TESTS_DIR)/winhello64.exe $(TESTS_DIR)/winhello32.exe $(TESTS_DIR)/winbox32.exe
 
 # Official Debian packages (and their dependencies) that make up the userland.
@@ -64,6 +77,10 @@ TRINITY_PKGS := dbus tdebase-trinity-bin twin-trinity kicker-trinity kdesktop-tr
 DEBIAN_PKGS  := bash busybox hello ncurses-base pciutils pci.ids netbase alsa-utils xserver-xorg-core xserver-xorg-video-fbdev xserver-xorg-input-evdev xinit x11-xserver-utils x11-xkb-utils xterm twm xfonts-base sudo libpam-runtime libpam-modules login fdisk e2fsprogs dosfstools xdotool firefox-esr \
                 wine wine64 iw wpasupplicant wireless-regdb hostapd fonts-wine xcape gparted python3 python3-gi python3-gi-cairo fonts-inter wayfire wayfire-plugin-winshadows xwayland seatd gir1.2-gtklayershell-0.1 swaybg gir1.2-gtk-3.0 librsvg2-common cups cups-bsd dpkg apt debconf libc-bin coreutils trinity-keyring ca-certificates \
                 libgl1-mesa-dri libglx-mesa0 libegl-mesa0 mesa-utils
+# Vulkan (Mesa's RADV, NVK, ANV, venus for VMs, lavapipe; ~80 MB), video
+# decode (VA-API: radeonsi, nouveau, virgl) and the GPU checks syluxium-diag
+# runs on GPU Test boots (vulkaninfo, vainfo, drm_info).
+DEBIAN_PKGS  += mesa-vulkan-drivers vulkan-tools mesa-va-drivers vainfo drm-info
 # Right-click "Extract Here" for .7z (zip and tar are handled without it).
 DEBIAN_PKGS  += 7zip
 # Android apps (Waydroid): its own repository for waydroid and gbinder; the
@@ -74,6 +91,8 @@ DEBIAN_PKGS  += waydroid python3-gbinder lxc weston
 DEBIAN_PKGS  += libinput-tools
 # Bluetooth: BlueZ (bluetoothd, bluetoothctl, btmgmt)
 DEBIAN_PKGS  += bluez
+# Bluetooth audio (A2DP, HFP/HSP) for the ALSA-only system: bluealsad + the "bluealsa" ALSA device
+DEBIAN_PKGS  += bluez-alsa-utils libasound2-plugin-bluez
 # Broadcom b43 Wi-Fi (iMacs, older MacBooks): tools/b43-firmware.sh cuts its
 # firmware out of Broadcom's driver at build time (syluxium-b43-firmware can
 # still do it on the machine).
@@ -83,6 +102,30 @@ DEBIAN_PKGS  += b43-fwcutter
 # network printer discovery (mDNS: avahi-daemon, cups-browsed, .local names).
 DEBIAN_PKGS  += abiword libnotify-bin avahi-daemon avahi-utils cups-browsed libnss-mdns
 TRINITY_PKGS += kcalc-trinity kcharselect-trinity kolourpaint-trinity ksnapshot-trinity
+# Xfce session: core (the Dusk desktop; Trinity stays as the "Classic" session).
+DEBIAN_PKGS  += xfce4-session xfwm4 xfce4-panel xfdesktop4 xfce4-settings xfconf thunar \
+                xfce4-whiskermenu-plugin volumeicon-alsa xfce4-power-manager \
+                xfce4-appfinder libxfce4ui-utils gvfs gvfs-daemons xdg-user-dirs
+# Xfce session: applications (GTK replacements for the Trinity apps)
+# Terminal, Calculator, Paint, Character Map, Snipping Tool, text editor
+# (~28 MB); yad: GTK dialogs for our shell scripts (zenity 4 would pull GTK 4
+# and libadwaita, ~42 MB); xdg-utils: xdg-open / xdg-mime.
+# udisks2 (pulled in by GVfs) is left out: no udev, and syluxium-automount
+# mounts USB sticks.
+DEBIAN_PKGS  += xfce4-terminal galculator drawing gucharmap xfce4-screenshooter mousepad yad xdg-utils
+# Task Manager's window list in the Wayland shell (Xfce's window library from Python).
+DEBIAN_PKGS  += gir1.2-libxfce4windowing-0.0
+# Wayland programs in the Xfce desktop (syluxium-wayland-host): foot (a
+# Wayland-only terminal, ~1 MB), wl-clipboard (wl-copy / wl-paste),
+# wayland-info, and xprop / xwininfo to look at the windows (~1 MB together).
+DEBIAN_PKGS  += foot wayland-utils
+# X11 programs in the Wayland shell (Xwayland): xsettingsd gives them the
+# Dusk theme, icons, fonts and cursor (XSETTINGS, which xfsettingsd only
+# provides on a real X server); clipboard tools for both sides (xclip,
+# wl-clipboard) and xprop/xwininfo/xdpyinfo (~1.5 MB). Test programs for
+# xwayland-test: an SDL 2 game (sopwith) and a Qt 5 one (kcheckers).
+DEBIAN_PKGS  += xsettingsd x11-utils xclip wl-clipboard sopwith kcheckers
+XFCE_APPS_EXCLUDE := udisks2
 DEBIAN_ROOT  := $(BUILD)/rootfs-debian
 DEBIAN_STAMP := $(DEBIAN_ROOT)/.fetched
 DEBIAN_CONFIGURED := $(DEBIAN_ROOT)/.configured
@@ -95,9 +138,11 @@ DEBIAN_I386_PKGS  := hello busybox bash
 # Wine (9-wine): libwine links the multimedia/hardware libraries below only
 # from optional Unix-side modules (winegstreamer, winepulse, gphoto2, wpcap,
 # capi, opencl); without them those modules don't load and the rest
-# of Wine works. FFmpeg + GStreamer alone would add ~150 MB.
-WINE_EXCLUDE := libavcodec61,libavformat61,libavutil59,libgstreamer-plugins-base1.0-0,libgstreamer1.0-0,libgphoto2-6t64,libgphoto2-port12t64,libpcap0.8t64,libpulse0,libcapi20-3t64,ocl-icd-libopencl1
-DEBIAN_EXCLUDE := cpp,cpp-14,cpp-14-x86-64-linux-gnu,cpp-x86-64-linux-gnu,man-db,groff-base,systemd,udev,xbase-clients,systemd-sysv,libpam-systemd,dbus-user-session,$(WINE_EXCLUDE)
+# of Wine works. FFmpeg + GStreamer alone would add ~150 MB. (libpulse0 is
+# kept: Debian's SDL 2 links it, and without it no SDL 2 program, game or
+# emulator starts; ~3 MB with libsndfile.)
+WINE_EXCLUDE := libavcodec61,libavformat61,libavutil59,libgstreamer-plugins-base1.0-0,libgstreamer1.0-0,libgphoto2-6t64,libgphoto2-port12t64,libpcap0.8t64,libcapi20-3t64,ocl-icd-libopencl1
+DEBIAN_EXCLUDE := cpp,cpp-14,cpp-14-x86-64-linux-gnu,cpp-x86-64-linux-gnu,man-db,groff-base,systemd,udev,xbase-clients,systemd-sysv,libpam-systemd,dbus-user-session,$(WINE_EXCLUDE),$(XFCE_APPS_EXCLUDE)
 DEBIAN_I386_EXCLUDE := base-files,debianutils,gawk,libmpfr6,libgmp10,libsigsegv2,readline-common,libreadline8t64
 DEBIAN_I386_PROGS := hello busybox bash
 DEBIAN_I386_ROOT  := $(BUILD)/rootfs-debian-i386
@@ -243,9 +288,18 @@ LKPI_LINUX_CFLAGS := -I$(LKPI_INCLUDE) -include linux/kconfig.h -Werror=implicit
     -Wno-initializer-overrides -Wno-unused-const-variable -Wno-implicit-fallthrough -Wno-format-zero-length \
     -Wno-missing-field-initializers -Wno-sign-compare -Wno-address-of-packed-member -Wno-tautological-constant-out-of-range-compare \
     -Wno-default-const-init-field-unsafe -Wno-unknown-warning-option
-lkpi_modname = $(if $(findstring /brcm80211/,$<),brcmfmac,$(lkpi_modname_net))
+lkpi_modname = $(or $(lkpi_modname_list),$(lkpi_modname_old))
+lkpi_modname_old = $(if $(findstring /brcm80211/,$<),brcmfmac,$(lkpi_modname_net))
+# Drivers imported from Linux 7.4-rc3 (docs/drivers.md): "<path part>:<module name>".
+LKPI_MODNAMES := /ethernet/intel/igb/:igb /drivers/net/mdio.c:mdio /ethernet/broadcom/bnx2:bnx2 \
+    /rtw89/rtw8851be.c:rtw89_8851be /rtw89/rtw8852ae.c:rtw89_8852ae /rtw89/rtw8852be.c:rtw89_8852be \
+    /rtw89/rtw8852bte.c:rtw89_8852bte /rtw89/rtw8852ce.c:rtw89_8852ce /rtw89/rtw8922ae.c:rtw89_8922ae \
+    /rtw89/pci:rtw89_pci /rtw89/:rtw89_core /scsi/megaraid/:megaraid_sas /drivers/scsi/scsi_common:scsi_common \
+    /mt7921/usb.c:mt7921u /rtw88/usb.c:rtw88_usb /rtw88/rtw8822bu:rtw88_8822bu /rtw88/rtw8822cu:rtw88_8822cu \
+    /rtw88/rtw8821cu:rtw88_8821cu /rtw88/rtw8723du:rtw88_8723du
+lkpi_modname_list = $(firstword $(foreach m,$(LKPI_MODNAMES),$(if $(findstring $(word 1,$(subst :, ,$(m))),$<),$(word 2,$(subst :, ,$(m))))))
 lkpi_modname_net = $(if $(findstring /drivers/net/usb/,$<),$(basename $(notdir $<)),$(lkpi_modname_net2))
-lkpi_modname_net2 = $(if $(findstring /iwlwifi/mvm/,$<),iwlmvm,$(if $(findstring /iwlwifi/,$<),iwlwifi,$(if $(findstring /ethernet/realtek/r8169,$<),r8169,$(if $(findstring /ethernet/intel/e1000e/,$<),e1000e,$(if $(findstring /ethernet/intel/igc/,$<),igc,$(if $(findstring /drivers/net/phy/realtek,$<),realtek,$(if $(findstring /drivers/net/phy/,$<),libphy,$(lkpi_modname_rest))))))))
+lkpi_modname_net2 = $(if $(findstring /iwlwifi/mvm/,$<),iwlmvm,$(if $(findstring /iwlwifi/,$<),iwlwifi,$(if $(findstring /ethernet/realtek/r8169,$<),r8169,$(if $(findstring /ethernet/broadcom/tg3,$<),tg3,$(if $(findstring /ethernet/intel/e1000e/,$<),e1000e,$(if $(findstring /ethernet/intel/igc/,$<),igc,$(if $(findstring /drivers/net/phy/realtek,$<),realtek,$(if $(findstring /drivers/net/phy/,$<),libphy,$(lkpi_modname_rest)))))))))
 lkpi_modname_rest = $(if $(findstring /drm/i915/,$<),i915,$(if $(findstring /drm/radeon/,$<),radeon,$(if $(findstring /drm/amd/,$<),amdgpu,$(if $(findstring /drm/nouveau/,$<),nouveau,$(if $(findstring /drm/scheduler/,$<),gpu_sched,$(patsubst virtual,mac80211_hwsim,$(patsubst wireless,cfg80211,$(notdir $(patsubst %/,%,$(dir $<))))))))))
 # Intel Wi-Fi (iwlwifi + iwlmvm): headers relative to the driver's root.
 LKPI_IWL := kernel/linuxkpi/drivers/net/wireless/intel/iwlwifi
@@ -254,21 +308,36 @@ $(OBJDIR)/$(LKPI_IWL)/%: LKPI_DRV_CFLAGS = -I$(LKPI_IWL) -DCONFIG_IWLWIFI=1 -DCO
 $(OBJDIR)/kernel/linuxkpi/drivers/bcma/%: LKPI_DRV_CFLAGS = -include net/lkpi_bcma.h
 $(OBJDIR)/kernel/linuxkpi/drivers/net/wireless/broadcom/%: LKPI_DRV_CFLAGS = -include net/lkpi_bcma.h
 $(OBJDIR)/kernel/linuxkpi/drivers/net/wireless/realtek/rtw88/%: LKPI_DRV_CFLAGS = -include net/lkpi_netcompat.h
+# Realtek rtw89 (RTL8852AE/BE/BTE/CE, 8851BE, 8922AE Wi-Fi 6/6E/7): from Linux 6.12 like the wireless stack it plugs into.
+$(OBJDIR)/kernel/linuxkpi/drivers/net/wireless/realtek/rtw89/%: LKPI_DRV_CFLAGS = -include net/lkpi_netcompat.h
 $(OBJDIR)/kernel/linuxkpi/drivers/net/wireless/ath/%: LKPI_DRV_CFLAGS = -include net/lkpi_netcompat.h -Ikernel/linuxkpi/drivers/net/wireless/ath
 # Bluetooth core
 $(OBJDIR)/kernel/linuxkpi/net/bluetooth/%: LKPI_DRV_CFLAGS = -include net/lkpi_bt.h
 $(OBJDIR)/kernel/linuxkpi/drivers/bluetooth/%: LKPI_DRV_CFLAGS = -include net/lkpi_bt.h -fshort-wchar
 LKPI_MT76 := kernel/linuxkpi/drivers/net/wireless/mediatek/mt76
 $(OBJDIR)/$(LKPI_MT76)/%: LKPI_DRV_CFLAGS = -include net/lkpi_netcompat.h -I$(LKPI_MT76) -DCONFIG_PM=1
+# mt76 USB (mt7921u): linear transfer buffers, no scatter-gather URBs (net/lkpi_wifiusb.h).
+$(OBJDIR)/$(LKPI_MT76)/usb.c.o: LKPI_DRV_CFLAGS = -include net/lkpi_wifiusb.h -I$(LKPI_MT76) -DCONFIG_PM=1
 LKPI_BRCM := kernel/linuxkpi/drivers/net/wireless/broadcom/brcm80211
 $(OBJDIR)/$(LKPI_BRCM)/%: LKPI_DRV_CFLAGS = -include net/lkpi_bcma.h -I$(LKPI_BRCM)/brcmfmac -I$(LKPI_BRCM)/include
 # Realtek Ethernet (r8169) and phylib.
 LKPI_NETDRV := kernel/linuxkpi/drivers/net
 $(OBJDIR)/$(LKPI_NETDRV)/ethernet/realtek/%: LKPI_DRV_CFLAGS = -include net/lkpi_phy.h
+# Broadcom Tigon3 Ethernet (tg3): iMacs, Mac minis and MacBook Pros, Dell/HP desktops and servers.
+$(OBJDIR)/$(LKPI_NETDRV)/ethernet/broadcom/%: LKPI_DRV_CFLAGS = -include net/lkpi_tg3.h
 $(OBJDIR)/$(LKPI_NETDRV)/phy/%: LKPI_DRV_CFLAGS = -include net/lkpi_phy.h
 # USB Ethernet adapters (r8152, ax88179_178a over usbnet)
 $(OBJDIR)/$(LKPI_NETDRV)/usb/%: LKPI_DRV_CFLAGS = -include net/lkpi_usbnet.h
 $(OBJDIR)/$(LKPI_NETDRV)/ethernet/intel/%: LKPI_DRV_CFLAGS = -include net/lkpi_phy.h -DCONFIG_E1000E=1 -DCONFIG_IGC=1
+# Intel 1 GbE server/desktop NICs (igb: 82575/82576/82580, I350, I210/I211, I354), Linux 7.4-rc3.
+$(OBJDIR)/$(LKPI_NETDRV)/ethernet/intel/igb/%: LKPI_DRV_CFLAGS = -include net/lkpi_netdrv.h -DCONFIG_IGB=1
+# Qualcomm Atheros/Killer Ethernet (alx: AR8161/8171/E2200..; atl1c: AR813x/815x, L1c/L2c), Linux 7.4-rc3; MDIO library.
+$(OBJDIR)/$(LKPI_NETDRV)/ethernet/atheros/%: LKPI_DRV_CFLAGS = -include net/lkpi_netdrv.h
+$(OBJDIR)/$(LKPI_NETDRV)/mdio.c.o: LKPI_DRV_CFLAGS = -include net/lkpi_netdrv.h
+# Broadcom NetXtreme II (bnx2), Linux 7.4-rc3: tg3's helpers plus the 7.x set.
+$(OBJDIR)/$(LKPI_NETDRV)/ethernet/broadcom/bnx2.c.o: LKPI_DRV_CFLAGS = -include net/lkpi_netdrv.h -include net/lkpi_tg3.h
+# SCSI host adapters (Linux 7.4-rc3) on the LinuxKPI SCSI midlayer (glue/scsi.c, scsi.cpp).
+$(OBJDIR)/kernel/linuxkpi/drivers/scsi/%: LKPI_DRV_CFLAGS = -include linux/lkpi_v7.h -include linux/cpumask.h
 # GPU drivers: their own include directory and Kconfig (drm/lkpi_<driver>_config.h).
 LKPI_I915 := kernel/linuxkpi/drivers/gpu/drm/i915
 $(OBJDIR)/$(LKPI_I915)/%: LKPI_DRV_CFLAGS = -I$(LKPI_I915) -DI915 -include drm/lkpi_i915_config.h -gline-tables-only
@@ -304,6 +373,10 @@ $(OBJDIR)/$(LKPI_AMD)/%: LKPI_DRV_CFLAGS = -I$(AMD_ASIC_REG) -I$(LKPI_AMD)/inclu
 # and run inside kernel FPU sections (DC_FP_START/END -> kernel_fpu_begin/end).
 -include $(LKPI_AMD)/display/lkpi-fpu-objs.mk
 $(AMD_DC_FPU_OBJS): LKPI_FP_CFLAGS = -msse -msse2 -mno-soft-float
+# virtio core (virtio-pci) and virtio-gpu (QEMU's virgl/venus 3D: the test
+# bed for the GPU userspace path in VMs).
+$(OBJDIR)/kernel/linuxkpi/drivers/virtio/%: LKPI_DRV_CFLAGS = -include drm/lkpi_virtio_config.h
+$(OBJDIR)/kernel/linuxkpi/drivers/gpu/drm/virtio/%: LKPI_DRV_CFLAGS = -include drm/lkpi_virtio_config.h
 LKPI_NOUVEAU := kernel/linuxkpi/drivers/gpu/drm/nouveau
 $(OBJDIR)/$(LKPI_NOUVEAU)/%: LKPI_DRV_CFLAGS = -I$(LKPI_NOUVEAU)/include -I$(LKPI_NOUVEAU)/include/nvkm -I$(LKPI_NOUVEAU)/nvkm \
     -I$(LKPI_NOUVEAU) -include drm/lkpi_nouveau_config.h -gline-tables-only
@@ -359,6 +432,35 @@ $(TESTS_DIR)/%: userspace/%.c | $(LIBC_SYSROOT)/.done
 	@echo "  USER  $<"
 	@$(USER_CC) $(USER_CFLAGS) $< -o $@ -lm
 
+$(SHELL_SYSROOT)/.done:
+	@echo "  FETCH Debian Wayfire/wlroots development files for the shell's plugin"
+	@python3 tools/debian-fetch.py --suite $(DEBIAN_SUITE) --out $(SHELL_SYSROOT) --cache deps/debian \
+	    --exclude systemd,udev,systemd-sysv,libpam-systemd,dbus-user-session,man-db $(SHELL_SYSROOT_PKGS) >/dev/null
+	@touch $@
+
+$(SHELL_DECOR): userspace/shell/syluxium-decor.cpp | $(SHELL_SYSROOT)/.done
+	@echo "  SO    $<"
+	@clang++ --target=x86_64-linux-gnu --sysroot=$(SHELL_SYSROOT) --gcc-install-dir=$(SHELL_SYSROOT)/usr/lib/gcc/x86_64-linux-gnu/14 \
+	    -std=c++17 -O2 -fPIC -shared -DWLR_USE_UNSTABLE -DWAYFIRE_PLUGIN -Wall -Wno-deprecated-declarations \
+	    $$($(SHELL_PKGCONFIG) --cflags wayfire wlroots-0.18 cairo pango pangocairo glesv2) \
+	    $< -o $@ -fuse-ld=lld -Wl,--as-needed $$($(SHELL_PKGCONFIG) --libs cairo pango pangocairo glesv2)
+
+$(WHOST_GEN)/xdg-shell-protocol.h: | $(SHELL_SYSROOT)/.done
+	@mkdir -p $(WHOST_GEN)
+	@wayland-scanner server-header $(SHELL_SYSROOT)/usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml $@
+	@wayland-scanner server-header $(SHELL_SYSROOT)/usr/share/wayland-protocols/staging/cursor-shape/cursor-shape-v1.xml $(WHOST_GEN)/cursor-shape-v1-protocol.h
+
+$(WHOST): userspace/whost/syluxium-wayland-host.c $(WHOST_GEN)/xdg-shell-protocol.h | $(SHELL_SYSROOT)/.done
+	@echo "  CC    $<"
+	@clang --target=x86_64-linux-gnu --sysroot=$(SHELL_SYSROOT) --gcc-install-dir=$(SHELL_SYSROOT)/usr/lib/gcc/x86_64-linux-gnu/14 \
+	    -std=gnu11 -O2 -Wall -Wno-unused-parameter -DWLR_USE_UNSTABLE -I$(WHOST_GEN) \
+	    $$($(SHELL_PKGCONFIG) --cflags wlroots-0.18 xcb xcb-render xcb-xfixes xcb-xinput xcb-randr xkbcommon pixman-1) \
+	    $< -o $@ -fuse-ld=lld -Wl,--as-needed $$($(SHELL_PKGCONFIG) --libs wlroots-0.18 wayland-server xcb xcb-render xcb-xfixes xcb-xinput xcb-randr xkbcommon pixman-1) -ldl
+
+$(SHELL_GLSYNC): userspace/shell/glsync.c
+	@echo "  SO    $<"
+	@$(USER_CC) -shared -fPIC -nostdlib -O2 -Wall $< -o $@
+
 $(TESTS_DIR)/%: userspace/ia32/%.c | $(LIBC_SYSROOT32)/.done
 	@mkdir -p $(dir $@)
 	@echo "  USER32 $<"
@@ -403,7 +505,7 @@ $(DEBIAN_CONFIGURED): $(DEBIAN_STAMP) tools/configure-packages.sh
 # Device firmware from Debian's non-free-firmware section: the packages are
 # huge (GPU firmware), so only the files our drivers load are kept.
 FIRMWARE_REPO  := http://deb.debian.org/debian|$(DEBIAN_SUITE)|non-free-firmware
-FIRMWARE_PKGS  := firmware-mediatek firmware-realtek firmware-intel-graphics firmware-amd-graphics firmware-nvidia-graphics firmware-iwlwifi firmware-brcm80211 firmware-atheros
+FIRMWARE_PKGS  := firmware-mediatek firmware-realtek firmware-misc-nonfree firmware-intel-graphics firmware-amd-graphics firmware-nvidia-graphics firmware-iwlwifi firmware-brcm80211 firmware-atheros firmware-bnx2
 FIRMWARE_FILES = mediatek/mt7601u.bin rtlwifi/rtl8188eufw.bin rtlwifi/rtl8723bu_nic.bin rtl_bt/rtl8723b_fw.bin \
                   $(I915_FIRMWARE)
 # i915: display microcontroller (DMC) firmware for Skylake..Alder Lake, GuC/HuC
@@ -433,10 +535,12 @@ GPU_FIRMWARE   += amdgpu/vega10_* amdgpu/vega12_* amdgpu/vega20_* amdgpu/raven* 
 # the PCIe chips (BCM43602 of 2015-17 MacBook Pros, 4350/4356/4358/43570/4371
 # ...) and the USB ones (~6.5 MB); Apple's 4355/4364 (T2 Macs) aren't in it.
 # Realtek rtw88 (RTL8822BE/CE, 8821CE, 8723DE): ~0.6 MB.
+# Realtek rtw89 (RTL8852AE/BE/BTE/CE, 8851BE, 8922AE): the newest format each 6.12 chip driver reads, ~8.7 MB.
 # MediaTek MT7921/MT7922 (mt7921e): ~2 MB.
 # Qualcomm ath10k: the laptop and PCIe-card chips QCA6174, QCA9377, QCA988x, QCA9887 (~6.5 MB).
 # Bluetooth (btusb): Intel (ibt-*, ~17 MB), Realtek (rtl_bt, ~1.5 MB), MediaTek MT7921/MT7922 (~1 MB).
-NET_FIRMWARE   := intel/ibt-* rtl_bt/* mediatek/BT_RAM_CODE_MT7961_1_2_hdr.bin mediatek/BT_RAM_CODE_MT7922_1_1_hdr.bin ath10k/QCA6174/*/* ath10k/QCA9377/*/* ath10k/QCA988X/*/* ath10k/QCA9887/*/* mediatek/WIFI_RAM_CODE_MT7961_1.bin mediatek/WIFI_MT7961_patch_mcu_1_2_hdr.bin mediatek/WIFI_RAM_CODE_MT7922_1.bin mediatek/WIFI_MT7922_patch_mcu_1_1_hdr.bin rtw88/rtw8822b_fw.bin rtw88/rtw8822c_fw.bin rtw88/rtw8821c_fw.bin rtw88/rtw8723d_fw.bin brcm/brcmfmac*-pcie.* brcm/brcmfmac43143.bin brcm/brcmfmac43236b.bin brcm/brcmfmac43242a.bin \
+# Broadcom NetXtreme II (bnx2: BCM5706/5708/5709/5716, PowerEdge R610/R710 and other servers): ~0.4 MB.
+NET_FIRMWARE   := tigon/* intel/ibt-* rtl_bt/* mediatek/BT_RAM_CODE_MT7961_1_2_hdr.bin mediatek/BT_RAM_CODE_MT7922_1_1_hdr.bin ath10k/QCA6174/*/* ath10k/QCA9377/*/* ath10k/QCA988X/*/* ath10k/QCA9887/*/* mediatek/WIFI_RAM_CODE_MT7961_1.bin mediatek/WIFI_MT7961_patch_mcu_1_2_hdr.bin mediatek/WIFI_RAM_CODE_MT7922_1.bin mediatek/WIFI_MT7922_patch_mcu_1_1_hdr.bin rtw88/rtw8822b_fw.bin rtw88/rtw8822c_fw.bin rtw88/rtw8821c_fw.bin rtw88/rtw8723d_fw.bin brcm/brcmfmac*-pcie.* brcm/brcmfmac43143.bin brcm/brcmfmac43236b.bin brcm/brcmfmac43242a.bin \
                   brcm/brcmfmac43569.bin brcm/brcmfmac4373.bin \
                   iwlwifi-7260-17.ucode iwlwifi-3160-17.ucode iwlwifi-7265-17.ucode iwlwifi-7265D-29.ucode \
                   iwlwifi-3168-29.ucode iwlwifi-8000C-36.ucode iwlwifi-8265-36.ucode iwlwifi-9000-pu-b0-jf-b0-46.ucode \
@@ -444,7 +548,9 @@ NET_FIRMWARE   := intel/ibt-* rtl_bt/* mediatek/BT_RAM_CODE_MT7961_1_2_hdr.bin m
                   iwlwifi-QuZ-a0-??-b0-77.ucode iwlwifi-so-a0-hr-b0-89.ucode iwlwifi-so-a0-jf-b0-77.ucode \
                   iwlwifi-so-a0-gf-a0-89.ucode iwlwifi-so-a0-gf4-a0-89.ucode iwlwifi-ty-a0-gf-a0-89.ucode \
                   iwlwifi-ma-b0-*-89.ucode iwlwifi-bz-b0-gf-a0-92.ucode iwlwifi-bz-b0-fm-c0-93.ucode \
-                  iwlwifi-gl-c0-fm-c0-92.ucode iwlwifi-*.pnvm rtl_nic/*
+                  iwlwifi-gl-c0-fm-c0-92.ucode iwlwifi-*.pnvm rtl_nic/* \
+                  bnx2/bnx2-* rtw89/rtw8851b_fw.bin rtw89/rtw8852a_fw.bin rtw89/rtw8852b_fw-1.bin rtw89/rtw8852bt_fw.bin \
+                  rtw89/rtw8852c_fw-1.bin rtw89/rtw8922a_fw-1.bin
 GPU_FIRMWARE_SKIP := */gsp/* */gc_9_4_* */psp_13_0_6_* */psp_13_0_14_* */smu_13_0_6_* */smu_13_0_14_* */sdma_4_4_* */vcn_4_0_3_*
 FIRMWARE_ROOT  := $(BUILD)/firmware-debian
 FIRMWARE_STAMP := $(FIRMWARE_ROOT)/.fetched
@@ -464,7 +570,7 @@ $(WINE_I386_STAMP): tools/debian-fetch.py Makefile
 	@python3 tools/debian-fetch.py --arch i386 --suite $(DEBIAN_SUITE) --out $(WINE_I386_ROOT) --cache deps/debian --no-deps libwine
 	@touch $@
 
-$(INITRAMFS): $(KERNEL) $(PICKER) $(DEBIAN_CONFIGURED) tools/merge-accounts.py tools/mkfontdir.py tools/debrand-tde.py tools/syluxium_names.py tools/run-triggers.sh tools/wine-setup.sh tools/wine-prefix-links.py $(DEBIAN_STAMP) $(DEBIAN_I386_STAMP) $(WINE_I386_STAMP) $(FIRMWARE_STAMP) $(USER_PROGS) $(USER32_PROGS) $(WIN_PROGS) $(shell find rootfs -type f 2>/dev/null) $(shell find rootfs -type d 2>/dev/null) Makefile
+$(INITRAMFS): $(KERNEL) $(PICKER) $(DEBIAN_CONFIGURED) tools/merge-accounts.py tools/mkfontdir.py tools/debrand-tde.py tools/syluxium_names.py tools/run-triggers.sh tools/wine-setup.sh tools/wine-prefix-links.py $(DEBIAN_STAMP) $(DEBIAN_I386_STAMP) $(WINE_I386_STAMP) $(FIRMWARE_STAMP) $(USER_PROGS) $(USER32_PROGS) $(WIN_PROGS) $(SHELL_GLSYNC) $(SHELL_DECOR) $(WHOST) $(shell find rootfs -type f 2>/dev/null) $(shell find rootfs -type d 2>/dev/null) Makefile
 	@echo "  ROOT  $(ROOTFS)"
 	@rm -rf $(ROOTFS)
 	@cp -a $(DEBIAN_ROOT) $(ROOTFS)
@@ -476,6 +582,9 @@ $(INITRAMFS): $(KERNEL) $(PICKER) $(DEBIAN_CONFIGURED) tools/merge-accounts.py t
 	@ln -sf busybox $(ROOTFS)/usr/bin/sh
 	@mkdir -p $(ROOTFS)/opt/syluxium/tests
 	@cp $(USER_PROGS) $(USER32_PROGS) $(WIN_PROGS) $(ROOTFS)/opt/syluxium/tests/
+	@mkdir -p $(ROOTFS)/usr/lib/syluxium && cp $(SHELL_GLSYNC) $(ROOTFS)/usr/lib/syluxium/
+	@cp $(SHELL_DECOR) $(ROOTFS)/usr/lib/x86_64-linux-gnu/wayfire/
+	@cp $(WHOST) $(ROOTFS)/usr/lib/syluxium/
 	@# 32-bit Debian userland (multiarch, as on Debian): libraries in
 	@# /usr/lib/i386-linux-gnu, ld-linux.so.2, programs installed as <name>-i386
 	@mkdir -p $(ROOTFS)/usr/lib/i386-linux-gnu
@@ -487,6 +596,8 @@ $(INITRAMFS): $(KERNEL) $(PICKER) $(DEBIAN_CONFIGURED) tools/merge-accounts.py t
 	@python3 tools/merge-accounts.py $(ROOTFS) $(DEBIAN_ROOT)
 	@# Menu entries read "Control Panel", "Start Menu", ... rather than TDE's names.
 	@python3 tools/debrand-tde.py $(ROOTFS)
+	@# Wayland-only programs' menu entries through syluxium-wayland-run.
+	@python3 rootfs/usr/local/sbin/syluxium-wayland-apps --root $(ROOTFS) | sed 's/^/  WAYL  /'
 	@# What Debian's install scripts and triggers would build (MIME types, image loaders, schemas, icons).
 	@tools/run-triggers.sh $(ROOTFS)
 	@# /var/run and /var/lock point into /run, as on Debian (programs look for
@@ -503,6 +614,12 @@ $(INITRAMFS): $(KERNEL) $(PICKER) $(DEBIAN_CONFIGURED) tools/merge-accounts.py t
 	    [ -f "$$f" ] || continue; skip=; for k in $(GPU_FIRMWARE_SKIP); do case $$f in $$k) skip=1;; esac; done; [ -z "$$skip" ] || continue; \
 	    mkdir -p $(CURDIR)/$(ROOTFS)/usr/lib/firmware/$$(dirname $$f); \
 	    cp -L "$$f" $(CURDIR)/$(ROOTFS)/usr/lib/firmware/$$f; done
+	@# Firmware that is a link to another file in the same set stays a link
+	@# (Intel's Bluetooth firmware: 63 links, 17 MB if copied twice).
+	@cd $(FIRMWARE_ROOT)/usr/lib/firmware && for f in $(GPU_FIRMWARE) $(NET_FIRMWARE); do \
+	    [ -L "$$f" ] || continue; t=$$(readlink "$$f"); case $$t in /*|*..*) continue;; esac; \
+	    [ -e "$(CURDIR)/$(ROOTFS)/usr/lib/firmware/$$(dirname $$f)/$$t" ] || continue; \
+	    ln -sf "$$t" "$(CURDIR)/$(ROOTFS)/usr/lib/firmware/$$f"; done
 	@ln -sf mediatek/mt7601u.bin $(ROOTFS)/usr/lib/firmware/mt7601u.bin # older drivers ask for it at the top level
 	@# Broadcom b43 (older MacBooks, iMacs): cut from Broadcom's driver at build time.
 	@tools/b43-firmware.sh $(ROOTFS)
@@ -596,6 +713,12 @@ clean:
 
 distclean: clean
 	rm -rf deps
+
+# The flags Linux driver sources are compiled with (tools/lkpi-check.py uses
+# them to try upstream driver directories against the LinuxKPI headers).
+.PHONY: print-lkpi-cflags
+print-lkpi-cflags:
+	@echo $(filter-out -isystem $(LKPI_INCLUDE) -MD -MP,$(CFLAGS)) $(LKPI_LINUX_CFLAGS)
 
 -include $(DEPS)
 

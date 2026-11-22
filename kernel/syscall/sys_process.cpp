@@ -7,6 +7,7 @@
 // Process, identity, signal-bookkeeping and system-information calls.
 
 #include <core/log.hpp>
+#include <core/watchdog.hpp>
 #include <arch/x86_64/cpu.hpp>
 #include <arch/x86_64/percpu.hpp>
 #include <lib/format.hpp>
@@ -23,6 +24,8 @@
 #include <syscall/syscall.hpp>
 #include <time/clock.hpp>
 #include <time/rtc.hpp>
+
+namespace events { long pidfd_to_pid(int fd); }
 
 namespace syscall {
 
@@ -435,12 +438,18 @@ long sys_execveat(SYSCALL_ARGS) {
 // status in a siginfo (CLD_EXITED/KILLED/DUMPED, pid, uid, status).
 long sys_waitid(SYSCALL_ARGS) {
     SYSCALL_UNUSED;
-    constexpr int P_ALL = 0, P_PID = 1, P_PGID = 2;
+    constexpr int P_ALL = 0, P_PID = 1, P_PGID = 2, P_PIDFD = 3;
     constexpr int WNOHANG = 1, WEXITED = 4, WNOWAIT = 0x01000000;
     int idtype = static_cast<int>(a0), id = static_cast<int>(a1), options = static_cast<int>(a3);
     if (!(options & WEXITED))
         return -err::INVAL; // stopped/continued children don't exist here (no job-control stops)
     int pid = idtype == P_ALL ? -1 : idtype == P_PID ? id : idtype == P_PGID ? (id ? -id : 0) : -999;
+    if (idtype == P_PIDFD) { // GLib watches its children this way
+        long p = events::pidfd_to_pid(id);
+        if (p < 0)
+            return p;
+        pid = static_cast<int>(p);
+    }
     if (pid == -999)
         return -err::INVAL;
     int status = 0;
@@ -713,7 +722,26 @@ long sys_set_tid_address(SYSCALL_ARGS) {
     return sched::current()->vtid;
 }
 
-long sys_set_robust_list(SYSCALL_ARGS) { SYSCALL_UNUSED; return 0; }
+long sys_set_robust_list(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    if (a1 == 12) // a 32-bit program's list (4-byte pointers): accepted, not walked at exit
+        return 0;
+    if (a1 != 24) // sizeof(struct robust_list_head)
+        return -err::INVAL;
+    sched::current()->robust_list = a0;
+    return 0;
+}
+
+// get_robust_list(pid, head_ptr, len_ptr): only the caller's own (pid 0 / itself).
+long sys_get_robust_list(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    sched::Thread* me = sched::current();
+    if (a0 && static_cast<int>(a0) != me->vtid)
+        return -err::PERM;
+    if (long r = uaccess::put(reinterpret_cast<u64*>(a1), me->robust_list); r < 0)
+        return r;
+    return uaccess::put(reinterpret_cast<u64*>(a2), u64(24));
+}
 
 // Optional kernel features that libc probes for and copes without (rseq,
 // clone3 falls back to clone). Answer quietly instead of logging a warning.
@@ -996,15 +1024,35 @@ long sys_reboot(SYSCALL_ARGS) {
             signal::send(init, 9 /* SIGKILL */);
         return 0;
     }
-    klog::info("System %s: flushing disks...", cmd == POWER_OFF ? "power off" : cmd == HALT ? "halt" : "restart");
+    // Each step is logged and the boot log saved after it, so a shutdown
+    // that hangs (a disk that never answers, firmware that ignores the
+    // power-off) shows where on the stick.
+    const char* what = cmd == POWER_OFF ? "power off" : cmd == HALT ? "halt" : "restart";
+    klog::info("System %s: flushing disks...", what);
     bootlog::save();
-    block::sync_all();
-    ext2::shutdown_all();
-    block::sync_all();
+    {
+        watchdog::Guard guard("shutdown: flushing disks", what, 20);
+        block::sync_all();
+    }
+    klog::info("System %s: disks flushed; closing file system journals", what);
+    bootlog::save();
+    {
+        watchdog::Guard guard("shutdown: closing journals", what, 20);
+        ext2::shutdown_all();
+        block::sync_all();
+    }
+    klog::info("System %s: file systems clean; asking the firmware (ACPI)", what);
+    bootlog::save();
+    // Firmware that ignores the request: reported (with every thread) after 10 s.
+    static watchdog::Guard* firmware_guard = nullptr;
+    firmware_guard = new watchdog::Guard("shutdown: firmware didn't act on", what, 10);
+    (void)firmware_guard;
     if (cmd == RESTART || cmd == RESTART2)
         acpi::restart();
     if (cmd == POWER_OFF)
         acpi::power_off();
+    klog::warn("System %s: the firmware didn't act on the request", what);
+    bootlog::save();
     klog::ok("System halted: it's safe to turn the computer off.");
     arch::cli();
     for (;;)
@@ -1132,7 +1180,8 @@ long sys_sched_setaffinity(SYSCALL_ARGS) {
 
 long sys_futex(SYSCALL_ARGS) {
     SYSCALL_UNUSED;
-    constexpr u32 FUTEX_WAIT = 0, FUTEX_WAKE = 1, FUTEX_REQUEUE = 3, FUTEX_CMP_REQUEUE = 4,
+    constexpr u32 FUTEX_WAIT = 0, FUTEX_WAKE = 1, FUTEX_REQUEUE = 3, FUTEX_CMP_REQUEUE = 4, FUTEX_WAKE_OP = 5,
+                  FUTEX_LOCK_PI = 6, FUTEX_UNLOCK_PI = 7, FUTEX_TRYLOCK_PI = 8, FUTEX_LOCK_PI2 = 13,
                   FUTEX_WAIT_BITSET = 9, FUTEX_WAKE_BITSET = 10;
     constexpr u32 FUTEX_PRIVATE_FLAG = 128, FUTEX_CLOCK_REALTIME = 256;
     u64 uaddr = a0;
@@ -1170,6 +1219,33 @@ long sys_futex(SYSCALL_ARGS) {
         return futex::wake(uaddr, static_cast<int>(val), ~0u, is_private);
     case FUTEX_WAKE_BITSET:
         return futex::wake(uaddr, static_cast<int>(val), static_cast<u32>(a5), is_private);
+    case FUTEX_LOCK_PI:
+    case FUTEX_LOCK_PI2:
+    case FUTEX_TRYLOCK_PI: {
+        u64 deadline = 0; // absolute: CLOCK_REALTIME for LOCK_PI, else as FUTEX_CLOCK_REALTIME says
+        if (a3 && cmd != FUTEX_TRYLOCK_PI) {
+            struct { i64 sec, nsec; } ts;
+            if (long r = uaccess::copy_from(&ts, reinterpret_cast<void*>(a3), sizeof(ts)); r < 0)
+                return r;
+            if (ts.sec < 0 || ts.nsec < 0 || ts.nsec >= 1'000'000'000)
+                return -err::INVAL;
+            u64 t = static_cast<u64>(ts.sec) * 1'000'000'000 + static_cast<u64>(ts.nsec);
+            if (cmd == FUTEX_LOCK_PI || (op & FUTEX_CLOCK_REALTIME)) {
+                u64 real_now = rtc::realtime_ns(), mono_now = clock::now_ns();
+                deadline = t > real_now ? mono_now + (t - real_now) : mono_now;
+            } else {
+                deadline = t;
+            }
+            if (deadline == 0)
+                deadline = 1;
+        }
+        return futex::lock_pi(uaddr, deadline, cmd == FUTEX_TRYLOCK_PI, is_private);
+    }
+    case FUTEX_UNLOCK_PI:
+        return futex::unlock_pi(uaddr, is_private);
+    case FUTEX_WAKE_OP: // a3 is not a timeout here: the second wake count
+        return futex::wake_op(uaddr, static_cast<int>(val), a4, static_cast<int>(a3), static_cast<u32>(a5),
+                              is_private);
     case FUTEX_REQUEUE:
     case FUTEX_CMP_REQUEUE:
         return futex::requeue(uaddr, a4, static_cast<int>(val), static_cast<int>(a3), cmd == FUTEX_CMP_REQUEUE,
@@ -1528,6 +1604,7 @@ void register_process() {
     set(218, sys_set_tid_address, "set_tid_address");
     set(231, sys_exit_group, "exit_group");
     set(273, sys_set_robust_list, "set_robust_list");
+    set(274, sys_get_robust_list, "get_robust_list");
     set(302, sys_prlimit64, "prlimit64");
     set(160, sys_setrlimit, "setrlimit");
     set(129, sys_rt_sigqueueinfo, "rt_sigqueueinfo");

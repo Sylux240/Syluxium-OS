@@ -121,8 +121,10 @@ public:
     bool passcred = false;             // SO_PASSCRED
     bool waiting_space = false;        // blocked until some receiver/listener frees room
     Ucred peer_cred;                   // SO_PEERCRED
+    PeerGroups peer_groups;            // SO_PEERGROUPS
     bool has_peer_cred = false;
     Ucred listen_cred;                 // our credentials at listen() time, for connecting clients
+    PeerGroups listen_groups;
     u64 events = 0;                    // bumped by kick()
 
     // Receive queue.
@@ -321,6 +323,7 @@ public:
             return -err::INVAL;
         backlog = n < 0 ? 0 : n > 4096 ? 4096 : n;
         listen_cred = current_cred();
+        listen_groups = current_groups();
         st = St::Listening;
         return 0;
     }
@@ -363,6 +366,7 @@ public:
         c->st = St::Connected;
         c->peer = this;
         c->peer_cred = current_cred();
+        c->peer_groups = current_groups();
         c->has_peer_cred = true;
         c->passcred = l->passcred;
         c->has_name = l->has_name; // getsockname on the accepted socket names the listener
@@ -371,6 +375,7 @@ public:
         st = St::Connected;
         connected = true;
         peer_cred = l->listen_cred;
+        peer_groups = l->listen_groups;
         has_peer_cred = true;
         UnixSocket** tailp = &l->acc_head;
         while (*tailp)
@@ -779,6 +784,22 @@ public:
             *len = sizeof(c);
             return 0;
         }
+        case 59: {                                    // SO_PEERGROUPS
+            LockGuard guard(g_unix);
+            if (!has_peer_cred)
+                return -ENODATA;
+            u32 need = peer_groups.n * 4;
+            if (need > *len)
+                return -ENOPROTOOPT;
+            memcpy(val, peer_groups.g, need);
+            *len = need;
+            return 0;
+        }
+        // SO_PEERPIDFD: not offered. dbus-daemon would then take the peer's
+        // pid from the pidfd's /proc fdinfo with a reader that trusts the
+        // file size (0, as on Linux) and lose every pid; without it, it
+        // uses SO_PEERCRED's pid, and polkit opens its own pidfd from that.
+        case 77: return -ENOPROTOOPT;
         case 31: return -ENOPROTOOPT;                 // SO_PEERSEC: no security modules
         default: return OPT_UNHANDLED;
         }
@@ -890,6 +911,7 @@ long unix_socketpair(int type, Socket** a, Socket** b) {
     x->st = y->st = St::Connected;
     x->connected = y->connected = true;
     x->peer_cred = y->peer_cred = me;
+    x->peer_groups = y->peer_groups = current_groups();
     x->has_peer_cred = y->has_peer_cred = true;
     *a = x;
     *b = y;

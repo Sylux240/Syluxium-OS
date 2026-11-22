@@ -1,0 +1,152 @@
+#!/usr/bin/python3
+"""Volume icon in the taskbar's notification area for the Syluxium shell
+(Wayland), where volumeicon (an X11 tray icon) can't appear: the same
+icons (audio-volume-muted/low/medium/high), a StatusNotifierItem that
+xfce4-panel's notification area shows. Click: a volume slider by the
+taskbar; scroll: louder/quieter; middle click: mute. ALSA (amixer, Master).
+In an X11 session it exits at once (volumeicon is there)."""
+import os
+import re
+import subprocess
+import sys
+
+import gi
+
+gi.require_version("Gtk", "3.0")
+from gi.repository import Gdk, Gio, GLib, Gtk  # noqa: E402
+
+if type(Gdk.Display.get_default()).__name__ != "GdkWaylandDisplay":
+    sys.exit(0)
+gi.require_version("GtkLayerShell", "0.1")
+from gi.repository import GtkLayerShell  # noqa: E402
+
+CONTROL = "Master"
+SNI_XML = """
+<node>
+  <interface name="org.kde.StatusNotifierItem">
+    <property name="Category" type="s" access="read"/>
+    <property name="Id" type="s" access="read"/>
+    <property name="Title" type="s" access="read"/>
+    <property name="Status" type="s" access="read"/>
+    <property name="IconName" type="s" access="read"/>
+    <property name="IconThemePath" type="s" access="read"/>
+    <property name="ItemIsMenu" type="b" access="read"/>
+    <property name="ToolTip" type="(sa(iiay)ss)" access="read"/>
+    <method name="Activate"><arg name="x" type="i" direction="in"/><arg name="y" type="i" direction="in"/></method>
+    <method name="SecondaryActivate"><arg name="x" type="i" direction="in"/><arg name="y" type="i" direction="in"/></method>
+    <method name="ContextMenu"><arg name="x" type="i" direction="in"/><arg name="y" type="i" direction="in"/></method>
+    <method name="Scroll"><arg name="delta" type="i" direction="in"/><arg name="orientation" type="s" direction="in"/></method>
+    <signal name="NewIcon"/>
+    <signal name="NewToolTip"/>
+  </interface>
+</node>"""
+
+
+def read_volume():
+    """(percent, muted) of the ALSA control, or (0, True) without one."""
+    try:
+        out = subprocess.run(["amixer", "-M", "get", CONTROL], capture_output=True, text=True, timeout=3).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return 0, True
+    m = re.search(r"\[(\d+)%\](?:.*\[(on|off)\])?", out)
+    if not m:
+        return 0, True
+    return int(m.group(1)), m.group(2) == "off"
+
+
+def amixer(*args):
+    subprocess.run(["amixer", "-q", "-M", "set", CONTROL, *args], capture_output=True, timeout=3)
+
+
+class VolumeItem:
+    def __init__(self):
+        self.level, self.muted = read_volume()
+        self.popup = None
+        self.bus = Gio.bus_get_sync(Gio.BusType.SESSION)
+        self.name = f"org.kde.StatusNotifierItem-{os.getpid()}-1"
+        info = Gio.DBusNodeInfo.new_for_xml(SNI_XML).interfaces[0]
+        self.bus.register_object("/StatusNotifierItem", info, self.on_call, self.on_get, None)
+        Gio.bus_own_name_on_connection(self.bus, self.name, Gio.BusNameOwnerFlags.NONE, None, None)
+        Gio.bus_watch_name_on_connection(self.bus, "org.kde.StatusNotifierWatcher", Gio.BusNameWatcherFlags.NONE,
+                                         self.on_watcher, None)
+        GLib.timeout_add_seconds(2, self.poll)
+
+    def on_watcher(self, *_):
+        self.bus.call("org.kde.StatusNotifierWatcher", "/StatusNotifierWatcher", "org.kde.StatusNotifierWatcher",
+                      "RegisterStatusNotifierItem", GLib.Variant("(s)", (self.name,)), None,
+                      Gio.DBusCallFlags.NONE, -1, None, None)
+
+    def icon(self):
+        if self.muted or self.level == 0:
+            return "audio-volume-muted"
+        return "audio-volume-low" if self.level < 34 else "audio-volume-medium" if self.level < 67 else \
+            "audio-volume-high"
+
+    def tooltip(self):
+        return "Volume: muted" if self.muted else f"Volume: {self.level}%"
+
+    def on_get(self, _bus, _sender, _path, _iface, prop):
+        values = {"Category": GLib.Variant("s", "Hardware"), "Id": GLib.Variant("s", "syluxium-volume"),
+                  "Title": GLib.Variant("s", "Volume"), "Status": GLib.Variant("s", "Active"),
+                  "IconName": GLib.Variant("s", self.icon()), "IconThemePath": GLib.Variant("s", ""),
+                  "ItemIsMenu": GLib.Variant("b", False),
+                  "ToolTip": GLib.Variant("(sa(iiay)ss)", (self.icon(), [], "Volume", self.tooltip()))}
+        return values.get(prop)
+
+    def on_call(self, _bus, _sender, _path, _iface, method, params, invocation):
+        if method == "Activate":
+            self.toggle_popup()
+        elif method == "SecondaryActivate":
+            amixer("toggle")
+            self.poll()
+        elif method == "Scroll":
+            delta, _orient = params.unpack()
+            amixer("5%+" if delta < 0 else "5%-")
+            self.poll()
+        invocation.return_value(None)
+
+    def poll(self):
+        level, muted = read_volume()
+        if (level, muted) != (self.level, self.muted):
+            self.level, self.muted = level, muted
+            for sig in ("NewIcon", "NewToolTip"):
+                self.bus.emit_signal(None, "/StatusNotifierItem", "org.kde.StatusNotifierItem", sig, None)
+            if self.popup:
+                self.scale.set_value(level)
+        return True
+
+    def toggle_popup(self):
+        if self.popup:
+            self.popup.destroy()
+            self.popup = None
+            return
+        win = Gtk.Window()
+        GtkLayerShell.init_for_window(win)
+        GtkLayerShell.set_namespace(win, "syluxium-volume")
+        GtkLayerShell.set_layer(win, GtkLayerShell.Layer.TOP)
+        GtkLayerShell.set_anchor(win, GtkLayerShell.Edge.RIGHT, True)
+        GtkLayerShell.set_anchor(win, GtkLayerShell.Edge.BOTTOM, True)
+        GtkLayerShell.set_margin(win, GtkLayerShell.Edge.RIGHT, 80)
+        GtkLayerShell.set_margin(win, GtkLayerShell.Edge.BOTTOM, 4)
+        GtkLayerShell.set_keyboard_mode(win, GtkLayerShell.KeyboardMode.ON_DEMAND)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, margin=8)
+        self.scale = Gtk.Scale.new_with_range(Gtk.Orientation.VERTICAL, 0, 100, 1)
+        self.scale.set_inverted(True)
+        self.scale.set_draw_value(False)
+        self.scale.set_size_request(-1, 140)
+        self.scale.set_value(self.level)
+        self.scale.connect("value-changed", lambda s: (amixer(f"{int(s.get_value())}%", "unmute"), self.poll()))
+        box.pack_start(self.scale, True, True, 0)
+        mute = Gtk.CheckButton(label="Mute")
+        mute.set_active(self.muted)
+        mute.connect("toggled", lambda b: (amixer("mute" if b.get_active() else "unmute"), self.poll()))
+        box.pack_start(mute, False, False, 0)
+        win.add(box)
+        win.connect("focus-out-event", lambda *_: self.toggle_popup() if self.popup else None)
+        win.connect("key-press-event", lambda _w, e: self.toggle_popup() if e.keyval == Gdk.KEY_Escape else None)
+        win.show_all()
+        self.popup = win
+
+
+VolumeItem()
+Gtk.main()

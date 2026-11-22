@@ -958,6 +958,13 @@ struct kernel_ethtool_ts_info {
  * See &struct net_device and &struct net_device_ops for documentation
  * of the generic netdev features interface.
  */
+/* Linux 7.x: RSS hash fields of a flow type (get/set_rxfh_fields). */
+struct ethtool_rxfh_fields {
+	u32 data;
+	u32 flow_type;
+	u32 rss_context;
+};
+
 struct ethtool_ops {
 	u32     cap_link_lanes_supported:1;
 	u32     cap_rss_ctx_supported:1;
@@ -1105,6 +1112,11 @@ struct ethtool_ops {
 	int	(*set_mm)(struct net_device *dev, struct ethtool_mm_cfg *cfg,
 			  struct netlink_ext_ack *extack);
 	void	(*get_mm_stats)(struct net_device *dev, struct ethtool_mm_stats *stats);
+	/* appended: Linux 7.x ops (drivers imported from 7.4: igb, ...) */
+	u32	(*get_rx_ring_count)(struct net_device *dev);
+	int	(*get_rxfh_fields)(struct net_device *, struct ethtool_rxfh_fields *);
+	int	(*set_rxfh_fields)(struct net_device *, const struct ethtool_rxfh_fields *,
+				   struct netlink_ext_ack *extack);
 };
 
 int ethtool_check_ops(const struct ethtool_ops *ops);

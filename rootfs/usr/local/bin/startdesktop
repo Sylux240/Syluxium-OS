@@ -10,23 +10,36 @@ syluxium-early
 
 # On a Syluxium stick: the X server's, login screen's and session's logs go
 # into this boot's log folder too (every 15 s), next to the kernel log.
+# syluxium-diag adds hardware.txt (devices and drivers, refreshed every
+# minute: hot-plugged USB shows up), status.txt (load, memory, busiest
+# processes, every 15 s) and milestones.txt (login screen, session, desktop).
+mkdir -p /run/syluxium-diag && chmod 1777 /run/syluxium-diag
 if [ -d /boot/logs ] && grep -q " /boot/logs-stick " /proc/mounts; then
+    syluxium-diag mark "startdesktop: starting services and the login screen"
     (
+        n=0
         while :; do
             sleep 15
-            for f in /var/log/Xorg.0.log /var/log/Xorg.0.log.old /var/log/tdm.log /var/log/tdm.out; do
-                [ -f "$f" ] && cp "$f" /boot/logs/ 2>/dev/null
-            done
-            for h in /home/*/.xsession-errors; do
-                [ -f "$h" ] && cp "$h" "/boot/logs/xsession-errors-$(basename "$(dirname "$h")").txt" 2>/dev/null
-            done
+            [ $((n % 4)) = 0 ] && syluxium-diag hardware
+            syluxium-diag status
+            syluxium-diag logs
             sync
+            n=$((n + 1))
         done
     ) &
 fi
 
 # X display driver for this machine (modesetting on a DRM device, else fbdev).
 syluxium-display-config > /dev/null 2>&1
+# GPU Test entry: the GPU stack before the X server starts (gpu-boot.txt:
+# driver start, sysfs as libdrm sees it, Mesa's driver choice on its own),
+# then milestones and logs every 2 s while X comes up (xwatch.txt).
+if grep -qw gpu /proc/cmdline; then
+    syluxium-diag mark "gpu: report before X (Mesa on the render node, no X yet)"
+    syluxium-diag gpu boot
+    syluxium-diag mark "gpu: report done; starting the login screen and X"
+    syluxium-diag xwatch &
+fi
 
 # Printing (CUPS): what its install scripts would set up, then the print service.
 if [ -x /usr/sbin/cupsd ]; then
@@ -67,6 +80,10 @@ fi
 dbus-uuidgen --ensure=/etc/machine-id 2>/dev/null
 cp /etc/machine-id /var/lib/dbus/machine-id 2>/dev/null
 [ -S /run/dbus/system_bus_socket ] || dbus-daemon --system --fork > /var/log/dbus-system.log 2>&1
+# polkit (who may shut down, mount, administer): started now, not on first
+# use, so the session's first question (Xfce asks at login whether it may
+# shut down, and remembers the answer) doesn't race its start-up.
+pgrep -x polkitd > /dev/null || /usr/lib/polkit-1/polkitd --no-debug > /var/log/polkitd.log 2>&1 &
 
 # USB sticks: mounted at /media/<label> when plugged in (AutoPlay box in the session).
 syluxium-automount > /var/log/automount.log 2>&1 &
@@ -74,6 +91,8 @@ syluxium-automount > /var/log/automount.log 2>&1 &
 syluxium-wifi > /var/log/syluxium-wifi.log 2>&1 &
 # Bluetooth: bluetoothd (adapters plugged in later reach it through the kernel).
 /usr/libexec/bluetooth/bluetoothd -n --noplugin=sap > /var/log/bluetoothd.log 2>&1 &
+# Bluetooth headphones and speakers: bluealsa, default output while connected.
+syluxium-bluetooth-audio > /var/log/syluxium-bluetooth-audio.log 2>&1 &
 # Adapter settings from Network Connections (static addresses, disabled adapters).
 syluxium-netconfig apply > /var/log/syluxium-netconfig.log 2>&1 &
 # Network printers and other devices announced on the local network (mDNS /

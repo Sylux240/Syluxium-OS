@@ -3,6 +3,7 @@
 #include <fs/ramfs.hpp>
 #include <mm/layout.hpp>
 #include <proc/process.hpp>
+#include <proc/uaccess.hpp>
 #include <syscall/syscall.hpp>
 
 namespace syscall {
@@ -32,7 +33,10 @@ long sys_mmap(SYSCALL_ARGS) {
         f = fd_get(p, fd);
         if (!f)
             return -err::BADF;
-        if (!vfs::is_reg(f->inode->mode)) {
+        // Linux driver files count as devices even when they look like
+        // regular files (a dma-buf is S_IFREG so fstat/lseek give its size):
+        // mapping one as a plain file gave pages that faulted (SIGSEGV).
+        if (!vfs::is_reg(f->inode->mode) || f->inode->linux_file(f)) {
             // Device memory (sound buffers; framebuffers and GPUs later): the
             // driver must support it, and the mapping is always shared.
             // Check the first and last page now so mmap() fails cleanly.
@@ -138,6 +142,35 @@ long sys_msync(SYSCALL_ARGS) {
     return 0; // shared mappings are the file's own pages (tmpfs) or device memory: nothing to write back
 }
 
+// mincore(addr, len, vec): which pages are in memory. Mesa's EGL calls it to
+// check that the display pointer a program passes is valid memory
+// (_eglPointerIsDereferenceable); without it every EGL program failed to
+// initialize ("failed to initialize EGL display"), on X11 and Wayland alike.
+long sys_mincore(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    uptr addr = a0;
+    usize len = a1;
+    if (addr & 0xFFF)
+        return -err::INVAL;
+    if (len == 0)
+        return 0;
+    usize pages = align_up<usize>(len, 4096) / 4096;
+    if (pages > (1ull << 36))
+        return -err::NOMEM;
+    if (long r = uaccess::check(reinterpret_cast<void*>(a2), pages, true); r < 0)
+        return r;
+    u8 buf[512];
+    for (usize done = 0; done < pages;) {
+        usize n = min<usize>(pages - done, sizeof(buf));
+        if (long r = current()->mem->residency(addr + done * 4096, n * 4096, buf); r < 0)
+            return r;
+        if (long r = uaccess::copy_to(reinterpret_cast<void*>(a2 + done), buf, n); r < 0)
+            return r;
+        done += n;
+    }
+    return 0;
+}
+
 // madvise: MADV_DONTNEED (and MADV_FREE, which may behave the same) really
 // drop pages: ART zeroes its GC structures that way. The rest is advice.
 long sys_madvise(SYSCALL_ARGS) {
@@ -160,6 +193,7 @@ void register_memory() {
     set(25, sys_mremap, "mremap");
     set(12, sys_brk, "brk");
     set(26, sys_msync, "msync");
+    set(27, sys_mincore, "mincore");
     set(28, sys_madvise, "madvise");
 }
 

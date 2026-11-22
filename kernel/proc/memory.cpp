@@ -120,10 +120,12 @@ bool Memory::copy_on_write(Vma* v, uptr page) {
     if (!new_phys)
         return false;
     memcpy(mm::phys_to_virt(new_phys), mm::phys_to_virt(old_phys), PAGE_SIZE);
-    m_as->unmap(page);
-    bool ok = m_as->map(page, new_phys, flags);
+    // One PTE store: threads of this process reading the page on other CPUs
+    // (the kernel's futex code among them, holding a spinlock) never find it
+    // missing -- they see the old copy or the new one.
+    bool ok = m_as->replace(page, new_phys, flags) != 0;
     vmm::shootdown(page, 1, m_as);
-    vmm::release_user_page(old_phys);
+    vmm::release_user_page(ok ? old_phys : new_phys);
     return ok;
 }
 
@@ -282,9 +284,11 @@ long Memory::map(uptr addr, usize len, u32 prot, u32 flags, vfs::Inode* file, u6
     v->file_bytes = v->file ? min<u64>(file_bytes, len) : 0;
     if (flags & MAP_GROWSDOWN)
         v->kind = VMA_STACK;
-    // Shared pages: device memory, or MAP_SHARED of a file whose pages can be
-    // shared (ramfs/tmpfs, memfd, shm). Other MAP_SHARED files get a private copy.
-    if (v->file && (!vfs::is_reg(v->file->mode) || ((flags & MAP_SHARED) && v->file->shared_mappable())))
+    // Shared pages: device memory (also Linux driver files that look regular,
+    // like dma-bufs), or MAP_SHARED of a file whose pages can be shared
+    // (ramfs/tmpfs, memfd, shm). Other MAP_SHARED files get a private copy.
+    if (v->file && (!vfs::is_reg(v->file->mode) || v->file->linux_file(nullptr) ||
+                    ((flags & MAP_SHARED) && v->file->shared_mappable())))
         v->kind = VMA_DEVICE;
     if (v->file) {
         v->file->mmap_ref(+1);
@@ -297,6 +301,12 @@ long Memory::map(uptr addr, usize len, u32 prot, u32 flags, vfs::Inode* file, u6
         prepare_locked(addr, len, false);
     *out = addr;
     return 0;
+}
+
+bool Memory::shared_at(uptr addr) {
+    LockGuard guard(m_lock);
+    Vma* v = find(addr);
+    return v && v->kind == VMA_DEVICE;
 }
 
 bool Memory::mapping_at(uptr addr, vfs::Inode** file, usize* len) {
@@ -490,6 +500,26 @@ void Memory::merge_adjacent(uptr start, uptr end) {
         }
         v = n;
     }
+}
+
+long Memory::residency(uptr addr, usize len, u8* out) {
+    if (addr & (PAGE_SIZE - 1))
+        return -err::INVAL;
+    uptr end = addr + align_up<usize>(len, PAGE_SIZE);
+    if (end < addr || end > task_end())
+        return -err::NOMEM;
+    LockGuard guard(m_lock);
+    for (uptr a = addr; a < end;) {
+        Vma* v = find(a);
+        if (!v)
+            return -err::NOMEM;
+        a = v->end;
+    }
+    for (uptr page = addr; page < end; page += PAGE_SIZE) {
+        u64 phys;
+        out[(page - addr) / PAGE_SIZE] = m_as->translate(page, &phys) ? 1 : 0;
+    }
+    return 0;
 }
 
 long Memory::brk(uptr new_end) {

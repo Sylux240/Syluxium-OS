@@ -1,0 +1,8 @@
+#!/bin/sh
+# Control Panel: the desktop's own settings window (Xfce's Settings Manager;
+# TDE's Control Center in the Trinity session).
+case "${XDG_CURRENT_DESKTOP:-}" in
+    *XFCE*) exec xfce4-settings-manager "$@" ;;
+esac
+command -v kcontrol > /dev/null && exec kcontrol "$@"
+exec xfce4-settings-manager "$@"

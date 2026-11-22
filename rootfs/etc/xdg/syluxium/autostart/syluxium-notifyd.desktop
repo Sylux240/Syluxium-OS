@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Syluxium Notifications
+Comment=Shows notifications as bubbles in the lower right corner
+# Started through D-Bus, which runs it once: a program sending a notification
+# early (power manager) would otherwise start a second copy at the same time.
+Exec=dbus-send --session --type=method_call --dest=org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus.StartServiceByName string:org.freedesktop.Notifications uint32:0
+NoDisplay=true
+OnlyShowIn=XFCE;

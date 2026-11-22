@@ -92,7 +92,30 @@ struct Segment {
     u16 seq;
     bool removed;              // IPC_RMID: gone from the table once nobody has it attached
     ramfs::RegularFile* file;  // the pages; kept alive by our reference and the mappings
+    u32 uid, gid, cuid, cgid;  // owner (IPC_SET changes it) and creator
 };
+
+// ipcperms: may the current process access a segment with these owner,
+// creator and mode bits (MAY_READ / MAY_WRITE)? Root may. The X server
+// checks the same thing (IPC_STAT's uid/mode against the client's uid)
+// before it attaches a client's MIT-SHM segment.
+bool ipc_allowed(const Segment& s, int mask) {
+    const proc::Cred& c = proc::cred();
+    if (c.euid == 0)
+        return true;
+    u32 bits = s.mode;
+    if (c.euid == s.uid || c.euid == s.cuid)
+        bits >>= 6;
+    else if (proc::in_group(s.gid) || proc::in_group(s.cgid))
+        bits >>= 3;
+    u32 want = ((mask & proc::MAY_READ) ? 4 : 0) | ((mask & proc::MAY_WRITE) ? 2 : 0);
+    return (bits & want) == want;
+}
+
+bool ipc_owner(const Segment& s) {
+    const proc::Cred& c = proc::cred();
+    return c.euid == 0 || c.euid == s.uid || c.euid == s.cuid;
+}
 
 constexpr int MAX_SEGMENTS = 128;
 Segment g_segments[MAX_SEGMENTS];
@@ -135,6 +158,8 @@ long sys_shmget(SYSCALL_ARGS) {
                 return -err::EXIST;
             if (size > s.size)
                 return -err::INVAL;
+            if (!ipc_allowed(s, (flags & 0222) ? proc::MAY_READ | proc::MAY_WRITE : proc::MAY_READ))
+                return -err::ACCES;
             return shm_id(i);
         }
         if (!(flags & IPC_CREAT))
@@ -151,7 +176,9 @@ long sys_shmget(SYSCALL_ARGS) {
         file->truncate(size);
         file->mmap_ref(+1); // the table's reference
         u16 seq = static_cast<u16>(s.seq + 1);
-        s = Segment{true, key, size, flags & 0777, proc::current()->pid, 0, 0, 0, now_s(), seq, false, file};
+        const proc::Cred& c = proc::cred();
+        s = Segment{true, key, size, flags & 0777, proc::current()->pid, 0, 0, 0, now_s(), seq, false, file,
+                    c.euid, c.egid, c.euid, c.egid};
         return shm_id(i);
     }
     return -err::NOSPC;
@@ -172,6 +199,8 @@ long sys_shmat(SYSCALL_ARGS) {
         // removed at once and then have the X server attach it (MIT-SHM).
         if (!s)
             return -err::INVAL;
+        if (!ipc_allowed(*s, (shmflg & SHM_RDONLY) ? proc::MAY_READ : proc::MAY_READ | proc::MAY_WRITE))
+            return -err::ACCES;
         file = s->file;
         size = s->size;
         s->atime = now_s();
@@ -240,8 +269,14 @@ long sys_shmctl(SYSCALL_ARGS) {
     switch (cmd) {
     case IPC_STAT:
     case 13: { // SHM_STAT
+        if (!ipc_allowed(*s, proc::MAY_READ))
+            return -err::ACCES;
         ShmidDs ds{};
         ds.perm.key = s->key;
+        ds.perm.uid = s->uid;
+        ds.perm.gid = s->gid;
+        ds.perm.cuid = s->cuid;
+        ds.perm.cgid = s->cgid;
         ds.perm.mode = s->mode | (s->removed ? 01000 : 0); // SHM_DEST
         ds.perm.seq = s->seq;
         ds.segsz = s->size;
@@ -257,11 +292,17 @@ long sys_shmctl(SYSCALL_ARGS) {
         ShmidDs ds;
         if (long r = uaccess::get(&ds, reinterpret_cast<ShmidDs*>(a2)); r < 0)
             return r;
+        if (!ipc_owner(*s))
+            return -err::PERM;
+        s->uid = ds.perm.uid;
+        s->gid = ds.perm.gid;
         s->mode = ds.perm.mode & 0777;
         s->ctime = now_s();
         return 0;
     }
     case IPC_RMID:
+        if (!ipc_owner(*s))
+            return -err::PERM;
         s->removed = true;
         s->key = IPC_PRIVATE; // a removed key can be created again
         if (s->file->mapping_count() <= 1)

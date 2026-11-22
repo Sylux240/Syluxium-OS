@@ -22,6 +22,7 @@
 #include <dev/platform.hpp>
 #include <drivers/pci/pci.hpp>
 #include <drivers/input/input.hpp>
+#include <drivers/input/uhid.hpp>
 #include <drivers/ps2kbd.hpp>
 #include <drivers/usb/usb.hpp>
 #include <linuxkpi/linuxkpi.hpp>
@@ -273,6 +274,12 @@ void discover_hardware() {
     sound::init(); // phase 8: ALSA-compatible sound core
     hda::register_driver();
     virtio_snd::register_driver();
+    {
+        char root_spec[8];
+        if (cmdline_value("root", root_spec, sizeof(root_spec)))
+            linuxkpi::firmware_root_expected(); // background firmware requests wait for the disk root
+    }
+    splash::stage(34, "Starting Linux drivers");
     linuxkpi::init(); // Linux drivers register themselves (module_init) here
     // Native drivers behind Linux's r8169 and e1000e (tried in registration order):
     // they take the device if the Linux driver fails, and the chips Linux's don't cover.
@@ -280,12 +287,16 @@ void discover_hardware() {
     r8169::register_driver();
     pci::init();
     dev::register_platform_devices(g_keyboard);
+    splash::stage(38, "Starting disks and USB");
+    if (strstr(boot::cmdline(), "bootstall_test")) // test aid: the splash stall detector (45 s)
+        sched::sleep_ms(50'000);
     // Disks and USB first, so the root file system (root=) is mounted before
     // other drivers start: they may load firmware from /lib/firmware.
     dev::probe_all([](dev::Device* d) {
         u32 cls = d->class_code >> 8; // class + subclass
         return d->bus == dev::Bus::Pci && ((cls >> 8) == 0x01 || cls == 0x0C03);
     });
+    splash::stage(44, "Finding USB devices");
     xhci::enumerate_all();
     ehci::enumerate_all();
     uhci::enumerate_all();
@@ -295,7 +306,9 @@ void discover_hardware() {
     bootlog::start();
     splash::stage(50, "Mounting file systems");
     mount_disk_root(); // root= on the command line: an installed system on disk
+    linuxkpi::firmware_root_ready();
     linuxkpi::usb_retry_deferred(); // Linux USB drivers that found no firmware before it
+    splash::stage(56, "Starting device drivers");
     dev::probe_all();
     sysfs::populate_devices();
     fbdev::init(); // /dev/fb0 (after the PCI devices are in /sys: fb0 may belong to one)
@@ -517,6 +530,11 @@ void kernel_main_thread(void*) {
     sysfs::init(); // needs the final CPU count
     cpupower::publish(); // cpufreq files; idle CPUs go tickless from here
     watchdog::start();   // stuck CPUs print where they are
+    if (strstr(boot::cmdline(), "watchdog_test")) // test aid: the stuck-operation report
+        sched::spawn("watchdog-test", [](void*) {
+            watchdog::Guard guard("watchdog self-test", "(boot option watchdog_test)", 2);
+            sched::sleep_ms(4000);
+        }, nullptr, -1, true);
     splash::stage(30, "Starting drivers");
     discover_hardware();
     splash::stage(62, "Starting services");
@@ -640,6 +658,7 @@ extern "C" [[noreturn]] __attribute__((no_stack_protector)) void kmain() {
     vfs::init();
     tty::init();
     input::init();
+    uhid::init(); // /dev/uhid (Bluetooth keyboards and mice through BlueZ)
     g_keyboard = ps2kbd::init();
     devices::init();
     proc::init();

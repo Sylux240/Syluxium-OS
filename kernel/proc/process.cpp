@@ -188,6 +188,10 @@ void page_fault(interrupts::Frame* frame) {
     if (!from_user && addr < mm::USER_END && (frame->error_code & 1) && !(frame->error_code & 16) &&
         protect::smap_violation(addr, frame->rip, &frame->rflags, smap_caller(frame)))
         return;
+    // The futex code reads user memory under spinlocks: it gets -EFAULT and
+    // faults the page in itself after letting go (resolving here may sleep).
+    if (!from_user && futex::fault_fixup(frame))
+        return;
     if (p && p->mem && addr < mm::USER_END) {
         // Resolving may sleep on the memory lock; fine with interrupts on.
         if (frame->rflags & arch::RFLAGS_IF)
@@ -739,10 +743,14 @@ long exec_impl(interrupts::Frame* frame, const char* path, const char* const* ar
     }
 
     sched::Thread* t = sched::current();
-    Memory* old = p->mem;
+    Memory* old;
     {
-        InterruptGuard guard;
+        LockGuard guard(table_lock()); // as in finish_process: /proc takes references under it
+        old = p->mem;
         p->mem = mem;
+    }
+    {
+        InterruptGuard guard; // the address space switch outside the table lock
         t->aspace = as;
         as->activate();
     }
@@ -863,8 +871,16 @@ namespace {
         me->aspace = nullptr;
         vmm::AddressSpace::kernel().activate();
     }
-    p->mem->put();
-    p->mem = nullptr;
+    // Detach the memory under the table lock before dropping it: /proc
+    // readers take their own reference under that lock, and must never
+    // find a pointer to memory that is already freed.
+    Memory* mem;
+    {
+        LockGuard guard(table_lock());
+        mem = p->mem;
+        p->mem = nullptr;
+    }
+    mem->put();
     me->process = nullptr; // from here on we're an ordinary kernel thread
 
     if (p->vfork_child)
@@ -942,6 +958,11 @@ void exit_thread(int code) {
     KASSERT(p != nullptr);
     sched::Thread* me = sched::current();
 
+    // Robust mutexes it still holds: marked "owner died", a waiter woken.
+    if (me->robust_list && p->mem) {
+        futex::exit_robust_list(me->robust_list, me->vtid);
+        me->robust_list = 0;
+    }
     // pthread_join waits on this word: clear it and wake the joiner.
     if (me->clear_child_tid && p->mem) {
         i32 zero = 0;

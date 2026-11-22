@@ -106,6 +106,7 @@ extern "C" void syscall_dispatch(interrupts::Frame* frame) {
     sched::Thread* self = sched::current();
     protect::report_pending();
     self->cur_syscall = static_cast<i64>(nr);
+    self->syscall_frame = frame;
     self->cur_args[0] = frame->rdi, self->cur_args[1] = frame->rsi, self->cur_args[2] = frame->rdx;
     if (nr < MAX_SYSCALLS && g_table[nr].handler) {
         result = g_table[nr].handler(frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8, frame->r9, frame);

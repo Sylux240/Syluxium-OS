@@ -1,5 +1,5 @@
 // Checks for copy_file_range, pidfd_open / pidfd_send_signal,
-// rt_sigtimedwait and mlock/munlock. Prints PASS/FAIL per check; exit
+// rt_sigtimedwait, mlock/munlock, mincore. Prints PASS/FAIL per check; exit
 // status = number of failures.
 #define _GNU_SOURCE
 #include <errno.h>
@@ -76,6 +76,19 @@ static void test_pidfd(void) {
           "pidfd_send_signal to a reaped process: ESRCH");
     close(pfd);
     check(syscall(SYS_pidfd_open, 999999, 0) < 0 && errno == ESRCH, "pidfd_open of no process: ESRCH");
+
+    /* waitid(P_PIDFD): how GLib (Xfce's session) watches its children. */
+    child = fork();
+    if (child == 0) {
+        usleep(100 * 1000);
+        _exit(7);
+    }
+    pfd = syscall(SYS_pidfd_open, child, 0);
+    siginfo_t si;
+    memset(&si, 0, sizeof(si));
+    check(waitid(3 /* P_PIDFD */, pfd, &si, WEXITED) == 0 && si.si_pid == child && si.si_code == CLD_EXITED &&
+              si.si_status == 7, "waitid(P_PIDFD) reaps the child");
+    close(pfd);
 }
 
 static void test_sigtimedwait(void) {
@@ -105,6 +118,23 @@ static void test_mlock(void) {
     char* p = mmap(NULL, 65536, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     check(mlock(p, 65536) == 0 && munlock(p, 65536) == 0, "mlock / munlock");
     munmap(p, 65536);
+}
+
+// mincore (Mesa calls it): touched pages are in memory, untouched anonymous
+// ones aren't yet; a range with an unmapped hole is ENOMEM, an unaligned
+// start EINVAL.
+static void test_mincore(void) {
+    char* p = mmap(NULL, 4 * 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    unsigned char vec[4] = {9, 9, 9, 9};
+    p[0] = 1;
+    p[2 * 4096] = 1;
+    check(mincore(p, 4 * 4096, vec) == 0 && (vec[0] & 1) && !(vec[1] & 1) && (vec[2] & 1) && !(vec[3] & 1),
+          "mincore: touched pages resident, untouched ones not");
+    check(mincore(p + 2 * 4096, 100, vec) == 0 && (vec[0] & 1), "mincore: a partial page counts as the whole page");
+    check(mincore(p + 1, 4096, vec) < 0 && errno == EINVAL, "mincore: unaligned start is EINVAL");
+    munmap(p + 4096, 4096);
+    check(mincore(p, 4 * 4096, vec) < 0 && errno == ENOMEM, "mincore: a range with an unmapped hole is ENOMEM");
+    munmap(p, 4 * 4096);
 }
 
 // ASLR: two runs of a program get different stack, heap, code and mmap
@@ -232,6 +262,7 @@ int main(int argc, char** argv) {
     test_pidfd();
     test_sigtimedwait();
     test_mlock();
+    test_mincore();
     test_aslr();
     test_posix_timers();
     test_process_vm();

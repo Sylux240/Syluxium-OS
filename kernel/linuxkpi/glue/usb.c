@@ -651,6 +651,12 @@ static struct usb_device* udev_for(void* sylux, const u8* config, unsigned int c
 		static struct usb_device blank_hub;
 		udev->parent = &blank_hub;
 	}
+	/* The bus: usbnet prints its name, mt76 asks whether it does
+	 * scatter-gather URBs (no: sg_tablesize 0). */
+	{
+		static struct usb_bus bus = { .busnum = 1, .bus_name = "usb" };
+		udev->bus = &bus;
+	}
 	r = lkpi_sylux_usb_control(sylux, USB_DIR_IN, USB_REQ_GET_DESCRIPTOR, USB_DT_DEVICE << 8, 0, &udev->descriptor,
 				   sizeof(udev->descriptor));
 	if (r < (long)sizeof(udev->descriptor)) {
@@ -726,6 +732,7 @@ static struct {
 } deferred[MAX_DEFERRED];
 static int ndeferred;
 void lkpi_sylux_usb_bound(void* registry, const char* driver_name);
+void lkpi_sylux_usb_failed(void* registry, const char* driver_name, int error);
 
 static int probe_intf(void* sylux, struct usb_device* udev, struct usb_interface* intf, const char* path,
 		      bool retry, const char** driver_name);
@@ -816,6 +823,7 @@ static int probe_intf(void* sylux, struct usb_device* udev, struct usb_interface
 	r = drv->probe(intf, id);
 	if (r) {
 		printk(KERN_WARNING "usb %s: %s probe failed (%d)\n", path, drv->name, r);
+		lkpi_sylux_usb_failed(udev->dev.lkpi_registry, drv->name, r);
 		intf->lkpi_driver = NULL;
 		intf->condition = USB_INTERFACE_UNBOUND;
 		return r;

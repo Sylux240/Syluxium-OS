@@ -194,6 +194,15 @@ void control_add_ip(Control& c, int level, int type, const void* data, u32 len) 
     c.ip_len += 12 + len;
 }
 
+PeerGroups current_groups() {
+    PeerGroups pg;
+    const proc::Cred& c = proc::cred();
+    pg.n = c.ngroups < 32 ? c.ngroups : 32;
+    for (u32 i = 0; i < pg.n; i++)
+        pg.g[i] = c.groups[i];
+    return pg;
+}
+
 Ucred current_cred() {
     Ucred c;
     c.pid = proc::current() ? proc::current()->pid : 0;
@@ -1166,12 +1175,19 @@ long sys_getsockopt(SYSCALL_ARGS) {
     u32 len;
     if (long r = uaccess::get(&len, reinterpret_cast<u32*>(a4)); r < 0)
         return r;
-    u8 raw[64] = {};
+    u8 raw[160] = {};
     u32 rlen = sizeof(raw);
     long hr = s->get_option(level, name, raw, &rlen);
     if (hr != OPT_UNHANDLED) {
         if (hr < 0)
             return hr;
+        // SO_PEERGROUPS with a buffer too small: the size needed, ERANGE (as
+        // on Linux; dbus-daemon asks again with that size).
+        if (level == SOL_SOCKET && name == 59 && rlen > len) {
+            if (long r = uaccess::put(reinterpret_cast<u32*>(a4), rlen); r < 0)
+                return r;
+            return -ERANGE;
+        }
     } else {
         i32 value = 0;
         if (level == SOL_SOCKET) {
@@ -1182,10 +1198,10 @@ long sys_getsockopt(SYSCALL_ARGS) {
             case 7: case 8: value = 212992; break;          // SO_SNDBUF / SO_RCVBUF
             case 38: value = s->protocol; break;            // SO_PROTOCOL
             case 39: value = s->domain; break;              // SO_DOMAIN
-            // SO_PEERPIDFD: no pidfds here. "Not supported", as on Linux
-            // without them, so dbus-daemon falls back to SO_PEERCRED's pid
-            // (a 0 here was taken as pidfd 0 and the peer's pid was lost).
-            case 77: return -ENOPROTOOPT;
+            // SO_PEERPIDFD / SO_PEERGROUPS on sockets without a peer
+            // process (not Unix sockets): not supported, as on Linux. A 0
+            // here would read as pidfd 0, or as membership of group root.
+            case 77: case 59: return -ENOPROTOOPT;
             default: value = 0; break;
             }
         } else if (level == IPPROTO_TCP && name == 2) {     // TCP_MAXSEG

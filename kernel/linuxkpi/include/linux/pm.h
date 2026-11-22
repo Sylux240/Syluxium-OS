@@ -54,8 +54,8 @@ struct dev_pm_ops {
 #define SET_LATE_SYSTEM_SLEEP_PM_OPS(s, r)
 #define SET_NOIRQ_SYSTEM_SLEEP_PM_OPS(s, r)
 #define SET_RUNTIME_PM_OPS(s, r, i)
-#define SIMPLE_DEV_PM_OPS(name, s, r) const struct dev_pm_ops name __attribute__((unused)) = { SYSTEM_SLEEP_PM_OPS(s, r) }
-#define DEFINE_SIMPLE_DEV_PM_OPS(name, s, r) SIMPLE_DEV_PM_OPS(name, s, r)
+#define SIMPLE_DEV_PM_OPS(name, s, r) const struct dev_pm_ops name __attribute__((unused)) = { SET_SYSTEM_SLEEP_PM_OPS(s, r) }
+#define DEFINE_SIMPLE_DEV_PM_OPS(name, s, r) const struct dev_pm_ops name __attribute__((unused)) = { SYSTEM_SLEEP_PM_OPS(s, r) }
 #define DEFINE_RUNTIME_DEV_PM_OPS(name, s, r, i) const struct dev_pm_ops name __attribute__((unused)) = { SYSTEM_SLEEP_PM_OPS(s, r) RUNTIME_PM_OPS(s, r, i) }
 #define UNIVERSAL_DEV_PM_OPS(name, s, r, i) DEFINE_RUNTIME_DEV_PM_OPS(name, s, r, i)
 #define _DEFINE_DEV_PM_OPS(name, s, r, rs, rr, ri) const struct dev_pm_ops name __attribute__((unused)) = { SYSTEM_SLEEP_PM_OPS(s, r) RUNTIME_PM_OPS(rs, rr, ri) }

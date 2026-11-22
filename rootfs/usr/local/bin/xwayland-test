@@ -1,0 +1,585 @@
+#!/usr/bin/python3
+"""Test aid: X11 programs in the Syluxium shell (Wayland), through Xwayland.
+Run as the user inside the shell (boot option shellscene=x11, or by hand).
+Results go to /run/syluxium-diag/xwayland-test.txt (copied to the stick's
+log folder); "XWLTEST <step>" lines go to /run/syluxium-diag/console.txt,
+which a test boot copies to the serial console, so tools/smoke-test.sh can
+wait for a step ("\\[XWLTEST shot xterm]") and then press keys or take a
+screenshot.
+
+    xwayland-test [phase ...]     (default: all of them, in this order)
+
+  lazy    Xwayland not running before the first X11 program; how long the
+          first connection takes; screen, DPI, resources, XSETTINGS, cursor
+  clip    CLIPBOARD and PRIMARY both ways (xclip on X11, wl-copy/wl-paste)
+  xterm   frame (active, then inactive next to a Wayland window), taskbar
+          app id and icon; typing (US, then German layout: z/y swapped);
+          Alt+F4
+  states  maximize, minimize, fullscreen, resize: from the taskbar side
+          (wlr-foreign-toplevel) and from the program (EWMH requests)
+  gtk     Mousepad forced to X11 (GDK_BACKEND=x11): Dusk theme, menu (F10),
+          a dialog centred on its window (Ctrl+O)
+  qt      kcheckers forced to xcb (QT_QPA_PLATFORM=xcb): menu (Alt+G)
+  sdl     sopwith (SDL 2)
+  tde     Trinity (TQt) programs: KCalc, Kate
+  perf    glxgears / es2gears (X11 and Wayland), shell-fps-test (GTK on X11
+          and on Wayland)
+  firefox Firefox on X11 (MOZ_ENABLE_WAYLAND=0)
+"""
+import importlib.machinery
+import importlib.util
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+
+import gi
+
+gi.require_version("Gtk", "3.0")
+gi.require_version("Libxfce4windowing", "0.0")
+from gi.repository import GLib, Gtk  # noqa: E402,F401
+from gi.repository import Libxfce4windowing as Xfw  # noqa: E402
+
+OUT = "/run/syluxium-diag/xwayland-test.txt"
+CON = "/run/syluxium-diag/console.txt"
+HOME = os.path.expanduser("~")
+procs = []
+
+
+def write(path, line):
+    try:
+        with open(path, "a") as f:
+            f.write(line + "\n")
+    except OSError:
+        pass
+
+
+def log(*parts):
+    line = " ".join(str(p) for p in parts)
+    print(line, flush=True)
+    write(OUT, line)
+
+
+def mark(step, wait=0):
+    """A step the test harness may act on (keys, screenshot), then a pause for it."""
+    write(CON, f"XWLTEST {step}")
+    log(f"-- {step} ({uptime():.1f} s)")
+    if wait:
+        pump(wait)
+
+
+def uptime():
+    return float(open("/proc/uptime").read().split()[0])
+
+
+def run(cmd, timeout=20, env=None, input_=None):
+    try:
+        r = subprocess.run(cmd, shell=isinstance(cmd, str), capture_output=True, text=True, timeout=timeout,
+                           env=env, input=input_)
+        return (r.stdout + r.stderr).strip()
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return f"({e})"
+
+
+def start(cmd, **env):
+    e = dict(os.environ, **env)
+    p = subprocess.Popen(cmd, shell=isinstance(cmd, str), env=e, stdout=subprocess.PIPE,
+                         stderr=subprocess.STDOUT, text=True, start_new_session=True)
+    procs.append(p)
+    return p
+
+
+def no_window(label, p=None):
+    log(f"{label}: NO WINDOW; windows now:", [(app_id(w), w.get_name()) for w in windows()])
+    if p is not None:
+        stop(p)
+        try:
+            log("  its output:", (p.stdout.read() or "")[-600:].replace("\n", " | "))
+        except (OSError, ValueError):
+            pass
+
+
+def stop(p):
+    try:
+        os.killpg(p.pid, 15)
+    except OSError:
+        pass
+    try:
+        p.wait(5)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(p.pid, 9)
+        except OSError:
+            pass
+
+
+def pump(secs):
+    ctx = GLib.MainContext.default()
+    end = time.monotonic() + secs
+    while True:
+        while ctx.pending():
+            ctx.iteration(False)
+        if time.monotonic() >= end:
+            break
+        time.sleep(0.02)
+
+
+# -- windows as the taskbar sees them (wlr-foreign-toplevel, Xfce's library) --
+screen = Xfw.Screen.get_default()
+_taskmgr = None
+
+
+def taskmgr_icon(app_id):
+    """The icon Task Manager shows for this app id (its own lookup)."""
+    global _taskmgr
+    if _taskmgr is None:
+        loader = importlib.machinery.SourceFileLoader("taskmgr", "/usr/local/bin/syluxium-taskmgr")
+        spec = importlib.util.spec_from_loader("taskmgr", loader)
+        _taskmgr = importlib.util.module_from_spec(spec)
+        loader.exec_module(_taskmgr)
+    return _taskmgr.TaskManager.icon_for(None, app_id)
+
+
+def windows():
+    pump(0.2)
+    return list(screen.get_windows() or [])
+
+
+def app_id(w):
+    ids = list(w.get_class_ids() or [])
+    return ids[0] if ids else ""
+
+
+def wait_window(pred, secs=30):
+    end = time.monotonic() + secs
+    while time.monotonic() < end:
+        for w in windows():
+            if pred(w):
+                return w
+        pump(0.3)
+    return None
+
+
+def state(w):
+    s = w.get_state()
+    names = [n for n in ("ACTIVE", "MINIMIZED", "MAXIMIZED", "FULLSCREEN")
+             if s & getattr(Xfw.WindowState, n)]
+    return "|".join(names) or "normal"
+
+
+def describe(w, label):
+    gicon = w.get_gicon()
+    names = list(gicon.get_names()) if hasattr(gicon, "get_names") else [str(gicon)]
+    aid = app_id(w)
+    log(f"{label}: app_id={aid!r} title={w.get_name()!r} state={state(w)} "
+        f"taskbar icon={names[:3]} taskmgr icon={taskmgr_icon(aid)!r}")
+
+
+def activate(w):
+    try:
+        seats = screen.get_seats() or []
+        w.activate(seats[0] if seats else None, 0)
+    except (GLib.Error, TypeError) as e:
+        log("activate failed:", e)
+    pump(1)
+
+
+def close(w):
+    try:
+        w.close(0)
+    except GLib.Error as e:
+        log("close failed:", e.message)
+    pump(1)
+
+
+# -- the X side --
+def xwin(pattern, by="--class"):
+    out = run(["xdotool", "search", "--onlyvisible", by, pattern])
+    ids = [line for line in out.split() if line.isdigit()]
+    return ids[-1] if ids else None
+
+
+def xgeom(wid):
+    """Absolute position and size of an X window (as X clients see it)."""
+    out = run(["xwininfo", "-id", str(wid)])
+    get = lambda k: int(re.search(k + r":\s+(-?\d+)", out).group(1)) if re.search(k + r":\s+(-?\d+)", out) else -1
+    return get("Absolute upper-left X"), get("Absolute upper-left Y"), get("Width"), get("Height")
+
+
+def net_wm_state(wid, add, *names):
+    """Ask the window manager to change a window's state the way programs do
+    (an EWMH _NET_WM_STATE client message to the root window: F11 in a
+    browser, a video player's fullscreen button)."""
+    import ctypes
+    x = ctypes.CDLL("libX11.so.6")
+    x.XOpenDisplay.restype = ctypes.c_void_p
+    x.XOpenDisplay.argtypes = [ctypes.c_char_p]
+    x.XInternAtom.restype = ctypes.c_ulong
+    x.XInternAtom.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int]
+    x.XDefaultRootWindow.restype = ctypes.c_ulong
+    x.XDefaultRootWindow.argtypes = [ctypes.c_void_p]
+    x.XSendEvent.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_int, ctypes.c_long, ctypes.c_void_p]
+    x.XFlush.argtypes = [ctypes.c_void_p]
+    x.XCloseDisplay.argtypes = [ctypes.c_void_p]
+
+    class ClientMessage(ctypes.Structure):
+        _fields_ = [("type", ctypes.c_int), ("serial", ctypes.c_ulong), ("send_event", ctypes.c_int),
+                    ("display", ctypes.c_void_p), ("window", ctypes.c_ulong), ("message_type", ctypes.c_ulong),
+                    ("format", ctypes.c_int), ("data", ctypes.c_long * 5), ("pad", ctypes.c_long * 12)]
+    d = x.XOpenDisplay(None)
+    atoms = [x.XInternAtom(d, ("_NET_WM_STATE_" + n).encode(), 0) for n in names] + [0, 0]
+    ev = ClientMessage(type=33, send_event=1, display=d, window=int(wid),
+                       message_type=x.XInternAtom(d, b"_NET_WM_STATE", 0), format=32)
+    ev.data[0], ev.data[1], ev.data[2], ev.data[3] = (1 if add else 0), atoms[0], atoms[1], 1
+    x.XSendEvent(d, x.XDefaultRootWindow(d), 0, (1 << 19) | (1 << 20), ctypes.byref(ev))
+    x.XFlush(d)
+    x.XCloseDisplay(d)
+
+
+def xstate(wid):
+    out = run(["xprop", "-id", str(wid), "_NET_WM_STATE"])
+    return out.split("=", 1)[1].strip() if "=" in out else "(none)"
+
+
+def xwayland_pid():
+    out = run(["pgrep", "-u", str(os.getuid()), "-x", "Xwayland"])
+    return out.split()[0] if out.split() and out.split()[0].isdigit() else None
+
+
+# ---------------------------------------------------------------------------
+def phase_lazy():
+    pid = xwayland_pid()
+    log(f"DISPLAY={os.environ.get('DISPLAY')!r} WAYLAND_DISPLAY={os.environ.get('WAYLAND_DISPLAY')!r} "
+        f"XCURSOR_THEME={os.environ.get('XCURSOR_THEME')!r} XCURSOR_SIZE={os.environ.get('XCURSOR_SIZE')!r} "
+        f"GDK_BACKEND={os.environ.get('GDK_BACKEND')!r} PATH={os.environ.get('PATH')!r}")
+    log(f"Xwayland before the first X11 program: {'running (pid ' + pid + ')' if pid else 'not running (lazy)'}")
+    t0 = time.monotonic()
+    info = run(["xdpyinfo"], timeout=30)
+    log(f"first X11 connection (xdpyinfo) answered in {time.monotonic() - t0:.2f} s")
+    for k in ("dimensions", "resolution", "depth of root window", "vendor string", "number of extensions"):
+        m = re.search(r"^\s*" + k + r":\s*(.*)$", info, re.M)
+        log(f"  {k}: {m.group(1) if m else '?'}")
+    pid = xwayland_pid()
+    if pid:
+        log("  Xwayland:", open(f"/proc/{pid}/cmdline").read().replace("\0", " ").strip())
+        st = open(f"/proc/{pid}/stat").read().split(")")[-1].split()
+        hz = os.sysconf("SC_CLK_TCK")
+        log(f"  Xwayland started {int(st[19]) / hz:.1f} s after boot")
+    pump(1.5)  # the settings helper starts with Xwayland
+    log("resources (xrdb -query):", run(["xrdb", "-query"]).replace("\n", "; ") or "(none)")
+    log("XSETTINGS (xsettingsd):", run(["pgrep", "-a", "-u", str(os.getuid()), "xsettingsd"]) or "not running")
+    log("keyboard (setxkbmap -query):", run(["setxkbmap", "-query"]).replace("\n", "; "))
+    log("screens: Xwayland", run("xrandr --listmonitors").replace("\n", "; "), "| wallpapers:",
+        run("for p in $(xfconf-query -c xfce4-desktop -l | grep last-image); do echo $p=$(xfconf-query -c xfce4-desktop -p $p); done").replace("\n", "; "))
+    from gi.repository import Gio
+    iface = Gio.Settings.new("org.gnome.desktop.interface")
+    log("Wayland programs (GSettings): theme", iface.get_string("gtk-theme"), "font", iface.get_string("font-name"),
+        "cursor", iface.get_string("cursor-theme"), iface.get_int("cursor-size"))
+
+
+def phase_clip():
+    p = start(["xterm", "-title", "Clipboard test", "-e", "sh"])
+    w = wait_window(lambda w: w.get_name() == "Clipboard test" or app_id(w) == "XTerm")
+    if not w:
+        no_window("clip", p); return
+    activate(w)
+    log("(an X11 window has the keyboard: wlroots shares the clipboard with X11 programs only then)")
+    _clip()
+    # Copied in an X11 program, pasted in a Wayland one after switching to it.
+    stop(p)
+
+
+def _clip():
+    def check(name, setter, getter, text):
+        p = subprocess.Popen(setter, shell=True, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, text=True, start_new_session=True)
+        p.communicate(text, timeout=10)
+        got = ""
+        for _ in range(10):
+            pump(0.4)
+            got = run(getter, timeout=5)
+            if got == text:
+                break
+        log(f"clipboard {name}: {'ok' if got == text else 'FAILED'} (sent {text!r}, got {got!r})")
+        return got == text
+
+    ok = check("X11 -> Wayland CLIPBOARD", "xclip -selection clipboard -i", "wl-paste -n", "x2w clipboard Grüße ✓")
+    ok &= check("X11 -> Wayland PRIMARY", "xclip -selection primary -i", "wl-paste -p -n", "x2w primary")
+    ok &= check("Wayland -> X11 CLIPBOARD", "wl-copy", "xclip -o -selection clipboard", "w2x clipboard Grüße ✓")
+    ok &= check("Wayland -> X11 PRIMARY", "wl-copy -p", "xclip -o -selection primary", "w2x primary")
+    log("clipboard:", "all ok" if ok else "FAILURES")
+
+
+def phase_xterm():
+    t0 = time.monotonic()
+    p = start(["xterm", "-title", "XTerm test", "-geometry", "70x18", "-e", "sh"])
+    w = wait_window(lambda w: w.get_name() == "XTerm test" or app_id(w) == "XTerm")
+    if not w:
+        no_window("xterm", p); return
+    log(f"xterm: window after {time.monotonic() - t0:.2f} s")
+    describe(w, "xterm")
+    xid = xwin("XTerm test", "--name")
+    log("xterm X geometry", xgeom(xid) if xid else "?", "WM_CLASS", run(["xprop", "-id", str(xid), "WM_CLASS"]) if xid else "")
+    mark("shot xterm-active", 4)
+    # A Wayland window beside it: the X window must look inactive like a Wayland one does.
+    m = start(["mousepad", "--disable-server"], GDK_BACKEND="wayland")
+    mw = wait_window(lambda w: app_id(w).lower().endswith("mousepad"), 20)
+    pump(2)
+    if mw:
+        describe(mw, "mousepad (Wayland)")
+        log("xterm state with the Wayland window active:", state(w))
+    mark("shot xterm-inactive", 4)
+    stop(m)
+    pump(1)
+    # Typing: xterm reads a line into a file; the harness types it.
+    def typed(title, expect, step, layout=None):
+        f = os.path.join(HOME, "xwl-typed.txt")
+        try:
+            os.remove(f)
+        except OSError:
+            pass
+        q = start(["xterm", "-title", title, "-e", "sh", "-c", f"read l; printf '%s' \"$l\" > {f}"])
+        tw = wait_window(lambda w: w.get_name() == title)
+        if tw:
+            activate(tw)
+        mark(step)
+        for _ in range(60):
+            if os.path.exists(f):
+                break
+            pump(0.5)
+        got = open(f).read() if os.path.exists(f) else None
+        log(f"typing{' (' + layout + ')' if layout else ''}: {'ok' if got == expect else 'FAILED'} "
+            f"(expected {expect!r}, got {got!r})")
+        stop(q)
+
+    def typed_wayland(expect, step):
+        """The same in a Wayland terminal: what the X11 result should match."""
+        f = os.path.join(HOME, "xwl-typed.txt")
+        try:
+            os.remove(f)
+        except OSError:
+            pass
+        q = start(["xfce4-terminal", "--disable-server", "-T", "Typing W", "-x", "sh", "-c",
+                   f"read l; printf '%s' \"$l\" > {f}"], GDK_BACKEND="wayland")
+        tw = wait_window(lambda w: w.get_name() == "Typing W")
+        if tw:
+            activate(tw)
+        pump(1)
+        mark(step)
+        for _ in range(60):
+            if os.path.exists(f):
+                break
+            pump(0.5)
+        got = open(f).read() if os.path.exists(f) else None
+        log(f"typing in a Wayland window: {'ok' if got == expect else 'FAILED'} (expected {expect!r}, got {got!r})")
+        stop(q)
+
+    typed("Typing test", "Hello, World! 123 @#", "keys-us")
+    conf = os.path.join(HOME, ".config/syluxium-shell/wayfire.ini")
+    original = open(conf).read()
+    try:
+        if re.search(r"^xkb_layout\s*=", original, re.M):  # syluxium-shell's, from /etc/default/keyboard
+            text = re.sub(r"^xkb_layout\s*=.*$", "xkb_layout = de", original, flags=re.M)
+        else:
+            text = original + "\n[input]\nxkb_layout = de\n"
+        open(conf, "w").write(text)
+        pump(2)  # Wayfire reloads its configuration by itself
+        log("keyboard after switching to de:", run(["setxkbmap", "-query"]).replace("\n", "; "))
+        typed("Typing test de", "yz", "keys-de", "de")
+        typed_wayland("yz", "keys-de-wl")
+    finally:
+        open(conf, "w").write(original)
+        pump(2)
+    # Alt+F4 (the shell's close shortcut) on an X11 window.
+    w = wait_window(lambda w: w.get_name() == "XTerm test", 3)
+    if w:
+        activate(w)
+        mark("altf4", 4)
+        log("Alt+F4 on xterm:", "closed" if p.poll() is not None else "STILL OPEN")
+    stop(p)
+
+
+def phase_states():
+    p = start(["xterm", "-title", "States test", "-geometry", "60x15", "-e", "sh"])
+    w = wait_window(lambda w: w.get_name() == "States test" or app_id(w) == "XTerm")
+    if not w:
+        no_window("states", p); return
+    pump(1)
+    xid = xwin("States test", "--name")
+    log("initial:", state(w), "X", xgeom(xid), xstate(xid))
+    # From the taskbar (what clicking its buttons does).
+    w.set_maximized(True); pump(2)
+    log("taskbar maximize:", state(w), "X", xgeom(xid), xstate(xid))
+    mark("shot maximized", 4)
+    w.set_maximized(False); pump(2)
+    log("taskbar restore:", state(w), "X", xgeom(xid))
+    w.set_minimized(True); pump(2)
+    log("taskbar minimize:", state(w), "X map state:", re.sub(r"\s+", " ", run(f"xwininfo -id {xid} | grep 'Map State'")))
+    mark("shot minimized", 3)
+    activate(w); pump(1)
+    log("taskbar activate:", state(w))
+    # From the program itself (EWMH / ICCCM requests, as programs send them).
+    net_wm_state(xid, True, "FULLSCREEN"); pump(2)
+    log("program fullscreen:", state(w), "X", xgeom(xid), xstate(xid))
+    mark("shot fullscreen", 4)
+    net_wm_state(xid, False, "FULLSCREEN"); pump(2)
+    log("program unfullscreen:", state(w), "X", xgeom(xid))
+    net_wm_state(xid, True, "MAXIMIZED_VERT", "MAXIMIZED_HORZ"); pump(2)
+    log("program maximize:", state(w), "X", xgeom(xid))
+    net_wm_state(xid, False, "MAXIMIZED_VERT", "MAXIMIZED_HORZ"); pump(2)
+    run(["xdotool", "windowsize", xid, "500", "300"]); pump(2)
+    log("program resize to 500x300:", "X", xgeom(xid))
+    run(["xdotool", "windowminimize", xid]); pump(2)
+    log("program minimize:", state(w))
+    activate(w)
+    stop(p)
+
+
+def popups_of(parent_xid):
+    """Override-redirect windows (menus, tooltips) shown now, with their positions."""
+    out = run("xwininfo -root -children")
+    res = []
+    for line in out.splitlines():
+        m = re.match(r"\s+(0x[0-9a-f]+) .*?(\d+)x(\d+)\+(-?\d+)\+(-?\d+)", line)
+        if not m:
+            continue
+        wid = m.group(1)
+        attrs = run(["xwininfo", "-id", wid, "-wm"]) + run(["xwininfo", "-id", wid])
+        if "Override Redirect State: yes" in attrs and "Map State: IsViewable" in attrs:
+            res.append((wid,) + xgeom(wid))
+    return res
+
+
+def phase_gtk():
+    p = start(["mousepad", "--disable-server"], GDK_BACKEND="x11")
+    w = wait_window(lambda w: app_id(w).lower().endswith("mousepad"), 30)
+    if not w:
+        no_window("gtk (x11)", p); return
+    pump(2)
+    describe(w, "mousepad (X11)")
+    xid = xwin("mousepad")
+    log("mousepad X geometry", xgeom(xid), "GTK theme via XSETTINGS: see the screenshot")
+    mark("shot gtk-x11", 4)
+    mark("menu-gtk", 4)  # the harness presses F10: the first menu opens
+    log("menu popups:", popups_of(xid), "window at", xgeom(xid))
+    mark("shot gtk-menu", 4)
+    mark("esc", 2)
+    mark("dialog-gtk", 4)  # Ctrl+O: the Open dialog
+    d = wait_window(lambda d: d.get_name() and "Open" in d.get_name() and d != w, 10)
+    if d:
+        did = xwin("Open", "--name")
+        px, py, pw, ph = xgeom(xid)
+        dx, dy, dw, dh = xgeom(did)
+        off = (dx + dw // 2 - (px + pw // 2), dy + dh // 2 - (py + ph // 2))
+        log(f"dialog: {d.get_name()!r} at {dx},{dy} {dw}x{dh}, window at {px},{py} {pw}x{ph}: "
+            f"centre offset {off} ({'centred' if abs(off[0]) < 30 and abs(off[1]) < 60 else 'NOT centred'})")
+    else:
+        log("dialog: none appeared")
+    mark("shot gtk-dialog", 4)
+    mark("esc", 2)
+    stop(p)
+
+
+def phase_qt():
+    p = start(["/usr/games/kcheckers"], QT_QPA_PLATFORM="xcb")
+    w = wait_window(lambda w: "checkers" in (app_id(w) + w.get_name()).lower(), 30)
+    if not w:
+        no_window("qt (xcb)", p); return
+    pump(2)
+    describe(w, "kcheckers (Qt xcb)")
+    xid = xwin("kcheckers")
+    mark("shot qt", 4)
+    mark("menu-qt", 3)  # Alt+G: the Game menu
+    log("menu popups:", popups_of(xid) if xid else "?", "window at", xgeom(xid) if xid else "?")
+    mark("shot qt-menu", 4)
+    mark("esc", 2)
+    stop(p)
+
+
+def phase_sdl():
+    p = start(["/usr/games/sopwith"])
+    w = wait_window(lambda w: "sopwith" in (app_id(w) + w.get_name()).lower(), 30)
+    if not w:
+        no_window("sdl", p); return
+    pump(2)
+    describe(w, "sopwith (SDL 2)")
+    xid = xwin("sopwith", "--name") or xwin("sopwith")
+    log("sopwith X geometry", xgeom(xid) if xid else "? (not an X11 window: SDL chose Wayland)")
+    mark("shot sdl", 4)
+    stop(p)
+
+
+def phase_tde():
+    for prog, match in (("/opt/trinity/bin/kcalc", "kcalc"), ("/opt/trinity/bin/kate", "kate")):
+        p = start([prog])
+        w = wait_window(lambda w: match in (app_id(w) + w.get_name()).lower(), 45)
+        if not w:
+            no_window(f"{match} (TQt)", p); continue
+        pump(3)
+        describe(w, f"{match} (TQt)")
+        mark(f"shot tde-{match}", 4)
+        stop(p)
+        pump(1)
+
+
+def gears(cmd, secs=12, **env):
+    p = start(cmd, vblank_mode="0", **env)
+    t_end = time.monotonic() + secs
+    while time.monotonic() < t_end:
+        pump(0.5)
+    stop(p)
+    out = p.stdout.read() if p.stdout else ""
+    rates = re.findall(r"=\s*([\d.]+)\s*FPS", out)
+    return rates[-1] if rates else "? (" + out[-300:].replace("\n", " | ") + ")"
+
+
+def phase_perf():
+    log("glxgears (X11, 300x300):", gears(["glxgears", "-geometry", "300x300"]), "FPS")
+    log("es2gears_x11 (X11):", gears(["stdbuf", "-oL", "es2gears_x11"]), "FPS")
+    log("es2gears_wayland (Wayland):", gears(["stdbuf", "-oL", "es2gears_wayland"]), "FPS")
+    for backend in ("wayland", "x11"):
+        try:
+            os.remove("/tmp/fps.log")
+        except OSError:
+            pass
+        run(["shell-fps-test", "12", "900", "600", "both"], timeout=40, env=dict(os.environ, GDK_BACKEND=backend))
+        lines = [l for l in open("/tmp/fps.log").read().splitlines() if "summary" in l] if os.path.exists("/tmp/fps.log") else []
+        log(f"shell-fps-test GTK on {backend}:", " / ".join(lines) or "?")
+
+
+def phase_firefox():
+    t0 = time.monotonic()
+    p = start(["firefox-esr", "--new-instance", "about:blank"], MOZ_ENABLE_WAYLAND="0", GDK_BACKEND="x11")
+    w = wait_window(lambda w: "firefox" in app_id(w).lower() or "Firefox" in (w.get_name() or ""), 90)
+    if not w:
+        no_window("firefox (X11)", p); return
+    log(f"firefox (X11): window after {time.monotonic() - t0:.1f} s")
+    pump(6)
+    describe(w, "firefox (X11)")
+    xid = xwin("firefox", "--class")
+    log("firefox is an X11 window:", "yes" if xid else "NO (Wayland)")
+    mark("shot firefox-x11", 4)
+    stop(p)
+
+
+PHASES = ["lazy", "clip", "xterm", "states", "gtk", "qt", "sdl", "tde", "perf", "firefox"]
+
+if __name__ == "__main__":
+    want = sys.argv[1:] or PHASES
+    write(OUT, f"== xwayland-test {' '.join(want)} at {uptime():.1f} s")
+    mark("start")
+    try:
+        for ph in want:
+            mark(f"phase {ph}")
+            try:
+                globals()["phase_" + ph]()
+            except Exception as e:  # keep going: one broken phase shouldn't hide the rest
+                import traceback
+                log(f"phase {ph}: ERROR {e!r}\n{traceback.format_exc()}")
+    finally:
+        for p in procs:
+            if p.poll() is None:
+                stop(p)
+        mark("done")

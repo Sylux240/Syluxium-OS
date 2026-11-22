@@ -32,6 +32,17 @@ bool usb_probe(usb::Device* d, const usb::Interface& intf, const char** driver_n
 // Probe again the USB interfaces whose Linux driver failed for want of
 // firmware before the root file system was mounted.
 void usb_retry_deferred();
+// Firmware and the disk root: with root= on the command line, firmware is
+// read from that disk, which is mounted after the drivers probe. A driver's
+// background job (b43, iwlwifi's request_firmware_nowait...) that asks for
+// firmware before then waits for it (up to 30 s); the boot thread itself
+// never waits (it is the one that mounts the root).
+void firmware_root_expected();
+void firmware_root_ready();
+// Every firmware file a Linux driver asked for (deduplicated, at most 128):
+// record i (0..), false past the end. For hardware.txt: which files a
+// driver wanted and didn't find (/sys/kernel/syluxium/firmware).
+bool firmware_record(unsigned i, const char** device, const char** file, bool* loaded);
 
 // socket(2) for an address family a Linux driver registered (AF_BLUETOOTH):
 // a socket, or nullptr with *error set (-EAFNOSUPPORT if none did).

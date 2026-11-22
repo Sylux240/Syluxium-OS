@@ -1,0 +1,102 @@
+#!/usr/bin/python3
+"""The icon of a Wayland program hosted in the Xfce session, as _NET_WM_ICON
+data (for syluxium-wayland-host, which sets it on the program's X window so
+the taskbar, Alt+Tab and Task Manager show it).
+    wayland-host-icon APP_ID [PID]
+Looks for the program's .desktop file (by app id, StartupWMClass or the
+process's executable) and takes its icon from the current icon theme.
+Prints width, height, ARGB pixels (32-bit, native order) for 16, 24, 32, 48
+and 64 pixels; nothing when no icon is found."""
+import array
+import configparser
+import glob
+import os
+import sys
+
+import gi
+
+gi.require_version("Gtk", "3.0")
+gi.require_version("GdkPixbuf", "2.0")
+from gi.repository import GdkPixbuf, Gtk  # noqa: E402
+
+app_id = sys.argv[1] if len(sys.argv) > 1 else ""
+pid = sys.argv[2] if len(sys.argv) > 2 else ""
+DIRS = [os.path.expanduser("~/.local/share/applications"), "/usr/local/share/applications",
+        "/usr/share/applications"]
+
+
+def entry(path):
+    cp = configparser.ConfigParser(interpolation=None, strict=False)
+    try:
+        cp.read(path, encoding="utf-8")
+        return cp["Desktop Entry"]
+    except (configparser.Error, KeyError, UnicodeDecodeError):
+        return None
+
+
+def find_desktop():
+    names = [app_id, app_id.lower(), app_id.split(".")[-1], app_id.split(".")[-1].lower()]
+    for d in DIRS:
+        for n in names:
+            if n and os.path.exists(f"{d}/{n}.desktop"):
+                e = entry(f"{d}/{n}.desktop")
+                if e is not None:
+                    return e
+    exe = ""
+    try:
+        exe = os.path.basename(os.readlink(f"/proc/{pid}/exe")) if pid else ""
+    except OSError:
+        pass
+    for d in DIRS:
+        for path in sorted(glob.glob(f"{d}/*.desktop")):
+            e = entry(path)
+            if e is None:
+                continue
+            if app_id and e.get("StartupWMClass", "").lower() == app_id.lower():
+                return e
+            cmd = e.get("Exec", "").split()
+            # (our launcher in front: syluxium-wayland-run PROGRAM ...)
+            while cmd and os.path.basename(cmd[0]) in ("env", "syluxium-wayland-run") or (cmd and "=" in cmd[0]):
+                cmd = cmd[1:]
+            if exe and cmd and os.path.basename(cmd[0]) == exe:
+                return e
+    return None
+
+
+def main():
+    e = find_desktop()
+    icon = e.get("Icon", "") if e is not None else ""
+    theme = Gtk.IconTheme.get_default()
+    candidates = [icon, app_id, app_id.lower(), app_id.split(".")[-1].lower(), "application-x-executable"]
+    out = array.array("I")
+    for size in (16, 24, 32, 48, 64):
+        pb = None
+        for name in candidates:
+            if not name:
+                continue
+            try:
+                if name.startswith("/"):
+                    pb = GdkPixbuf.Pixbuf.new_from_file_at_size(name, size, size)
+                elif theme.has_icon(name):
+                    pb = theme.load_icon(name, size, Gtk.IconLookupFlags.FORCE_SIZE)
+            except Exception:
+                pb = None
+            if pb:
+                break
+        if not pb:
+            continue
+        if not pb.get_has_alpha():
+            pb = pb.add_alpha(False, 0, 0, 0)
+        w, h, stride = pb.get_width(), pb.get_height(), pb.get_rowstride()
+        px = pb.get_pixels()
+        out.append(w)
+        out.append(h)
+        for y in range(h):
+            row = y * stride
+            for x in range(w):
+                r, g, b, a = px[row + 4 * x:row + 4 * x + 4]
+                out.append((a << 24) | (r << 16) | (g << 8) | b)
+    sys.stdout.buffer.write(out.tobytes())
+
+
+main()

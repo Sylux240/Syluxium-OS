@@ -5,5 +5,5 @@ Comment=Disks and USB drives of this computer
 Exec=syluxium-open computer
 Icon=computer
 Terminal=false
-# Shown only at the top level of the Start menu (tde-applications.menu).
-Categories=X-Syluxium-StartMenu;
+# The Xfce menu files it under System (FileManager).
+Categories=X-Syluxium-StartMenu;System;FileManager;

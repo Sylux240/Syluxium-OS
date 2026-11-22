@@ -1,0 +1,88 @@
+#!/bin/sh
+# Test aid: Firefox in the desktop session the way a user runs it -- start
+# the desktop, log in, open Firefox with a page that keeps its threads
+# busy, open more tabs, then close the window and time how long Firefox
+# takes to exit. Results go to the console ("FFTEST ..."); the kernel's
+# "futex: lost wakeup caught" messages in the boot log tell whether wakeups
+# went missing meanwhile.
+#   firefox-desktop-test [seconds to browse]
+say() { echo "FFTEST $*" > /dev/console; }
+browse=${1:-40}
+startdesktop > /dev/null 2>&1 &
+export DISPLAY=:0
+for i in $(seq 1 120); do
+    XAUTHORITY="$(ls /var/run/xauth/A:0-* 2>/dev/null | head -1)"
+    [ -n "$XAUTHORITY" ] && [ -S /tmp/.X11-unix/X0 ] && break
+    sleep 1
+done
+export XAUTHORITY
+sleep 10
+xdotool key Return    # log in (the login screen's user has no password)
+for i in $(seq 1 120); do pidof kicker > /dev/null && break; sleep 1; done
+sleep 15
+say "desktop up"
+session=
+for i in $(seq 1 60); do
+    for p in /proc/[0-9]*; do
+        grep -q "^Uid:[[:space:]]*1000[[:space:]]" "$p/status" 2>/dev/null && grep -qa "DISPLAY=" "$p/environ" 2>/dev/null \
+            && session=${p#/proc/} && break
+    done
+    [ -n "$session" ] && break; sleep 1
+done
+asuser() {
+    env -i XAUTHORITY=/home/syluxium/.Xauthority $(tr '\0' '\n' < /proc/"$session"/environ | grep -v '[[:space:]]') \
+        python3 -c "import os, sys; os.setgroups([27, 1000]); os.setgid(1000); os.setuid(1000); os.execvp(sys.argv[1], sys.argv[1:])" "$@"
+}
+win() { for i in $(seq 1 ${2:-60}); do w=$(xdotool search --name "$1" 2>/dev/null | head -1); [ -n "$w" ] && echo "$w" && return; sleep 1; done; }
+uptime_s() { cut -d' ' -f1 /proc/uptime; }
+
+# A page with timers, a canvas animation and a worker: plenty of threads talking.
+cat > /tmp/fftest.html <<'HTML'
+<html><head><title>Syluxium thread test</title></head><body style="font-family:sans-serif">
+<h1>Firefox on Syluxium</h1><p id="n">0</p><canvas id="c" width="400" height="200"></canvas>
+<script>
+let n = 0; setInterval(() => { document.getElementById("n").textContent = ++n; }, 50);
+const c = document.getElementById("c").getContext("2d");
+(function draw(t) { c.clearRect(0, 0, 400, 200); c.fillRect(200 + 150 * Math.sin(t / 300), 80, 40, 40); requestAnimationFrame(draw); })(0);
+const w = new Worker(URL.createObjectURL(new Blob(["setInterval(() => postMessage(Date.now()), 20)"])));
+w.onmessage = () => {};
+</script></body></html>
+HTML
+chmod 644 /tmp/fftest.html
+
+t0=$(uptime_s)
+asuser firefox-esr --no-remote file:///tmp/fftest.html > /tmp/fftest.log 2>&1 &
+w=$(win "Syluxium thread test" 180)
+t1=$(uptime_s)
+[ -n "$w" ] && say "window open after $(echo "$t1 - $t0" | bc) s" || say "window did NOT open"
+sleep "$browse"
+say "stage page"
+sleep 4
+for u in about:support about:memory; do
+    xdotool windowactivate --sync "$w" 2>/dev/null; xdotool key ctrl+t; sleep 2
+    xdotool type "$u"; xdotool key Return; sleep 10
+done
+say "stage tabs"
+sleep 4
+t0=$(uptime_s)
+xdotool windowactivate --sync "$w" 2>/dev/null; xdotool key ctrl+shift+w   # close the window: Firefox quits
+sleep 3
+xdotool key Return   # its "Quit Firefox or close current tab?" question: Quit
+gone=
+for i in $(seq 1 240); do
+    pidof firefox-esr > /dev/null || { gone=1; break; }
+    sleep 0.5
+done
+t1=$(uptime_s)
+if [ -n "$gone" ]; then
+    say "firefox exited $(echo "$t1 - $t0" | bc) s after closing its window"
+else
+    say "firefox still running 120 s after closing its window"
+    for pid in $(pidof firefox-esr); do
+        echo "pid $pid: $(cat /proc/$pid/syscall)"
+        for t in /proc/$pid/task/*; do echo "   t$(basename $t) $(cat $t/comm 2>/dev/null): $(cut -d' ' -f1-3 $t/syscall)"; done | head -30
+    done > /dev/console 2>&1
+fi
+say "stage closed"
+sleep 4
+say "TEST DONE"

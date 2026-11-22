@@ -1,3 +1,5 @@
 #!/bin/sh
-# The default desktop session (Debian's Xsession runs this): Trinity.
-exec /opt/trinity/bin/starttde "$@"
+# The default desktop session (Debian's Xsession runs this): the Syluxium
+# desktop, Xfce in the Dusk theme. "Syluxium Classic" (Trinity) is chosen
+# from the login screen's session menu.
+exec /usr/local/bin/syluxium-session "$@"

@@ -13,6 +13,9 @@
 #include <time/clock.hpp>
 #include <time/rtc.hpp>
 
+namespace vfs { struct File; }
+namespace events { long pidfd_file_pid(vfs::File* f); }
+
 namespace procfs {
 
 namespace {
@@ -544,6 +547,96 @@ private:
     IrqSpinlock m_lock;
 };
 
+// /proc/<pid>/fdinfo: one text file per open descriptor, as Linux writes
+// them (position, flags, mount, inode; "Pid:" for a pidfd, which polkit's
+// pkexec checks against its caller).
+class FdInfoDir : public vfs::Inode {
+public:
+    explicit FdInfoDir(int pid) : m_pid(pid) {
+        ino = vfs::next_ino();
+        mode = vfs::S_IFDIR | 0500;
+        nlink = 2;
+    }
+    isize read(u64, void*, usize) override { return -err::ISDIR; }
+
+    vfs::Inode* lookup(const char* name, usize len) override {
+        int fd;
+        if (!parse_number(name, len, &fd) || fd >= proc::MAX_FDS || !fd_open(fd))
+            return nullptr;
+        LockGuard guard(m_lock);
+        if (!m_files[fd]) {
+            auto* ctx = new Ctx{m_pid, fd};
+            m_files[fd] = new GeneratedFile(gen_info, ctx, 0400);
+        }
+        // Owned by the process's user, like this directory (kept current by
+        // /proc/<pid> on every lookup): a daemon that dropped root after
+        // starting (dbus-daemon reads its own pidfds' "Pid:" here) must be
+        // able to read them.
+        m_files[fd]->uid = uid;
+        m_files[fd]->gid = gid;
+        return m_files[fd];
+    }
+
+    long readdir(u64 index, vfs::DirEntry* out) override {
+        if (index < 2) {
+            fill_entry(out, ino, vfs::DT_DIR, index == 0 ? "." : "..");
+            return 1;
+        }
+        u64 seen = 2;
+        for (int fd = 0; fd < proc::MAX_FDS; fd++) {
+            if (!fd_open(fd))
+                continue;
+            if (seen++ == index) {
+                char name[16];
+                snprintf(name, sizeof(name), "%d", fd);
+                fill_entry(out, ino + 1 + static_cast<u64>(fd), vfs::DT_REG, name);
+                return 1;
+            }
+        }
+        return 0;
+    }
+
+private:
+    struct Ctx {
+        int pid, fd;
+    };
+
+    bool fd_open(int fd) {
+        LockGuard guard(proc::table_lock());
+        Process* p = proc::find(m_pid);
+        return p && p->fds[fd];
+    }
+
+    static bool gen_info(TextBuffer& out, const void* ctx) {
+        auto* c = static_cast<const Ctx*>(ctx);
+        u64 pos = 0, inode = 0;
+        u32 flags = 0;
+        long pidfd_pid = -1;
+        {
+            LockGuard guard(proc::table_lock());
+            Process* p = proc::find(c->pid);
+            if (!p || !p->fds[c->fd])
+                return false;
+            vfs::File* f = p->fds[c->fd];
+            pos = f->offset;
+            flags = f->flags;
+            if (p->cloexec[c->fd])
+                flags |= 02000000; // O_CLOEXEC
+            inode = f->inode ? f->inode->ino : 0;
+            pidfd_pid = events::pidfd_file_pid(f);
+        }
+        out.printf("pos:\t%llu\nflags:\t0%o\nmnt_id:\t0\nino:\t%llu\n", static_cast<unsigned long long>(pos),
+                   flags, static_cast<unsigned long long>(inode));
+        if (pidfd_pid > 0)
+            out.printf("Pid:\t%ld\nNSpid:\t%ld\n", pidfd_pid, pidfd_pid);
+        return true;
+    }
+
+    int m_pid;
+    vfs::Inode* m_files[proc::MAX_FDS] = {};
+    IrqSpinlock m_lock;
+};
+
 // /proc/<pid>/task: one directory per thread.
 class TaskDir : public vfs::Inode {
 public:
@@ -689,6 +782,7 @@ PidDir::PidDir(int p, int t) : pid(p), tid(t) {
     add("exe", new ExeLink(this));
     add("cwd", new GeneratedLink(link_cwd, this));
     add("fd", new FdDir(pid));
+    add("fdinfo", new FdInfoDir(pid));
     add("ns", new NsDir(pid));
     add("mountinfo", new GeneratedFile(gen_mountinfo, this));
     add("cgroup", new GeneratedFile(gen_cgroup, this));

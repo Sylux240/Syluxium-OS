@@ -260,6 +260,9 @@ extern "C" void lkpi_sysfs_char_device(unsigned int major, unsigned int minor, c
                                        const char* pci_bus_id) {
     sysfs::add_char_device(major, minor, devname, pci_bus_id, true);
 }
+extern "C" void lkpi_sysfs_char_device_remove(unsigned int major, unsigned int minor) {
+    sysfs::remove_char_device(major, minor);
+}
 extern "C" void lkpi_sysfs_char_device_platform(unsigned int major, unsigned int minor, const char* devname,
                                                 const char* platform_name) {
     sysfs::add_char_device(major, minor, devname, platform_name, false);

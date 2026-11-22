@@ -11,21 +11,137 @@ mkdir -p "$RT" && chown "$U" "$RT" && chmod 700 "$RT"
 pgrep -x seatd > /dev/null || { seatd -g video > /var/log/seatd.log 2>&1 & sleep 1; }
 chmod 666 /run/seatd.sock 2>/dev/null
 LOG=/var/log/syluxium-shell.log
+syluxium-diag mark "session: Wayland shell (Wayfire) starting for $U"
+: > $LOG
 # Wayfire runs from the user's own copy of the configuration (Personalize
 # switches blur there; Wayfire reloads it by itself). Blur needs a GPU
 # driver: on the firmware framebuffer (software rendering) it misplaces the
-# panel, and partial redraws leave stale areas, so everything is redrawn.
+# panel.
 HOME_=$(getent passwd "$U" | cut -d: -f6)
 mkdir -p "$HOME_/.config/syluxium-shell"
 CONF=$HOME_/.config/syluxium-shell/wayfire.ini
 SET=$HOME_/.config/syluxium-shell/settings.ini
 cp /etc/syluxium-shell/wayfire.ini "$CONF"
-if grep -qs "simple-framebuffer" /sys/class/drm/card0/device/uevent; then
-    SYLUXIUM_WAYFIRE_ARGS="--damage-rerender $SYLUXIUM_WAYFIRE_ARGS"
+# Boot options for testing: shelldebug (Wayfire's debug log), shellbench
+# (frame-rate overlay), shellrerender (redraw everything every frame),
+# shellgpufail (the GPU start fails: tests the fallback to software).
+grep -qw shelldebug /proc/cmdline && SYLUXIUM_WAYFIRE_ARGS="-dwlroots $SYLUXIUM_WAYFIRE_ARGS"
+grep -qw shellrerender /proc/cmdline && SYLUXIUM_WAYFIRE_ARGS="--damage-rerender $SYLUXIUM_WAYFIRE_ARGS"
+for v in $(tr ' ' '\n' < /proc/cmdline | sed -n 's/^shellenv\.//p'); do SYLUXIUM_SHELL_ENV="$SYLUXIUM_SHELL_ENV $v"; done
+grep -qw shellbench /proc/cmdline && sed -i 's/^plugins = autostart /plugins = autostart bench /' "$CONF"
+# shellfps: a window measuring the frame rate (shell-fps-test) once the
+# desktop is up: 80 % of the screen, small updates then full redraws; the
+# results go to the log folder's shell.txt. shellfps=small|full: 900x600, one kind.
+fps=$(tr ' ' '\n' < /proc/cmdline | sed -n 's/^shellfps=//p' | head -1)
+if [ -n "$fps" ]; then
+    printf "fpstest = sh -c 'sleep 20; shell-fps-test 30 900 600 %s'\n" "$fps" >> "$CONF"
+elif grep -qw shellfps /proc/cmdline; then
+    printf "fpstest = sh -c 'sleep 20; shell-fps-test 24 0 0 both'\n" >> "$CONF"
+else
+    # Once per machine (by its DMI name, remembered in /var/lib/syluxium):
+    # an 8-second measurement shortly after the desktop is up, so every
+    # hardware round's logs carry the frame rate. Not in QEMU (test runs)
+    # or when a test scene runs.
+    # (the firmware's name for the computer, as the kernel wrote it into this boot's log folder)
+    machine=$(sed -n 's/^Computer: //p' /boot/logs/machine.txt 2>/dev/null | tr -d '\r' | head -1)
+    mkdir -p /var/lib/syluxium
+    if [ -n "$machine" ] && [ "${machine#QEMU}" = "$machine" ] && \
+       ! grep -qxF "$machine" /var/lib/syluxium/fps-measured 2>/dev/null && ! grep -qw "shellscene=[^ ]*" /proc/cmdline; then
+        echo "$machine" >> /var/lib/syluxium/fps-measured
+        FPS_NOTE="first start on \"$machine\": measuring the frame rate once (FPS lines below)"
+        printf "fpstest = sh -c 'sleep 12; shell-fps-test 8 0 0 both'\n" >> "$CONF"
+    fi
+fi
+# shellscene=<name>: a test scene (scene-test) once the desktop is up.
+scene=$(tr ' ' '\n' < /proc/cmdline | sed -n 's/^shellscene=//p' | head -1)
+if [ -n "$scene" ]; then
+    printf "scenetest = sh -c 'sleep 15; scene-test %s'\n" "$scene" >> "$CONF"
+    # Test steps the scene announces (/run/syluxium-diag/console.txt) go to
+    # the serial console, where tools/smoke-test.sh waits for them.
+    : > /run/syluxium-diag/console.txt && chmod 666 /run/syluxium-diag/console.txt
+    pgrep -f "tail -F /run/syluxium-diag/console.txt" > /dev/null || \
+        { tail -n 0 -F /run/syluxium-diag/console.txt > /dev/console 2>/dev/null & }
+fi
+# Software or GPU rendering: a GPU driver with 3D gives a render node
+# (/dev/dri/renderD*); without one (the firmware framebuffer, simpledrm, or
+# a display-only driver) Mesa draws with llvmpipe.
+software_setup() {
+    SOFTWARE=1
+    # Each frame must be finished before the display copies it
+    # (libsyluxium-glsync.so, see userspace/shell/glsync.c), or half-drawn
+    # parts stay on the screen. (shellnosync: without, for tests)
+    PRELOAD=
+    grep -qw shellnosync /proc/cmdline || PRELOAD="env LD_PRELOAD=/usr/lib/syluxium/libsyluxium-glsync.so"
+    sed -i 's/^\(plugins = .*\) blur /\1 /' "$CONF"
+}
+SOFTWARE=0 PRELOAD= FALLBACK_ENV=
+if grep -qw shellgpufail /proc/cmdline; then
+    # Test: the GPU start fails (an unknown wlroots backend), the fallback takes over.
+    FALLBACK_ENV="WLR_BACKENDS=none-such"
+elif ! ls /dev/dri/renderD* > /dev/null 2>&1; then
+    software_setup
 elif ! grep -qs "^blur *= *false" "$SET"; then
     sed -i 's/^plugins = autostart /plugins = autostart blur /' "$CONF"
 fi
+# Personalize's "Shadows under windows" switch.
+grep -qs "^shadows *= *false" "$SET" && sed -i 's/^\(plugins = .*\) winshadows/\1/' "$CONF"
+# The keyboard layout chosen when Syluxium was installed (/etc/default/keyboard),
+# for Wayland and X11 programs alike (Xwayland takes Wayfire's keymap).
+if [ -f /etc/default/keyboard ]; then
+    kb() { sed -n "s/^$1=\"\{0,1\}\([^\"]*\)\"\{0,1\}$/\1/p" /etc/default/keyboard | head -1; }
+    { echo; echo "[input]"
+      [ -n "$(kb XKBLAYOUT)" ] && echo "xkb_layout = $(kb XKBLAYOUT)"
+      [ -n "$(kb XKBVARIANT)" ] && echo "xkb_variant = $(kb XKBVARIANT)"
+      [ -n "$(kb XKBMODEL)" ] && echo "xkb_model = $(kb XKBMODEL)"
+      [ -n "$(kb XKBOPTIONS)" ] && echo "xkb_options = $(kb XKBOPTIONS)"; } >> "$CONF"
+fi
+# For the stick's log folder (syluxium-diag copies /run/syluxium-diag):
+# display driver, screen mode, software or GPU rendering. The renderer
+# Wayfire really uses ("GL renderer: ...") is in syluxium-shell.log.
+{
+    echo "== Syluxium shell (Wayland), started $(cut -d' ' -f1 /proc/uptime) s after boot"
+    # (the first card: a GPU driver that took over from simpledrm may be card1)
+    card=
+    for c in /sys/class/drm/card[0-9]*; do
+        case "$c" in *-*) continue ;; esac
+        card=$c; break
+    done
+    echo "display driver: $(sed -n 's/^DRIVER=//p' "$card/device/uevent" 2>/dev/null) ($(ls /dev/dri 2>/dev/null | tr '\n' ' '))"
+    for s in /sys/class/drm/card*-*/status; do
+        [ "$(cat "$s" 2>/dev/null)" = connected ] || continue
+        d=$(dirname "$s"); echo "output $(basename "$d"): $(head -1 "$d/modes" 2>/dev/null) (first mode)"
+    done
+    echo "screen (framebuffer): $(cat /sys/class/graphics/fb0/virtual_size 2>/dev/null)"
+    [ "$SOFTWARE" = 1 ] && echo "rendering: software (llvmpipe)${PRELOAD:+, frames finished before the copy (glsync)}" \
+        || echo "rendering: GPU driver"
+    echo "wayfire: $SYLUXIUM_WAYFIRE_ARGS $(grep '^plugins' "$CONF")"
+    echo "X11 programs: Xwayland, started by the first one ($(grep '^xwayland' "$CONF"); milestones.txt, xwayland.log)"
+    [ -n "$FPS_NOTE" ] && echo "$FPS_NOTE"
+} > /run/syluxium-diag/shell.txt 2>/dev/null
+chmod 666 /run/syluxium-diag/shell.txt 2>/dev/null
 chown -R "$U" "$HOME_/.config/syluxium-shell"
-exec su "$U" -s /bin/bash -c "export XDG_RUNTIME_DIR=$RT XDG_SESSION_TYPE=wayland LIBSEAT_BACKEND=seatd \
-    WLR_RENDERER_ALLOW_SOFTWARE=1 GDK_BACKEND=wayland,x11 MOZ_ENABLE_WAYLAND=1 $SYLUXIUM_SHELL_ENV; \
-    cd ~; exec dbus-run-session wayfire $SYLUXIUM_WAYFIRE_ARGS -c $CONF" > $LOG 2>&1
+# Logging out ends Wayfire: a new session starts (the shell has no login screen).
+# If Wayfire fails right away on the GPU driver (its EGL/GLES setup), the
+# next start draws in software instead of leaving a black screen.
+# (/usr/games on the PATH as in the Xfce desktop: Debian's games live there.)
+while :; do
+started=$(cut -d. -f1 /proc/uptime)
+su "$U" -s /bin/bash -c "export XDG_RUNTIME_DIR=$RT XDG_SESSION_TYPE=wayland LIBSEAT_BACKEND=seatd \
+    WLR_RENDERER_ALLOW_SOFTWARE=1 GDK_BACKEND=wayland,x11 MOZ_ENABLE_WAYLAND=1 \
+    WLR_XWAYLAND=/usr/local/lib/syluxium/xwayland SYLUXIUM_SHELL_SOFTWARE=$SOFTWARE \
+    XDG_CONFIG_DIRS=/etc/xdg/syluxium:/etc/xdg XDG_CURRENT_DESKTOP=XFCE XDG_MENU_PREFIX=xfce- $FALLBACK_ENV $SYLUXIUM_SHELL_ENV \
+    PATH=$PATH:/usr/local/games:/usr/games; \
+    cd ~; exec dbus-run-session $PRELOAD wayfire $SYLUXIUM_WAYFIRE_ARGS -c $CONF" >> $LOG 2>&1
+    status=$?
+    ran=$(( $(cut -d. -f1 /proc/uptime) - started ))
+    if [ "$SOFTWARE" = 0 ] && [ "$status" != 0 ] && [ "$ran" -lt 20 ]; then
+        syluxium-diag mark "session: Wayland shell failed on the GPU driver after $ran s (exit $status); starting it in software"
+        echo "GPU start failed after $ran s (exit $status): software rendering from now on" >> /run/syluxium-diag/shell.txt
+        software_setup
+        FALLBACK_ENV="LIBGL_ALWAYS_SOFTWARE=1"
+        chown "$U" "$CONF"
+    else
+        syluxium-diag mark "session: Wayland shell ended (log out, exit $status after $ran s); starting a new one"
+    fi
+    sleep 1
+done

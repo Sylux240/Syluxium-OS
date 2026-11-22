@@ -931,6 +931,7 @@ void lkpi_bus_device_added(struct device* dev);
 void lkpi_bus_device_removed(struct device* dev);
 void lkpi_sysfs_char_device(unsigned int major, unsigned int minor, const char *devname, const char *pci_bus_id);
 void lkpi_sysfs_char_device_platform(unsigned int major, unsigned int minor, const char *devname, const char *platform_name);
+void lkpi_sysfs_char_device_remove(unsigned int major, unsigned int minor);
 int device_add(struct device* dev)
 {
 	if (dev->init_name) {
@@ -982,6 +983,7 @@ void device_del(struct device* dev)
 		snprintf(path, sizeof(path), "/dev/%s", name ? name : dev_name(dev));
 		kfree(name);
 		lkpi_chrdev_node_remove(path);
+		lkpi_sysfs_char_device_remove(MAJOR(dev->devt), MINOR(dev->devt));
 		if (!strncmp(path, "/dev/dri/card", 13))
 			lkpi_drm_card_added(-1);
 	}
@@ -1452,13 +1454,20 @@ unsigned long clear_user(void __user *to, unsigned long n)
 	}
 	return 0;
 }
+/* The caching the driver asks for: write-combining for framebuffers
+ * (simpledrm's firmware framebuffer was mapped uncached: whole-screen
+ * copies ran at ~80 MB/s), write-back for MEMREMAP_WB. */
 void *devm_memremap(struct device *dev, resource_size_t offset, size_t size, unsigned long flags)
 {
+	if (flags & MEMREMAP_WC)
+		return (void *)ioremap_wc(offset, size);
+	if (flags & MEMREMAP_WB)
+		return (void *)ioremap_cache(offset, size);
 	return (void *)ioremap(offset, size);
 }
 void __iomem *devm_ioremap_wc(struct device *dev, resource_size_t offset, resource_size_t size)
 {
-	return ioremap(offset, size);
+	return ioremap_wc(offset, size);
 }
 
 void *memdup_array_user(const void __user *src, size_t n, size_t size)

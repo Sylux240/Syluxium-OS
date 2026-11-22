@@ -1,0 +1,47 @@
+#!/bin/sh
+# Bluetooth audio: runs bluealsa (A2DP and hands-free profiles for BlueZ, the
+# "bluealsa" ALSA device) and keeps the default sound output on connected
+# Bluetooth headphones or speakers: /etc/asound.conf loads
+# /run/syluxium/bluetooth-audio.conf, written while one is connected and
+# removed when it goes away, so the sound card is the default otherwise.
+# "off" in /etc/syluxium/bluetooth-audio keeps the sound card the default.
+#   syluxium-bluetooth-audio        (started by startdesktop)
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+CONF=/run/syluxium/bluetooth-audio.conf
+mkdir -p /run/syluxium
+rm -f "$CONF"
+
+bluealsa -S -p a2dp-source -p a2dp-sink -p hfp-ag -p hsp-ag > /var/log/bluealsa.log 2>&1 &
+
+current=""
+while sleep 5; do
+    target=""
+    if [ "$(cat /etc/syluxium/bluetooth-audio 2>/dev/null)" != off ]; then
+        # A playback PCM of a connected device: .../dev_XX_XX_XX_XX_XX_XX/a2dpsrc/sink
+        target=$(bluealsa-cli list-pcms 2>/dev/null | grep -m1 '/a2dpsrc/sink$' |
+                 sed -n 's|.*/dev_\([0-9A-F_]*\)/.*|\1|p' | tr _ :)
+    fi
+    [ "$target" = "$current" ] && continue
+    if [ -n "$target" ]; then
+        cat > "$CONF.new" <<EOF
+pcm.!default {
+	type plug
+	slave.pcm {
+		type bluealsa
+		device "$target"
+		profile "a2dp"
+	}
+}
+ctl.!default {
+	type bluealsa
+	device "$target"
+}
+EOF
+        mv "$CONF.new" "$CONF"
+        echo "default output: Bluetooth $target"
+    else
+        rm -f "$CONF"
+        echo "default output: sound card"
+    fi
+    current=$target
+done

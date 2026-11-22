@@ -1,6 +1,27 @@
 # Syluxium's default programs for file types (for freedesktop.org programs;
 # the desktop's file manager goes by each program's InitialPreference).
+# Folders open in Files (Thunar), web pages in Firefox, text in the Code
+# Editor (Mousepad), documents in WordPad.
 [Default Applications]
 application/vnd.debian.binary-package=syluxium-debinstaller.desktop
 application/x-debian-package=syluxium-debinstaller.desktop
 application/x-deb=syluxium-debinstaller.desktop
+inode/directory=thunar.desktop
+x-scheme-handler/file=thunar.desktop
+x-scheme-handler/trash=thunar.desktop
+text/html=firefox-esr.desktop
+x-scheme-handler/http=firefox-esr.desktop
+x-scheme-handler/https=firefox-esr.desktop
+text/plain=org.xfce.mousepad.desktop
+text/x-csrc=org.xfce.mousepad.desktop
+text/x-c++src=org.xfce.mousepad.desktop
+text/x-python=org.xfce.mousepad.desktop
+text/x-python3=org.xfce.mousepad.desktop
+text/x-shellscript=org.xfce.mousepad.desktop
+application/x-shellscript=org.xfce.mousepad.desktop
+text/markdown=org.xfce.mousepad.desktop
+application/rtf=syluxium-wordpad.desktop
+text/rtf=syluxium-wordpad.desktop
+application/msword=syluxium-wordpad.desktop
+application/vnd.openxmlformats-officedocument.wordprocessingml.document=syluxium-wordpad.desktop
+application/vnd.oasis.opendocument.text=syluxium-wordpad.desktop

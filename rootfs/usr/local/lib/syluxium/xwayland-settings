@@ -1,0 +1,56 @@
+#!/bin/sh
+# X11 programs in the Syluxium shell get the settings xfsettingsd gives them
+# in the Xfce desktop (where it is the XSETTINGS manager and writes the X
+# resources); under Wayland it only serves Wayland programs. Started by
+# /usr/local/lib/syluxium/xwayland once Xwayland answers on display $1.
+#   XSETTINGS   xsettingsd, from xfconf's "xsettings" channel (GTK theme,
+#               icons, fonts, font rendering, cursor size, scaling); rewritten
+#               and reloaded when a setting changes (Personalize's accent)
+#   resources   Xft.dpi/antialias/hinting/rgba, Xcursor.theme/size (xrdb):
+#               Xlib programs (xterm, Trinity's TQt, SDL) size their fonts
+#               and cursors from these
+export DISPLAY=$1
+CONF=${XDG_RUNTIME_DIR:-/tmp}/xsettingsd-${DISPLAY#:}.conf
+
+q() { xfconf-query -c xsettings -p "$1" 2>/dev/null; }
+
+write_conf() {
+    xfconf-query -c xsettings -lv 2>/dev/null | awk '
+        { name = substr($1, 2); $1 = ""; v = substr($0, 2) }
+        name == "" { next }
+        name == "Xft/DPI" { if (v + 0 > 0) dpi = v; next }
+        v ~ /^-?[0-9]+$/ { print name, v; next }
+        v == "true"  { print name, 1; next }
+        v == "false" { print name, 0; next }
+        { gsub(/\\/, "\\\\", v); gsub(/"/, "\\\"", v); print name " \"" v "\"" }
+        END { print "Xft/DPI", (dpi ? dpi : 96) * 1024 }' > "$CONF.new" && mv "$CONF.new" "$CONF"
+}
+
+resources() {
+    dpi=$(q /Xft/DPI); [ "${dpi:-0}" -gt 0 ] 2>/dev/null || dpi=96
+    aa=$(q /Xft/Antialias); hint=$(q /Xft/Hinting)
+    cursor=$(q /Gtk/CursorThemeName); size=$(q /Gtk/CursorThemeSize)
+    xrdb -nocpp -merge <<EOF
+Xft.dpi: $dpi
+Xft.antialias: $([ "$aa" = 0 ] && echo 0 || echo 1)
+Xft.hinting: $([ "$hint" = 0 ] && echo 0 || echo 1)
+Xft.hintstyle: $(q /Xft/HintStyle || echo hintslight)
+Xft.rgba: $(q /Xft/RGBA || echo rgb)
+Xcursor.theme: ${cursor:-${XCURSOR_THEME:-default}}
+Xcursor.size: ${size:-${XCURSOR_SIZE:-24}}
+EOF
+}
+
+write_conf
+resources
+echo "settings for X11 programs: $(wc -l < "$CONF") XSETTINGS, resources: $(xrdb -query | tr '\n' ' ')"
+xsettingsd -c "$CONF" 2>&1 &
+xsd=$!
+# Follow changes (xfconf-query -m prints a line per change); ends with xsettingsd.
+xfconf-query -c xsettings -m 2>/dev/null | while read -r _; do
+    kill -0 $xsd 2>/dev/null || break
+    write_conf && kill -HUP $xsd
+    resources
+done &
+wait $xsd
+pkill -P $$ -x xfconf-query 2>/dev/null

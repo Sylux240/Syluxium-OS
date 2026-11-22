@@ -24,7 +24,7 @@ LKPI_EXTERN_C_BEGIN
 
 struct pci_driver;
 
-struct pci_bus { unsigned char number; struct pci_bus *parent; struct pci_dev *self; unsigned char max_bus_speed, cur_bus_speed; };
+struct pci_bus { unsigned char number; struct pci_bus *parent; struct pci_dev *self; unsigned char max_bus_speed, cur_bus_speed; struct resource busn_res; /* busn_res appended */ };
 
 struct pci_dev {
     struct device dev;
@@ -54,6 +54,21 @@ struct pci_dev {
     int cfg_size;                 /* appended: 256, or 4096 for PCI Express */
     unsigned int pme_poll:1;      /* appended */
     unsigned int state_saved:1;   /* appended */
+    struct pci_bus* subordinate;  /* appended: the bus behind a bridge (none known: NULL) */
+    unsigned int error_state;     /* appended: pci_channel_io_normal (1) */
+    u64 dma_mask;                 /* appended: as set by dma_set_mask (for messages) */
+    unsigned int is_virtfn:1;     /* appended: an SR-IOV virtual function (never: no SR-IOV) */
+    unsigned int is_physfn:1;     /* appended */
+    unsigned short dev_flags;     /* appended: PCI_DEV_FLAGS_* quirks (drivers set them) */
+};
+enum pci_dev_flags {
+    PCI_DEV_FLAGS_MSI_INTX_DISABLE_BUG = 1 << 0,
+    PCI_DEV_FLAGS_NO_D3 = 1 << 1,
+    PCI_DEV_FLAGS_ASSIGNED = 1 << 2,
+    PCI_DEV_FLAGS_NO_BUS_RESET = 1 << 6,
+    PCI_DEV_FLAGS_NO_PM_RESET = 1 << 7,
+    PCI_DEV_FLAGS_NO_FLR_RESET = 1 << 10,
+    PCI_DEV_FLAGS_NO_RELAXED_ORDERING = 1 << 11,
 };
 
 struct pci_driver {
@@ -66,6 +81,8 @@ struct pci_driver {
     void* lkpi; /* Syluxium registration */
     const struct pci_error_handlers* err_handler; /* appended */
     const struct attribute_group** dev_groups;
+    int (*sriov_configure)(struct pci_dev* dev, int num_vfs); /* appended: never called (no SR-IOV) */
+    bool driver_managed_dma;                                 /* appended */
 };
 
 #define to_pci_dev(d) container_of(d, struct pci_dev, dev)
@@ -146,7 +163,7 @@ void pci_unmap_rom(struct pci_dev* pdev, void __iomem* rom);
 #define pcie_aspm_support_enabled() false
 #define pci_enable_atomic_ops_to_root(d, mask) (-EINVAL)
 #define pcie_capability_read_dword(d, pos, v) (*(v) = 0, 0)
-#define pci_find_next_capability(d, pos, cap) 0
+int pci_find_next_capability(struct pci_dev* dev, u8 pos, int cap);
 #define pci_bus_max_busnr(bus) 0
 enum pci_bus_speed { PCIE_SPEED_2_5GT = 0x14, PCIE_SPEED_5_0GT = 0x15, PCIE_SPEED_8_0GT = 0x16, PCIE_SPEED_16_0GT = 0x17,
                      PCIE_SPEED_32_0GT = 0x18, PCIE_SPEED_64_0GT = 0x19, PCI_SPEED_UNKNOWN = 0xff };

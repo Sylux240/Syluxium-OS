@@ -1,0 +1,26 @@
+#!/usr/bin/python3
+"""The Wayland shell's screens by name, one per line ("Unknown-1",
+"HDMI-A-1": what xfdesktop calls them), from the compositor (Xfce's window
+library: wl_output names), so nothing has to ask Xwayland (xrandr) and start
+it. The DRM connectors in /sys don't always exist (the firmware framebuffer)."""
+import time
+
+import gi
+
+gi.require_version("Gdk", "3.0")
+gi.require_version("Libxfce4windowing", "0.0")
+from gi.repository import GLib  # noqa: E402
+from gi.repository import Libxfce4windowing as Xfw  # noqa: E402
+
+screen = Xfw.Screen.get_default()
+ctx = GLib.MainContext.default()
+end = time.monotonic() + 2
+names = []
+while time.monotonic() < end:
+    while ctx.pending():
+        ctx.iteration(False)
+    names = [m.get_connector() for m in (screen.get_monitors() or []) if m.get_connector()]
+    if names:
+        break
+    time.sleep(0.05)
+print("\n".join(names))

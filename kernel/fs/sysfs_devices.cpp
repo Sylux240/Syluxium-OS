@@ -9,7 +9,9 @@
 #include <fs/procfs.hpp>
 #include <fs/vfs.hpp>
 #include <lib/format.hpp>
+#include <lib/spinlock.hpp>
 #include <lib/string.hpp>
+#include <linuxkpi/linuxkpi.hpp>
 
 namespace sysfs {
 
@@ -76,6 +78,8 @@ bool gen_uevent(TextBuffer& o, const void* c) {
         o.printf("DRIVER=%s\n", d->driver_name);
     o.printf("PCI_CLASS=%X\nPCI_ID=%04X:%04X\nPCI_SUBSYS_ID=%04X:%04X\nPCI_SLOT_NAME=%s\n", d->class_code, d->vendor,
              d->device, d->subsystem_vendor, d->subsystem_device, d->bus_id);
+    o.printf("MODALIAS=pci:v%08Xd%08Xsv%08Xsd%08Xbc%02Xsc%02Xi%02X\n", d->vendor, d->device, d->subsystem_vendor,
+             d->subsystem_device, (d->class_code >> 16) & 0xFF, (d->class_code >> 8) & 0xFF, d->class_code & 0xFF);
     return true;
 }
 
@@ -103,6 +107,17 @@ bool gen_device_list(TextBuffer& o, const void*) {
     return true;
 }
 
+// Firmware files Linux drivers asked for: "loaded|missing  <device>  <file>".
+// Drivers often try several versions of a file and take the first one
+// found, so a missing file next to a loaded one of the same family is fine.
+bool gen_firmware(TextBuffer& o, const void*) {
+    const char *device, *file;
+    bool loaded;
+    for (unsigned i = 0; linuxkpi::firmware_record(i, &device, &file, &loaded); i++)
+        o.printf("%s\t%s\t%s\n", loaded ? "loaded" : "missing", device, file);
+    return true;
+}
+
 void add(const char* dir, const char* name, vfs::Inode* node) {
     char path[160];
     snprintf(path, sizeof(path), "%s/%s", dir, name);
@@ -116,6 +131,7 @@ void populate_devices() {
     vfs::mkdir_p("/sys/bus/pci/drivers", 0755);
     vfs::mkdir_p("/sys/kernel/syluxium", 0755);
     vfs::add_node("/sys/kernel/syluxium/devices", new GeneratedFile(gen_device_list, nullptr));
+    vfs::add_node("/sys/kernel/syluxium/firmware", new GeneratedFile(gen_firmware, nullptr));
 
     dev::for_each([](dev::Device* d, void*) {
         if (d->bus != dev::Bus::Pci)
@@ -152,7 +168,35 @@ namespace {
 struct CharDev {
     char parent[96]; // /sys path of the parent device
     char uevent[96];
+    char base[32];   // card0, renderD128
+    u32 major, minor;
+    bool live;
 };
+// Every node ever published (a GPU driver taking over from simpledrm reuses
+// its minor: the old entries must go, or /sys/dev/char/226:0/device still
+// leads to the firmware framebuffer and Mesa can't tell which GPU card0 is).
+constexpr int MAX_CHARDEVS = 64;
+CharDev* g_chardevs[MAX_CHARDEVS];
+Spinlock g_chardev_lock;
+
+// Remove a sysfs directory and the entries inside it (files, links, one
+// level of subdirectories), as a device's removal does on Linux.
+void remove_tree(const char* path) {
+    vfs::Inode* dir;
+    if (vfs::resolve(path, nullptr, false, &dir) < 0 || !vfs::is_dir(dir->mode))
+        return;
+    static const char* const entries[] = {"device", "uevent", "subsystem", "dev"};
+    for (const char* name : entries) {
+        char p[192];
+        snprintf(p, sizeof(p), "%s/%s", path, name);
+        vfs::remove_node(p);
+    }
+    vfs::Inode* parent;
+    const char* name;
+    usize len;
+    if (vfs::resolve_parent(path, nullptr, &parent, &name, &len) == 0)
+        parent->unlink(name, len, true);
+}
 bool link_chardev_device(char* out, usize size, const void* c) {
     snprintf(out, size, "%s", static_cast<const CharDev*>(c)->parent);
     return true;
@@ -174,7 +218,31 @@ void add_char_device(u32 major, u32 minor, const char* devname, const char* pci_
     add_char_device(major, minor, devname, pci_bus_id, true);
 }
 
+void remove_char_device(u32 major, u32 minor) {
+    CharDev* cd = nullptr;
+    {
+        LockGuard guard(g_chardev_lock);
+        for (CharDev* c : g_chardevs)
+            if (c && c->live && c->major == major && c->minor == minor) {
+                c->live = false;
+                cd = c;
+                break;
+            }
+    }
+    if (!cd)
+        return;
+    char path[192];
+    snprintf(path, sizeof(path), "/sys/dev/char/%u:%u", major, minor);
+    remove_tree(path);
+    snprintf(path, sizeof(path), "/sys/class/drm/%s", cd->base);
+    vfs::remove_node(path);
+    snprintf(path, sizeof(path), "%s/drm/%s", cd->parent, cd->base);
+    remove_tree(path);
+    // The CharDev stays allocated: removed nodes may still be open.
+}
+
 void add_char_device(u32 major, u32 minor, const char* devname, const char* parent_name, bool pci) {
+    remove_char_device(major, minor); // a stale node with this number (simpledrm's card0)
     char dir[64];
     snprintf(dir, sizeof(dir), "/sys/dev/char/%u:%u", major, minor);
     vfs::mkdir_p(dir, 0755);
@@ -183,6 +251,19 @@ void add_char_device(u32 major, u32 minor, const char* devname, const char* pare
         if (*p == '/')
             base = p + 1;
     auto* cd = new CharDev;
+    snprintf(cd->base, sizeof(cd->base), "%s", base);
+    cd->major = major;
+    cd->minor = minor;
+    cd->live = true;
+    {
+        LockGuard guard(g_chardev_lock);
+        int slot = -1;
+        for (int i = 0; i < MAX_CHARDEVS && slot < 0; i++)
+            if (!g_chardevs[i] || !g_chardevs[i]->live)
+                slot = i;
+        if (slot >= 0)
+            g_chardevs[slot] = cd; // a dead record is leaked on purpose (open nodes)
+    }
     if (pci) {
         snprintf(cd->parent, sizeof(cd->parent), "/sys/bus/pci/devices/%s", parent_name);
     } else {

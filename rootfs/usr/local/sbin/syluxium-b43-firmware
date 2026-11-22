@@ -30,9 +30,13 @@ have_card() {
 }
 have_firmware() { ls "$FW_DIR"/b43/ucode*.fw >/dev/null 2>&1; }
 
+# say --error|--msgbox|--sorry TEXT: a GTK (yad) message, or on the console.
 say() {
-    if [ -n "$DISPLAY" ] && command -v kdialog >/dev/null; then
-        kdialog --title "$TITLE" "$1" "$2"
+    if [ -n "$DISPLAY" ] && command -v yad >/dev/null; then
+        local image=dialog-information
+        case "$1" in --error) image=dialog-error ;; --sorry) image=dialog-warning ;; esac
+        yad --title "$TITLE" --window-icon network-wireless --center --borders 12 --image "$image" \
+            --text "$2" --button "OK:0" 2>/dev/null
     else
         echo "$2" >&2
     fi
@@ -47,10 +51,11 @@ if have_firmware; then
     exit 0
 fi
 if [ "$(id -u)" != 0 ]; then
-    exec tdesudo -c "$0 $*"
+    exec syluxium-sudo --why "Installing the Wi-Fi firmware changes the computer for everyone." "$0" "$@"
 fi
 if [ "$1" != "--yes" ] && [ -n "$DISPLAY" ]; then
-    kdialog --title "$TITLE" --yesno "This computer's Broadcom wireless card needs firmware that Broadcom does not allow to be included.
+    yad --title "$TITLE" --window-icon network-wireless --center --borders 12 --image dialog-question \
+        --button "No:1" --button "Yes:0" --text "This computer's Broadcom wireless card needs firmware that Broadcom does not allow to be included.
 
 Download Broadcom's driver (about 6 MB) and extract the firmware from it now?
 An internet connection is needed (cable, USB Wi-Fi or a phone shared over USB)." || exit 0

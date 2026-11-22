@@ -1,0 +1,39 @@
+#!/bin/sh
+# Syluxium shell (Wayland), at every start as the user: the same desktop as
+# in the Xfce session. Desktop icons and the first wallpaper as at the first
+# Xfce login (syluxium-xfce-setup); then every screen's wallpaper: xfdesktop
+# keeps one per monitor name, and Wayland's names (the outputs: DRM connectors,
+# e.g. "Unknown-1", "HDMI-A-1") can differ from X's, so a screen with none
+# yet gets the one already chosen for another screen (else the Dusk one).
+WALL=/opt/trinity/share/wallpapers/syluxium-default.jpg
+# Start-up milestones for the stick's milestones.txt (seconds since boot).
+/usr/local/sbin/syluxium-diag mark "shell: Wayfire up, autostart running"
+(
+    i=0
+    while [ $i -lt 120 ] && ! pgrep -u "$(id -u)" -x xfce4-panel >/dev/null; do sleep 0.5; i=$((i + 1)); done
+    /usr/local/sbin/syluxium-diag mark "shell: taskbar (xfce4-panel) started"
+    while [ $i -lt 120 ] && ! pgrep -u "$(id -u)" -x xfdesktop >/dev/null; do sleep 0.5; i=$((i + 1)); done
+    /usr/local/sbin/syluxium-diag mark "shell: desktop (xfdesktop) started"
+) &
+/usr/local/bin/syluxium-xfce-setup >/dev/null 2>&1
+
+i=0
+while [ $i -lt 30 ] && ! pgrep -u "$(id -u)" -x xfdesktop >/dev/null; do sleep 1; i=$((i + 1)); done
+props=$(xfconf-query -c xfce4-desktop -l 2>/dev/null | grep '/workspace0/last-image$')
+ref=
+for p in $props; do
+    v=$(xfconf-query -c xfce4-desktop -p "$p" 2>/dev/null)
+    [ -f "$v" ] && { ref=$v; break; }
+done
+[ -n "$ref" ] || ref=$WALL
+for name in $(/usr/local/lib/syluxium/shell-outputs 2>/dev/null); do
+    p=/backdrop/screen0/monitor$name/workspace0/last-image
+    xfconf-query -c xfce4-desktop -p "$p" >/dev/null 2>&1 && continue
+    xfconf-query -c xfce4-desktop -p "$p" -n -t string -s "$ref"
+    xfconf-query -c xfce4-desktop -p "${p%last-image}image-style" -n -t int -s 5
+done
+/usr/local/sbin/syluxium-diag mark "shell: desktop ready (icons, wallpaper)"
+# For the stick's shell.txt: the wallpaper of each screen xfdesktop knows.
+for p in $(xfconf-query -c xfce4-desktop -l 2>/dev/null | grep '/last-image$'); do
+    echo "wallpaper $p: $(xfconf-query -c xfce4-desktop -p "$p" 2>/dev/null)"
+done >> /run/syluxium-diag/shell.txt 2>/dev/null

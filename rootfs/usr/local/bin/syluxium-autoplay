@@ -1,7 +1,9 @@
 #!/bin/sh
-. /usr/local/lib/syluxium/balloon.sh
 # Syluxium AutoPlay (desktop session): when a USB drive appears in /media
 # (mounted by syluxium-automount), ask what to do with it - like Windows.
+# The question is a GTK (yad) bubble in the lower right corner, above the
+# clock; "removed" is a notification.
+esc() { printf '%s' "$1" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g'; }
 known=" "
 first=1
 while :; do
@@ -12,25 +14,24 @@ while :; do
         [ $first = 1 ] && continue # drives already there at login: no popup
         name=$(basename "$dir")
         size=$(df -h "$dir" 2>/dev/null | awk 'NR==2 {print $2}')
-        # Lower right corner, just above the clock; gone after 15 s if unanswered.
-        out=/tmp/.autoplay-$$
-        balloon --title "AutoPlay" --icon drive-removable-media --geometry 330x175-8-36 --radiolist \
-            "<b>$name</b> ($size) was connected.<br>What do you want to do?" \
-            open "Open folder to view files" on \
-            media "Play media files (Kaffeine)" off \
-            none "Take no action" off > "$out" 2>/dev/null &
-        pid=$!
-        n=0
-        while kill -0 $pid 2>/dev/null && [ $n -lt 15 ]; do sleep 1; n=$((n + 1)); done
-        kill $pid 2>/dev/null
-        choice=$(cat "$out" 2>/dev/null); rm -f "$out"
+        # Gone after 15 s if unanswered.
+        choice=$(yad --title "AutoPlay" --window-icon drive-removable-media --image drive-removable-media \
+            --geometry 360x190-8-48 --undecorated --skip-taskbar --on-top --borders 12 --timeout 15 \
+            --text "<b>$(esc "$name")</b> ($size) was connected.
+What do you want to do?" \
+            --list --radiolist --no-headers --column "" --column "" --column "" --hide-column 2 \
+            --print-column 2 --separator "" --button "OK:0" \
+            TRUE open "Open folder to view files" \
+            FALSE media "Play media files (Kaffeine)" \
+            FALSE none "Take no action" 2>/dev/null)
         case "$choice" in
-            open) konqueror "$dir" >/dev/null 2>&1 & ;;
+            open) xdg-open "$dir" >/dev/null 2>&1 & ;;
             media) kaffeine "$dir" >/dev/null 2>&1 & ;;
         esac
     done
     for dir in $known; do
-        case "$now" in *" $dir "*) ;; *) [ $first = 0 ] && kdialog --title "AutoPlay" --passivepopup "$(basename "$dir") was removed." 4 2>/dev/null & ;; esac
+        case "$now" in *" $dir "*) ;; *) [ $first = 0 ] && notify-send -a "AutoPlay" -i drive-removable-media \
+            "AutoPlay" "$(basename "$dir") was removed." 2>/dev/null & ;; esac
     done
     known=$now
     first=0

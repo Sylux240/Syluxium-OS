@@ -1,5 +1,0 @@
-#!/bin/sh
-# The shell's wallpaper: the one chosen in Personalize (settings.ini), else Dusk.
-W=$(sed -n 's/^wallpaper *= *//p' "$HOME/.config/syluxium-shell/settings.ini" 2>/dev/null | tail -1)
-[ -f "$W" ] || W=/opt/trinity/share/wallpapers/syluxium-default.jpg
-exec swaybg -i "$W" -m fill

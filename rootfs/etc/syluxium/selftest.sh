@@ -60,12 +60,43 @@ check "/proc/<pid>/cmdline"                 sh -c 'sleep 3 & p=$!; tr "\\0" " " 
 check "/proc/<pid>/fd lists open files"     sh -c 'exec 7</etc/hostname; [ "$(readlink /proc/$$/fd/7)" = /etc/hostname ]'
 check "free / uptime work"                  sh -c 'free >/dev/null && uptime >/dev/null'
 check "/sys/devices/system/cpu/online"      sh -c 'grep -q "^0" /sys/devices/system/cpu/online'
+# GPU buffers shared between programs (dma-buf): its own mapping and the
+# DRM mapping are the same memory.
+[ -e /dev/dri/card0 ] && check "dma-buf mmap (PRIME export)"   python3 -c 'import os, fcntl, struct, mmap
+fd = os.open("/dev/dri/card0", os.O_RDWR)
+c = bytearray(fcntl.ioctl(fd, 0xC02064B2, struct.pack("IIIIIIQ", 64, 64, 32, 0, 0, 0, 0)))
+h, pitch, size = struct.unpack("IIIIIIQ", c)[4:]
+off = struct.unpack("IIQ", bytearray(fcntl.ioctl(fd, 0xC01064B3, struct.pack("IIQ", h, 0, 0))))[2]
+dfd = struct.unpack("IIi", bytearray(fcntl.ioctl(fd, 0xC00C642D, struct.pack("IIi", h, 0x80002, -1))))[2]
+a = mmap.mmap(dfd, size, mmap.MAP_SHARED, mmap.PROT_READ | mmap.PROT_WRITE)
+b = mmap.mmap(fd, size, mmap.MAP_SHARED, mmap.PROT_READ | mmap.PROT_WRITE, offset=off)
+a[100:104] = b"Slx!"; assert b[100:104] == b"Slx!", b[100:104]'
+# mincore: Mesa's EGL checks with it that a display pointer is real memory
+# (every EGL program failed without it). Touched page in memory, untouched
+# one not, an unmapped range ENOMEM.
+check "mincore (Mesa's EGL pointer check)"  python3 -c 'import ctypes, errno
+libc = ctypes.CDLL(None, use_errno=True)
+libc.mmap.restype = ctypes.c_void_p
+libc.mmap.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_long]
+a = libc.mmap(None, 3 * 4096, 3, 0x22, -1, 0)
+ctypes.memset(a, 1, 1)
+v = (ctypes.c_ubyte * 3)()
+assert libc.mincore(ctypes.c_void_p(a), 3 * 4096, v) == 0, ctypes.get_errno()
+assert v[0] == 1 and v[2] == 0, list(v)
+libc.munmap(ctypes.c_void_p(a), 3 * 4096)
+assert libc.mincore(ctypes.c_void_p(a), 4096, v) == -1 and ctypes.get_errno() == errno.ENOMEM, ctypes.get_errno()'
+# Terminal emulators on VTE (xfce4-terminal) read the pty in packet mode.
+# (In a session of its own: closing the master hangs up the slave's group.)
+check "pty packet mode (TIOCPKT)"           setsid python3 -c 'import os, fcntl, struct
+m, s = os.openpty(); fcntl.ioctl(m, 0x5420, struct.pack("i", 1)); os.write(s, b"hi")
+d = os.read(m, 16); assert d == b"\0hi", d'
 
 # --- threads and pipes under stress (1 s each part): futex handoffs (a
 # lost wakeup hangs it: the program's own watchdog fails it), both pipe ends
 # closed at once, dup storms, fork/exec with inherited pipes ---
 check "futex stress (GIL handoff, condvars, timeouts)" /opt/syluxium/tests/futexstress 1
 check "pipe / fd stress (close races, dup, fork)"     /opt/syluxium/tests/pipestress 1
+check "futex wakeups while forking, WAKE_OP, PI, robust" /opt/syluxium/tests/futexfork 1
 check "copy_file_range, pidfd, sigtimedwait, mlock"   /opt/syluxium/tests/newsyscalls
 
 echo "selftest: $pass passed, $fail failed"

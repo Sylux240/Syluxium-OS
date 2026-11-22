@@ -1,0 +1,264 @@
+#!/bin/sh
+# Test-round diagnostics: everything useful for working out what happened on
+# a machine goes into this boot's folder on the stick (/boot/logs, next to
+# the kernel log), so a stick brought back after a round tells the story.
+#
+#   syluxium-diag hardware        hardware.txt: PCI/USB devices and their drivers,
+#                                 displays, network, disks, CPU, memory (once)
+#   syluxium-diag status          status.txt / status-history.txt: load, memory,
+#                                 busiest processes, zombies (every 15 s)
+#   syluxium-diag logs            copy the session's logs (X, login, shell, Wi-Fi, ...;
+#                                 the Wayland shell's Xwayland: xwayland.log)
+#   syluxium-diag mark <text>     milestones.txt: "<seconds since boot> <text>"
+#   syluxium-diag gpu-clients     gpu-clients.txt: why programs do or don't get the
+#                                 GPU (Mesa's own explanation); GPU Test entry only
+#   syluxium-diag gpu [name]      gpu.txt (or gpu-<name>.txt): the GPU stack top to
+#                                 bottom - kernel driver start (firmware, IP blocks,
+#                                 errors), /dev/dri and the sysfs files libdrm reads,
+#                                 drmGetDevice2 per node, Mesa's driver choice (EGL
+#                                 GBM/surfaceless/device), X server glamor/DRI3,
+#                                 glxinfo, vulkaninfo --summary, vainfo. GPU_OUT=<file>
+#                                 writes it there (no stick needed: test aids)
+#   syluxium-diag xwatch          GPU Test entry: X server start milestones and logs
+#                                 to the stick every 2 s for 3 minutes (a machine that
+#                                 hangs as X starts still leaves its last state)
+#
+# Never copies secrets: wpa_supplicant's configuration (the Wi-Fi key) is not
+# read, and passwords are scrubbed from what is copied.
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/opt/trinity/bin
+up() { cut -d' ' -f1 /proc/uptime; }
+
+# Mesa's debug output without the noise (config tables, missing drirc).
+mesa_filter() {
+    grep -v -E "libEGL debug: +([0-9]+ +)?0x0|libEGL debug: (---|cho |sen )|No DRI config supports|Can't open configuration file|^$"
+}
+
+# The GPU stack, top to bottom (see "gpu" above).
+gpu_report() {
+    echo "== GPU report at $(up) s as $(id -un), $(uname -srv)"
+    echo "cmdline: $(cat /proc/cmdline)"
+    echo; echo "== Display devices (PCI class 03)"
+    for d in /sys/bus/pci/devices/*; do
+        case "$(cat "$d/class" 2>/dev/null)" in
+            0x03*) echo "${d##*/} $(cat "$d/vendor"):$(cat "$d/device") sub $(cat "$d/subsystem_vendor"):$(cat "$d/subsystem_device") rev $(cat "$d/revision") class $(cat "$d/class") driver $(basename "$(readlink "$d/driver" 2>/dev/null)" 2>/dev/null)" ;;
+        esac
+    done
+    lspci -nnk 2>/dev/null | grep -A3 -E "VGA|Display|3D controller"
+    echo; echo "== Kernel: GPU driver start (firmware, IP blocks, rings, errors)"
+    dmesg 2>/dev/null | grep -E "amdgpu|radeon|nouveau|i915|virtio_gpu|virtio-pci|\[drm\]|drm:|aperture|firmware|GPU|gpu_sched|ring |IP block|VRAM|GTT|PSP|SMU|DMUB|DCN|VCN|MES" \
+        | grep -v -E "\[drm:[0-9a-f]+\] [^*]" | head -400
+    echo; echo "== /dev/dri and what libdrm makes of it (syluxium-drm-devices)"
+    ls -l /dev/dri 2>&1
+    ls -l /sys/class/drm 2>&1
+    syluxium-drm-devices 2>&1
+    echo; echo "== Mesa's driver choice without X (EGL GBM, surfaceless and device platforms)"
+    for p in gbm surfaceless device; do
+        echo "-- eglinfo -B -p $p"
+        LIBGL_DEBUG=verbose EGL_LOG_LEVEL=debug MESA_DEBUG=1 timeout 30 eglinfo -B -p $p 2>&1 | mesa_filter | head -60
+        echo "-- exit $?"
+    done
+    if [ -n "$DISPLAY" ]; then
+        echo; echo "== In the X session ($DISPLAY)"
+        echo "-- glxinfo -B"
+        LIBGL_DEBUG=verbose MESA_DEBUG=1 timeout 30 glxinfo -B 2>&1 | mesa_filter | head -60
+        echo "-- exit $?"
+        echo "-- X extensions (DRI3, Present, GLX)"
+        python3 -c 'import ctypes, ctypes.util
+x = ctypes.CDLL(ctypes.util.find_library("X11")); x.XOpenDisplay.restype = ctypes.c_void_p
+x.XListExtensions.restype = ctypes.POINTER(ctypes.c_char_p); x.XListExtensions.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int)]
+d = x.XOpenDisplay(None); n = ctypes.c_int()
+l = x.XListExtensions(d, ctypes.byref(n)) if d else None
+print(" ".join(sorted(l[i].decode() for i in range(n.value))) if l else "no display")' 2>&1
+    fi
+    echo; echo "== X server: glamor, DRI3, GLX (Xorg.0.log)"
+    grep -E "glamor|DRI3|DRI2|AIGLX|GLX|EGL|Acceleration|AccelMethod|kmsdev|using \/dev\/dri|Output .* connected|\\(EE\\)|\\(WW\\) modeset|Backtrace|Segmentation|Fatal|^\\[ *[0-9.]*\\] *[0-9]+: " /var/log/Xorg.0.log 2>/dev/null | grep -v "(WW) warning, (EE) error" | head -80
+    echo; echo "== Vulkan (vulkaninfo --summary)"
+    if command -v vulkaninfo > /dev/null; then
+        VK_LOADER_DEBUG=error,warn timeout 30 vulkaninfo --summary 2>&1 | grep -v "extension revision" | head -100
+        echo "-- exit $?"
+    else
+        echo "vulkaninfo not installed"
+    fi
+    ls /usr/share/vulkan/icd.d 2>&1
+    echo; echo "== Video decode (vainfo)"
+    if command -v vainfo > /dev/null; then
+        for n in /dev/dri/renderD*; do
+            [ -e "$n" ] || continue
+            echo "-- $n"
+            timeout 20 vainfo --display drm --device "$n" 2>&1 | head -30
+        done
+    else
+        echo "vainfo not installed"
+    fi
+    echo; echo "== Firmware files the kernel asked for"
+    dmesg 2>/dev/null | grep -i -E "firmware|\.bin" | grep -i -E "amdgpu|nouveau|nvidia|i915|radeon|direct firmware|failed to load|loading" | tail -60
+    echo "== end at $(up) s"
+}
+
+if [ "$1" = gpu ] && [ -n "$GPU_OUT" ]; then
+    gpu_report > "$GPU_OUT" 2>&1
+    exit 0
+fi
+
+L=/boot/logs
+grep -q " /boot/logs-stick " /proc/mounts || exit 0
+# The desktop user can't write to the stick (or even look into /boot/logs):
+# their parts (milestones, GPU check) go to /run/syluxium-diag, which root's
+# "logs" step copies over.
+if [ "$(id -u)" != 0 ]; then
+    L=/run/syluxium-diag
+    [ -d "$L" ] || exit 0
+else
+    [ -d "$L" ] || exit 0
+fi
+case "$1" in
+hardware)
+    {
+        echo "== $(uname -srv) at $(up) s"
+        echo "cmdline: $(cat /proc/cmdline)"
+        echo; echo "== CPU / memory"
+        grep -m1 "model name" /proc/cpuinfo; echo "cpus: $(grep -c ^processor /proc/cpuinfo)"
+        grep -E "MemTotal|MemAvailable" /proc/meminfo
+        echo; echo "== Drivers: every PCI/USB device (bound to <driver> / no driver / probe failed: <error>)"
+        awk -F'\t' '$2 == "pci" || $2 == "usb" {
+            if ($6 == "ok") s = "bound to " $7
+            else if ($6 == "error") s = "probe failed: " ($9 != "" ? $9 : $7)
+            else s = "no driver"
+            printf "%-14s %s  %-40s %s\n", $3, $5, substr($8, 1, 40), s
+        }' /sys/kernel/syluxium/devices 2>&1
+        echo; echo "== Firmware requested by drivers but missing (drivers often try several versions: a"
+        echo "   missing file is only a problem when no file of its family was loaded)"
+        awk -F'\t' '$1 == "missing" { printf "%-14s %s\n", $2, $3; n++ } END { if (!n) print "(none)" }' \
+            /sys/kernel/syluxium/firmware 2>&1
+        echo "-- loaded:"
+        awk -F'\t' '$1 == "loaded" { printf "%-14s %s\n", $2, $3 }' /sys/kernel/syluxium/firmware 2>&1
+        echo; echo "== PCI (lspci -nnk)"; lspci -nnk 2>&1
+        echo; echo "== USB devices (vendor:product, name, driver per interface)"
+        for d in /sys/bus/usb/devices/*; do
+            [ -f "$d/idVendor" ] || continue
+            printf '%s  %s:%s  %s %s\n' "$(basename "$d")" "$(cat "$d/idVendor")" "$(cat "$d/idProduct")" \
+                "$(cat "$d/manufacturer" 2>/dev/null)" "$(cat "$d/product" 2>/dev/null)"
+            for i in "$d"/*:*; do
+                [ -d "$i" ] || continue
+                drv=$(basename "$(readlink "$i/driver" 2>/dev/null)" 2>/dev/null)
+                printf '    if %s class %s -> %s\n' "${i##*:}" "$(cat "$i/bInterfaceClass" 2>/dev/null)" "${drv:-no driver}"
+            done
+        done
+        echo; echo "== Displays (DRM)"
+        for c in /sys/class/drm/card*; do
+            [ -e "$c" ] || continue
+            echo "$(basename "$c"): $(basename "$(readlink "$c/device/driver" 2>/dev/null)" 2>/dev/null) $(cat "$c/status" 2>/dev/null)"
+        done
+        ls -l /dev/dri 2>&1
+        echo; echo "== Network"
+        ip -br link 2>&1; ip -br addr 2>&1; ip route 2>&1
+        command -v iw >/dev/null && iw dev 2>&1
+        echo; echo "== Disks"
+        cat /proc/partitions; grep -E "^/dev" /proc/mounts
+        echo; echo "== Input devices"
+        grep -E "^N: Name=|^H: Handlers=" /proc/bus/input/devices 2>/dev/null
+        echo; echo "== Sound"
+        cat /proc/asound/cards 2>/dev/null
+        echo; echo "== Power"
+        for b in /sys/class/power_supply/*; do [ -e "$b" ] && echo "$(basename "$b"): $(cat "$b/type" 2>/dev/null) $(cat "$b/status" 2>/dev/null) $(cat "$b/capacity" 2>/dev/null)%"; done
+        ls /sys/class/backlight 2>/dev/null
+    } > "$L/hardware.txt" 2>&1
+    ;;
+status)
+    {
+        echo "== $(up) s  load $(cut -d' ' -f1-3 /proc/loadavg)  $(grep -E 'MemAvailable' /proc/meminfo | tr -s ' ')"
+        ps -eo pid,stat,pcpu,rss,etime,comm --sort=-pcpu 2>/dev/null | head -9
+        z=$(ps -eo stat,pid,comm 2>/dev/null | awk '$1 ~ /^Z/ {print $2 "/" $3}' | tr '\n' ' ')
+        [ -n "$z" ] && echo "zombies: $z"
+        d=$(ps -eo stat,pid,comm 2>/dev/null | awk '$1 ~ /^D/ {print $2 "/" $3}' | tr '\n' ' ')
+        [ -n "$d" ] && echo "waiting on disk/device (D): $d"
+    } > "$L/status.txt" 2>&1
+    cat "$L/status.txt" >> "$L/status-history.txt"
+    # Keep the history to the last ~2000 lines.
+    if [ "$(wc -l < "$L/status-history.txt")" -gt 2400 ]; then
+        tail -n 2000 "$L/status-history.txt" > "$L/status-history.tmp" && mv "$L/status-history.tmp" "$L/status-history.txt"
+    fi
+    ;;
+logs)
+    for f in /var/log/Xorg.0.log /var/log/Xorg.0.log.old /var/log/tdm.log /var/log/tdm.out \
+             /var/log/syluxium-shell.log /var/log/seatd.log /var/log/bluetoothd.log /var/log/bluealsa.log \
+             /var/log/syluxium-netconfig.log /var/log/syluxium-wifi.log /var/log/wpa_supplicant.log \
+             /var/log/dbus-system.log /var/log/polkitd.log /var/log/cups/error_log; do
+        [ -f "$f" ] && sed -E 's/(psk|password|passphrase)=[^ ]*/\1=********/Ig' "$f" > "$L/$(basename "$f")" 2>/dev/null
+    done
+    [ -d /run/syluxium-diag ] && cp /run/syluxium-diag/* "$L/" 2>/dev/null
+    for h in /home/*/.xsession-errors; do
+        [ -f "$h" ] && cp "$h" "$L/xsession-errors-$(basename "$(dirname "$h")").txt" 2>/dev/null
+    done
+    # Wayland programs in the Xfce desktop (syluxium-wayland-host; its
+    # summary is wayland-host.txt from /run/syluxium-diag)
+    for h in /run/user/*/syluxium-wayland-host.log; do
+        [ -f "$h" ] && tail -c 262144 "$h" > "$L/wayland-host-$(basename "$(dirname "$h")").log" 2>/dev/null
+    done
+    ;;
+mark)
+    # One file for root and the desktop user alike (in /run: both can write
+    # it); "logs" copies it to the stick.
+    shift
+    mkdir -p /run/syluxium-diag 2>/dev/null
+    echo "$(up) $* (as $(id -un))" >> /run/syluxium-diag/milestones.txt
+    chmod 666 /run/syluxium-diag/milestones.txt 2>/dev/null
+    [ "$(id -u)" = 0 ] && cp /run/syluxium-diag/milestones.txt "$L/" 2>/dev/null
+    ;;
+gpu-clients)
+    # Run as the desktop user inside the session (DISPLAY set). Only with the
+    # "gpu" boot option: a broken GPU path may crash the X server, which the
+    # marker line then shows.
+    grep -qw gpu /proc/cmdline || exit 0
+    out="$L/gpu-clients.txt"
+    {
+        echo "== $(up) s: about to run glxinfo -B (if nothing follows, it crashed the session)"
+    } > "$out"
+    sync
+    LIBGL_DEBUG=verbose MESA_DEBUG=1 timeout 30 glxinfo -B >> "$out" 2>&1
+    echo "== exit $? at $(up) s" >> "$out"
+    echo "== eglinfo -B" >> "$out"
+    EGL_LOG_LEVEL=debug timeout 30 eglinfo -B >> "$out" 2>&1
+    echo "== exit $? at $(up) s" >> "$out"
+    sync
+    # The whole stack as the session sees it (gpu-session.txt).
+    gpu_report > "$L/gpu-session.txt" 2>&1
+    sync
+    ;;
+gpu)
+    gpu_report > "$L/gpu${2:+-$2}.txt" 2>&1
+    sync
+    ;;
+xwatch)
+    # GPU Test entry, started by startdesktop just before the login screen
+    # (which starts the X server): milestones as X comes up, and the X log,
+    # the kernel's last GPU messages and the process list on the stick every
+    # 2 s, synced, for 3 minutes. If the machine hangs (amdgpu right after X
+    # started), the last copy shows how far it got.
+    grep -qw gpu /proc/cmdline || exit 0
+    seen_sock= seen_glamor= seen_dri3= seen_session=
+    for i in $(seq 1 90); do
+        if [ -z "$seen_sock" ] && [ -S /tmp/.X11-unix/X0 ]; then
+            seen_sock=1; "$0" mark "xwatch: X server socket up"
+        fi
+        if [ -z "$seen_glamor" ] && grep -q "glamor" /var/log/Xorg.0.log 2>/dev/null; then
+            seen_glamor=1; "$0" mark "xwatch: Xorg: $(grep -m1 -E 'glamor (initialized|X acceleration|.*failed)|Glamor|glamor' /var/log/Xorg.0.log | sed 's/^\[ *[0-9.]*\] //')"
+        fi
+        if [ -z "$seen_dri3" ] && grep -q "DRI3" /var/log/Xorg.0.log 2>/dev/null; then
+            seen_dri3=1; "$0" mark "xwatch: Xorg: $(grep -m1 DRI3 /var/log/Xorg.0.log | sed 's/^\[ *[0-9.]*\] //')"
+        fi
+        if [ -z "$seen_session" ] && pidof xfce4-session > /dev/null; then
+            seen_session=1; "$0" mark "xwatch: Xfce session running"
+        fi
+        cp /var/log/Xorg.0.log "$L/Xorg.0.log" 2>/dev/null
+        {
+            echo "== $(up) s (xwatch $i/90)"
+            ps -eo pid,stat,pcpu,wchan:24,etime,comm --sort=-pcpu 2>/dev/null | head -12
+            echo "-- kernel, last GPU lines"
+            dmesg 2>/dev/null | grep -E "amdgpu|radeon|nouveau|i915|virtio_gpu|drm|GPU|ring|fence|timeout|hang|watchdog|lockup" | tail -25
+        } > "$L/xwatch.txt" 2>&1
+        sync
+        sleep 2
+    done
+    ;;
+esac

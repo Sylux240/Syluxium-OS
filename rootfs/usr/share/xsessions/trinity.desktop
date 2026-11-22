@@ -1,0 +1,8 @@
+[Desktop Entry]
+Encoding=UTF-8
+Type=XSession
+Exec=/opt/trinity/bin/starttde
+TryExec=/opt/trinity/bin/starttde
+DesktopNames=Trinity
+Name=Syluxium Classic (Trinity)
+Comment=The classic Syluxium desktop (Trinity)

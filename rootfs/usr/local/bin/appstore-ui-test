@@ -1,0 +1,37 @@
+#!/bin/sh
+# Test aid: log in to the Xfce desktop, then show the App Store's
+# desktop-icon question and its Settings (software sources) as the desktop
+# user, for screenshots. Console lines start with "ASTEST".
+#   appstore-ui-test icon|settings
+say() { echo "ASTEST $*" > /dev/console; }
+startdesktop > /dev/null 2>&1 &
+export DISPLAY=:0
+for i in $(seq 1 120); do
+    XAUTHORITY="$(ls /var/run/xauth/A:0-* 2>/dev/null | head -1)"
+    [ -n "$XAUTHORITY" ] && [ -S /tmp/.X11-unix/X0 ] && break
+    sleep 1
+done
+export XAUTHORITY
+sleep 10
+xdotool key Return    # log in (the login screen's user has no password)
+for i in $(seq 1 120); do pidof xfce4-panel > /dev/null && break; sleep 1; done
+sleep 12
+env=
+for e in /proc/[0-9]*/environ; do
+    [ -z "$env" ] || break
+    [ "$(stat -c %u "$e" 2>/dev/null)" = 1000 ] || continue
+    tr '\0' '\n' < "$e" 2>/dev/null | grep -q '^DBUS_SESSION_BUS_ADDRESS=' || continue
+    env=$(tr '\0' '\n' < "$e" | grep -E '^[A-Za-z_][A-Za-z0-9_]*=' | grep -v "'" | sed "s/^/export /; s/=/='/; s/\$/'/")
+done
+asuser() {
+    ( eval "$env"; cd /home/syluxium; exec python3 -c 'import os, sys
+os.initgroups("syluxium", 1000); os.setgid(1000); os.setuid(1000)
+os.execvp(sys.argv[1], sys.argv[1:])' "$@" ) < /dev/null > /dev/console 2>&1 &
+}
+say "desktop up"
+case "$1" in
+icon) asuser syluxium-appstore --ask-icon Cube ;;
+*) asuser syluxium-appstore --settings ;;
+esac
+sleep 25
+say "ready for screenshot"

@@ -14,8 +14,10 @@
 # USB=1 adds an xHCI controller with a USB keyboard, mouse and the FAT32
 # stick from tools/make-test-disks.sh (as /dev/sdb).
 # $TYPE: text typed on the (PS/2) keyboard after the boot wait, then a few
-# more seconds pass before the screenshot. "\n" = Enter, "\c" = Ctrl+C, "\w" = wait 2 s, "\m" = mouse moves/clicks/scroll, "\s" = Alt+SysRq+W (thread dump), "\o" = Alt+F1 (launcher menu), "\t" = Ctrl+Alt+Del (Task Manager),
-# "\{cmd}" = run a QEMU monitor command (e.g. "\{device_add usb-kbd,bus=xhci.0,id=k2}" for hot-plug tests).
+# more seconds pass before the screenshot. "\n" = Enter, "\c" = Ctrl+C, "\w" = wait 2 s, "\m" = mouse moves/clicks/scroll, "\s" = Alt+SysRq+W (thread dump), "\o" = Alt+F1 (launcher menu), "\e" = Ctrl+Esc (start menu), "\t" = Ctrl+Alt+Del (Task Manager),
+# "\{cmd}" = run a QEMU monitor command (e.g. "\{device_add usb-kbd,bus=xhci.0,id=k2}" for hot-plug tests),
+# "\[text]" = wait until the serial log shows <text> (at most MARK_WAIT seconds, default 180): a test
+# inside the system says when it's ready for keys or a screenshot ("\{screendump build/smoke/x.ppm}").
 set -euo pipefail
 
 MODE=${1:-bios}
@@ -113,21 +115,50 @@ names = {" ": "spc", "\n": "ret", "-": "minus", "=": "equal", ".": "dot", ",": "
 shifted = {"|": "backslash", "_": "minus", "+": "equal", ">": "dot", "<": "comma", "?": "slash", ":": "semicolon",
            '"': "apostrophe", "{": "bracket_left", "}": "bracket_right", "~": "grave_accent", "!": "1", "@": "2",
            "#": "3", "$": "4", "%": "5", "^": "6", "&": "7", "*": "8", "(": "9", ")": "0"}
-text = sys.argv[3].replace("\\n", "\n").replace("\\c", "\x03").replace("\\w", "\x01").replace("\\m", "\x02").replace("\\s", "\x04").replace("\\o", "\x05").replace("\\t", "\x06")
-# "\{monitor command}": pulled out first, executed in order with the keys.
-pieces, rest = [], text
-while "\\{" in rest:
-    before, _, after = rest.partition("\\{")
-    cmd, _, rest = after.partition("}")
-    pieces += list(before) + [("monitor", cmd)]
-pieces += list(rest)
+text = sys.argv[3].replace("\\n", "\n").replace("\\c", "\x03").replace("\\w", "\x01").replace("\\m", "\x02").replace("\\s", "\x04").replace("\\o", "\x05").replace("\\t", "\x06").replace("\\e", "\x07")
+# "\{monitor command}" and "\[serial text]": pulled out first, executed in order with the keys.
+import re as _re
+pieces = []
+for tok in _re.split(r"(\\\{[^}]*\}|\\\[[^\]]*\])", text):
+    if tok.startswith("\\{") and tok.endswith("}"):
+        pieces.append(("monitor", tok[2:-1]))
+    elif tok.startswith("\\[") and tok.endswith("]"):
+        pieces.append(("wait", tok[2:-1]))
+    else:
+        pieces += list(tok)
 for ch in pieces:
-    if isinstance(ch, tuple):  # \{cmd}
-        s.sendall((ch[1] + "\n").encode()); time.sleep(1); continue
+    if isinstance(ch, tuple) and ch[0] == "wait":  # \[text]: wait for it on the serial log
+        end = time.time() + float(os.environ.get("MARK_WAIT", "180"))
+        while time.time() < end:
+            try:
+                if ch[1].encode() in open(sys.argv[4], "rb").read():
+                    break
+            except OSError:
+                pass
+            time.sleep(0.25)
+        else:
+            print(f"smoke-test: no \"{ch[1]}\" on the serial log", file=sys.stderr)
+        continue
+    if isinstance(ch, tuple):  # \{cmd}: its reply goes to monitor-<mode>.log
+        s.sendall((ch[1] + "\n").encode()); time.sleep(1)
+        s.setblocking(False)
+        try:
+            reply = s.recv(65536).decode(errors="replace")
+        except BlockingIOError:
+            reply = ""
+        s.setblocking(True)
+        with open(sys.argv[2].rsplit("/", 1)[0] + "/monitor-" + sys.argv[2].rsplit("-", 1)[-1].split(".")[0] + ".log", "a") as m:
+            import re
+            clean = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", reply).replace("\r", "")
+            lines = [l for l in clean.split("\n") if l.strip() and not l.startswith("(qemu)") and ch[1] not in l]
+            m.write(f">>> {ch[1]}\n" + "\n".join(lines) + "\n")
+        continue
     if ch == "\x03":       # \c in $TYPE: Ctrl+C
         s.sendall(b"sendkey ctrl-c\n"); time.sleep(0.3); continue
     if ch == "\x06":       # \t in $TYPE: Ctrl+Alt+Del
         s.sendall(b"sendkey ctrl-alt-delete\n"); time.sleep(0.5); continue
+    if ch == "\x07":       # \e in $TYPE: Ctrl+Esc (Xfce start menu)
+        s.sendall(b"sendkey ctrl-esc\n"); time.sleep(0.5); continue
     if ch == "\x05":       # \o in $TYPE: Alt+F1 (launcher menu)
         s.sendall(b"sendkey alt-f1\n"); time.sleep(0.5); continue
     if ch == "\x04":       # \s in $TYPE: Alt+SysRq+W
@@ -160,6 +191,19 @@ if text:
         time.sleep(0.25)
 s.sendall(f"screendump {sys.argv[2]}\n".encode())
 time.sleep(1)
+# A GL display (virtio-vga-gl on egl-headless) writes the picture later.
+for _ in range(40):
+    if os.path.exists(sys.argv[2]) and os.path.getsize(sys.argv[2]) > 0:
+        break
+    time.sleep(0.25)
+s.setblocking(False)
+try:
+    reply = s.recv(65536).decode(errors="replace")
+    if "rror" in reply:
+        print("monitor:", reply.strip().splitlines()[-2:], file=sys.stderr)
+except BlockingIOError:
+    pass
+s.setblocking(True)
 s.sendall(b"quit\n")
 time.sleep(0.5)
 EOF

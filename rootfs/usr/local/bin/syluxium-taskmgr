@@ -139,6 +139,88 @@ class X11:
         self.message(win, "_NET_ACTIVE_WINDOW", 2, 0, 0)
 
 
+class WaylandWindows:
+    """The same as X11 above for the Syluxium shell (Wayland): the windows
+    the taskbar shows, from Xfce's window library (wlr-foreign-toplevel).
+    Window ids are numbers this object hands out; Wayland gives no process
+    ids, so a program's process is found by its name."""
+
+    def __init__(self):
+        self.screen = None
+        self.ids, self.objs = {}, {}
+        try:
+            gi.require_version("Libxfce4windowing", "0.0")
+            from gi.repository import Libxfce4windowing as Xfw
+            self.screen = Xfw.Screen.get_default()
+        except (ValueError, ImportError, GLib.Error):
+            self.screen = None
+
+    def _id(self, w):
+        key = hash(w)
+        if key not in self.ids:
+            self.ids[key] = len(self.ids) + 1
+        self.objs[self.ids[key]] = w
+        return self.ids[key]
+
+    @staticmethod
+    def _pid_of(app_id):
+        """A process whose program name matches the window's app id (e.g. org.xfce.mousepad)."""
+        names = {app_id.lower(), app_id.lower().rsplit(".", 1)[-1]}
+        for d in os.listdir("/proc"):
+            if d.isdigit():
+                try:
+                    comm = open(f"/proc/{d}/comm").read().strip().lower()
+                except OSError:
+                    continue
+                if comm in names:
+                    return int(d)
+        return 0
+
+    def windows(self):
+        if not self.screen:
+            return []
+        out = []
+        for w in self.screen.get_windows() or []:
+            try:
+                if w.is_skip_tasklist():
+                    continue
+            except AttributeError:
+                pass
+            ids = list(w.get_class_ids() or []) if hasattr(w, "get_class_ids") else []
+            cls = ids[0] if ids else ""
+            out.append((self._id(w), w.get_name() or cls, self._pid_of(cls) if cls else 0, cls))
+        return out
+
+    def exists(self, win):
+        w = self.objs.get(win)
+        return bool(w and self.screen and w in (self.screen.get_windows() or []))
+
+    def close(self, win):
+        w = self.objs.get(win)
+        if w:
+            try:
+                w.close(0)
+            except GLib.Error:
+                pass
+
+    def activate(self, win):
+        w = self.objs.get(win)
+        if not w:
+            return
+        try:
+            seats = self.screen.get_seats() if hasattr(self.screen, "get_seats") else []
+            w.activate(seats[0] if seats else None, 0)
+        except (GLib.Error, TypeError):
+            pass
+
+
+def window_list():
+    """X11 windows in an X session, Wayland toplevels in the Syluxium shell."""
+    if os.environ.get("WAYLAND_DISPLAY"):
+        return WaylandWindows()
+    return X11()
+
+
 # ---------------------------------------------------------------------------
 # The machine: /proc
 # ---------------------------------------------------------------------------
@@ -352,7 +434,7 @@ def framed(title, child):
 # ---------------------------------------------------------------------------
 class TaskManager:
     def __init__(self, start_tab):
-        self.x = X11()
+        self.x = window_list()
         self.win = window("Syluxium Task Manager", 470, 500, "utilities-system-monitor")
         self.win.connect("key-press-event", self.on_key)
         self.speed = "Normal"
@@ -453,8 +535,11 @@ class TaskManager:
             self.timer = GLib.timeout_add(SPEEDS[name], lambda: self.refresh() or True)
 
     def shutdown(self, kind):
-        # ksmserver: logout(confirm, type 0 = log off / 1 = restart / 2 = turn off, mode 2 = now)
-        launch("dcop", "ksmserver", "ksmserver", "logout", "1", str(kind), "2")
+        # kind 0 = log off / 1 = restart / 2 = turn off
+        if desktop_session() == "xfce":
+            launch("xfce4-session-logout", ("--logout", "--reboot", "--halt")[kind])
+        else:  # TDE's ksmserver: logout(confirm, type, mode 2 = now)
+            launch("dcop", "ksmserver", "ksmserver", "logout", "1", str(kind), "2")
 
     def on_key(self, _w, ev):
         ctrl = ev.state & Gdk.ModifierType.CONTROL_MASK
@@ -503,10 +588,33 @@ class TaskManager:
         return box
 
     def icon_for(self, cls):
+        """The window's icon: its class or Wayland app id as an icon name, else
+        the icon of the program's .desktop file (xfce4-terminal -> org.xfce.terminal)."""
         theme = Gtk.IconTheme.get_default()
         for name in (cls.lower(), cls.lower().replace(" ", "-")):
             if name and theme.has_icon(name):
                 return name
+        from gi.repository import Gio
+        # As the taskbar finds it (libxfce4windowing): <app id>.desktop, else
+        # the best match of a .desktop search (X11 programs under Xwayland
+        # have their WM_CLASS as app id: "Mousepad" -> org.xfce.mousepad,
+        # "Kcalc" -> trinity-kcalc).
+        ids = [cls, cls.lower()]
+        try:
+            ids += [d for group in Gio.DesktopAppInfo.search(cls) for d in group][:3] if cls else []
+        except (TypeError, GLib.Error):
+            pass
+        for desktop in ids:
+            try:
+                info = Gio.DesktopAppInfo.new(desktop if desktop.endswith(".desktop") else desktop + ".desktop") \
+                    if desktop else None
+            except TypeError:
+                info = None
+            icon = info.get_icon() if info else None
+            if isinstance(icon, Gio.ThemedIcon):
+                for name in icon.get_names():
+                    if theme.has_icon(name):
+                        return name
         return "application-x-executable"
 
     def refresh_apps(self):
@@ -538,6 +646,8 @@ class TaskManager:
                 GLib.idle_add(self.end_now, w, row[1], row[4])
 
     def own_window(self):
+        if isinstance(self.x, WaylandWindows):  # our own window, by its title
+            return next((w for w, title, _p, _c in self.x.windows() if title == "Syluxium Task Manager"), 0)
         gw = self.win.get_window()
         try:
             return gw.get_xid() if gw else 0
@@ -624,7 +734,7 @@ class TaskManager:
             if shutil.which(cmd[0]):
                 launch(*cmd)
             else:
-                launch("kfmclient", "exec", text)
+                launch("xdg-open", os.path.expanduser(text))
         d.destroy()
 
     # ---- Processes ----
@@ -769,7 +879,7 @@ class TaskManager:
                             "Access is denied: the process belongs to another user. End it as administrator?",
                             Gtk.MessageType.WARNING, Gtk.ButtonsType.YES_NO)
                 if r == Gtk.ResponseType.YES:
-                    launch("tdesudo", "kill", "-KILL", str(pid))
+                    launch("syluxium-sudo", "kill", "-KILL", str(pid))
             return False
 
     # ---- Performance ----
@@ -911,7 +1021,7 @@ class TaskManager:
 if __name__ == "__main__":
     # One Task Manager: a second Ctrl+Alt+Del brings the open one forward.
     me = os.getpid()
-    x = X11()
+    x = window_list()
     for w, title, pid, _cls in x.windows():
         if title == "Syluxium Task Manager" and pid != me:
             x.activate(w)

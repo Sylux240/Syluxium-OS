@@ -259,6 +259,8 @@ extern "C" int aperture_remove_conflicting_pci_devices(struct pci_dev* pdev, con
 // A pci_dev for function `f` (bound or not: drivers also look at bridges
 // and sibling functions).
 void fill_pdev(pci_dev* pdev, pci::Function* f, dev::Device* d) {
+    pdev->error_state = 1; /* pci_channel_io_normal */
+    pdev->dma_mask = ~0ull;
     pdev->vendor = f->vendor_id;
     pdev->device = f->device_id;
     pdev->subsystem_vendor = d ? d->subsystem_vendor : 0;
@@ -732,6 +734,18 @@ int pci_find_capability(struct pci_dev* p, int cap) {
     return 0;
 }
 
+// The next capability of this type after the one at `pos` (virtio devices
+// have several vendor-specific ones).
+int pci_find_next_capability(struct pci_dev* p, u8 pos, int cap) {
+    pos = pci::read8(fn(p), static_cast<u16>(pos + 1)) & 0xFC;
+    for (int guard = 0; pos && guard < 48; guard++) {
+        if (pci::read8(fn(p), pos) == cap)
+            return pos;
+        pos = pci::read8(fn(p), static_cast<u16>(pos + 1)) & 0xFC;
+    }
+    return 0;
+}
+
 int pci_find_ext_capability(struct pci_dev* p, int cap) {
     u16 pos = 0x100;
     for (int guard = 0; pos && guard < 64; guard++) {
@@ -961,12 +975,62 @@ void iounmap(volatile void __iomem* addr) {
 
 // ---- firmware ----
 
+namespace {
+sched::Thread* g_fw_boot_thread;      // the thread that mounts the root (never waits)
+volatile bool g_fw_root_pending;      // root= given and not yet mounted
+} // namespace
+
+// Firmware requests, for diagnostics.
+struct FwRecord {
+    char device[32];
+    char file[96];
+    bool loaded;
+};
+constexpr unsigned MAX_FW_RECORDS = 128;
+FwRecord g_fw_records[MAX_FW_RECORDS];
+unsigned g_fw_record_count;
+IrqSpinlock g_fw_record_lock;
+
+static void note_firmware(struct device* dev, const char* name, bool loaded) {
+    const char* who = dev ? dev_name(dev) : "-";
+    LockGuard guard(g_fw_record_lock);
+    for (unsigned i = 0; i < g_fw_record_count; i++) {
+        FwRecord& r = g_fw_records[i];
+        if (!strncmp(r.file, name, sizeof(r.file) - 1) && !strncmp(r.device, who, sizeof(r.device) - 1)) {
+            r.loaded = r.loaded || loaded;
+            return;
+        }
+    }
+    if (g_fw_record_count >= MAX_FW_RECORDS)
+        return;
+    FwRecord& r = g_fw_records[g_fw_record_count++];
+    snprintf(r.device, sizeof(r.device), "%s", who);
+    snprintf(r.file, sizeof(r.file), "%s", name);
+    r.loaded = loaded;
+}
+
+static int request_firmware_file(const struct firmware** out, const char* name, struct device* dev);
+
 int request_firmware(const struct firmware** out, const char* name, struct device* dev) {
+    int r = request_firmware_file(out, name, dev);
+    note_firmware(dev, name, r == 0);
+    return r;
+}
+
+static int request_firmware_file(const struct firmware** out, const char* name, struct device* dev) {
     *out = nullptr;
     char path[256];
     snprintf(path, sizeof(path), "/lib/firmware/%s", name);
     vfs::Inode* node;
-    if (vfs::resolve(path, nullptr, true, &node) != 0 || vfs::is_dir(node->mode)) {
+    int found = vfs::resolve(path, nullptr, true, &node);
+    if ((found != 0 || vfs::is_dir(node->mode)) && g_fw_root_pending && sched::current() != g_fw_boot_thread) {
+        if (dev)
+            dev_info(dev, "firmware %s: waiting for the root file system", name);
+        for (int i = 0; i < 600 && g_fw_root_pending; i++)
+            sched::sleep_ms(50);
+        found = vfs::resolve(path, nullptr, true, &node);
+    }
+    if (found != 0 || vfs::is_dir(node->mode)) {
         if (dev)
             dev_err(dev, "firmware %s not found in /lib/firmware", name);
         return -ENOENT;
@@ -1032,6 +1096,22 @@ int request_firmware_nowait(void*, bool, const char* name, struct device* dev, g
 } // extern "C"
 
 namespace linuxkpi {
+
+void firmware_root_expected() {
+    g_fw_boot_thread = sched::current();
+    g_fw_root_pending = true;
+}
+void firmware_root_ready() { g_fw_root_pending = false; }
+
+bool firmware_record(unsigned i, const char** device, const char** file, bool* loaded) {
+    LockGuard guard(g_fw_record_lock);
+    if (i >= g_fw_record_count)
+        return false;
+    *device = g_fw_records[i].device;
+    *file = g_fw_records[i].file;
+    *loaded = g_fw_records[i].loaded;
+    return true;
+}
 
 // Test aid: "pci_fakeid=VVVV:DDDD=vvvv:dddd" makes the device VVVV:DDDD look
 // like vvvv:dddd to Linux drivers, so a driver's probe and its failure
