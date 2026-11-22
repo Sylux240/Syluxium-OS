@@ -242,6 +242,8 @@ long do_openat_path(long dirfd, const char* kpath, u32 flags, u32 mode) {
     }
 
     inode = inode->open_redirect();
+    if ((inode->mode & S_IFMT) == S_IFSOCK && !(flags & O_PATH))
+        return -err::NXIO; // sockets are not opened, as on Linux (reached through /proc/self/fd/N)
     if ((inode->mode & S_IFMT) == S_IFIFO && !(flags & O_PATH)) { // a named pipe
         inode = pipe::fifo_for(inode);
         if (!inode)

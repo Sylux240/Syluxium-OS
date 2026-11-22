@@ -603,9 +603,7 @@ private:
             vfs::File* f = p ? p->fds[m_ctx->fd] : nullptr;
             if (!f) {
                 *error = -err::NOENT;
-            } else if ((f->inode->mode & vfs::S_IFMT) == vfs::S_IFSOCK) {
-                *error = -err::NXIO;
-            } else {
+            } else { // (sockets too: stat works on them, open() refuses them with ENXIO)
                 *error = 0;
                 *out = f->inode;
             }
