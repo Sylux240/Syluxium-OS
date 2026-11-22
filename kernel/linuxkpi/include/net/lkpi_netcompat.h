@@ -14,16 +14,32 @@
 #define ____cacheline_aligned_in_smp __attribute__((__aligned__(SMP_CACHE_BYTES)))
 #endif
 
-/* MSI-X (one interrupt per queue) isn't offered: drivers fall back to MSI. */
+/* MSI-X with one interrupt per queue (pci.cpp) only for the drivers built
+ * with LKPI_REAL_MSIX (tested that way: igb in QEMU); the others (iwlwifi,
+ * e1000e, tg3, ... proven on real machines with one vector) keep falling
+ * back to MSI. */
 struct msix_entry {
     u32 vector;
     u16 entry;
 };
+#ifdef LKPI_REAL_MSIX
+int lkpi_pci_enable_msix_range(struct pci_dev *dev, struct msix_entry *e, int minvec, int maxvec);
+static inline int pci_enable_msix_range(struct pci_dev *dev, struct msix_entry *e, int minvec, int maxvec)
+{
+    return lkpi_pci_enable_msix_range(dev, e, minvec, maxvec);
+}
+static inline int pci_enable_msix_exact(struct pci_dev *dev, struct msix_entry *e, int nvec)
+{
+    int r = lkpi_pci_enable_msix_range(dev, e, nvec, nvec);
+    return r < 0 ? r : 0;
+}
+#else
 static inline int pci_enable_msix_range(struct pci_dev *dev, struct msix_entry *e, int minvec, int maxvec)
 {
     return -ENOSYS;
 }
 static inline int pci_enable_msix_exact(struct pci_dev *dev, struct msix_entry *e, int nvec) { return -ENOSYS; }
+#endif
 
 #define ns_to_timespec64(ns) \
     ({ s64 __ns = (ns); struct timespec64 __t = { __ns / 1000000000LL, __ns % 1000000000LL }; __t; })

@@ -120,10 +120,18 @@ void set_user_gate(u8 vector, void (*entry)()) {
 }
 
 u8 allocate_vector() {
-    u8 v = __atomic_fetch_add(&g_next_vector, 1, __ATOMIC_RELAXED);
-    if (v == VEC_SYSCALL_INT80) // reserved for 32-bit system calls
-        v = __atomic_fetch_add(&g_next_vector, 1, __ATOMIC_RELAXED);
-    return v <= VEC_DEVICE_LAST ? v : 0;
+    // Compare-and-swap, so the counter stops at the end of the device range
+    // instead of wrapping round to vectors that belong to the CPU (with
+    // several MSI-X vectors per device the range can run out).
+    u8 cur = __atomic_load_n(&g_next_vector, __ATOMIC_RELAXED);
+    for (;;) {
+        u8 v = cur == VEC_SYSCALL_INT80 ? static_cast<u8>(cur + 1) : cur; // 0x80: 32-bit system calls
+        if (v < VEC_DEVICE_FIRST || v > VEC_DEVICE_LAST)
+            return 0;
+        if (__atomic_compare_exchange_n(&g_next_vector, &cur, static_cast<u8>(v + 1), false, __ATOMIC_RELAXED,
+                                        __ATOMIC_RELAXED))
+            return v;
+    }
 }
 
 void dump_frame(const Frame* f) {

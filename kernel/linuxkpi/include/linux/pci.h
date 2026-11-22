@@ -60,6 +60,12 @@ struct pci_dev {
     unsigned int is_virtfn:1;     /* appended: an SR-IOV virtual function (never: no SR-IOV) */
     unsigned int is_physfn:1;     /* appended */
     unsigned short dev_flags;     /* appended: PCI_DEV_FLAGS_* quirks (drivers set them) */
+    /* appended: MSI-X vectors handed out by pci_alloc_irq_vectors (entry i ->
+     * interrupt vector lkpi_vectors[i]); lkpi_nvec in use, lkpi_nvec_owned
+     * allocated so far (kept for the next request: vectors aren't freed). */
+#define LKPI_MAX_MSIX 16
+    unsigned int lkpi_vectors[LKPI_MAX_MSIX];
+    unsigned int lkpi_nvec, lkpi_nvec_owned;
 };
 enum pci_dev_flags {
     PCI_DEV_FLAGS_MSI_INTX_DISABLE_BUG = 1 << 0,
