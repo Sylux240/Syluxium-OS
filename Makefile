@@ -264,7 +264,11 @@ LKPI_LINUX_CFLAGS := -I$(LKPI_INCLUDE) -include linux/kconfig.h -Werror=implicit
     -Wno-initializer-overrides -Wno-unused-const-variable -Wno-implicit-fallthrough -Wno-format-zero-length \
     -Wno-missing-field-initializers -Wno-sign-compare -Wno-address-of-packed-member -Wno-tautological-constant-out-of-range-compare \
     -Wno-default-const-init-field-unsafe -Wno-unknown-warning-option
-lkpi_modname = $(if $(findstring /brcm80211/,$<),brcmfmac,$(lkpi_modname_net))
+lkpi_modname = $(or $(lkpi_modname_list),$(lkpi_modname_old))
+lkpi_modname_old = $(if $(findstring /brcm80211/,$<),brcmfmac,$(lkpi_modname_net))
+# Drivers imported from Linux 7.4-rc3 (docs/drivers.md): "<path part>:<module name>".
+LKPI_MODNAMES := /ethernet/intel/igb/:igb
+lkpi_modname_list = $(firstword $(foreach m,$(LKPI_MODNAMES),$(if $(findstring $(word 1,$(subst :, ,$(m))),$<),$(word 2,$(subst :, ,$(m))))))
 lkpi_modname_net = $(if $(findstring /drivers/net/usb/,$<),$(basename $(notdir $<)),$(lkpi_modname_net2))
 lkpi_modname_net2 = $(if $(findstring /iwlwifi/mvm/,$<),iwlmvm,$(if $(findstring /iwlwifi/,$<),iwlwifi,$(if $(findstring /ethernet/realtek/r8169,$<),r8169,$(if $(findstring /ethernet/broadcom/tg3,$<),tg3,$(if $(findstring /ethernet/intel/e1000e/,$<),e1000e,$(if $(findstring /ethernet/intel/igc/,$<),igc,$(if $(findstring /drivers/net/phy/realtek,$<),realtek,$(if $(findstring /drivers/net/phy/,$<),libphy,$(lkpi_modname_rest)))))))))
 lkpi_modname_rest = $(if $(findstring /drm/i915/,$<),i915,$(if $(findstring /drm/radeon/,$<),radeon,$(if $(findstring /drm/amd/,$<),amdgpu,$(if $(findstring /drm/nouveau/,$<),nouveau,$(if $(findstring /drm/scheduler/,$<),gpu_sched,$(patsubst virtual,mac80211_hwsim,$(patsubst wireless,cfg80211,$(notdir $(patsubst %/,%,$(dir $<))))))))))
@@ -292,6 +296,8 @@ $(OBJDIR)/$(LKPI_NETDRV)/phy/%: LKPI_DRV_CFLAGS = -include net/lkpi_phy.h
 # USB Ethernet adapters (r8152, ax88179_178a over usbnet)
 $(OBJDIR)/$(LKPI_NETDRV)/usb/%: LKPI_DRV_CFLAGS = -include net/lkpi_usbnet.h
 $(OBJDIR)/$(LKPI_NETDRV)/ethernet/intel/%: LKPI_DRV_CFLAGS = -include net/lkpi_phy.h -DCONFIG_E1000E=1 -DCONFIG_IGC=1
+# Intel 1 GbE server/desktop NICs (igb: 82575/82576/82580, I350, I210/I211, I354), Linux 7.4-rc3.
+$(OBJDIR)/$(LKPI_NETDRV)/ethernet/intel/igb/%: LKPI_DRV_CFLAGS = -include net/lkpi_netdrv.h -DCONFIG_IGB=1
 # GPU drivers: their own include directory and Kconfig (drm/lkpi_<driver>_config.h).
 LKPI_I915 := kernel/linuxkpi/drivers/gpu/drm/i915
 $(OBJDIR)/$(LKPI_I915)/%: LKPI_DRV_CFLAGS = -I$(LKPI_I915) -DI915 -include drm/lkpi_i915_config.h -gline-tables-only
