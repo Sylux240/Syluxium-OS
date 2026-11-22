@@ -441,8 +441,21 @@ bool block_on(WaitList& list, IrqSpinlock& lock, u64 deadline_ns, bool (*abort)(
     if (deadline_ns) {
         RunQueue& rq = this_cpu()->rq; // interrupts are off: we can't migrate here
         rq.lock.lock();
-        me->wake_deadline = deadline_ns;
-        insert_sleeper(rq, me);
+        // Only while still Blocked. A waker that doesn't hold `lock` (a
+        // signal: wake_process) may already have made us Ready and queued us
+        // since we set Blocked above; a timeout entry added now would stay
+        // linked after we run again, and once we moved to another CPU it
+        // was unlinked under the wrong CPU's lock (block_on's tail) or
+        // expired by this CPU's tick later: the sleeper list got corrupted
+        // and a thread - even a freed one whose memory became a new thread -
+        // was queued while it ran elsewhere. Two CPUs then ran the same
+        // thread: one started it on its fresh stack, the other `ret`ed
+        // through the start frame the first had already overwritten
+        // (page fault at RIP 0, RSP at the top of a kernel stack).
+        if (me->state == ThreadState::Blocked) {
+            me->wake_deadline = deadline_ns;
+            insert_sleeper(rq, me);
+        }
         rq.lock.unlock();
     }
 
