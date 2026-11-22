@@ -1,14 +1,30 @@
 #!/usr/bin/python3
-"""Personalize (Syluxium shell): taskbar and menu transparency, glass blur,
-accent colour and wallpaper. Writes ~/.config/syluxium-shell/settings.ini;
-the panel and wallpaper follow at once, and blur is switched in the user's
-Wayfire configuration (Wayfire reloads it by itself).
+"""Personalize: taskbar transparency, window transparency and shadows, accent
+colour and wallpaper. The choices are kept in
+~/.config/syluxium-shell/settings.ini in every session.
 
-In the classic desktop (X11/TDE) the taskbar's transparency is set in
-Control Panel > Panels > Appearance instead; this window says so."""
+Syluxium shell (Wayland): the panel and wallpaper follow settings.ini at
+once, and blur is switched in the user's Wayfire configuration (Wayfire
+reloads it by itself).
+
+Classic desktop (X11, Xfce): through xfconf (xfconf-query):
+  taskbar    xfce4-panel  /panels/panel-N/background-style = 1 (colour) and
+                          background-rgba (the panel's colour, the chosen alpha)
+  windows    xfwm4        /general/inactive_opacity, show_frame_shadow,
+                          show_popup_shadow, show_dock_shadow, use_compositing
+  wallpaper  xfce4-desktop /backdrop/screen*/monitor*/workspace*/last-image
+  accent     a per-user copy of the Syluxium GTK theme with the accent
+             swapped (~/.local/share/themes/Syluxium-RRGGBB), chosen through
+             xsettings /Net/ThemeName so running programs restyle at once
+             (and gtk-theme-name in ~/.config/gtk-3.0/settings.ini for
+             programs started outside Xfce).
+Without Xfce (or when xfconfd doesn't answer) only the accent colour applies
+(to programs started afterwards); the window says so."""
 import glob
 import os
 import re
+import shutil
+import subprocess
 import sys
 
 sys.path.insert(0, "/usr/local/lib/syluxium/python")
@@ -25,6 +41,15 @@ ACCENTS = [("Cyan", "#6fe3f0"), ("Lavender", "#b9a3e3"), ("Cloud pink", "#f29ab6
            ("Sun gold", "#f6c96b"), ("Mint", "#7ee0b0"), ("Sky", "#7fb2ff")]
 WALLPAPER_DIRS = ["/opt/trinity/share/wallpapers", "/usr/share/syluxium/dusk", "/usr/share/backgrounds",
                   os.path.expanduser("~/Pictures")]
+WAYLAND = os.environ.get("XDG_SESSION_TYPE") == "wayland"
+
+# The GTK theme and how its accent appears in it (gtk.css).
+THEME = "Syluxium"
+THEME_CSS = f"/usr/share/themes/{THEME}/gtk-3.0/gtk.css"
+USER_THEMES = os.path.expanduser("~/.local/share/themes")
+GTK_SETTINGS = os.path.expanduser("~/.config/gtk-3.0/settings.ini")
+ACCENT, ACCENT_RGB, ACCENT_HOVER = "#6fe3f0", "111, 227, 240", "#9cecf5"
+GLASS = (18 / 255, 23 / 255, 54 / 255)  # the Dusk taskbar's navy
 
 
 def read():
@@ -76,21 +101,204 @@ def software_rendering():
         return False
 
 
+def rgb(hexv):
+    return tuple(int(hexv[i:i + 2], 16) for i in (1, 3, 5))
+
+
+# ---- X11: Xfce's settings (xfconf) ----
+class Xfconf:
+    """xfconf-query, only in an Xfce session and only while xfconfd answers;
+    every call returns None (or False) instead of failing."""
+
+    def __init__(self):
+        self.ok = (S.desktop_session() == "xfce" and shutil.which("xfconf-query") is not None
+                   and self.run("-l") is not None)
+
+    def run(self, *args):
+        try:
+            p = subprocess.run(["xfconf-query", *args], capture_output=True, text=True, timeout=5,
+                               env=dict(os.environ, LC_ALL="C"))
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        return p.stdout if p.returncode == 0 else None
+
+    def get(self, channel, prop):
+        out = self.run("-c", channel, "-p", prop) if self.ok else None
+        return out.strip() if out is not None else None
+
+    def get_array(self, channel, prop):
+        """The items of an array property ("Value is an array with N items:", a blank line, the items)."""
+        out = self.run("-c", channel, "-p", prop) if self.ok else None
+        if not out or not out.startswith("Value is an array"):
+            return []
+        return [line.strip() for line in out.splitlines()[1:] if line.strip()]
+
+    def props(self, channel):
+        out = self.run("-c", channel, "-l") if self.ok else None
+        return out.split() if out else []
+
+    def set(self, channel, prop, kind, value):
+        if isinstance(value, bool):
+            value = "true" if value else "false"
+        return self.ok and self.run("-c", channel, "-p", prop, "-n", "-t", kind, "-s", str(value)) is not None
+
+    def set_array(self, channel, prop, items):
+        args = ["-c", channel, "-p", prop, "-n"]
+        for kind, value in items:
+            args += ["-t", kind, "-s", str(value)]
+        return self.ok and self.run(*args) is not None
+
+    # -- the taskbar --
+    def panels(self):
+        ids = [int(v) for v in self.get_array("xfce4-panel", "/panels") if v.isdigit()]
+        return ids or ([1] if self.ok else [])
+
+    def panel_alpha(self):
+        for n in self.panels():
+            if self.get("xfce4-panel", f"/panels/panel-{n}/background-style") == "1":
+                rgba = self.get_array("xfce4-panel", f"/panels/panel-{n}/background-rgba")
+                try:
+                    return float(rgba[3])
+                except (IndexError, ValueError):
+                    pass
+        return None
+
+    def set_panel_alpha(self, alpha):
+        """Solid-colour background at the given alpha; the panel's own colour stays (Dusk navy if none)."""
+        for n in self.panels():
+            base = f"/panels/panel-{n}"
+            try:
+                r, g, b = (float(v) for v in self.get_array("xfce4-panel", base + "/background-rgba")[:3])
+            except ValueError:
+                r, g, b = GLASS
+            self.set_array("xfce4-panel", base + "/background-rgba",
+                           [("double", f"{r:.4f}"), ("double", f"{g:.4f}"), ("double", f"{b:.4f}"),
+                            ("double", f"{alpha:.2f}")])
+            self.set("xfce4-panel", base + "/background-style", "uint", 1)
+
+    # -- windows (xfwm4's compositor) --
+    def inactive_opacity(self):
+        v = self.get("xfwm4", "/general/inactive_opacity")
+        return int(v) if v and v.isdigit() else 100
+
+    def shadows(self):
+        return self.get("xfwm4", "/general/show_frame_shadow") != "false"
+
+    def set_windows(self, inactive, shadows):
+        if inactive < 100 or shadows:
+            self.set("xfwm4", "/general/use_compositing", "bool", True)
+        self.set("xfwm4", "/general/inactive_opacity", "int", inactive)
+        for p in ("show_frame_shadow", "show_popup_shadow", "show_dock_shadow"):
+            self.set("xfwm4", f"/general/{p}", "bool", shadows)
+
+    # -- wallpaper --
+    def set_wallpaper(self, path):
+        last = [p for p in self.props("xfce4-desktop")
+                if re.fullmatch(r"/backdrop/screen\d+/monitor[^/]+/workspace\d+/last-image", p)]
+        if not last:  # nothing set yet: one per connected screen, workspace 0
+            last = [f"/backdrop/screen0/monitor{m}/workspace0/last-image" for m in monitors()]
+            for p in last:
+                self.set("xfce4-desktop", p.replace("/last-image", "/image-style"), "int", 5)  # zoomed
+        ok = False
+        for p in last:
+            ok = self.set("xfce4-desktop", p, "string", path) or ok
+        return ok
+
+    # -- GTK theme (accent) --
+    def set_theme(self, name):
+        return self.set("xsettings", "/Net/ThemeName", "string", name)
+
+
+def monitors():
+    try:
+        out = subprocess.run(["xrandr", "--query"], capture_output=True, text=True, timeout=5).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        out = ""
+    return [line.split()[0] for line in out.splitlines() if " connected" in line] or ["0"]
+
+
+def accent_theme(hexv):
+    """The GTK theme with this accent: Syluxium itself for the default, else a
+    per-user copy (imports Syluxium, repeats its accent rules in the new colour)."""
+    hexv = hexv.lower()
+    if hexv == ACCENT:
+        return THEME
+    name = f"{THEME}-{hexv[1:]}"
+    try:
+        css = open(THEME_CSS).read()
+    except OSError:
+        return None
+    r, g, b = rgb(hexv)
+    hover = "#%02x%02x%02x" % tuple(round(c + (255 - c) * 0.35) for c in (r, g, b))
+    plain = re.sub(r"/\*.*?\*/", "", css, flags=re.S)
+    plain = re.sub(r"^\s*@[^\n]*;\s*$", "", plain, flags=re.M)
+    out = [f"/* Syluxium with the accent colour {hexv} (written by Personalize). */",
+           f'@import url("file://{THEME_CSS}");', "",
+           f"@define-color theme_selected_bg_color {hexv};", f"@define-color accent_color {hexv};", ""]
+    for sel, body in re.findall(r"([^{}]+)\{([^{}]*)\}", plain):
+        if ACCENT in body or ACCENT_RGB in body or ACCENT_HOVER in body:
+            body = body.replace(ACCENT_HOVER, hover).replace(ACCENT, hexv).replace(ACCENT_RGB, f"{r}, {g}, {b}")
+            out.append(f"{sel.strip()} {{{body.rstrip()}\n}}\n")
+    d = os.path.join(USER_THEMES, name, "gtk-3.0")
+    os.makedirs(d, exist_ok=True)
+    with open(os.path.join(d, "gtk.css.new"), "w") as f:
+        f.write("\n".join(out))
+    os.replace(os.path.join(d, "gtk.css.new"), os.path.join(d, "gtk.css"))
+    with open(os.path.join(USER_THEMES, name, "index.theme"), "w") as f:
+        f.write(f"[Desktop Entry]\nType=X-GNOME-Metatheme\nName={name}\n"
+                f"Comment=Syluxium with the accent colour {hexv} (Personalize)\n\n"
+                f"[X-GNOME-Metatheme]\nGtkTheme={name}\n")
+    return name
+
+
+def remove_old_accent_themes(keep):
+    for d in glob.glob(os.path.join(USER_THEMES, f"{THEME}-" + "[0-9a-f]" * 6)):
+        if os.path.basename(d) != keep:
+            shutil.rmtree(d, ignore_errors=True)
+
+
+def set_gtk_settings_theme(name):
+    """gtk-theme-name in ~/.config/gtk-3.0/settings.ini (GTK programs outside Xfce's xsettings)."""
+    try:
+        lines = open(GTK_SETTINGS).read().splitlines()
+    except OSError:
+        lines = []
+    if not any(line.strip() == "[Settings]" for line in lines):
+        lines = ["[Settings]"] + lines
+    lines = [line for line in lines if not line.startswith("gtk-theme-name")]
+    lines.insert(next(i for i, line in enumerate(lines) if line.strip() == "[Settings]") + 1,
+                 f"gtk-theme-name={name}")
+    os.makedirs(os.path.dirname(GTK_SETTINGS), exist_ok=True)
+    with open(GTK_SETTINGS + ".new", "w") as f:
+        f.write("\n".join(lines) + "\n")
+    os.replace(GTK_SETTINGS + ".new", GTK_SETTINGS)
+
+
 class Personalize:
     def __init__(self):
         self.values = read()
-        self.win = S.window("Personalize", 720, 600, "preferences-desktop-theme")
-        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18, margin=22)
+        self.xfconf = None if WAYLAND else Xfconf()
+        self.pending = {}
+        if self.xfconf and self.xfconf.ok:
+            a = self.xfconf.panel_alpha()
+            if a is not None:
+                self.values["opacity"] = f"{a:.2f}"
+        self.win = S.window("Personalize", 720, 640 if WAYLAND else 700, "preferences-desktop-theme")
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14, margin=22)
         self.win.add(outer)
         outer.pack_start(S.label("Personalize", bold=True, size="x-large"), False, False, 0)
-        if os.environ.get("XDG_SESSION_TYPE") != "wayland":
-            note = S.label("These settings are for the Syluxium shell (the \"new shell\" boot entry). In the "
-                           "classic desktop, set the taskbar's transparency in Control Panel > Panels > "
-                           "Appearance > Advanced options.", wrap=True)
+        xfce = WAYLAND or self.xfconf.ok  # the taskbar/window/wallpaper settings can apply
+        if not WAYLAND and not self.xfconf.ok:
+            why = ("Xfce's settings service (xfconfd) isn't answering"
+                   if S.desktop_session() == "xfce" else "this desktop isn't Xfce")
+            note = S.label(f"The taskbar, window and wallpaper settings are for the Xfce desktop, but {why}. "
+                           "Here the accent colour applies to programs started from now on.", wrap=True)
+            note.get_style_context().add_class("dim-label")
             outer.pack_start(note, False, False, 0)
 
-        # transparency
-        outer.pack_start(S.label("Taskbar and menu transparency", bold=True), False, False, 0)
+        # taskbar transparency
+        outer.pack_start(S.label("Taskbar and menu transparency" if WAYLAND else "Taskbar transparency",
+                                 bold=True), False, False, 0)
         row = Gtk.Box(spacing=12)
         row.pack_start(S.label("See-through"), False, False, 0)
         self.opacity = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 20, 100, 1)
@@ -102,26 +310,52 @@ class Personalize:
         self.opacity.connect("value-changed", self.on_opacity)
         row.pack_start(self.opacity, True, True, 0)
         row.pack_start(S.label("Solid"), False, False, 0)
+        row.set_sensitive(xfce)
         outer.pack_start(row, False, False, 0)
         self.preview = Gtk.DrawingArea()
         self.preview.set_size_request(-1, 54)
         self.preview.connect("draw", self.draw_preview)
         outer.pack_start(self.preview, False, False, 0)
 
-        # blur
-        brow = Gtk.Box(spacing=12)
-        self.blur = Gtk.Switch()
-        self.blur.set_active(self.values["blur"] != "false")
-        self.blur.connect("notify::active", self.on_blur)
-        brow.pack_start(S.label("Frosted-glass blur behind the taskbar and menus", bold=True), False, False, 0)
-        brow.pack_end(self.blur, False, False, 0)
-        outer.pack_start(brow, False, False, 0)
-        if software_rendering():
-            hint = S.label("Blur needs a graphics driver; on this computer the screen is drawn in software, so "
-                           "blur stays off.", wrap=True)
-            hint.get_style_context().add_class("dim-label")
-            outer.pack_start(hint, False, False, 0)
-            self.blur.set_sensitive(False)
+        if WAYLAND:
+            # blur
+            brow = Gtk.Box(spacing=12)
+            self.blur = Gtk.Switch()
+            self.blur.set_active(self.values["blur"] != "false")
+            self.blur.connect("notify::active", self.on_blur)
+            brow.pack_start(S.label("Frosted-glass blur behind the taskbar and menus", bold=True), False, False, 0)
+            brow.pack_end(self.blur, False, False, 0)
+            outer.pack_start(brow, False, False, 0)
+            if software_rendering():
+                hint = S.label("Blur needs a graphics driver; on this computer the screen is drawn in software, "
+                               "so blur stays off.", wrap=True)
+                hint.get_style_context().add_class("dim-label")
+                outer.pack_start(hint, False, False, 0)
+                self.blur.set_sensitive(False)
+        else:
+            # windows: transparency of the windows not in use, shadows
+            outer.pack_start(S.label("Windows", bold=True), False, False, 0)
+            wbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+            wrow = Gtk.Box(spacing=12)
+            wrow.pack_start(S.label("Windows in the background"), False, False, 0)
+            self.inactive = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 40, 100, 1)
+            self.inactive.set_value_pos(Gtk.PositionType.RIGHT)
+            self.inactive.connect("format-value",
+                                  lambda _s, v: "solid" if v >= 100 else f"{100 - int(v)} % see-through")
+            self.inactive.set_value(self.xfconf.inactive_opacity() if self.xfconf.ok else 100)
+            self.inactive.set_hexpand(True)
+            self.inactive.connect("value-changed", self.on_windows)
+            wrow.pack_start(self.inactive, True, True, 0)
+            wbox.pack_start(wrow, False, False, 0)
+            srow = Gtk.Box(spacing=12)
+            srow.pack_start(S.label("Shadows under windows and menus"), False, False, 0)
+            self.shadows = Gtk.Switch()
+            self.shadows.set_active(self.xfconf.shadows() if self.xfconf.ok else True)
+            self.shadows.connect("notify::active", self.on_windows)
+            srow.pack_end(self.shadows, False, False, 0)
+            wbox.pack_start(srow, False, False, 0)
+            wbox.set_sensitive(xfce)
+            outer.pack_start(wbox, False, False, 0)
 
         # accent
         outer.pack_start(S.label("Accent colour", bold=True), False, False, 0)
@@ -160,7 +394,7 @@ class Personalize:
             flow.add(child)
             if path == self.values["wallpaper"]:
                 flow.select_child(child)
-        sw = Gtk.ScrolledWindow(min_content_height=170)
+        sw = Gtk.ScrolledWindow(min_content_height=150)
         sw.add(flow)
         outer.pack_start(sw, True, True, 0)
         browse = Gtk.Button(label="Browse...")
@@ -168,6 +402,8 @@ class Personalize:
         brow2 = Gtk.Box()
         brow2.pack_end(browse, False, False, 0)
         outer.pack_start(brow2, False, False, 0)
+        flow.set_sensitive(xfce)
+        browse.set_sensitive(xfce)
         self.win.show_all()
 
     def wallpapers(self):
@@ -182,23 +418,59 @@ class Personalize:
         write(self.values)
         self.preview.queue_draw()
 
+    def later(self, key, fn):
+        """Apply to Xfce once a slider rests (one xfconf-query per change, not per pixel)."""
+        if key in self.pending:
+            GLib.source_remove(self.pending[key])
+
+        def run():
+            del self.pending[key]
+            fn()
+            return False
+        self.pending[key] = GLib.timeout_add(200, run)
+
     def on_opacity(self, scale):
         self.values["opacity"] = f"{scale.get_value() / 100:.2f}"
         self.save()
+        if self.xfconf and self.xfconf.ok:
+            self.later("opacity", lambda: self.xfconf.set_panel_alpha(float(self.values["opacity"])))
 
     def on_blur(self, sw, _p):
         self.values["blur"] = "true" if sw.get_active() else "false"
         set_blur(sw.get_active())
         self.save()
 
+    def on_windows(self, *_):
+        if self.xfconf.ok:
+            self.later("windows", lambda: self.xfconf.set_windows(int(self.inactive.get_value()),
+                                                                  self.shadows.get_active()))
+
     def on_accent(self, b, hexv):
-        if b.get_active():
-            self.values["accent"] = hexv
-            self.save()
+        if not b.get_active():
+            return
+        self.values["accent"] = hexv
+        self.save()
+        if WAYLAND:
+            return
+        name = accent_theme(hexv)
+        if not name:
+            return
+        set_gtk_settings_theme(name)
+        if self.xfconf.ok:
+            # A new theme name: every GTK program (this one too) reloads its style.
+            self.xfconf.set_theme(name)
+        else:
+            Gtk.Settings.get_default().set_property("gtk-theme-name", name)
+        GLib.timeout_add_seconds(3, lambda: remove_old_accent_themes(name))  # (once: returns None)
+
+    def set_wallpaper(self, path):
+        self.values["wallpaper"] = path
+        self.save()
+        if self.xfconf and self.xfconf.ok:
+            self.xfconf.set_wallpaper(path)
 
     def on_wallpaper(self, _flow, child):
-        self.values["wallpaper"] = child.path
-        self.save()
+        self.set_wallpaper(child.path)
 
     def on_browse(self, *_):
         d = Gtk.FileChooserDialog(title="Choose a wallpaper", transient_for=self.win,
@@ -210,12 +482,11 @@ class Personalize:
             f.add_mime_type(m)
         d.add_filter(f)
         if d.run() == Gtk.ResponseType.OK:
-            self.values["wallpaper"] = d.get_filename()
-            self.save()
+            self.set_wallpaper(d.get_filename())
         d.destroy()
 
     def draw_swatch(self, _w, cr, hexv):
-        r, g, b = (int(hexv[i:i + 2], 16) / 255 for i in (1, 3, 5))
+        r, g, b = (c / 255 for c in rgb(hexv))
         cr.set_source_rgb(r, g, b)
         cr.arc(17, 17, 14, 0, 6.2832)
         cr.fill()
@@ -231,11 +502,10 @@ class Personalize:
         except GLib.Error:
             cr.set_source_rgb(0.3, 0.3, 0.5)
             cr.paint()
-        cr.set_source_rgba(18 / 255, 23 / 255, 54 / 255, float(self.values["opacity"]))
+        cr.set_source_rgba(*GLASS, float(self.values["opacity"]))
         cr.rectangle(0, 0, width, height)
         cr.fill()
-        a = self.values["accent"]
-        r, g, b = (int(a[i:i + 2], 16) / 255 for i in (1, 3, 5))
+        r, g, b = (c / 255 for c in rgb(self.values["accent"]))
         cr.set_source_rgba(r, g, b, 0.6)
         cr.rectangle(0, 0, width, 1)
         cr.fill()

@@ -85,6 +85,14 @@ TRINITY_PKGS += kcalc-trinity kcharselect-trinity kolourpaint-trinity ksnapshot-
 DEBIAN_PKGS  += xfce4-session xfwm4 xfce4-panel xfdesktop4 xfce4-settings xfconf thunar \
                 xfce4-whiskermenu-plugin volumeicon-alsa xfce4-power-manager \
                 xfce4-appfinder libxfce4ui-utils gvfs gvfs-daemons xdg-user-dirs
+# Xfce session: applications (GTK replacements for the Trinity apps)
+# Terminal, Calculator, Paint, Character Map, Snipping Tool, text editor
+# (~28 MB); yad: GTK dialogs for our shell scripts (zenity 4 would pull GTK 4
+# and libadwaita, ~42 MB); xdg-utils: xdg-open / xdg-mime.
+# udisks2 (pulled in by GVfs) is left out: no udev, and syluxium-automount
+# mounts USB sticks.
+DEBIAN_PKGS  += xfce4-terminal galculator drawing gucharmap xfce4-screenshooter mousepad yad xdg-utils
+XFCE_APPS_EXCLUDE := udisks2
 DEBIAN_ROOT  := $(BUILD)/rootfs-debian
 DEBIAN_STAMP := $(DEBIAN_ROOT)/.fetched
 DEBIAN_CONFIGURED := $(DEBIAN_ROOT)/.configured
@@ -99,7 +107,7 @@ DEBIAN_I386_PKGS  := hello busybox bash
 # capi, opencl); without them those modules don't load and the rest
 # of Wine works. FFmpeg + GStreamer alone would add ~150 MB.
 WINE_EXCLUDE := libavcodec61,libavformat61,libavutil59,libgstreamer-plugins-base1.0-0,libgstreamer1.0-0,libgphoto2-6t64,libgphoto2-port12t64,libpcap0.8t64,libpulse0,libcapi20-3t64,ocl-icd-libopencl1
-DEBIAN_EXCLUDE := cpp,cpp-14,cpp-14-x86-64-linux-gnu,cpp-x86-64-linux-gnu,man-db,groff-base,systemd,udev,xbase-clients,systemd-sysv,libpam-systemd,dbus-user-session,$(WINE_EXCLUDE)
+DEBIAN_EXCLUDE := cpp,cpp-14,cpp-14-x86-64-linux-gnu,cpp-x86-64-linux-gnu,man-db,groff-base,systemd,udev,xbase-clients,systemd-sysv,libpam-systemd,dbus-user-session,$(WINE_EXCLUDE),$(XFCE_APPS_EXCLUDE)
 DEBIAN_I386_EXCLUDE := base-files,debianutils,gawk,libmpfr6,libgmp10,libsigsegv2,readline-common,libreadline8t64
 DEBIAN_I386_PROGS := hello busybox bash
 DEBIAN_I386_ROOT  := $(BUILD)/rootfs-debian-i386

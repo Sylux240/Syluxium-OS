@@ -1,0 +1,13 @@
+[Scheme]
+Name=Syluxium Dusk
+ColorForeground=#eef2ff
+ColorBackground=#141a3a
+ColorCursorUseDefault=FALSE
+ColorCursor=#6fe3f0
+ColorCursorForeground=#141a3a
+ColorSelectionUseDefault=FALSE
+ColorSelection=#141a3a
+ColorSelectionBackground=#6fe3f0
+ColorBoldUseDefault=TRUE
+TabActivityColor=#f6c96b
+ColorPalette=#1b2148;#e8708f;#7ee0b0;#f6c96b;#7fb2ff;#b9a3e3;#6fe3f0;#c8cfee;#4a5590;#f29ab6;#a3ecc8;#f9da98;#a6caff;#d0c1f0;#9cecf5;#ffffff

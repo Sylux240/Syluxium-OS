@@ -15,6 +15,23 @@ SYS=/sys/class/graphics/fb0
 CONF=/boot/efi/boot/limine/limine.conf
 SAVED="$HOME/.config/syluxium/display"
 
+# GTK dialogs (yad): an error, a yes/no question, a choice from a list
+# ("menu": tag and text pairs; prints the tag) and a drop-down list (the
+# current value first; prints the choice).
+dlg() { yad --title "$TITLE" --window-icon preferences-desktop-display --center --borders 12 "$@" 2>/dev/null; }
+dlg_error() { dlg --image dialog-error --text "$1" --button "OK:0"; }
+dlg_yesno() { dlg --image dialog-question --text "$1" --button "No:1" --button "Yes:0"; }
+dlg_menu() {
+    local text=$1; shift
+    dlg --list --width 460 --height 300 --text "$text" --no-headers --column "" --column "" --hide-column 1 \
+        --print-column 1 --separator "" --button "Cancel:1" --button "OK:0" "$@"
+}
+dlg_combo() {
+    local text=$1 current=$2 items=() i; shift 2
+    for i in "$@"; do [ "$i" = "$current" ] || items+=("$i"); done
+    dlg --entry --text "$text" --button "Cancel:1" --button "OK:0" "$current" "${items[@]}"
+}
+
 set_resolution() {
     local res=$1
     [ -f "$CONF" ] || { echo "no boot loader configuration at $CONF" >&2; return 1; }
@@ -68,25 +85,16 @@ apply_and_confirm() {
     local new=$1 old=$2
     # shellcheck disable=SC2086 # the layouts are argument lists
     if ! xrandr $new; then
-        kdialog --title "$TITLE" --error "The screens could not be set up that way."
+        dlg_error "The screens could not be set up that way."
         xrandr $old 2>/dev/null
         return 1
     fi
-    kdialog --title "$TITLE" --yesno "Do you want to keep these display settings?
+    local answer
+    # (exit code 70 when the 15 seconds run out)
+    dlg_yesno "Do you want to keep these display settings?
 
-They go back to the previous ones in 15 seconds." &
-    local ask=$! answer
-    for _ in $(seq 150); do
-        kill -0 "$ask" 2>/dev/null || break
-        sleep 0.1
-    done
-    if kill -0 "$ask" 2>/dev/null; then
-        kill "$ask" 2>/dev/null
-        answer=1
-    else
-        wait "$ask"
-        answer=$?
-    fi
+They go back to the previous ones in 15 seconds." --timeout 15 --timeout-indicator bottom
+    answer=$?
     if [ "$answer" = 0 ]; then
         mkdir -p "$(dirname "$SAVED")"
         xr_layout > "$SAVED"
@@ -103,8 +111,7 @@ change_resolution() {
         items+=("$m @ $r Hz")
     done < <(xr_modes "$out")
     current="$cur_mode @ $cur_rate Hz"
-    choice=$(kdialog --title "$TITLE" --combobox "Screen resolution and refresh rate ($out):" \
-             "${items[@]}" --default "$current") || return 0
+    choice=$(dlg_combo "Screen resolution and refresh rate ($out):" "$current" "${items[@]}") || return 0
     [ "$choice" = "$current" ] && return 0
     mode=${choice%% @*}
     rate=${choice#*@ }
@@ -135,14 +142,14 @@ mapfile -t outs < <(xr_connected)
 if [ ${#outs[@]} -ge 2 ]; then
     # ---- several screens ----
     a=${outs[0]} b=${outs[1]}
-    action=$(kdialog --title "$TITLE" --menu "Screens: ${outs[*]}" \
+    action=$(dlg_menu "Screens: ${outs[*]}" \
              layout "Arrangement (extend, duplicate, one screen only)..." \
              primary "Main display (taskbar, new windows)..." \
              resolution "Resolution and refresh rate...") || exit 0
     old=$(xr_layout)
     case $action in
     layout)
-        choice=$(kdialog --title "$TITLE" --menu "How should $a and $b be used?" \
+        choice=$(dlg_menu "How should $a and $b be used?" \
                  right "Extend: $b to the right of $a" \
                  left "Extend: $b to the left of $a" \
                  above "Extend: $b above $a" \
@@ -164,13 +171,13 @@ if [ ${#outs[@]} -ge 2 ]; then
     primary)
         menu=()
         for o in "${outs[@]}"; do menu+=("$o" "$o"); done
-        choice=$(kdialog --title "$TITLE" --menu "Main display:" "${menu[@]}") || exit 0
+        choice=$(dlg_menu "Main display:" "${menu[@]}") || exit 0
         apply_and_confirm "--output $choice --primary" "$old"
         ;;
     resolution)
         menu=()
         for o in "${outs[@]}"; do menu+=("$o" "$o ($(xr_current "$o" | awk '{ print $1 }'))"); done
-        choice=$(kdialog --title "$TITLE" --menu "Which screen?" "${menu[@]}") || exit 0
+        choice=$(dlg_menu "Which screen?" "${menu[@]}") || exit 0
         change_resolution "$choice"
         ;;
     esac
@@ -185,21 +192,21 @@ if [ -n "$out" ] && [ "$(xr_modes "$out" | wc -l)" -gt 1 ]; then
 fi
 
 # ---- firmware framebuffer: the boot loader sets the mode ----
-[ "$(id -u)" = 0 ] || exec tdesudo -c "$0" -- "$@"
+[ "$(id -u)" = 0 ] || exec syluxium-sudo --why "The screen resolution is set in the boot loader's settings." "$0" "$@"
 current=$(sed 's/^U://; s/p.*//' "$SYS/mode" 2>/dev/null)
 modes=()
 while read -r line; do
     m=$(echo "$line" | sed 's/^U://; s/p.*//')
     [ -n "$m" ] && modes+=("$m")
 done < "$SYS/modes"
-[ ${#modes[@]} -gt 0 ] || { kdialog --title "$TITLE" --error "The screen's resolutions could not be read."; exit 1; }
-choice=$(kdialog --title "$TITLE" --combobox "Screen resolution (now: $current):" "${modes[@]}" --default "$current") || exit 0
+[ ${#modes[@]} -gt 0 ] || { dlg_error "The screen's resolutions could not be read."; exit 1; }
+choice=$(dlg_combo "Screen resolution (now: $current):" "$current" "${modes[@]}") || exit 0
 [ "$choice" = "$current" ] && exit 0
 if ! set_resolution "$choice"; then
-    kdialog --title "$TITLE" --error "The setting could not be saved."
+    dlg_error "The setting could not be saved."
     exit 1
 fi
-if kdialog --title "$TITLE" --yesno "The screen will use $choice after a restart.
+if dlg_yesno "The screen will use $choice after a restart.
 
 Restart now?"; then
     reboot

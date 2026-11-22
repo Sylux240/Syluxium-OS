@@ -1,0 +1,6 @@
+# Syluxium: the GTK accessories' defaults in the Dusk look.
+# Code Editor (Mousepad): the Dusk colour scheme
+# (/usr/share/gtksourceview-4/styles/syluxium-dusk.xml), line numbers.
+[org.xfce.mousepad.preferences.view]
+color-scheme='syluxium-dusk'
+show-line-numbers=true

@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Syluxium Dusk: the Code Editor (Mousepad) in the desktop's colours:
+     navy page, light text, cyan cursor and selection. -->
+<style-scheme id="syluxium-dusk" name="Syluxium Dusk" version="1.0">
+  <author>Syluxium</author>
+  <description>Navy and indigo with the cyan accent</description>
+  <color name="navy"      value="#141a3a"/>
+  <color name="indigo"    value="#1b2148"/>
+  <color name="line"      value="#1d2552"/>
+  <color name="border"    value="#2e3870"/>
+  <color name="text"      value="#eef2ff"/>
+  <color name="dim"       value="#8590b8"/>
+  <color name="cyan"      value="#6fe3f0"/>
+  <color name="lavender"  value="#b9a3e3"/>
+  <color name="pink"      value="#f29ab6"/>
+  <color name="red"       value="#e8708f"/>
+  <color name="gold"      value="#f6c96b"/>
+  <color name="mint"      value="#7ee0b0"/>
+  <color name="sky"       value="#7fb2ff"/>
+
+  <style name="text"                    foreground="text" background="navy"/>
+  <style name="selection"               foreground="navy" background="cyan"/>
+  <style name="selection-unfocused"     foreground="navy" background="dim"/>
+  <style name="cursor"                  foreground="cyan"/>
+  <style name="current-line"            background="line"/>
+  <style name="line-numbers"            foreground="dim" background="indigo"/>
+  <style name="draw-spaces"             foreground="border"/>
+  <style name="right-margin"            foreground="border" background="indigo"/>
+  <style name="background-pattern"      background="indigo"/>
+  <style name="bracket-match"           foreground="navy" background="lavender"/>
+  <style name="bracket-mismatch"        foreground="text" background="red"/>
+  <style name="search-match"            foreground="navy" background="gold"/>
+
+  <style name="def:comment"             foreground="dim" italic="true"/>
+  <style name="def:shebang"             foreground="dim" italic="true"/>
+  <style name="def:doc-comment-element" bold="true"/>
+  <style name="def:constant"            foreground="pink"/>
+  <style name="def:string"              foreground="mint"/>
+  <style name="def:special-char"        foreground="gold"/>
+  <style name="def:special-constant"    foreground="pink" bold="true"/>
+  <style name="def:number"              foreground="pink"/>
+  <style name="def:floating-point"      foreground="pink"/>
+  <style name="def:boolean"             foreground="pink"/>
+  <style name="def:keyword"             foreground="cyan" bold="true"/>
+  <style name="def:builtin"             foreground="cyan"/>
+  <style name="def:statement"           foreground="cyan"/>
+  <style name="def:type"                foreground="lavender"/>
+  <style name="def:identifier"          foreground="text"/>
+  <style name="def:function"            foreground="sky"/>
+  <style name="def:preprocessor"        foreground="gold"/>
+  <style name="def:emphasis"            italic="true"/>
+  <style name="def:strong-emphasis"     bold="true"/>
+  <style name="def:heading"             foreground="cyan" bold="true"/>
+  <style name="def:link-text"           foreground="sky"/>
+  <style name="def:net-address"         foreground="sky" underline="single"/>
+  <style name="def:inline-code"         foreground="mint"/>
+  <style name="def:list-marker"         foreground="cyan"/>
+  <style name="def:insertion"           foreground="mint"/>
+  <style name="def:deletion"            foreground="red" strikethrough="true"/>
+  <style name="def:error"               foreground="text" background="red" bold="true"/>
+  <style name="def:warning"             foreground="navy" background="gold"/>
+  <style name="def:note"                foreground="gold" bold="true"/>
+  <style name="def:underlined"          underline="single"/>
+</style-scheme>

@@ -70,6 +70,7 @@ struct Pty {
     WinSize winsize{24, 80, 0, 0};
     int fg_pgrp = 0;
     bool locked = true;     // TIOCSPTLCK: slave can't be opened until unlocked
+    bool packet = false;    // TIOCPKT: master reads start with a status byte (VTE terminals use it)
     Ring to_slave;          // cooked input ready for slave reads
     Ring to_master;         // slave output for master reads
     char line[BUF];
@@ -213,7 +214,7 @@ long common_ioctl(Pty* p, u64 request, u64 arg, bool master) {
                   TCXONC = 0x540A, TCFLSH = 0x540B, TIOCSCTTY = 0x540E, TIOCGPGRP = 0x540F, TIOCSPGRP = 0x5410,
                   TIOCOUTQ = 0x5411, TIOCGWINSZ = 0x5413, TIOCSWINSZ = 0x5414, FIONREAD = 0x541B, TIOCPKT = 0x5420,
                   TIOCNOTTY = 0x5422, TIOCGSID = 0x5429, TCGETS2 = 0x802C542A, TCSETS2 = 0x402C542B,
-                  TCSETSW2 = 0x402C542C, TCSETSF2 = 0x402C542D, FIONBIO = 0x5421;
+                  TCSETSW2 = 0x402C542C, TCSETSF2 = 0x402C542D, FIONBIO = 0x5421, TIOCGPKT = 0x80045438;
     void* uarg = reinterpret_cast<void*>(arg);
     switch (request) {
     case TCGETS: {
@@ -318,7 +319,21 @@ long common_ioctl(Pty* p, u64 request, u64 arg, bool master) {
         p->fg_pgrp = proc::current()->pgid;
         proc::current()->ctty = p->slave_node;
         return 0;
-    case TIOCNOTTY: case TCSBRK: case TCXONC: case TIOCPKT: case FIONBIO:
+    case TIOCPKT: { // packet mode (master): every read starts with TIOCPKT_DATA (0)
+        if (!master)
+            return -err::NOTTY;
+        i32 on;
+        if (long r = uaccess::get(&on, static_cast<i32*>(uarg)); r < 0)
+            return r;
+        LockGuard guard(p->wq.lock());
+        p->packet = on != 0;
+        return 0;
+    }
+    case TIOCGPKT: {
+        i32 on = p->packet;
+        return uaccess::put(static_cast<i32*>(uarg), on);
+    }
+    case TIOCNOTTY: case TCSBRK: case TCXONC: case FIONBIO:
         return 0;
     default:
         return -err::NOTTY;
@@ -552,6 +567,10 @@ public:
             bool hangup = false;
             {
                 LockGuard guard(p->wq.lock());
+                // Packet mode: a TIOCPKT_DATA status byte, then the data.
+                usize start = p->packet && p->to_master.count && count > 1 ? 1 : 0;
+                if (start)
+                    tmp[n++] = 0;
                 while (n < count && n < sizeof(tmp) && p->to_master.count)
                     tmp[n++] = p->to_master.pop();
                 // Slave closed after having been opened: EIO, as Linux (xterm exits on it).

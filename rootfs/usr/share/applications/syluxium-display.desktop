@@ -6,4 +6,4 @@ Comment=Change the screen resolution
 Exec=syluxium-display
 Icon=preferences-desktop-display
 X-TDE-SubstituteUID=true
-Categories=Qt;TDE;Settings;HardwareSettings;
+Categories=GTK;Settings;HardwareSettings;
