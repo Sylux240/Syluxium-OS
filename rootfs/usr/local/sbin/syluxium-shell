@@ -83,7 +83,13 @@ grep -qs "^shadows *= *false" "$SET" && sed -i 's/^\(plugins = .*\) winshadows/\
 # Wayfire really uses ("GL renderer: ...") is in syluxium-shell.log.
 {
     echo "== Syluxium shell (Wayland), started $(cut -d' ' -f1 /proc/uptime) s after boot"
-    echo "display driver: $(sed -n 's/^DRIVER=//p' /sys/class/drm/card0/device/uevent 2>/dev/null) ($(ls /dev/dri 2>/dev/null | tr '\n' ' '))"
+    # (the first card: a GPU driver that took over from simpledrm may be card1)
+    card=
+    for c in /sys/class/drm/card[0-9]*; do
+        case "$c" in *-*) continue ;; esac
+        card=$c; break
+    done
+    echo "display driver: $(sed -n 's/^DRIVER=//p' "$card/device/uevent" 2>/dev/null) ($(ls /dev/dri 2>/dev/null | tr '\n' ' '))"
     for s in /sys/class/drm/card*-*/status; do
         [ "$(cat "$s" 2>/dev/null)" = connected ] || continue
         d=$(dirname "$s"); echo "output $(basename "$d"): $(head -1 "$d/modes" 2>/dev/null) (first mode)"
