@@ -274,6 +274,11 @@ void discover_hardware() {
     sound::init(); // phase 8: ALSA-compatible sound core
     hda::register_driver();
     virtio_snd::register_driver();
+    {
+        char root_spec[8];
+        if (cmdline_value("root", root_spec, sizeof(root_spec)))
+            linuxkpi::firmware_root_expected(); // background firmware requests wait for the disk root
+    }
     linuxkpi::init(); // Linux drivers register themselves (module_init) here
     // Native drivers behind Linux's r8169 and e1000e (tried in registration order):
     // they take the device if the Linux driver fails, and the chips Linux's don't cover.
@@ -296,6 +301,7 @@ void discover_hardware() {
     bootlog::start();
     splash::stage(50, "Mounting file systems");
     mount_disk_root(); // root= on the command line: an installed system on disk
+    linuxkpi::firmware_root_ready();
     linuxkpi::usb_retry_deferred(); // Linux USB drivers that found no firmware before it
     dev::probe_all();
     sysfs::populate_devices();

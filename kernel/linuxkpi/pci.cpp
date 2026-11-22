@@ -961,12 +961,25 @@ void iounmap(volatile void __iomem* addr) {
 
 // ---- firmware ----
 
+namespace {
+sched::Thread* g_fw_boot_thread;      // the thread that mounts the root (never waits)
+volatile bool g_fw_root_pending;      // root= given and not yet mounted
+} // namespace
+
 int request_firmware(const struct firmware** out, const char* name, struct device* dev) {
     *out = nullptr;
     char path[256];
     snprintf(path, sizeof(path), "/lib/firmware/%s", name);
     vfs::Inode* node;
-    if (vfs::resolve(path, nullptr, true, &node) != 0 || vfs::is_dir(node->mode)) {
+    int found = vfs::resolve(path, nullptr, true, &node);
+    if ((found != 0 || vfs::is_dir(node->mode)) && g_fw_root_pending && sched::current() != g_fw_boot_thread) {
+        if (dev)
+            dev_info(dev, "firmware %s: waiting for the root file system", name);
+        for (int i = 0; i < 600 && g_fw_root_pending; i++)
+            sched::sleep_ms(50);
+        found = vfs::resolve(path, nullptr, true, &node);
+    }
+    if (found != 0 || vfs::is_dir(node->mode)) {
         if (dev)
             dev_err(dev, "firmware %s not found in /lib/firmware", name);
         return -ENOENT;
@@ -1032,6 +1045,12 @@ int request_firmware_nowait(void*, bool, const char* name, struct device* dev, g
 } // extern "C"
 
 namespace linuxkpi {
+
+void firmware_root_expected() {
+    g_fw_boot_thread = sched::current();
+    g_fw_root_pending = true;
+}
+void firmware_root_ready() { g_fw_root_pending = false; }
 
 // Test aid: "pci_fakeid=VVVV:DDDD=vvvv:dddd" makes the device VVVV:DDDD look
 // like vvvv:dddd to Linux drivers, so a driver's probe and its failure
