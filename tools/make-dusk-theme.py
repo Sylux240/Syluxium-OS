@@ -257,6 +257,68 @@ def make_window_theme(root):
              os.path.join(base, "buttons/press/buttonStickyDownPress" + ("" if act else "Inactive") + ".png"))
 
 
+def rounded_corner(im, left, r=10):
+    """Cut a rounded top corner out of a title-bar corner piece (alpha)."""
+    im = im.convert("RGBA")
+    m = rounded((2 * r + 2, 2 * r + 2), r, (255, 255, 255, 255)).split()[3]
+    a = im.split()[3].copy()
+    for y in range(min(r, im.height)):
+        for x in range(min(r, im.width)):
+            xx = x if left else im.width - 1 - x
+            a.putpixel((xx, y), 255 if m.getpixel((x, y)) >= 128 else 0)
+    im.putalpha(a)
+    return im
+
+
+def make_xfwm4_theme(root):
+    """The same window frames for Xfce's window manager (xfwm4): indigo
+    title bar with the cyan line, rounded top corners, thin frame, soft
+    square caption buttons with a cloud-pink close."""
+    base = os.path.join(root, "usr/share/themes/Syluxium/xfwm4")
+    for act in (True, False):
+        sfx = "-active.png" if act else "-inactive.png"
+        parts = {
+            "top-left": rounded_corner(title_corner(True, act), True),
+            "top-right": rounded_corner(title_corner(False, act), False),
+            "title-1": title_tile(8, act), "title-2": title_tile(8, act), "title-3": title_tile(32, act),
+            "title-4": title_tile(8, act), "title-5": title_tile(8, act),
+            "left": side_frame(True, 16, act), "right": side_frame(False, 16, act),
+            "bottom": bottom_frame(16, act),
+            "bottom-left": bottom_frame(FRAME, act, "left"), "bottom-right": bottom_frame(FRAME, act, "right"),
+        }
+        for name, im in parts.items():
+            save(im, os.path.join(base, name + sfx))
+    kinds = {"close": "close", "hide": "min", "maximize": "max", "maximize-toggled": "restore",
+             "menu": "menu", "shade": "shade", "shade-toggled": "shadedown", "stick": "sticky",
+             "stick-toggled": "stickydown"}
+    for name, kind in kinds.items():
+        save(button(kind, "normal", True), os.path.join(base, name + "-active.png"))
+        save(button(kind, "normal", False), os.path.join(base, name + "-inactive.png"))
+        save(button(kind, "hover", True), os.path.join(base, name + "-prelight.png"))
+        save(button(kind, "press", True), os.path.join(base, name + "-pressed.png"))
+    with open(os.path.join(base, "themerc"), "w") as f:
+        f.write("""# Syluxium Dusk (tools/make-dusk-theme.py)
+active_text_color=#EEF2FF
+inactive_text_color=#8590B8
+title_alignment=left
+title_horizontal_offset=6
+title_vertical_offset_active=0
+title_vertical_offset_inactive=0
+full_width_title=true
+button_offset=4
+button_spacing=0
+show_app_icon=true
+title_shadow_active=false
+title_shadow_inactive=false
+shadow_delta_x=0
+shadow_delta_y=-2
+shadow_delta_width=0
+shadow_delta_height=4
+shadow_opacity=45
+maximized_offset=0
+""")
+
+
 # ---------------------------------------------------------------------------
 # Launcher button, menu header, taskbar, user picture
 # ---------------------------------------------------------------------------
@@ -432,6 +494,7 @@ def make_wallpaper(root, art):
 def main(root):
     art = os.path.join(root, "usr/share/syluxium/dusk")
     make_window_theme(root)
+    make_xfwm4_theme(root)
     make_launcher(root, art)
     make_menu_top(root)
     make_taskbar(root)

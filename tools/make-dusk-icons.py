@@ -69,7 +69,8 @@ def draw(name, p):
         p.rect(3, 4, 21, 16, 2)
         p.line((8, 20), (16, 20))
         p.line((12, 16), (12, 20))
-    elif name in ("folder", "folder_home", "folder_wordprocessing", "syluxium-files", "folder_open"):
+    elif name in ("folder", "folder_home", "folder_wordprocessing", "syluxium-files", "folder_open",
+                  "org.xfce.thunar", "thunar", "system-file-manager"):
         folder(p, CYAN)
     elif name == "folder_image":
         folder(p, PINK)
@@ -98,7 +99,7 @@ def draw(name, p):
     elif name in ("system-software-update",):
         p.arc(12, 12, 8, 8, 20, 320)
         p.line((20, 4), (20, 9), (15, 9))
-    elif name in ("kcontrol", "preferences-system", "syluxium-settings"):
+    elif name in ("kcontrol", "preferences-system", "syluxium-settings", "org.xfce.settings.manager"):
         p.circle(12, 12, 3)
         for a in range(0, 360, 45):
             c, s = math.cos(math.radians(a)), math.sin(math.radians(a))
@@ -179,6 +180,8 @@ ICONS = {
     "syluxium-network-connections": CYAN, "network-wired": CYAN,
     "syluxium-notification": GOLD, "preferences-desktop-notification": GOLD,
     "syluxium-bluetooth": CYAN, "bluetooth": CYAN, "preferences-system-bluetooth": CYAN,
+    # Xfce's names for the same things
+    "org.xfce.thunar": CYAN, "thunar": CYAN, "system-file-manager": CYAN, "org.xfce.settings.manager": CYAN,
 }
 COLOR_OVERRIDE = {"folder_wordprocessing": CYAN}  # documents folder: cyan like the mockup's folders
 

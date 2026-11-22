@@ -1,0 +1,5 @@
+[Desktop Entry]
+Type=Application
+Name=Windows key opens the start menu
+Exec=xcape -e 'Super_L=Control_L|Escape;Super_R=Control_L|Escape'
+OnlyShowIn=XFCE;

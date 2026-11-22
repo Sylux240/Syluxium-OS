@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Volume
+Comment=Volume control in the taskbar (ALSA)
+Exec=volumeicon
+Icon=audio-volume-high
+OnlyShowIn=XFCE;

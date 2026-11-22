@@ -81,6 +81,10 @@ DEBIAN_PKGS  += b43-fwcutter
 # network printer discovery (mDNS: avahi-daemon, cups-browsed, .local names).
 DEBIAN_PKGS  += abiword libnotify-bin avahi-daemon avahi-utils cups-browsed libnss-mdns
 TRINITY_PKGS += kcalc-trinity kcharselect-trinity kolourpaint-trinity ksnapshot-trinity
+# Xfce session: core (the Dusk desktop; Trinity stays as the "Classic" session).
+DEBIAN_PKGS  += xfce4-session xfwm4 xfce4-panel xfdesktop4 xfce4-settings xfconf thunar \
+                xfce4-whiskermenu-plugin volumeicon-alsa xfce4-power-manager \
+                xfce4-appfinder libxfce4ui-utils gvfs gvfs-daemons xdg-user-dirs
 DEBIAN_ROOT  := $(BUILD)/rootfs-debian
 DEBIAN_STAMP := $(DEBIAN_ROOT)/.fetched
 DEBIAN_CONFIGURED := $(DEBIAN_ROOT)/.configured
