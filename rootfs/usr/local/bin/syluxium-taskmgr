@@ -453,8 +453,11 @@ class TaskManager:
             self.timer = GLib.timeout_add(SPEEDS[name], lambda: self.refresh() or True)
 
     def shutdown(self, kind):
-        # ksmserver: logout(confirm, type 0 = log off / 1 = restart / 2 = turn off, mode 2 = now)
-        launch("dcop", "ksmserver", "ksmserver", "logout", "1", str(kind), "2")
+        # kind 0 = log off / 1 = restart / 2 = turn off
+        if desktop_session() == "xfce":
+            launch("xfce4-session-logout", ("--logout", "--reboot", "--halt")[kind])
+        else:  # TDE's ksmserver: logout(confirm, type, mode 2 = now)
+            launch("dcop", "ksmserver", "ksmserver", "logout", "1", str(kind), "2")
 
     def on_key(self, _w, ev):
         ctrl = ev.state & Gdk.ModifierType.CONTROL_MASK
@@ -624,7 +627,7 @@ class TaskManager:
             if shutil.which(cmd[0]):
                 launch(*cmd)
             else:
-                launch("kfmclient", "exec", text)
+                launch("xdg-open", os.path.expanduser(text))
         d.destroy()
 
     # ---- Processes ----
@@ -769,7 +772,7 @@ class TaskManager:
                             "Access is denied: the process belongs to another user. End it as administrator?",
                             Gtk.MessageType.WARNING, Gtk.ButtonsType.YES_NO)
                 if r == Gtk.ResponseType.YES:
-                    launch("tdesudo", "kill", "-KILL", str(pid))
+                    launch("syluxium-sudo", "kill", "-KILL", str(pid))
             return False
 
     # ---- Performance ----

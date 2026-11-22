@@ -17,7 +17,8 @@ import threading
 SHOTS = os.environ.get("SYLUXIUM_INSTALLER_SHOTS")
 if os.geteuid() != 0 and not SHOTS:  # the desktop icon asks for the administrator password
     try:
-        os.execvp("tdesudo", ["tdesudo", "-c", os.path.abspath(sys.argv[0])])
+        os.execvp("syluxium-sudo", ["syluxium-sudo", "--why", "Installing Syluxium changes the disks of this "
+                  "computer.", os.path.abspath(sys.argv[0])])
     except OSError:
         pass
 
@@ -45,7 +46,7 @@ SOFTWARE = [
     ("Windows programs (Wine)", "Run many Windows programs.", "wine wine64 libwine fonts-wine", True),
     ("E-mail and notes", "KMail and KNotes.", "kmail-trinity knotes-trinity", True),
     ("Media player", "Kaffeine plays music, videos and DVDs.", "kaffeine-trinity", True),
-    ("Programmer's text editor", "Kate, with syntax highlighting.", "kate-trinity", True),
+    ("Programmer's text editor", "Mousepad, with syntax highlighting.", "mousepad", True),
     ("Partition editor", "GParted, for disks and USB sticks.", "gparted", True),
     ("Magnifier and on-screen keyboard", "Accessibility tools.", "kmag-trinity kvkbd-trinity", True),
 ]

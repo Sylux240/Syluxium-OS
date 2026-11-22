@@ -1,14 +1,21 @@
 #!/bin/sh
-# Open one of the places of the Start menu / desktop in the file manager
-# (Konqueror), like the familiar "My ..." folders:
+# Open one of the places of the Start menu / desktop in Files (Thunar),
+# like the familiar "My ..." folders:
 #   syluxium-open documents|pictures|music|computer|network|home
+files() {
+    if command -v thunar > /dev/null; then exec thunar "$@"; fi
+    exec xdg-open "$@"
+}
 case "$1" in
     documents) dir="$HOME/Documents" ;;
     pictures)  dir="$HOME/Pictures" ;;
     music)     dir="$HOME/Music" ;;
-    computer)  exec kfmclient openProfile filemanagement media:/ ;;
-    network)   exec kfmclient openProfile filemanagement remote:/ ;;
+    # The whole computer: its disks and USB drives are in the side pane.
+    computer)  files / ;;
+    # Network places need GVfs's network backends; without them, the
+    # network settings.
+    network)   [ -x /usr/libexec/gvfsd-network ] && files network:/// ; exec syluxium-netconn ;;
     *)         dir="$HOME" ;;
 esac
 mkdir -p "$dir"
-exec kfmclient openProfile filemanagement "$dir"
+files "$dir"

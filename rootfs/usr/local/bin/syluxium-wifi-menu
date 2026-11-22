@@ -3,31 +3,22 @@
 # Wi-Fi adapter sees, asks for the password, connects through
 # wpa_supplicant (wpa_cli; members of netdev may) and saves the network.
 T="Wi-Fi"
-# Shown as a bubble in the lower right, above the clock (twinrulesrc: no frame,
-# no taskbar entry, on top).
-. /usr/local/lib/syluxium/balloon.sh
+# A bubble by the mouse pointer (the button that opened it): GTK (yad), no
+# frame, no taskbar entry, on top; progress as notifications.
 kd() {
-    balloon "$@" &
-    local pid=$!
-    ( # move it to the lower right corner once it appears
-        geom=$(xdotool getdisplaygeometry 2>/dev/null); sw=${geom% *}; sh=${geom#* }
-        for i in $(seq 1 30); do
-            wid=$(xdotool search --onlyvisible --pid "$pid" 2>/dev/null | tail -1)
-            if [ -n "$wid" ]; then
-                eval "$(xdotool getwindowgeometry --shell "$wid" 2>/dev/null)"
-                xdotool windowmove "$wid" $((sw - WIDTH - 8)) $((sh - HEIGHT - 36)) 2>/dev/null
-                break
-            fi
-            sleep 0.1
-        done
-    ) &
-    wait "$pid"
+    yad --title "$T" --window-icon network-wireless --mouse --undecorated --skip-taskbar --on-top \
+        --borders 14 --fixed "$@" 2>/dev/null
 }
+sorry() { kd --image dialog-warning --text "$(esc "$1")" --button "OK:0"; }
+note() { notify-send -a "$T" -i network-wireless "$T" "$1" 2>/dev/null & }
+esc() { printf '%s' "$1" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g'; }
 # Interfaces wpa_supplicant runs on (control sockets, readable for netdev).
 iface=$(ls /run/wpa_supplicant 2>/dev/null | grep -v "^p2p-" | head -1)
 [ -n "$iface" ] || iface=$(/usr/sbin/iw dev 2>/dev/null | awk '$1 == "Interface" {print $2; exit}')
 if [ -z "$iface" ]; then
-    kd --title "$T" --sorry "No Wi-Fi adapter was found.\n\nWired network: $(ip -4 -o addr show 2>/dev/null | awk '$2 != "lo" {print $2 " " $4}' | head -3)"
+    sorry "No Wi-Fi adapter was found.
+
+Wired network: $(ip -4 -o addr show 2>/dev/null | awk '$2 != "lo" {print $2 " " $4}' | head -3)"
     exit 0
 fi
 W="/usr/sbin/wpa_cli -p /run/wpa_supplicant -i $iface"
@@ -35,11 +26,13 @@ for i in 1 2 3 4 5; do $W ping >/dev/null 2>&1 && break; sleep 1; done
 current=$($W status 2>/dev/null | sed -n 's/^ssid=//p')
 ip=$(ip -4 -o addr show "$iface" 2>/dev/null | awk '{print $4}')
 if ! $W ping >/dev/null 2>&1; then
-    kd --title "$T" --sorry "The Wi-Fi service isn't answering (wpa_supplicant on $iface).\n\n$($W ping 2>&1 | head -2)"
+    sorry "The Wi-Fi service isn't answering (wpa_supplicant on $iface).
+
+$($W ping 2>&1 | head -2)"
     exit 0
 fi
 $W scan >/dev/null 2>&1
-kdialog --title "$T" --passivepopup "Looking for Wi-Fi networks..." 3 &
+note "Looking for Wi-Fi networks..."
 # A full scan of all channels takes a few seconds on real adapters.
 for i in $(seq 1 12); do
     sleep 1
@@ -55,33 +48,38 @@ while IFS=$'\t' read -r bssid freq level flags ssid; do
     case " ${seen[*]} " in *" $ssid "*) continue ;; esac
     seen+=("$ssid")
     pct=$(( (level + 100) * 2 )); [ $pct -gt 100 ] && pct=100; [ $pct -lt 0 ] && pct=0
-    lock=""; case "$flags" in *WPA*|*RSN*|*WEP*) lock=" (secured)" ;; esac
-    mark=""; [ "$ssid" = "$current" ] && mark="  - connected"
-    items+=("$ssid" "$ssid   $pct%$lock$mark")
+    lock=""; case "$flags" in *WPA*|*RSN*|*WEP*) lock="secured" ;; esac
+    mark=""; [ "$ssid" = "$current" ] && mark="connected"
+    items+=("$ssid" "$pct%" "$lock" "$mark")
 done < "$list"
-[ ${#items[@]} -gt 0 ] || { kd --title "$T" --sorry "No Wi-Fi networks found."; exit 0; }
+[ ${#items[@]} -gt 0 ] || { sorry "No Wi-Fi networks found."; exit 0; }
 status="Not connected"; [ -n "$current" ] && status="Connected to $current${ip:+ ($ip)}"
-ssid=$(kd --title "$T" --menu "$status"$'\n\n'"Choose a network:" "${items[@]}") || exit 0
+ssid=$(kd --list --width 380 --height 320 --text "$(esc "$status")
+
+Choose a network:" --column "Network" --column "Signal" --column "" --column "" \
+       --print-column 1 --separator "" --button "Cancel:1" --button "Connect:0" "${items[@]}") || exit 0
+[ -n "$ssid" ] || exit 0
 flags=$($W scan_results | awk -F'\t' -v s="$ssid" '$5 == s {print $4; exit}')
 id=$($W add_network | tail -1)
 $W set_network "$id" ssid "\"$ssid\"" >/dev/null
 case "$flags" in
     *WPA*|*RSN*)
-        pass=$(kd --title "$T" --password "Password for \"$ssid\":") || { $W remove_network "$id" >/dev/null; exit 0; }
+        pass=$(kd --entry --hide-text --image dialog-password --text "Password for \"$(esc "$ssid")\":" \
+               --button "Cancel:1" --button "Connect:0") || { $W remove_network "$id" >/dev/null; exit 0; }
         $W set_network "$id" psk "\"$pass\"" >/dev/null ;;
     *) $W set_network "$id" key_mgmt NONE >/dev/null ;;
 esac
 $W select_network "$id" >/dev/null
 $W save_config >/dev/null
-kdialog --title "$T" --passivepopup "Connecting to $ssid..." 5 &
+note "Connecting to $ssid..."
 for i in $(seq 1 30); do
     sleep 1
     st=$($W status | sed -n 's/^wpa_state=//p')
     ip=$(ip -4 -o addr show "$iface" 2>/dev/null | awk '{print $4}')
-    [ "$st" = COMPLETED ] && [ -n "$ip" ] && { kdialog --title "$T" --passivepopup "Connected to $ssid ($ip)" 6; exit 0; }
+    [ "$st" = COMPLETED ] && [ -n "$ip" ] && { note "Connected to $ssid ($ip)"; exit 0; }
 done
 if [ "$st" = COMPLETED ]; then
-    kdialog --title "$T" --passivepopup "Connected to $ssid, but no IP address yet." 8
+    note "Connected to $ssid, but no IP address yet."
 else
-    kdialog --title "$T" --passivepopup "Could not connect to $ssid (wrong password?)" 8
+    note "Could not connect to $ssid (wrong password?)"
 fi

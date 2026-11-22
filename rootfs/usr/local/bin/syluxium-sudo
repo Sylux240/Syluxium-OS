@@ -1,0 +1,37 @@
+#!/usr/bin/python3
+"""Run a program as administrator (root), asking for the user's own password
+in a Dusk window (sudo; members of "sudo" are administrators). For the
+desktop's "needs administrator" actions in any session (Xfce, TDE).
+
+    syluxium-sudo [--why TEXT] PROGRAM [ARGUMENTS...]
+
+Exits with the program's exit code; 126 when not allowed or cancelled."""
+import os
+import subprocess
+import sys
+
+args = sys.argv[1:]
+why = "This changes the computer for everyone."
+if len(args) >= 2 and args[0] == "--why":
+    why, args = args[1], args[2:]
+if not args:
+    print(__doc__.strip(), file=sys.stderr)
+    sys.exit(2)
+if os.geteuid() == 0:
+    os.execvp(args[0], args)
+
+sys.path.insert(0, "/usr/local/lib/syluxium/python")
+import syluxium_sys as S  # noqa: E402
+
+runner = S.AdminRunner(None, why)
+if not runner.ready():
+    sys.exit(126)
+# The password goes in on standard input; the program keeps the display
+# (sudo keeps DISPLAY and XAUTHORITY).
+p = subprocess.Popen(["sudo", "-S", "-p", "", "--"] + args, stdin=subprocess.PIPE)
+try:
+    p.stdin.write(((runner.password or "") + "\n").encode())
+    p.stdin.close()
+except BrokenPipeError:
+    pass
+sys.exit(p.wait())
