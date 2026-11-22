@@ -270,7 +270,7 @@ lkpi_modname_old = $(if $(findstring /brcm80211/,$<),brcmfmac,$(lkpi_modname_net
 LKPI_MODNAMES := /ethernet/intel/igb/:igb /drivers/net/mdio.c:mdio /ethernet/broadcom/bnx2:bnx2 \
     /rtw89/rtw8851be.c:rtw89_8851be /rtw89/rtw8852ae.c:rtw89_8852ae /rtw89/rtw8852be.c:rtw89_8852be \
     /rtw89/rtw8852bte.c:rtw89_8852bte /rtw89/rtw8852ce.c:rtw89_8852ce /rtw89/rtw8922ae.c:rtw89_8922ae \
-    /rtw89/pci:rtw89_pci /rtw89/:rtw89_core
+    /rtw89/pci:rtw89_pci /rtw89/:rtw89_core /scsi/megaraid/:megaraid_sas /drivers/scsi/scsi_common:scsi_common
 lkpi_modname_list = $(firstword $(foreach m,$(LKPI_MODNAMES),$(if $(findstring $(word 1,$(subst :, ,$(m))),$<),$(word 2,$(subst :, ,$(m))))))
 lkpi_modname_net = $(if $(findstring /drivers/net/usb/,$<),$(basename $(notdir $<)),$(lkpi_modname_net2))
 lkpi_modname_net2 = $(if $(findstring /iwlwifi/mvm/,$<),iwlmvm,$(if $(findstring /iwlwifi/,$<),iwlwifi,$(if $(findstring /ethernet/realtek/r8169,$<),r8169,$(if $(findstring /ethernet/broadcom/tg3,$<),tg3,$(if $(findstring /ethernet/intel/e1000e/,$<),e1000e,$(if $(findstring /ethernet/intel/igc/,$<),igc,$(if $(findstring /drivers/net/phy/realtek,$<),realtek,$(if $(findstring /drivers/net/phy/,$<),libphy,$(lkpi_modname_rest)))))))))
@@ -308,6 +308,8 @@ $(OBJDIR)/$(LKPI_NETDRV)/ethernet/atheros/%: LKPI_DRV_CFLAGS = -include net/lkpi
 $(OBJDIR)/$(LKPI_NETDRV)/mdio.c.o: LKPI_DRV_CFLAGS = -include net/lkpi_netdrv.h
 # Broadcom NetXtreme II (bnx2), Linux 7.4-rc3: tg3's helpers plus the 7.x set.
 $(OBJDIR)/$(LKPI_NETDRV)/ethernet/broadcom/bnx2.c.o: LKPI_DRV_CFLAGS = -include net/lkpi_netdrv.h -include net/lkpi_tg3.h
+# SCSI host adapters (Linux 7.4-rc3) on the LinuxKPI SCSI midlayer (glue/scsi.c, scsi.cpp).
+$(OBJDIR)/kernel/linuxkpi/drivers/scsi/%: LKPI_DRV_CFLAGS = -include linux/lkpi_v7.h -include linux/cpumask.h
 # GPU drivers: their own include directory and Kconfig (drm/lkpi_<driver>_config.h).
 LKPI_I915 := kernel/linuxkpi/drivers/gpu/drm/i915
 $(OBJDIR)/$(LKPI_I915)/%: LKPI_DRV_CFLAGS = -I$(LKPI_I915) -DI915 -include drm/lkpi_i915_config.h -gline-tables-only
