@@ -438,7 +438,7 @@ static inline char *lkpi_strchrnul(const char *s, int c) { while (*s && *s != (c
 	({ int __r = 0; if (refcount_dec_and_test(&(kref)->refcount)) { spin_lock(lock); release(kref); __r = 1; } __r; })
 #define refcount_dec_and_lock_irqsave(r, lock, flagsp) \
 	({ bool __r = false; if (refcount_dec_and_test(r)) { spin_lock_irqsave(lock, *(flagsp)); __r = true; } __r; })
-#define dev_notice_ratelimited dev_notice
+#define dev_notice_ratelimited(d, fmt, ...) lkpi_rl_call(dev_notice(d, fmt, ##__VA_ARGS__))
 #define device_iommu_mapped(dev) false
 #define device_get_next_child_node(dev, child) ((struct fwnode_handle *)NULL)
 #define INIT_DELAYED_WORK_ONSTACK(w, f) INIT_DELAYED_WORK(w, f)
@@ -590,8 +590,6 @@ struct pci_error_handlers {
 #define rwsem_is_contended(s) 0
 #define rwsem_is_locked(s) mutex_is_locked(&(s)->m)
 #define HW_ERR "[Hardware Error]: "
-#define printk_ratelimit() 1
-#define printk_ratelimited printk
 #ifndef FALSE
 #define FALSE 0
 #define TRUE 1

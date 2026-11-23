@@ -11,5 +11,7 @@ struct ratelimit_state { int interval, burst, printed, missed; unsigned long beg
 #define ratelimit_state_init(rs, i, b) do { (rs)->interval = (i); (rs)->burst = (b); } while (0)
 #define ratelimit_set_flags(rs, f) ((rs)->flags = (f))
 #define ratelimit_state_exit(rs) do { } while (0)
-#define __ratelimit(rs) 1
-#define ___ratelimit(rs, func) 1
+/* glue/lib.c, with the state's own interval and burst (interval 0: no limit) */
+int lkpi_ratelimit_state(struct ratelimit_state *rs);
+#define __ratelimit(rs) lkpi_ratelimit_state(rs)
+#define ___ratelimit(rs, func) lkpi_ratelimit_state(rs)

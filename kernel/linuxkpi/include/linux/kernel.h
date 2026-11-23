@@ -56,9 +56,15 @@ char* kasprintf(gfp_t gfp, const char* fmt, ...) __printf(2, 3);
 #define pr_err_once(...) lkpi_print_once(pr_err, __VA_ARGS__)
 #define pr_warn_once(...) lkpi_print_once(pr_warn, __VA_ARGS__)
 #define pr_info_once(...) lkpi_print_once(pr_info, __VA_ARGS__)
-#define pr_err_ratelimited pr_err
-#define pr_warn_ratelimited pr_warn
-#define pr_info_ratelimited pr_info
+/* Rate-limited messages, as on Linux: 10 per call site in 5 s, then a count
+ * of the ones dropped. (Without a limit, a GPU page-fault storm printed
+ * ten lines per fault from the interrupt handler and nothing else ran.) */
+struct lkpi_rl { unsigned long begin; int printed, missed; };
+int lkpi_ratelimit(struct lkpi_rl *s, int interval_jiffies, int burst); /* glue/lib.c; interval 0: default */
+#define lkpi_rl_call(stmt) do { static struct lkpi_rl __lkpi_rl; if (lkpi_ratelimit(&__lkpi_rl, 0, 0)) { stmt; } } while (0)
+#define pr_err_ratelimited(fmt, ...) lkpi_rl_call(pr_err(fmt, ##__VA_ARGS__))
+#define pr_warn_ratelimited(fmt, ...) lkpi_rl_call(pr_warn(fmt, ##__VA_ARGS__))
+#define pr_info_ratelimited(fmt, ...) lkpi_rl_call(pr_info(fmt, ##__VA_ARGS__))
 #define pr_debug_ratelimited pr_debug
 
 /* ---- assertions ---- */
@@ -159,7 +165,9 @@ struct lock_class_key { int unused; };
 #define print_hex_dump(...) do { } while (0)
 #define print_hex_dump_bytes(...) do { } while (0)
 #define print_hex_dump_debug(...) do { } while (0)
-#define printk_ratelimited printk
+#define printk_ratelimited(fmt, ...) lkpi_rl_call(printk(fmt, ##__VA_ARGS__))
+extern struct lkpi_rl lkpi_printk_rl;
+#define printk_ratelimit() lkpi_ratelimit(&lkpi_printk_rl, 0, 0)
 #define printk_once(...) lkpi_print_once(printk, __VA_ARGS__)
 #define pr_debug_once pr_debug
 #define pr_notice_once(...) lkpi_print_once(pr_notice, __VA_ARGS__)
