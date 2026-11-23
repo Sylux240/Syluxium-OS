@@ -847,15 +847,12 @@ int lkpi_nouveau_gsp_loaded;
 static int nouveau_drm_probe_once(struct pci_dev *pdev,
 				  const struct pci_device_id *pent);
 
-/* LinuxKPI: Turing and Ampere use NVIDIA's GSP-RM firmware by default here
- * (Linux 6.12 asks for nouveau.config=NvGspRm=1): clocks and power
- * management, and NVK. If the GSP doesn't come up, the device is probed
- * again on nouveau's own (non-GSP) path, as before, rather than lost. */
+/* LinuxKPI: NVIDIA's GSP-RM firmware (Turing/Ampere: boot option
+ * nouveau.config=NvGspRm=1; Ada always): clocks and power management, and
+ * NVK. The log says on every boot whether it runs. */
 static int nouveau_drm_probe(struct pci_dev *pdev,
 			     const struct pci_device_id *pent)
 {
-	static char no_gsp[192];
-	char *saved = nouveau_config;
 	int ret;
 
 	lkpi_nouveau_gsp_loaded = 0;
@@ -868,15 +865,11 @@ static int nouveau_drm_probe(struct pci_dev *pdev,
 	}
 	if (!lkpi_nouveau_gsp_loaded || ret == -EPROBE_DEFER)
 		return ret;
-	dev_warn(&pdev->dev, "nouveau: the GSP-RM firmware didn't start (%d): probing again without GSP "
-		 "(boot option nouveau.config=NvGspRm=0 skips the attempt)\n", ret);
-	snprintf(no_gsp, sizeof(no_gsp), "%s%sNvGspRm=0", saved ? saved : "", saved && *saved ? "," : "");
-	nouveau_config = no_gsp;
-	lkpi_nouveau_gsp_loaded = 0;
-	ret = nouveau_drm_probe_once(pdev, pent);
-	nouveau_config = saved;
-	if (!ret)
-		dev_info(&pdev->dev, "nouveau: running without GSP-RM after the GSP failed\n");
+	/* No second probe in the same boot: the GPU is left half-started by the
+	 * failed GSP boot (its falcons hold state only a reset clears), and
+	 * probing it again froze a real machine (an H97 with a GTX 1650). */
+	dev_warn(&pdev->dev, "nouveau: the GSP-RM firmware didn't start (%d): this GPU stays off for this boot; "
+		 "boot without nouveau.config=NvGspRm=1 to use nouveau's own path\n", ret);
 	return ret;
 }
 

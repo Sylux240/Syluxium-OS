@@ -89,14 +89,32 @@ if [ -n "$card" ] && ! grep -qw xfbdev /proc/cmdline; then
     } > "$out"
     choice="modesetting on $card, driver ${driver:-unknown}, acceleration $accel"
 else
-    cat > "$out" <<CFG
-# Written at boot by syluxium-display-config: firmware framebuffer.
-Section "Device"
-    Identifier "Display"
-    Driver     "fbdev"
-    Option     "fbdev" "/dev/fb0"
-EndSection
-CFG
+    # Several graphics cards: the firmware framebuffer belongs to the one
+    # the firmware booted on (boot_vga); X's fbdev driver can't tell which
+    # without its PCI address ("Unable to find a valid framebuffer device").
+    fbbus=""
+    nvga=0
+    for dev in /sys/bus/pci/devices/*; do
+        case "$(cat "$dev/class" 2>/dev/null)" in 0x0300*|0x0380*) nvga=$((nvga + 1)) ;; *) continue ;; esac
+        if [ "$(cat "$dev/boot_vga" 2>/dev/null)" = 1 ]; then
+            slot=${dev##*/}; b=${slot#*:}; d=${b#*:}; f=${d#*.}; b=${b%%:*}; d=${d%%.*}
+            fbbus="PCI:$((0x$b)):$((0x$d)):$((0x$f))"
+        fi
+    done
+    {
+        echo "# Written at boot by syluxium-display-config: firmware framebuffer."
+        if [ "$nvga" -gt 1 ]; then
+            echo "Section \"ServerFlags\""
+            echo "    Option \"AutoAddGPU\" \"false\""
+            echo "EndSection"
+        fi
+        echo "Section \"Device\""
+        echo "    Identifier \"Display\""
+        echo "    Driver     \"fbdev\""
+        [ "$nvga" -gt 1 ] && [ -n "$fbbus" ] && echo "    BusID      \"$fbbus\""
+        echo "    Option     \"fbdev\" \"/dev/fb0\""
+        echo "EndSection"
+    } > "$out"
     choice="fbdev on /dev/fb0"
 fi
 if mkdir -p /boot/logs 2>/dev/null; then
