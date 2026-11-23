@@ -129,6 +129,8 @@ DEBIAN_PKGS  += xsettingsd x11-utils xclip wl-clipboard sopwith kcheckers
 # mount of its squashfs; libfuse2 for older AppImages whose runtime loads
 # libfuse.so.2.
 DEBIAN_PKGS  += fuse3 libfuse2t64
+# Unprivileged sandboxes on user namespaces (bwrap: Flatpak, GNOME's thumbnailers, ...).
+DEBIAN_PKGS  += bubblewrap
 # Vulkan drivers (Mesa: lavapipe as the software fallback, RADV/ANV/NVK) and
 # vulkaninfo, for Vulkan programs such as dGPUFG.
 # (mesa-vulkan-drivers and vulkan-tools are in the GPU packages above.)

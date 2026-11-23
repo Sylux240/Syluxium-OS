@@ -271,6 +271,14 @@ u64 mount_generation(); // grows with every mount, move and unmount
 long unmount_at(const char* path, Inode* cwd, const char* canon); // umount2: relative to cwd
 void mount_source(const char* path, char* out, usize size); // what /proc/mounts shows as its device
 long move_mount(const char* from, const char* to); // MS_MOVE
+// MS_BIND: what to mount for a bind of `src` (directories: a wrapper whose
+// directories are inodes of their own, so mounts below the bind stay there).
+Inode* bind_source(Inode* src);
+// The real directory behind a bind-mount wrapper (others: unchanged); for
+// file systems that cast inodes of their own type (rename, link, sockets).
+Inode* unwrap(Inode* n);
+// pivot_root: rename the caller's (private) mount points as seen from the new root.
+void pivot_mounts(const char* new_root, const char* put_old);
 void bind_replicate(const char* src, const char* dst); // MS_BIND | MS_REC: copies of the mounts below src
 // chroot/pivot_root: the process layer says where the caller's "/" is.
 void set_process_root_hook(Inode* (*fn)());

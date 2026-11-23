@@ -171,17 +171,24 @@ long sys_mincore(SYSCALL_ARGS) {
     return 0;
 }
 
-// madvise: MADV_DONTNEED (and MADV_FREE, which may behave the same) really
-// drop pages: ART zeroes its GC structures that way. The rest is advice.
+// madvise: MADV_DONTNEED and MADV_FREE drop the pages (the next touch reads
+// zeros, or the file); MADV_WIPEONFORK isn't implemented and says so (its
+// users, BoringSSL's RNG, fall back); the rest is advice only.
 long sys_madvise(SYSCALL_ARGS) {
     SYSCALL_UNUSED;
-    constexpr int MADV_DONTNEED = 4, MADV_FREE = 8;
-    if (a0 & 0xFFF)
+    constexpr u64 MADV_DONTNEED = 4, MADV_FREE = 8, MADV_WIPEONFORK = 18, MADV_KEEPONFORK = 19;
+    if (a0 & (mm::PAGE_SIZE - 1))
         return -err::INVAL;
-    int advice = static_cast<int>(a2);
-    if (advice == MADV_DONTNEED || advice == MADV_FREE)
-        return current()->mem->discard(a0, a1);
-    return 0;
+    switch (a2) {
+    case MADV_DONTNEED:
+    case MADV_FREE:
+        return proc::current()->mem->discard(a0, a1);
+    case MADV_WIPEONFORK:
+    case MADV_KEEPONFORK:
+        return -err::INVAL;
+    default:
+        return 0;
+    }
 }
 
 } // namespace

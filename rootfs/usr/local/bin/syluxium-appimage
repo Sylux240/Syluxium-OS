@@ -12,9 +12,106 @@
 #   unpacked instead (APPIMAGE_EXTRACT_AND_RUN=1: unpacked to /tmp, slower start).
 # - Every launch goes to ~/.cache/syluxium/appimage.log, and on test rounds
 #   (logs stick) to appimage-launches.txt on the stick.
+#
+# Start menu integration (like appimaged / AppImageLauncher):
+#   syluxium-appimage --integrate FILE     menu entry + icon from the AppImage itself
+#   syluxium-appimage --unintegrate FILE   take it out again (also the entry's own action)
+#   syluxium-appimage --sync               every AppImage in ~/Applications gets an entry,
+#                                          entries of AppImages that are gone are removed
+#                                          (at login)
+# The first time an AppImage outside ~/Applications is opened from the
+# desktop, it asks once whether to add it to the Start menu.
+APPS_DIR=${XDG_DATA_HOME:-$HOME/.local/share}/applications
+ICON_DIR=${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor
+entry_id() { # the menu entry's id for an AppImage path
+    printf 'appimage-%s-%s' "$(basename -- "$1" | sed 's/\.[Aa]pp[Ii]mage$//; s/[^A-Za-z0-9._-]/_/g' | cut -c1-40)" \
+        "$(printf '%s' "$1" | md5sum | cut -c1-8)"
+}
+integrate() {
+    local file id tmp desk icon iconname w name rel t d hops
+    file=$(readlink -f -- "$1")
+    [ -f "$file" ] || return 1
+    [ "$(od -An -c -j 8 -N 2 -- "$file" 2>/dev/null | tr -d ' ')" = "AI" ] || return 1
+    [ -x "$file" ] || chmod +x -- "$file" 2>/dev/null || return 1
+    id=$(entry_id "$file")
+    tmp=$(mktemp -d "${TMPDIR:-/tmp}/appimage-int.XXXXXX") || return 1
+    # Only the .desktop file and the icon come out (runtimes take a pattern).
+    (cd "$tmp" && "$file" --appimage-extract '*.desktop' && "$file" --appimage-extract .DirIcon) >/dev/null 2>&1
+    desk=$(ls "$tmp"/squashfs-root/*.desktop 2>/dev/null | head -n 1)
+    iconname=$( [ -n "$desk" ] && sed -n 's/^Icon=//p' "$desk" | head -n 1)
+    # The icon at the top is often a symlink (into usr/share/icons): take
+    # each link's target out too, a few hops at most.
+    icon=
+    for rel in ${iconname:+"$iconname.svg" "$iconname.png"} .DirIcon; do
+        (cd "$tmp" && "$file" --appimage-extract "$rel") >/dev/null 2>&1
+        hops=0
+        while [ -L "$tmp/squashfs-root/$rel" ] && [ $hops -lt 5 ]; do
+            t=$(readlink "$tmp/squashfs-root/$rel")
+            case $t in /*) break;; esac
+            d=$(dirname -- "$rel")
+            [ "$d" = . ] && rel=$t || rel=$d/$t
+            (cd "$tmp" && "$file" --appimage-extract "$rel") >/dev/null 2>&1
+            hops=$((hops + 1))
+        done
+        [ -f "$tmp/squashfs-root/$rel" ] && [ ! -L "$tmp/squashfs-root/$rel" ] && { icon=$tmp/squashfs-root/$rel; break; }
+    done
+    mkdir -p "$APPS_DIR"
+    if [ -n "$icon" ]; then
+        if head -c 512 "$icon" | grep -q "<svg"; then
+            mkdir -p "$ICON_DIR/scalable/apps" && cp "$icon" "$ICON_DIR/scalable/apps/$id.svg"
+        else
+            w=$(od -An -tu1 -j16 -N4 "$icon" | awk '{print $1*16777216+$2*65536+$3*256+$4}')
+            case $w in 16|22|24|32|48|64|96|128|256|512) ;; *) w=256;; esac
+            mkdir -p "$ICON_DIR/${w}x$w/apps" && cp "$icon" "$ICON_DIR/${w}x$w/apps/$id.png"
+        fi
+    fi
+    name=$(basename -- "$file" | sed 's/\.[Aa]pp[Ii]mage$//')
+    {
+        if [ -n "$desk" ]; then
+            # The program's own entry: our launcher, our icon, no TryExec, plus "remove".
+            sed -n '1,/^\[Desktop Action/p' "$desk" | sed '/^\[Desktop Action/d' |
+                sed -e "s|^Exec=[^ ]*|Exec=syluxium-appimage \"$file\"|" -e "s|^Icon=.*|Icon=${icon:+$id}|" \
+                    -e '/^TryExec=/d' -e '/^Actions=/d' -e '/^X-AppImage-/d'
+        else
+            printf '[Desktop Entry]\nType=Application\nName=%s\nExec=syluxium-appimage "%s" %%U\nIcon=%s\nCategories=Utility;\n' \
+                "$name" "$file" "${icon:+$id}"
+        fi
+        printf 'X-Syluxium-AppImage=%s\nActions=SyluxiumRemove;\n\n[Desktop Action SyluxiumRemove]\nName=Remove from Start menu\nExec=syluxium-appimage --unintegrate "%s"\n' \
+            "$file" "$file"
+    } > "$APPS_DIR/$id.desktop"
+    chmod 644 "$APPS_DIR/$id.desktop"
+    rm -rf "$tmp"
+    command -v update-desktop-database >/dev/null && update-desktop-database "$APPS_DIR" 2>/dev/null
+    command -v gtk-update-icon-cache >/dev/null && gtk-update-icon-cache -q -t "$ICON_DIR" 2>/dev/null
+    return 0
+}
+unintegrate() {
+    local file id
+    file=$(readlink -f -- "$1" 2>/dev/null || echo "$1")
+    id=$(entry_id "$file")
+    rm -f "$APPS_DIR/$id.desktop" "$ICON_DIR"/*/apps/"$id".png "$ICON_DIR"/scalable/apps/"$id".svg
+    command -v update-desktop-database >/dev/null && update-desktop-database "$APPS_DIR" 2>/dev/null
+    return 0
+}
+case "$1" in
+--integrate)   integrate "$2"; exit $? ;;
+--unintegrate) unintegrate "$2"; exit 0 ;;
+--sync)
+    for a in "$HOME"/Applications/*.[Aa]pp[Ii]mage; do
+        [ -f "$a" ] || continue
+        [ -f "$APPS_DIR/$(entry_id "$(readlink -f -- "$a")").desktop" ] || integrate "$a"
+    done
+    for d in "$APPS_DIR"/appimage-*.desktop; do
+        [ -f "$d" ] || continue
+        p=$(sed -n 's/^X-Syluxium-AppImage=//p' "$d")
+        [ -n "$p" ] && [ ! -f "$p" ] && unintegrate "$p"
+    done
+    exit 0 ;;
+esac
+
 f=$1
 if [ -z "$f" ]; then
-    echo "usage: syluxium-appimage FILE [ARGS...]" >&2
+    echo "usage: syluxium-appimage FILE [ARGS...] | --integrate FILE | --unintegrate FILE | --sync" >&2
     exit 2
 fi
 shift
@@ -69,6 +166,21 @@ if [ ! -x "$f" ]; then
     fi
     note "$name: made executable"
 fi
+
+# Opened from the desktop for the first time: offer a Start menu entry
+# (once per file; ~/Applications is integrated at login anyway).
+case "$f" in
+/opt/apps/*|"$HOME"/Applications/*) ;;
+*)
+    if gui && [ -z "$SYLUXIUM_APPIMAGE_NOASK" ] && [ ! -f "$APPS_DIR/$(entry_id "$f").desktop" ] && ! grep -qxF "$f" "$logdir/appimage-asked" 2>/dev/null; then
+        echo "$f" >> "$logdir/appimage-asked"
+        if yad --question --title="$name" --window-icon=application-x-executable --width=420 --center \
+               --text="<b>Add $name to the Start menu?</b>\n\nIt gets its own entry and icon there (remove it again from the entry's right-click menu)." \
+               --button="Add to Start menu:0" --button="Just run it:1" >/dev/null 2>&1; then
+            integrate "$f" && note "$name: added to the Start menu" &
+        fi
+    fi ;;
+esac
 
 # No FUSE (device or mount helper): unpack instead of mounting.
 if [ ! -c /dev/fuse ] || ! { command -v fusermount3 || command -v fusermount; } >/dev/null 2>&1; then

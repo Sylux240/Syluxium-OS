@@ -58,6 +58,11 @@ check "/proc/meminfo has MemTotal"          sh -c 'grep -q "^MemTotal:" /proc/me
 check "ps sees this shell"                  sh -c 'ps -A -o args | grep -q selftest'
 check "/proc/<pid>/cmdline"                 sh -c 'sleep 3 & p=$!; tr "\\0" " " < /proc/$p/cmdline | grep -q "^sleep 3"; r=$?; kill $p; exit $r'
 check "/proc/<pid>/fd lists open files"     sh -c 'exec 7</etc/hostname; [ "$(readlink /proc/$$/fd/7)" = /etc/hostname ]'
+# /proc/<pid>/fd/N are magic links: opening one opens the descriptor's own inode.
+check "bash <(...) through /dev/fd"         bash -c '[ "$(cat <(echo subst))" = subst ]'
+check "bash >(...) through /dev/fd"         bash -c 'echo out > >(cat > /tmp/procsubst); sleep 0.5; [ "$(cat /tmp/procsubst)" = out ]'
+check "<(...) as a normal user"             su syluxium -s /bin/bash -c '[ "$(cat <(echo subst))" = subst ]'
+check "a deleted file through /proc/self/fd" sh -c 'echo kept > /tmp/gone; exec 5</tmp/gone; rm /tmp/gone; [ "$(cat /proc/self/fd/5)" = kept ]'
 check "free / uptime work"                  sh -c 'free >/dev/null && uptime >/dev/null'
 check "/sys/devices/system/cpu/online"      sh -c 'grep -q "^0" /sys/devices/system/cpu/online'
 # GPU buffers shared between programs (dma-buf): its own mapping and the
@@ -101,6 +106,25 @@ assert os.pread(fd, 4096, 4096) == bytes(4096)
 assert os.fstat(fd).st_size == 4 * 4096
 m[6000] = 7
 assert os.pread(fd, 1, 6000) == b"\x07"'
+# madvise(MADV_DONTNEED): private anonymous memory reads zeros afterwards
+# (Chromium's allocator hands it out as calloc memory), shared memory keeps
+# its data, a private file mapping shows the file again.
+check "madvise(MADV_DONTNEED) semantics"    python3 -c 'import mmap
+a = mmap.mmap(-1, 3 * 4096, mmap.MAP_PRIVATE | mmap.MAP_ANONYMOUS)
+a[:] = b"x" * len(a); a.madvise(mmap.MADV_DONTNEED, 4096, 4096)
+assert a[0:1] == b"x" and a[4096:8192] == bytes(4096) and a[8192:8193] == b"x", "private"
+s = mmap.mmap(-1, 4096, mmap.MAP_SHARED | mmap.MAP_ANONYMOUS)
+s[:4] = b"keep"; s.madvise(mmap.MADV_DONTNEED); assert s[:4] == b"keep", "shared"
+open("/tmp/madv", "wb").write(b"file" * 1024)
+fd = open("/tmp/madv", "rb")
+f = mmap.mmap(fd.fileno(), 4096, mmap.MAP_PRIVATE, mmap.PROT_READ | mmap.PROT_WRITE)
+f[:4] = b"COPY"; f.madvise(mmap.MADV_DONTNEED); assert f[:4] == b"file", "file"'
+# bubblewrap as a normal user: user, mount, PID, IPC and UTS namespaces,
+# a new root of bind mounts with its own /proc, /dev and /tmp.
+command -v bwrap >/dev/null && check "bwrap sandbox as a user" su syluxium -s /bin/sh -c '
+out=$(bwrap --ro-bind / / --proc /proc --dev /dev --tmpfs /tmp --unshare-all --share-net --uid 0 --gid 0 --hostname sandbox \
+    sh -c "echo \$(id -u) \$(hostname) \$\$; touch /tmp/inside") || exit 1
+echo "$out"; [ ! -e /tmp/inside ] && case "$out" in "0 sandbox 1"|"0 sandbox 2") exit 0;; esac; exit 1'
 # Terminal emulators on VTE (xfce4-terminal) read the pty in packet mode.
 # (In a session of its own: closing the master hangs up the slave's group.)
 check "pty packet mode (TIOCPKT)"           setsid python3 -c 'import os, fcntl, struct

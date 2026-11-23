@@ -13,6 +13,7 @@ namespace {
 
 constexpr usize CAPACITY = 64 * KiB;
 constexpr usize PIPE_BUF = 4096;
+constexpr u8 KIND_PIPE = 0xC1; // Inode::anon_kind of pipes (named FIFOs' nodes are their file system's)
 
 // Callers pass user buffers (read/write) or kernel ones (sendfile, splice).
 bool is_kernel(const void* p) { return reinterpret_cast<uptr>(p) >= mm::USER_END; }
@@ -40,6 +41,7 @@ public:
     Pipe() {
         ino = vfs::next_ino();
         mode = vfs::S_IFIFO | 0600;
+        anon_kind = KIND_PIPE;
         // Owned by its creator, as on Linux (fstat shows the user, and
         // permission checks on the pipe itself see the right owner).
         uid = proc::cred().fsuid;
@@ -231,6 +233,9 @@ sched::Mutex g_named_lock;
 } // namespace
 
 vfs::Inode* fifo_for(vfs::Inode* node) {
+    // Already a pipe (reopened through /proc/<pid>/fd/N): the same pipe.
+    if (node->anon_kind == KIND_PIPE)
+        return node;
     LockGuard guard(g_named_lock);
     for (usize i = 0; i < g_named_count; i++)
         if (g_named[i].backing == node)

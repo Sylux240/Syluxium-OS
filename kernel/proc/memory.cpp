@@ -3,6 +3,7 @@
 #include <mm/layout.hpp>
 #include <mm/pmm.hpp>
 #include <proc/memory.hpp>
+#include <time/clock.hpp>
 
 namespace proc {
 
@@ -649,8 +650,17 @@ bool Memory::populate(Vma* v, uptr page) {
         }
     }
     u64 phys = pmm::alloc_page(true);
-    if (!phys)
+    if (!phys) {
+        // Out of memory: the program gets SIGSEGV. Say why (once a second at most).
+        static u64 last_ns = 0;
+        u64 now = clock::now_ns();
+        if (now - last_ns > 1'000'000'000ull) {
+            last_ns = now;
+            klog::warn("out of memory: a page fault at %#lx could not be served (%lu pages free)", page,
+                       pmm::stats().free_pages);
+        }
         return false;
+    }
     if (v->file) {
         u64 delta = page - v->start;
         if (delta < v->file_bytes) {
