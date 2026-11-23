@@ -239,8 +239,9 @@ Legend: ✅ done · 🟡 partly done · ⬜ to do
 - ✅ Image Writer: .iso/.img to USB sticks and SD cards with a read-back check
 - ✅ Firefox (Debian firefox-esr) preinstalled and the default browser
 - ✅ Windows programs: double-click an .exe (Wine)
-- 🟡 Android apps: Android (LineageOS via Waydroid) boots on the kernel's binder IPC and containers, and its
-     apps open in their own desktop windows; APK installs and F-Droid in progress
+- 🟡 Android apps (preview): Android (LineageOS via Waydroid) runs on the kernel's binder IPC and containers;
+     apps open in their own desktop windows (Xfce and the Wayland shell) with Start-menu entries and icons;
+     install an .apk by double-click, or from F-Droid's catalogue in the App Store (install, update, remove)
 - ✅ Notifications: Dusk glass bubbles in the lower right for every program (the desktop's
      org.freedesktop.Notifications service: notify-send, Firefox, GTK programs), AutoPlay and Wi-Fi
 
