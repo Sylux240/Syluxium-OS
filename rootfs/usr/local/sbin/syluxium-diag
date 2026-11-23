@@ -133,7 +133,20 @@ print(" ".join(sorted(l[i].decode() for i in range(n.value))) if l else "no disp
                 echo "skipped: amdgpu video decode (VCN) is off until it is fixed (boot option vaapi runs it)"
                 continue
             fi
+            # The kernel log reaches the stick only every 20 s: while vainfo
+            # runs, stream it there (synced), so a machine that freezes in
+            # the video engine still leaves its last kernel lines.
+            if [ -d /boot/logs ]; then
+                ( dmesg -w > /boot/logs/vainfo-kernel.txt 2>&1 & echo $! > /run/syluxium-vainfo-dmesg
+                  while [ -e /run/syluxium-vainfo-dmesg ]; do sync; sleep 0.2; done ) &
+                sleep 0.5
+            fi
             timeout 20 vainfo --display drm --device "$n" 2>&1 | head -30
+            if [ -e /run/syluxium-vainfo-dmesg ]; then
+                kill "$(cat /run/syluxium-vainfo-dmesg)" 2>/dev/null
+                rm -f /run/syluxium-vainfo-dmesg
+                sync
+            fi
         done
     else
         echo "vainfo not installed"
