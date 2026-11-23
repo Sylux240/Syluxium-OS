@@ -11,6 +11,7 @@
 // queued on the sender's socket as datagrams of at most one page (glibc
 // reads with a page-sized buffer and fails on MSG_TRUNC).
 
+#include <core/log.hpp>
 #include <mm/heap.hpp>
 #include <net/internal.hpp>
 #include <lib/format.hpp>
@@ -258,6 +259,24 @@ void for_each_attr(const u8* attrs, usize len, Fn fn) {
     }
 }
 
+// Changes to the system's own network settings, with who asked (Android's
+// netd and IpClient share the host's network: what they change, they change
+// for the whole system).
+void note_kept(u16 type) {
+    static u32 notes = 0;
+    if (notes++ < 8) {
+        proc::Process* p = proc::current();
+        klog::info("Network: change %u from %s[%d] in a container: accepted, not applied to the system",
+                   static_cast<unsigned>(type), p ? p->name : "?", p ? static_cast<int>(p->pid) : 0);
+    }
+}
+
+void note_change(const char* what, const char* iface) {
+    proc::Process* p = proc::current();
+    klog::info("Network: %s %s (asked by %s[%d])", iface ? iface : "", what, p ? p->name : "?",
+               p ? static_cast<int>(p->pid) : 0);
+}
+
 long set_link(const u8* p, usize len) {
     if (len < 16)
         return -err::INVAL;
@@ -276,8 +295,10 @@ long set_link(const u8* p, usize len) {
     if (flags || change) {
         if (change == 0)
             change = 0xFFFFFFFF;
-        if ((change & IFF_UP) && ((flags ^ f->flags) & IFF_UP))
+        if ((change & IFF_UP) && ((flags ^ f->flags) & IFF_UP)) {
+            note_change(flags & IFF_UP ? "up" : "down", f->name);
             result = f->set_up(flags & IFF_UP);
+        }
     }
     for_each_attr(p + 16, len - 16, [&](u16 type, const u8* data, usize alen) {
         if (type == IFLA_MTU && alen >= 4) {
@@ -334,11 +355,13 @@ long change_addr(bool add, const u8* p, usize len) {
     if (add) {
         if (f->addr == addr && f->netmask == mask_of(prefix))
             return -err::EXIST;
+        note_change("IPv4 address set", f->name);
         f->addr = addr; // one IPv4 address per interface
         f->netmask = mask_of(prefix);
     } else {
         if (f->addr != addr)
             return -EADDRNOTAVAIL;
+        note_change("IPv4 address removed", f->name);
         f->addr = 0;
         f->netmask = 0;
     }
@@ -409,8 +432,10 @@ long change_route(bool add, const u8* p, usize len) {
     if (add) {
         if (!gw)
             return -err::INVAL;
+        note_change("default route set", nullptr);
         set_gateway(gw);
     } else if (!gw || gw == gateway()) {
+        note_change("default route removed", nullptr);
         set_gateway(0);
     } else {
         return -err::SRCH;
@@ -829,7 +854,22 @@ public:
                 }
                 break;
             case RTM_NEWLINK:
-            case RTM_SETLINK: result = set_link(p, len); break;
+            case RTM_SETLINK:
+            case RTM_NEWADDR:
+            case RTM_DELADDR:
+            case RTM_NEWROUTE:
+            case RTM_DELROUTE:
+                if (contained_caller()) {
+                    note_kept(h.type);
+                    break;
+                }
+                if (h.type == RTM_NEWLINK || h.type == RTM_SETLINK)
+                    result = set_link(p, len);
+                else if (h.type == RTM_NEWADDR || h.type == RTM_DELADDR)
+                    result = change_addr(h.type == RTM_NEWADDR, p, len);
+                else
+                    result = change_route(h.type == RTM_NEWROUTE, p, len);
+                break;
             case RTM_DELLINK: result = -EOPNOTSUPP_; break;
             case RTM_GETADDR:
                 if (!dump) {
@@ -843,8 +883,6 @@ public:
                 if (family == AF_UNSPEC || family == AF_INET6)
                     dump_addr6(*b);
                 break;
-            case RTM_NEWADDR:
-            case RTM_DELADDR: result = change_addr(h.type == RTM_NEWADDR, p, len); break;
             case RTM_GETROUTE:
                 if (!dump) {
                     result = -EOPNOTSUPP_;
@@ -855,8 +893,6 @@ public:
                 if (family == AF_UNSPEC || family == AF_INET6)
                     dump_routes6(*b);
                 break;
-            case RTM_NEWROUTE:
-            case RTM_DELROUTE: result = change_route(h.type == RTM_NEWROUTE, p, len); break;
             case RTM_GETRULE:
                 if (!dump) {
                     result = -EOPNOTSUPP_;
@@ -1121,6 +1157,11 @@ Datagram* make_datagram(const void* data, usize len) {
 }
 
 } // namespace
+
+bool contained_caller() {
+    proc::Process* p = proc::current();
+    return p && p->pidns;
+}
 
 } // namespace net
 

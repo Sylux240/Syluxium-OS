@@ -38,7 +38,7 @@ def android_status():
         return subprocess.run(["syluxium-android", "status"], capture_output=True, text=True,
                               timeout=20).stdout.strip()
     except (OSError, subprocess.TimeoutExpired):
-        return "stopped"
+        return "unknown"  # (a busy Android can be slow to answer)
 
 
 class AndroidPage:
@@ -51,6 +51,11 @@ class AndroidPage:
         self.busy = False
         self.icon_cache = {}
         self.loading = False
+        # Test aid (android-ui-test store): SYLUXIUM_STORE_TEST=PACKAGE[,PACKAGE...] installs it,
+        # opens it, updates it (an older version recorded first) and removes it,
+        # through the same code as the buttons; "STORETEST" lines on stdout.
+        self.test_pkg = os.environ.get("SYLUXIUM_STORE_TEST") or None
+        self.test_step = None
         self.widget = self.build()
 
     # ---- layout ----
@@ -288,6 +293,59 @@ class AndroidPage:
         else:
             self.show_app(None)
         self.load_icons([p for p in names[:200] if p not in self.icon_cache])
+        if self.test_pkg and self.test_step is None:
+            GLib.idle_add(self.test_start)
+
+    # ---- test aid ----
+    def test_say(self, text):
+        print("STORETEST", text, flush=True)
+
+    def test_start(self):
+        if self.test_step is not None:
+            return False
+        # a comma-separated list: the first one in the catalog
+        pkg = next((p for p in self.test_pkg.split(",") if p in self.apps), self.test_pkg)
+        self.test_pkg = pkg
+        a = self.apps.get(pkg)
+        self.test_say(f"catalog: {len(self.apps)} apps; {pkg}: {a.name + ' ' + a.version if a else 'NOT IN THE CATALOG'}")
+        if not a:
+            self.test_step = "failed"
+            return False
+        self.test_step = "install"
+        self.search.set_text(a.name)
+        self.fill_keep(pkg)
+        self.show_app(pkg)
+        self.test_say(f"button: {self.d_install.get_label()} (visible {self.d_install.get_visible()})")
+        self.install(pkg)
+        return False
+
+    def test_after_install(self, ok):
+        pkg = self.test_pkg
+        if self.test_step == "install":
+            self.test_say(f"installed: ok={ok}; status: {self.store.status.get_text()}")
+            if not ok:
+                return
+            self.test_step = "open"
+            GLib.timeout_add_seconds(3, lambda: self.open_app(pkg) and False)
+            GLib.timeout_add_seconds(110, lambda: self.test_say("open ready for screenshot") and False)
+            GLib.timeout_add_seconds(140, self.test_update)
+        elif self.test_step == "update":
+            self.test_say(f"updated: ok={ok}; recorded {installed().get(pkg)}; status: {self.store.status.get_text()}")
+            self.test_step = "remove"
+            GLib.timeout_add_seconds(5, lambda: self.test_say("update ready for screenshot") and False)
+            GLib.timeout_add_seconds(25, lambda: self.remove(pkg) and False)
+
+    def test_update(self):
+        pkg = self.test_pkg
+        a = self.apps[pkg]
+        record_installed(pkg, a.version_code - 1)
+        self.installed = installed()
+        self.show_app(pkg)
+        self.test_say(f"after recording an older version: button {self.d_install.get_label()} "
+                      f"(visible {self.d_install.get_visible()}), updates {self.updates()}")
+        self.test_step = "update"
+        self.install(pkg)
+        return False
 
     def load_icons(self, names):
         if not names:
@@ -397,9 +455,10 @@ class AndroidPage:
             self.store.progress.set_text("")
 
     def first_start_note(self):
-        if android_status() in ("not-set-up",):
+        status = android_status()
+        if status == "not-set-up":
             return " Android is set up first (a one-time download of about 1 GB)."
-        if android_status() != "running":
+        if status in ("stopped", "starting"):
             return " Android starts first (this takes a minute)."
         return ""
 
@@ -424,7 +483,10 @@ class AndroidPage:
                 return
             GLib.idle_add(lambda: self.store.status.set_text(
                 f"Installing {a.name}...{self.first_start_note()}") and False)
-            p = subprocess.run(["syluxium-android", "install", path], capture_output=True, text=True)
+            if self.test_pkg == pkg:
+                self.test_say(f"downloaded: {path} ({os.path.getsize(path)} bytes); android {android_status()}")
+            p = subprocess.run(["syluxium-android", "install", path], capture_output=True, text=True,
+                               env=dict(os.environ, SYLUXIUM_ANDROID_QUIET="1"))
             try:
                 os.unlink(path)
             except OSError:
@@ -437,13 +499,14 @@ class AndroidPage:
     def remove(self, pkg):
         a = self.apps.get(pkg)
         name = a.name if a else pkg
-        if self.busy or message(self.win, f"Remove {name}?", "The app and its data are removed from Android.",
+        if self.busy or not self.test_pkg and message(self.win, f"Remove {name}?", "The app and its data are removed from Android.",
                                 Gtk.MessageType.QUESTION, Gtk.ButtonsType.YES_NO) != Gtk.ResponseType.YES:
             return
         self.set_busy(True, f"Removing {name}...")
 
         def work():
-            p = subprocess.run(["syluxium-android", "remove", pkg], capture_output=True, text=True)
+            p = subprocess.run(["syluxium-android", "remove", pkg], capture_output=True, text=True,
+                               env=dict(os.environ, SYLUXIUM_ANDROID_QUIET="1"))
             if p.returncode == 0:
                 record_installed(pkg, None)
             GLib.idle_add(self.removed, pkg, p.returncode == 0, (p.stdout + p.stderr).strip())
@@ -451,7 +514,7 @@ class AndroidPage:
 
     def open_app(self, pkg):
         subprocess.Popen(["syluxium-android", "launch", pkg], start_new_session=True)
-        self.store.status.set_text("Opening the app" + (" (Android is starting)..." if android_status() != "running"
+        self.store.status.set_text("Opening the app" + (" (Android is starting)..." if android_status() in ("stopped", "starting")
                                                         else "..."))
 
     def done(self, pkg, ok, out, updating):
@@ -465,9 +528,13 @@ class AndroidPage:
                                        "It is in the Start menu under Android Apps.")
         else:
             self.store.status.set_text(f"{name} was not installed.")
+            if self.test_pkg == pkg:
+                self.test_say(f"install failed: {out[-400:]!r}")
             message(self.win, f"{name} could not be installed.",
                     out[-600:] or "See ~/.cache/syluxium-android.log.", Gtk.MessageType.ERROR)
         self.fill_keep(pkg)
+        if self.test_pkg == pkg:
+            self.test_after_install(ok)
         return False
 
     def removed(self, pkg, ok, out):
@@ -479,6 +546,10 @@ class AndroidPage:
         else:
             message(self.win, "The app could not be removed.", out[-600:], Gtk.MessageType.ERROR)
         self.fill_keep(pkg)
+        if self.test_pkg == pkg:
+            menu = os.path.expanduser(f"~/.local/share/applications/waydroid.{pkg}.desktop")
+            self.test_say(f"removed: ok={ok}; menu entry {'STILL THERE' if os.path.exists(menu) else 'gone'}; "
+                          f"recorded {installed().get(pkg)}; status: {self.store.status.get_text()}")
         return False
 
     def fill_keep(self, pkg):

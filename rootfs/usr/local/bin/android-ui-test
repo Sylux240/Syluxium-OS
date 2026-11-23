@@ -4,7 +4,13 @@
 #   android-ui-test apk FILE.apk   the .apk installer dialog for FILE
 #   android-ui-test store          the App Store's Android Apps page (F-Droid;
 #                                  downloads the catalog: needs QEMU's user networking)
+#   android-ui-test store PKG[,PKG]  the same, then install, open, update and remove
+#                                  the first of these apps found (Android must be set up)
 #   android-ui-test menu           the Start menu (Android Apps folder)
+#   android-ui-test apkflow FILE.apk PACKAGE
+#                                  install an app from an .apk (as opening it does),
+#                                  open it from its Start menu entry, screenshot,
+#                                  then remove it again (Android must be set up)
 #   android-ui-test app PACKAGE    open an Android app as a desktop window
 #                                  (Android must be set up: syluxium-android-container init)
 say() { echo "ANDTEST $*" > /dev/console; }
@@ -39,7 +45,20 @@ apk)
     asuser syluxium-apk-install /tmp/test-app.apk ;;
 store)
     for i in $(seq 1 60); do ip route 2>/dev/null | grep -q default && break; sleep 1; done
-    asuser syluxium-appstore --android
+    if [ -n "$2" ]; then
+        # install, open, update and remove an app through the store (STORETEST lines)
+        asuser env SYLUXIUM_STORE_TEST="$2" syluxium-appstore --android
+        # what Android's side is doing meanwhile (until the store test ends)
+        (for i in $(seq 1 40); do
+            sleep 60
+            say "store watch: $(ps -eo pid,etimes,args 2>/dev/null | grep -E 'syluxium-android|waydroid|apk' | grep -v grep | cut -c1-110 | tr '\n' '|')"
+            say "store watch mem: $(grep -E '^(MemFree|MemAvailable|Cached|Shmem):' /proc/meminfo | tr -s ' ' | tr '\n' ' '); top: $(ps -eo rss,comm --sort=-rss 2>/dev/null | sed -n 2,7p | tr -s ' ' | tr '\n' ',')"
+            say "store watch net: $(ip -4 -o addr 2>&1 | cut -c1-80 | tr '\n' '|') routes: $(ip -4 route 2>&1 | tr '\n' '|') dns: $(grep -v '^#' /etc/resolv.conf 2>&1 | tr '\n' '|')"
+            say "store watch log: $(tail -4 /home/syluxium/.cache/syluxium-android.log 2>/dev/null | cut -c1-160 | tr '\n' '|')"
+        done) &
+    else
+        asuser syluxium-appstore --android
+    fi
     for i in $(seq 1 90); do
         [ -f /home/syluxium/.cache/syluxium-appstore/fdroid/apps.json ] && break
         sleep 2
@@ -51,6 +70,30 @@ store)
     ;;
 menu)
     xdotool key ctrl+Escape ;;
+apkflow)
+    cp "$2" /tmp/test-app.apk && chmod 644 /tmp/test-app.apk
+    pkg=$3
+    desk=/home/syluxium/.local/share/applications/waydroid.$pkg.desktop
+    asuser syluxium-apk-install --yes /tmp/test-app.apk
+    for i in $(seq 1 120); do
+        sleep 5
+        [ -f "$desk" ] && break
+    done
+    say "installed: menu entry $([ -f "$desk" ] && echo present || echo MISSING); log: $(tail -3 /home/syluxium/.cache/syluxium-android.log | tr '\n' '|')"
+    say "entry: $(grep -E '^(Name|Exec|Icon|Categories)=' "$desk" 2>/dev/null | tr '\n' '|')"
+    # as the Start menu does: the menu entry through GIO
+    asuser python3 -c 'import sys, gi; gi.require_version("Gio", "2.0"); from gi.repository import Gio
+print("launch:", Gio.DesktopAppInfo.new_from_filename(sys.argv[1]).launch([], None))' "$desk"
+    for i in $(seq 1 24); do
+        sleep 5
+        say "windows: $(xdotool search --onlyvisible --name . getwindowname %@ 2>/dev/null | tr '\n' '|' | cut -c1-300)"
+    done
+    say "apk ready for screenshot"
+    sleep 25
+    asuser syluxium-android remove "$pkg"
+    sleep 20
+    say "removed: menu entry $([ -f "$desk" ] && echo STILL THERE || echo gone); list: $(su -s /bin/sh syluxium -c 'syluxium-android list' 2>/dev/null | tr '\n' ' ')"
+    ;;
 app)
     asuser syluxium-android launch "$2"
     for i in $(seq 1 60); do
