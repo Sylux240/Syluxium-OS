@@ -49,6 +49,14 @@ if [ ! -f "$DONE" ]; then
         chmod +x "$dst"
     done
 fi
+# "Install Syluxium" on the desktop of a live boot (the stick, or the
+# whole system in memory), every login; never on an installed system.
+if grep -qw "root=LABEL=SYLUXLIVE" /proc/cmdline || ! grep -q "root=" /proc/cmdline; then
+    [ -f /usr/share/applications/syluxium-installer.desktop ] && [ ! -f "$DESK/syluxium-installer.desktop" ] &&
+        cp /usr/share/applications/syluxium-installer.desktop "$DESK/" && chmod +x "$DESK/syluxium-installer.desktop"
+else
+    rm -f "$DESK/syluxium-installer.desktop"
+fi
 for f in "$DESK"/*.desktop; do
     [ -f "$f" ] || continue
     gio set -t string "$f" metadata::xfce-exe-checksum "$(sha256sum "$f" | cut -d' ' -f1)" 2>/dev/null

@@ -2,7 +2,7 @@
 # Test aid: log in to the Xfce desktop, then show the App Store's
 # desktop-icon question and its Settings (software sources) as the desktop
 # user, for screenshots. Console lines start with "ASTEST".
-#   appstore-ui-test icon|settings|store
+#   appstore-ui-test icon|settings|store|installer
 #   (store: downloads the catalog first - needs QEMU's user networking)
 say() { echo "ASTEST $*" > /dev/console; }
 startdesktop > /dev/null 2>&1 &
@@ -32,6 +32,8 @@ os.execvp(sys.argv[1], sys.argv[1:])' "$@" ) < /dev/null > /dev/console 2>&1 &
 say "desktop up"
 case "$1" in
 icon) asuser syluxium-appstore --ask-icon Cube ;;
+installer)
+    asuser sh -c 'echo "XAUTHORITY=$XAUTHORITY DISPLAY=$DISPLAY"; sudo -n true; echo "SUDO-N rc=$?"; (timeout 25 syluxium-installer > /tmp/inst.out 2>&1; echo "INSTALLER rc=$?" >> /tmp/inst.out) & sleep 10; w=$(xdotool search --onlyvisible --name "Administrator Permission" | head -1); [ -n "$w" ] && xdotool windowactivate --sync "$w" key Return; sleep 12; echo "INSTALLER windows: $(xdotool search --onlyvisible --name . getwindowname %@ 2>/dev/null | tr "\n" "|")"; sleep 12; sed "s/^/INST: /" /tmp/inst.out' ;;
 store)
     for i in $(seq 1 60); do ip route 2>/dev/null | grep -q default && break; sleep 1; done
     apt-get update > /dev/console 2>&1
