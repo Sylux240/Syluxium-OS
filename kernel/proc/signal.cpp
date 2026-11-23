@@ -211,6 +211,15 @@ bool pending(proc::Process* p) {
 
 bool interrupted() { return pending(proc::current()); }
 
+bool fatal_pending() {
+    proc::Process* p = proc::current();
+    if (!p)
+        return false;
+    sched::Thread* t = sched::current();
+    u64 pend = __atomic_load_n(&p->sig_pending, __ATOMIC_ACQUIRE) | __atomic_load_n(&t->sig_pending, __ATOMIC_ACQUIRE);
+    return must_exit(p, t) || (pend & bit(SIGKILL));
+}
+
 u64 pending_set() {
     proc::Process* p = proc::current();
     sched::Thread* t = sched::current();

@@ -150,6 +150,7 @@ struct Request {
     u32 out_max = 0, out_len = 0;
     i32 error = 0;
     bool done = false;
+    bool sent = false;                          // taken by the server (no longer cancellable)
     bool background = false;                    // nobody waits: freed once answered (INIT, RELEASE)
     void (*on_reply)(Conn*, Request*) = nullptr; // background requests' handler
 };
@@ -190,8 +191,11 @@ struct Arg {
 
 // Queue a request; the reply wakes us.
 long call(Conn* c, u32 opcode, u64 nodeid, const Arg* args, int nargs, void* out, u32 out_max, u32* out_len = nullptr) {
-    if (opcode != OP_INIT)
-        c->wq.wait_until([&] { return c->initialized || !c->connected; });
+    if (opcode != OP_INIT) {
+        c->wq.wait_until([&] { return c->initialized || !c->connected || signal::fatal_pending(); });
+        if (!c->initialized && c->connected)
+            return -err::INTR; // killed while the server never answered INIT
+    }
     u32 len = sizeof(InHeader);
     for (int i = 0; i < nargs; i++)
         len += args[i].n;
@@ -233,7 +237,28 @@ long call(Conn* c, u32 opcode, u64 nodeid, const Arg* args, int nargs, void* out
     if (!r->done) {
         c->wq.wake_all();
         poll::notify();
-        c->wq.wait_until([&] { return r->done; });
+        // A process being killed gives up on a request the server hasn't
+        // taken yet; one being served is waited for (a hung server must be
+        // killed, which aborts the connection).
+        c->wq.wait_until([&] { return r->done || (!r->sent && signal::fatal_pending()); });
+        if (!r->done) {
+            LockGuard guard(c->wq.lock());
+            if (!r->sent) {
+                for (Request** pp = &c->pending; *pp; pp = &(*pp)->next) {
+                    if (*pp == r) {
+                        *pp = r->next;
+                        break;
+                    }
+                }
+                c->pending_tail = nullptr;
+                for (Request* q = c->pending; q; q = q->next)
+                    c->pending_tail = q;
+                r->error = -err::INTR;
+                r->done = true;
+            }
+        }
+        if (!r->done)
+            c->wq.wait_until([&] { return r->done; });
     }
     long result = r->error;
     if (out_len)
@@ -1208,6 +1233,7 @@ public:
                 if (!c->connected)
                     return -err::NODEV;
                 if ((r = c->pending)) {
+                    r->sent = true;
                     c->pending = r->next;
                     if (!c->pending)
                         c->pending_tail = nullptr;
