@@ -140,6 +140,7 @@ check "futex wakeups while forking, WAKE_OP, PI, robust" /opt/syluxium/tests/fut
 check "timed sleeps woken by signals while threads come and go" /opt/syluxium/tests/schedstress 2
 check "copy_file_range, pidfd, sigtimedwait, mlock"   /opt/syluxium/tests/newsyscalls
 check "bpf: maps, programs, cgroup attach, bpffs pins" /opt/syluxium/tests/bpftest
+check "extended attributes (user.*): set, get, list, remove" /opt/syluxium/tests/xattrtest
 
 echo "selftest: $pass passed, $fail failed"
 exit $fail

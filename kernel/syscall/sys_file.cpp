@@ -1169,11 +1169,234 @@ long sys_linkat(SYSCALL_ARGS) {
     return do_linkat(static_cast<i32>(a0), a1, static_cast<i32>(a2), a3, static_cast<u32>(a4));
 }
 
-// Extended attributes: none are stored (tmpfs/ext2 without xattrs).
-long sys_getxattr(SYSCALL_ARGS) { SYSCALL_UNUSED; return -err::NODATA; }
-long sys_listxattr(SYSCALL_ARGS) { SYSCALL_UNUSED; return 0; }
-long sys_setxattr(SYSCALL_ARGS) { SYSCALL_UNUSED; return -err::OPNOTSUPP; }
-long sys_removexattr(SYSCALL_ARGS) { SYSCALL_UNUSED; return -err::NODATA; }
+// Extended attributes, kept in memory per file (device + inode number, so
+// they outlive cached inodes) for every file system; not written to disk yet
+// (an ext4 file's attributes last until the next boot). user.* on files and
+// directories with write (set) or read (get) permission, trusted.* and
+// security.* writes for root; system.* (POSIX ACLs) aren't supported.
+// Android's installd marks every app data directory with user.* attributes
+// and stopped creating them when that failed.
+namespace xattrs {
+
+struct Attr {
+    Attr* next;
+    u32 len;
+    char name[256];
+    u8 value[1]; // len bytes
+};
+struct File {
+    File* next;
+    u64 dev, ino;
+    Attr* attrs;
+};
+constexpr usize BUCKETS = 512;
+constexpr usize VALUE_MAX = 65536, LIST_MAX = 65536;
+File* g_files[BUCKETS];
+sched::Mutex g_lock;
+
+File* find(Inode* n, bool create) {
+    usize b = (n->dev * 31 + n->ino) % BUCKETS;
+    for (File* f = g_files[b]; f; f = f->next)
+        if (f->dev == n->dev && f->ino == n->ino)
+            return f;
+    if (!create)
+        return nullptr;
+    auto* f = static_cast<File*>(kzalloc(sizeof(File)));
+    if (!f)
+        return nullptr;
+    f->dev = n->dev;
+    f->ino = n->ino;
+    f->next = g_files[b];
+    g_files[b] = f;
+    return f;
+}
+
+// Who may touch this name on this file (Linux's xattr_permission).
+long allowed(Inode* n, const char* name, bool write) {
+    if (strncmp(name, "user.", 5) == 0) {
+        if (!is_reg(n->mode) && !is_dir(n->mode))
+            return write ? -err::PERM : -err::NODATA;
+        return proc::permission(n, write ? proc::MAY_WRITE : proc::MAY_READ);
+    }
+    if (strncmp(name, "trusted.", 8) == 0)
+        return proc::capable() ? 0 : (write ? -err::PERM : -err::NODATA);
+    if (strncmp(name, "security.", 9) == 0)
+        return !write || proc::capable() ? 0 : -err::PERM;
+    if (strncmp(name, "system.", 7) == 0)
+        return write ? -err::OPNOTSUPP : -err::NODATA;
+    return -err::OPNOTSUPP; // no such namespace
+}
+
+long get_name(u64 uname, char* out) {
+    long r = uaccess::string_from(reinterpret_cast<const char*>(uname), out, 256);
+    if (r == -err::NAMETOOLONG)
+        return -err::RANGE;
+    if (r < 0)
+        return r;
+    return out[0] ? 0 : -err::RANGE;
+}
+
+// The file a call names: a path (following symlinks or not) or a descriptor.
+enum class By { Path, LinkPath, Fd };
+long target(By by, u64 a0, Inode** out) {
+    Process* p = proc::current();
+    if (by == By::Fd) {
+        FileRef f(p, static_cast<long>(a0));
+        if (!f)
+            return -err::BADF;
+        *out = f->inode;
+        return 0;
+    }
+    UserPath path(a0);
+    if (path.error())
+        return path.error();
+    return resolve(path.c_str(), p->cwd, by == By::Path, out);
+}
+
+long set(By by, u64 a0, u64 uname, u64 uvalue, u64 size, u64 flags) {
+    constexpr u64 XATTR_CREATE = 1, XATTR_REPLACE = 2;
+    if (flags & ~(XATTR_CREATE | XATTR_REPLACE))
+        return -err::INVAL;
+    if (size > VALUE_MAX)
+        return -err::TOOBIG;
+    char name[256];
+    if (long r = get_name(uname, name); r < 0)
+        return r;
+    Inode* n;
+    if (long r = target(by, a0, &n); r < 0)
+        return r;
+    if (long r = allowed(n, name, true); r < 0)
+        return r;
+    usize nlen = strlen(name);
+    auto* a = static_cast<Attr*>(kmalloc(sizeof(Attr) + size));
+    if (!a)
+        return -err::NOMEM;
+    memcpy(a->name, name, nlen + 1);
+    a->len = static_cast<u32>(size);
+    if (size && uaccess::copy_from(a->value, reinterpret_cast<const void*>(uvalue), size) < 0) {
+        kfree(a);
+        return -err::FAULT;
+    }
+    LockGuard guard(g_lock);
+    File* f = find(n, true);
+    if (!f) {
+        kfree(a);
+        return -err::NOMEM;
+    }
+    for (Attr** pp = &f->attrs; *pp; pp = &(*pp)->next) {
+        if (strcmp((*pp)->name, name) == 0) {
+            if (flags & XATTR_CREATE) {
+                kfree(a);
+                return -err::EXIST;
+            }
+            Attr* old = *pp;
+            a->next = old->next;
+            *pp = a;
+            kfree(old);
+            n->ctime = vfs::now();
+            return 0;
+        }
+    }
+    if (flags & XATTR_REPLACE) {
+        kfree(a);
+        return -err::NODATA;
+    }
+    a->next = f->attrs;
+    f->attrs = a;
+    n->ctime = vfs::now();
+    return 0;
+}
+
+long get(By by, u64 a0, u64 uname, u64 uvalue, u64 size) {
+    char name[256];
+    if (long r = get_name(uname, name); r < 0)
+        return r;
+    Inode* n;
+    if (long r = target(by, a0, &n); r < 0)
+        return r;
+    if (long r = allowed(n, name, false); r < 0)
+        return r;
+    LockGuard guard(g_lock);
+    File* f = find(n, false);
+    for (Attr* a = f ? f->attrs : nullptr; a; a = a->next) {
+        if (strcmp(a->name, name) != 0)
+            continue;
+        if (size == 0)
+            return a->len;
+        if (size < a->len)
+            return -err::RANGE;
+        if (a->len && uaccess::copy_to(reinterpret_cast<void*>(uvalue), a->value, a->len) < 0)
+            return -err::FAULT;
+        return a->len;
+    }
+    return -err::NODATA;
+}
+
+long list(By by, u64 a0, u64 ulist, u64 size) {
+    Inode* n;
+    if (long r = target(by, a0, &n); r < 0)
+        return r;
+    LockGuard guard(g_lock);
+    File* f = find(n, false);
+    usize total = 0;
+    for (Attr* a = f ? f->attrs : nullptr; a; a = a->next)
+        if (allowed(n, a->name, false) == 0)
+            total += strlen(a->name) + 1;
+    if (size == 0)
+        return static_cast<long>(total);
+    if (size < total)
+        return -err::RANGE;
+    if (total > LIST_MAX)
+        return -err::TOOBIG;
+    usize pos = 0;
+    for (Attr* a = f ? f->attrs : nullptr; a; a = a->next) {
+        if (allowed(n, a->name, false) != 0)
+            continue;
+        usize len = strlen(a->name) + 1;
+        if (uaccess::copy_to(reinterpret_cast<void*>(ulist + pos), a->name, len) < 0)
+            return -err::FAULT;
+        pos += len;
+    }
+    return static_cast<long>(total);
+}
+
+long remove(By by, u64 a0, u64 uname) {
+    char name[256];
+    if (long r = get_name(uname, name); r < 0)
+        return r;
+    Inode* n;
+    if (long r = target(by, a0, &n); r < 0)
+        return r;
+    if (long r = allowed(n, name, true); r < 0)
+        return r;
+    LockGuard guard(g_lock);
+    File* f = find(n, false);
+    for (Attr** pp = f ? &f->attrs : nullptr; pp && *pp; pp = &(*pp)->next) {
+        if (strcmp((*pp)->name, name) == 0) {
+            Attr* old = *pp;
+            *pp = old->next;
+            kfree(old);
+            n->ctime = vfs::now();
+            return 0;
+        }
+    }
+    return -err::NODATA;
+}
+
+} // namespace xattrs
+
+long sys_setxattr(SYSCALL_ARGS) { SYSCALL_UNUSED; return xattrs::set(xattrs::By::Path, a0, a1, a2, a3, a4); }
+long sys_lsetxattr(SYSCALL_ARGS) { SYSCALL_UNUSED; return xattrs::set(xattrs::By::LinkPath, a0, a1, a2, a3, a4); }
+long sys_fsetxattr(SYSCALL_ARGS) { SYSCALL_UNUSED; return xattrs::set(xattrs::By::Fd, a0, a1, a2, a3, a4); }
+long sys_getxattr(SYSCALL_ARGS) { SYSCALL_UNUSED; return xattrs::get(xattrs::By::Path, a0, a1, a2, a3); }
+long sys_lgetxattr(SYSCALL_ARGS) { SYSCALL_UNUSED; return xattrs::get(xattrs::By::LinkPath, a0, a1, a2, a3); }
+long sys_fgetxattr(SYSCALL_ARGS) { SYSCALL_UNUSED; return xattrs::get(xattrs::By::Fd, a0, a1, a2, a3); }
+long sys_listxattr(SYSCALL_ARGS) { SYSCALL_UNUSED; return xattrs::list(xattrs::By::Path, a0, a1, a2); }
+long sys_llistxattr(SYSCALL_ARGS) { SYSCALL_UNUSED; return xattrs::list(xattrs::By::LinkPath, a0, a1, a2); }
+long sys_flistxattr(SYSCALL_ARGS) { SYSCALL_UNUSED; return xattrs::list(xattrs::By::Fd, a0, a1, a2); }
+long sys_removexattr(SYSCALL_ARGS) { SYSCALL_UNUSED; return xattrs::remove(xattrs::By::Path, a0, a1); }
+long sys_lremovexattr(SYSCALL_ARGS) { SYSCALL_UNUSED; return xattrs::remove(xattrs::By::LinkPath, a0, a1); }
+long sys_fremovexattr(SYSCALL_ARGS) { SYSCALL_UNUSED; return xattrs::remove(xattrs::By::Fd, a0, a1); }
 long sys_fadvise64(SYSCALL_ARGS) { SYSCALL_UNUSED; return 0; } // advice only
 long sys_readahead(SYSCALL_ARGS) { SYSCALL_UNUSED; return 0; } // a hint: the cache reads on demand
 
@@ -2395,17 +2618,17 @@ void register_file() {
     set(87, sys_unlink, "unlink");
     set(86, sys_link, "link");
     set(188, sys_setxattr, "setxattr");
-    set(189, sys_setxattr, "lsetxattr");
-    set(190, sys_setxattr, "fsetxattr");
+    set(189, sys_lsetxattr, "lsetxattr");
+    set(190, sys_fsetxattr, "fsetxattr");
     set(191, sys_getxattr, "getxattr");
-    set(192, sys_getxattr, "lgetxattr");
-    set(193, sys_getxattr, "fgetxattr");
+    set(192, sys_lgetxattr, "lgetxattr");
+    set(193, sys_fgetxattr, "fgetxattr");
     set(194, sys_listxattr, "listxattr");
-    set(195, sys_listxattr, "llistxattr");
-    set(196, sys_listxattr, "flistxattr");
+    set(195, sys_llistxattr, "llistxattr");
+    set(196, sys_flistxattr, "flistxattr");
     set(197, sys_removexattr, "removexattr");
-    set(198, sys_removexattr, "lremovexattr");
-    set(199, sys_removexattr, "fremovexattr");
+    set(198, sys_lremovexattr, "lremovexattr");
+    set(199, sys_fremovexattr, "fremovexattr");
     set(221, sys_fadvise64, "fadvise64");
     set(187, sys_readahead, "readahead");
     set(285, sys_fallocate, "fallocate");

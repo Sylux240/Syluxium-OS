@@ -169,6 +169,16 @@ ensure_started() {
         sleep 1
     done
     $WAYDROID app list 2>/dev/null | grep -q '^packageName:' || fail "Android did not finish starting (see $LOG)."
+    # ...and booted: Android ignores app starts until sys.boot_completed.
+    local j
+    for j in $(seq 300); do
+        [ "$($WAYDROID prop get sys.boot_completed 2>/dev/null | tail -1)" = 1 ] && break
+        session_running || fail "Android stopped while starting (see $LOG)."
+        sleep 1
+    done
+    [ "$($WAYDROID prop get sys.boot_completed 2>/dev/null | tail -1)" = 1 ] ||
+        log "Android's boot did not report completion; going on"
+    i=$((i + j))
     touch "$STATE/ready"
     log "Android is ready (${i}s)"
     fix_menu_entries
