@@ -1173,7 +1173,8 @@ long sys_linkat(SYSCALL_ARGS) {
 // they outlive cached inodes) for every file system; not written to disk yet
 // (an ext4 file's attributes last until the next boot). user.* on files and
 // directories with write (set) or read (get) permission, trusted.* and
-// security.* writes for root; system.* (POSIX ACLs) aren't supported.
+// security.* writes for root; POSIX ACLs (system.posix_acl_*) are kept
+// but not enforced.
 // Android's installd marks every app data directory with user.* attributes
 // and stopped creating them when that failed.
 namespace xattrs {
@@ -1222,6 +1223,16 @@ long allowed(Inode* n, const char* name, bool write) {
         return proc::capable() ? 0 : (write ? -err::PERM : -err::NODATA);
     if (strncmp(name, "security.", 9) == 0)
         return !write || proc::capable() ? 0 : -err::PERM;
+    // POSIX ACLs are kept (getfacl shows them) but not enforced: access
+    // still follows the mode bits. Android's vold sets a default ACL on each
+    // user's media directory and won't unlock the user without it.
+    if (strcmp(name, "system.posix_acl_access") == 0 || strcmp(name, "system.posix_acl_default") == 0) {
+        if (strcmp(name, "system.posix_acl_default") == 0 && !is_dir(n->mode))
+            return write ? -err::ACCES : -err::NODATA;
+        if (!write)
+            return 0;
+        return proc::capable() || proc::cred().fsuid == n->uid ? 0 : -err::PERM;
+    }
     if (strncmp(name, "system.", 7) == 0)
         return write ? -err::OPNOTSUPP : -err::NODATA;
     return -err::OPNOTSUPP; // no such namespace

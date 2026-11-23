@@ -172,13 +172,23 @@ ensure_started() {
     # ...and booted: Android ignores app starts until sys.boot_completed.
     local j
     for j in $(seq 300); do
-        [ "$($WAYDROID prop get sys.boot_completed 2>/dev/null | tail -1)" = 1 ] && break
+        [ "$($HELPER getprop sys.boot_completed 2>/dev/null)" = 1 ] && break
         session_running || fail "Android stopped while starting (see $LOG)."
         sleep 1
     done
-    [ "$($WAYDROID prop get sys.boot_completed 2>/dev/null | tail -1)" = 1 ] ||
+    [ "$($HELPER getprop sys.boot_completed 2>/dev/null)" = 1 ] ||
         log "Android's boot did not report completion; going on"
-    i=$((i + j))
+    # ...and its user unlocked (credential storage available): until then
+    # Android shows only a placeholder home and drops app starts.
+    local k
+    for k in $(seq 300); do
+        [ "$($HELPER getprop sys.user.0.ce_available 2>/dev/null)" = true ] && break
+        session_running || fail "Android stopped while starting (see $LOG)."
+        sleep 1
+    done
+    [ "$($HELPER getprop sys.user.0.ce_available 2>/dev/null)" = true ] ||
+        log "Android's user storage did not unlock; going on"
+    i=$((i + j + k))
     touch "$STATE/ready"
     log "Android is ready (${i}s)"
     fix_menu_entries

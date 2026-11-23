@@ -9,6 +9,8 @@
 #   syluxium-android-container switch VANILLA|GAPPS
 #                                        change Android's system image (downloads it; apps
 #                                        and their data stay); Android must be stopped
+#   syluxium-android-container getprop NAME
+#                                        one Android system property (read-only)
 #   syluxium-android-container android-id
 #                                        the Google services Android ID (for Google's
 #                                        registration of uncertified devices), if there is one
@@ -158,6 +160,13 @@ switch)
     rc=$?
     adapt_config
     exit $rc
+    ;;
+getprop)
+    # One Android system property (read-only; the desktop's launcher waits
+    # for boot completion and user unlock with it).
+    case "$2" in ''|*[!A-Za-z0-9._-]*) echo "getprop NAME" >&2; exit 1 ;; esac
+    lxc-info -P /var/lib/waydroid/lxc -n waydroid 2>/dev/null | grep -q RUNNING || exit 1
+    timeout 15 lxc-attach -P /var/lib/waydroid/lxc -n waydroid --clear-env -- /system/bin/getprop "$2" 2>/dev/null
     ;;
 android-id)
     lxc-info -P /var/lib/waydroid/lxc -n waydroid 2>/dev/null | grep -q RUNNING || exit 1
