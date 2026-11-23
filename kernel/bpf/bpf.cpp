@@ -356,11 +356,16 @@ Object* object_of(vfs::File* f) {
 }
 
 // A new file for `obj` in the caller's table (bpf fds are always close-on-exec).
-long install(Object* obj, u32 open_flags = 0) {
+// A `fresh` object (just made, no other references) is freed on failure:
+// by the file's release once a file was opened for it, else here.
+long install(Object* obj, u32 open_flags = 0, bool fresh = false) {
     u32 acc = (open_flags & BPF_F_RDONLY) ? vfs::O_RDONLY : (open_flags & BPF_F_WRONLY) ? vfs::O_WRONLY : vfs::O_RDWR;
     vfs::File* f = vfs::open_inode(obj, acc);
-    if (!f)
+    if (!f) {
+        if (fresh)
+            delete obj;
         return -err::NOMEM;
+    }
     const char* what = obj->kind == Kind::Map ? "bpf-map" : obj->kind == Kind::Prog ? "bpf-prog"
                        : obj->kind == Kind::Btf ? "btf" : "bpf_link";
     char path[32];
@@ -479,10 +484,7 @@ long map_create(const u8* a) {
             return r;
         }
     }
-    long fd = install(m);
-    if (fd < 0)
-        delete m;
-    return fd;
+    return install(m, 0, true);
 }
 
 long map_elem(int cmd, const u8* a) {
@@ -595,10 +597,7 @@ long prog_load(const u8* a) {
     copy_name(p->name, a + 48);
     p->expected_attach_type = get<u32>(a, 68);
     p->created_by_uid = proc::cred().ruid;
-    long fd = install(p);
-    if (fd < 0)
-        delete p;
-    return fd;
+    return install(p, 0, true);
 }
 
 long obj_pin(const u8* a) {
@@ -808,10 +807,7 @@ long btf_load(const u8* a) {
         return -err::INVAL;
     auto* b = new Blob(Kind::Btf);
     b->size = size;
-    long fd = install(b);
-    if (fd < 0)
-        delete b;
-    return fd;
+    return install(b, 0, true);
 }
 
 long link_create(const u8* a) {
@@ -824,10 +820,7 @@ long link_create(const u8* a) {
     auto* l = new Blob(Kind::Link);
     l->prog_id = h.obj->id;
     l->attach_type = type;
-    long fd = install(l);
-    if (fd < 0)
-        delete l;
-    return fd;
+    return install(l, 0, true);
 }
 
 long sys_bpf(SYSCALL_ARGS) {

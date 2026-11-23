@@ -65,8 +65,8 @@ audio_socket() {
     local pulse="$XDG_RUNTIME_DIR/pulse/native"
     [ -S "$pulse" ] && return
     if command -v pipewire > /dev/null && command -v pipewire-pulse > /dev/null; then
-        pgrep -u "$(id -u)" -x pipewire > /dev/null || { setsid pipewire >> "$STATE/pipewire.log" 2>&1 < /dev/null 9>&- & sleep 1; }
-        pgrep -u "$(id -u)" -x pipewire-pulse > /dev/null || { setsid pipewire-pulse >> "$STATE/pipewire.log" 2>&1 < /dev/null 9>&- & }
+        pgrep -u "$(id -u)" -x pipewire > /dev/null || { setsid pipewire >> "$STATE/pipewire.log" 2>&1 < /dev/null & sleep 1; }
+        pgrep -u "$(id -u)" -x pipewire-pulse > /dev/null || { setsid pipewire-pulse >> "$STATE/pipewire.log" 2>&1 < /dev/null & }
         for _ in $(seq 30); do [ -S "$pulse" ] && return; sleep 0.1; done
     fi
     mkdir -p "$(dirname "$pulse")"
@@ -114,13 +114,27 @@ menu_watcher() {
     done
 }
 
+# Android up and ready, started by one caller at a time (a lock directory:
+# there is no flock). The lock goes when this is done (or the script exits:
+# launch and full-ui replace the script with waydroid afterwards).
 ensure() {
     if android_ready; then return 0; fi
-    # one starter at a time
-    exec 9> "$STATE/lock"
-    flock 9
-    android_ready && return 0
+    local waited=0
+    until mkdir "$STATE/lock" 2>/dev/null; do
+        android_ready && return 0
+        # a lock left by a starter that died
+        if [ $waited -ge 600 ]; then rmdir "$STATE/lock" 2>/dev/null; waited=0; continue; fi
+        sleep 0.5; waited=$((waited + 1))
+    done
+    trap 'rmdir "$STATE/lock" 2>/dev/null' EXIT
+    local rc=0
+    android_ready || ensure_started || rc=$?
+    rmdir "$STATE/lock" 2>/dev/null
+    trap - EXIT
+    return $rc
+}
 
+ensure_started() {
     case "$($HELPER status 2>/dev/null)" in
     not-set-up)
         syluxium-android-setup || exit 1 ;;
@@ -136,7 +150,7 @@ ensure() {
         audio_socket
         rm -f "$STATE/ready"
         log "starting the Android session on $disp"
-        WAYLAND_DISPLAY=$disp setsid $WAYDROID session start >> "$LOG" 2>&1 < /dev/null 9>&- &
+        WAYLAND_DISPLAY=$disp setsid $WAYDROID session start >> "$LOG" 2>&1 < /dev/null &
         echo $! > "$STATE/session.pid"
         for _ in $(seq 240); do
             session_running && break
@@ -158,7 +172,7 @@ ensure() {
     touch "$STATE/ready"
     log "Android is ready (${i}s)"
     fix_menu_entries
-    (menu_watcher 9>&- &) 2>/dev/null
+    (menu_watcher &) 2>/dev/null
     return 0
 }
 

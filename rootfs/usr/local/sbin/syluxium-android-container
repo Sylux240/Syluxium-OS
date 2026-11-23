@@ -48,6 +48,13 @@ adapt_config() {
         # Each Android app its own desktop window (no Android home screen).
         grep -q '^persist.waydroid.multi_windows' /var/lib/waydroid/waydroid.cfg ||
             sed -i '/^\[properties\]/a persist.waydroid.multi_windows = true' /var/lib/waydroid/waydroid.cfg
+        # (Waydroid copies [properties] into waydroid_base.prop only at init:
+        # Android reads it from there when it starts.)
+        b=/var/lib/waydroid/waydroid_base.prop
+        if [ -f "$b" ]; then
+            sed -i '/^persist.waydroid.multi_windows=/d' "$b"
+            echo "persist.waydroid.multi_windows=true" >> "$b"
+        fi
     fi
 }
 

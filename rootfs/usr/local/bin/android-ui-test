@@ -60,9 +60,12 @@ app)
         say "t=$((i * 5))s container=$st $ready windows: $(xdotool search --onlyvisible --name . getwindowname %@ 2>/dev/null | tr '\n' '|' | cut -c1-200)"
         [ -n "$ready" ] && break
     done
-    sleep 40
-    say "log: $(tail -5 /home/syluxium/.cache/syluxium-android.log 2>/dev/null | tr '\n' '|')"
-    say "host: $(tail -5 /run/user/1000/syluxium-wayland-host.log 2>/dev/null | tr '\n' '|' | cut -c1-400)"
+    for i in 1 2 3 4 5 6 7 8; do
+        sleep 5
+        say "windows: $(xdotool search --onlyvisible --name . getwindowname %@ 2>/dev/null | tr '\n' '|' | cut -c1-300)"
+    done
+    say "log: $(tail -8 /home/syluxium/.cache/syluxium-android.log 2>/dev/null | tr '\n' '|')"
+    say "host: $(grep -v 'wayland-host-icon\|Traceback\|File \|\^\^\|sys.stdout' /run/user/1000/syluxium-wayland-host.log 2>/dev/null | tail -40 | tr '\n' '|' | cut -c1-4000)"
     say "waydroid.log: $(grep -v 'lxc-info\|seccomp' /var/lib/waydroid/waydroid.log 2>/dev/null | tail -25 | tr '\n' '|' | cut -c1-3000)"
     say "binder: $(ls -l /dev/anbox-binder /dev/binderfs/ 2>&1 | tr '\n' '|')"
     ;;
