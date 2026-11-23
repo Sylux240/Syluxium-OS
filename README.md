@@ -261,3 +261,13 @@ Legend: ✅ done · 🟡 partly done · ⬜ to do
      (repair disks and packages, reset settings or passwords, root prompt)
 
 Tally: 53 done · 13 partly done · 1 to do.
+
+## License
+
+Syluxium is free software, licensed under the **GNU General Public License, version 2 only**
+(GPL-2.0-only), the same licence as the Linux kernel. See [LICENSE](LICENSE).
+
+Third-party code keeps its own licence: the vendored Linux drivers in `kernel/linuxkpi/` (GPL-2.0,
+some dual-licensed GPL/BSD or ISC), [Limine](https://github.com/limine-bootloader/limine) (BSD-2-Clause),
+uACPI (MIT), and the Debian packages that make up the user space (each under its own licence, listed
+in `/usr/share/doc/*/copyright` on the system).
