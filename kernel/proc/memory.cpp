@@ -532,7 +532,15 @@ long Memory::discard(uptr addr, usize len) {
             u64 phys;
             if (!m_as->translate(page, &phys))
                 continue;
-            if (!v->file && __atomic_load_n(&pmm::frame(phys)->refcount, __ATOMIC_ACQUIRE) == 1)
+            pmm::PageFrame* fr = pmm::frame(phys);
+            // Never zero or drop memory that isn't an ordinary page of this
+            // process: device memory (no frame), or kernel memory a driver
+            // mapped here (heap, page tables, firmware areas) - zeroing it in
+            // place wiped kernel data, and dropping it would free it.
+            if (!fr || !(fr->flags & pmm::PF_ALLOCATED) ||
+                (fr->flags & (pmm::PF_RESERVED | pmm::PF_SLAB | pmm::PF_HEAP_LARGE | pmm::PF_PAGE_TABLE)))
+                continue;
+            if (!v->file && __atomic_load_n(&fr->refcount, __ATOMIC_ACQUIRE) == 1)
                 memset(mm::phys_to_virt(phys), 0, PAGE_SIZE);
             else
                 unmap_pages(page, page + PAGE_SIZE, true);
