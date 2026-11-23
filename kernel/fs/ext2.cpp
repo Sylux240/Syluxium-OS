@@ -654,18 +654,32 @@ public:
     }
 
     u32 opens = 0;         // Files open on it
-    bool orphaned = false; // unlinked while open: freed by the last close
+    u32 maps = 0;          // memory mappings of it (they outlive the fd: open, mmap, close)
+    bool orphaned = false; // unlinked while open or mapped: freed when the last of both goes
 
-    void on_open(vfs::File*) override { __atomic_add_fetch(&opens, 1, __ATOMIC_ACQ_REL); }
-    void on_release(vfs::File*) override {
-        if (__atomic_sub_fetch(&opens, 1, __ATOMIC_ACQ_REL) != 0)
-            return;
+    bool in_use() const {
+        return __atomic_load_n(&opens, __ATOMIC_ACQUIRE) || __atomic_load_n(&maps, __ATOMIC_ACQUIRE);
+    }
+    void last_user_gone() {
         LockGuard guard(vol->lock);
-        if (orphaned && __atomic_load_n(&opens, __ATOMIC_ACQUIRE) == 0) {
+        if (orphaned && !in_use()) {
             vol->orphan_remove(this);
             orphaned = false;
             release_inode(this);
         }
+    }
+    void on_open(vfs::File*) override { __atomic_add_fetch(&opens, 1, __ATOMIC_ACQ_REL); }
+    void on_release(vfs::File*) override {
+        if (__atomic_sub_fetch(&opens, 1, __ATOMIC_ACQ_REL) == 0)
+            last_user_gone();
+    }
+    // A running program whose file is deleted or replaced (apt upgrade,
+    // rename over it) keeps its mapped pages: the file is freed only after
+    // the last mapping goes. Freeing it at unlink left the program faulting
+    // in zero pages from a released inode.
+    void mmap_ref(int delta) override {
+        if (__atomic_add_fetch(&maps, static_cast<u32>(delta), __ATOMIC_ACQ_REL) == 0)
+            last_user_gone();
     }
 
     Node(Volume* v, u32 inode_number) : vol(v), number(inode_number) {
@@ -1604,7 +1618,7 @@ public:
     // A regular file lost its last name: free it now, or (still open) at
     // its last close.
     void drop_last_link(Node* victim) {
-        if (__atomic_load_n(&victim->opens, __ATOMIC_ACQUIRE) > 0 && !victim->orphaned) {
+        if (victim->in_use() && !victim->orphaned) {
             victim->orphaned = true;
             victim->save(); // links = 0
             vol->orphan_add(victim);
