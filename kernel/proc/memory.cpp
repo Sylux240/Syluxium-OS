@@ -158,7 +158,8 @@ bool Memory::overlaps(uptr start, uptr end) {
 
 void zap_device_range(u64 offset, u64 len) {
     // Collect under the lock, unmap outside it (shootdowns wait for other CPUs).
-    struct Hit { vmm::AddressSpace* as; uptr start, end; };
+    // (each owner held meanwhile: its page tables can't be freed under us)
+    struct Hit { Memory* mem; uptr start, end; };
     constexpr usize MAX_HITS = 64;
     Hit hits[MAX_HITS];
     usize n = 0;
@@ -171,13 +172,14 @@ void zap_device_range(u64 offset, u64 len) {
             u64 beg = max(vbeg, offset), end = min(vend, offset + len);
             if (beg >= end || !v->owner->aspace())
                 continue;
-            hits[n++] = {v->owner->aspace(), v->start + (beg - vbeg), v->start + (end - vbeg)};
+            if (!v->owner->try_get())
+                continue; // exiting: its teardown drops the mapping itself
+            hits[n++] = {v->owner, v->start + (beg - vbeg), v->start + (end - vbeg)};
         }
     }
     for (usize i = 0; i < n; i++) {
-        for (uptr page = hits[i].start; page < hits[i].end; page += PAGE_SIZE)
-            hits[i].as->unmap(page);
-        vmm::shootdown(hits[i].start, (hits[i].end - hits[i].start) / PAGE_SIZE, hits[i].as);
+        hits[i].mem->zap_range(hits[i].start, hits[i].end);
+        hits[i].mem->put();
     }
 }
 
@@ -187,7 +189,12 @@ void zap_file_page(vfs::Inode* file, u64 offset, u64 phys) {
     // reference until written to.
     // (in rounds of up to 64 mappings: every one must go, or it would keep
     // showing a page that is freed)
-    struct Hit { vmm::AddressSpace* as; uptr va; bool counted; };
+    // Each owner is held (a reference) and locked while its page goes:
+    // unlocked, the owner's own exit or munmap could release the same page
+    // too (one reference too many: a page the file still caches was freed
+    // and handed out again, e.g. as a page table), or the zap wrote into
+    // page tables an exit had already freed.
+    struct Hit { Memory* mem; uptr va; bool counted; };
     constexpr usize MAX_HITS = 64;
     Hit hits[MAX_HITS];
     for (usize skip = 0;; skip += MAX_HITS) {
@@ -201,20 +208,44 @@ void zap_file_page(vfs::Inode* file, u64 offset, u64 phys) {
                     continue;
                 if (seen++ < skip)
                     continue;
-                hits[n++] = {v->owner->aspace(), v->start + (offset - v->file_offset), v->kind != VMA_DEVICE};
+                if (!v->owner->try_get())
+                    continue; // exiting: its teardown drops the mapping itself
+                hits[n++] = {v->owner, v->start + (offset - v->file_offset), v->kind != VMA_DEVICE};
             }
         }
         for (usize i = 0; i < n; i++) {
-            u64 now;
-            if (!hits[i].as->translate(hits[i].va, &now) || (now & ~(PAGE_SIZE - 1)) != phys)
-                continue;  // not mapped, or a private copy
-            if (hits[i].as->unmap(hits[i].va) == phys && hits[i].counted)
-                vmm::release_user_page(phys);
-            vmm::shootdown(hits[i].va, 1, hits[i].as);
+            hits[i].mem->zap_page(hits[i].va, phys, hits[i].counted);
+            hits[i].mem->put();
         }
         if (n < MAX_HITS)
             break;
     }
+}
+
+void Memory::zap_page(uptr va, u64 phys, bool counted) {
+    LockGuard guard(m_lock);
+    if (!m_as)
+        return;
+    u64 now;
+    if (!m_as->translate(va, &now) || (now & ~(PAGE_SIZE - 1)) != phys)
+        return;  // not mapped, or a private copy
+    if (m_as->unmap(va) == phys && counted) {
+        vmm::release_user_page(phys);
+        __atomic_sub_fetch(&m_rss, 1, __ATOMIC_RELAXED);
+    }
+    vmm::shootdown(va, 1, m_as);
+}
+
+void Memory::zap_range(uptr start, uptr end) {
+    // Not under m_lock: TTM calls this holding a buffer's reservation, which
+    // a page fault (holding m_lock) takes in the driver's fault handler.
+    // The caller's reference is what matters: page tables are freed only by
+    // destroy(), at the last reference. Device pages carry no references.
+    if (!m_as)
+        return;
+    for (uptr page = start; page < end; page += PAGE_SIZE)
+        m_as->unmap(page);
+    vmm::shootdown(start, (end - start) / PAGE_SIZE, m_as);
 }
 
 void Memory::insert(Vma* v) {

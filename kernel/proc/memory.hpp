@@ -65,6 +65,12 @@ public:
 
     // Shared by vfork()/CLONE_VM children; freed with the last reference.
     void get() { __atomic_add_fetch(&m_refs, 1, __ATOMIC_RELAXED); }
+    // A reference unless the last one is already gone (being torn down).
+    bool try_get() {
+        u32 r = __atomic_load_n(&m_refs, __ATOMIC_RELAXED);
+        while (r && !__atomic_compare_exchange_n(&m_refs, &r, r + 1, true, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) {}
+        return r != 0;
+    }
     void put(); // must not be the active address space when the last ref goes
 
     // Copy-on-write duplicate for fork(): both sides share every page
@@ -122,6 +128,10 @@ public:
 
     // Unmap everything and free the page tables.
     void destroy();
+    // zap_file_page: drop this space's mapping of a RAM file's page `phys` at
+    // `va` (under our lock: not racing our own munmap, copy-on-write or exit).
+    void zap_page(uptr va, u64 phys, bool counted);
+    void zap_range(uptr start, uptr end); // zap_device_range: unmap (no references)
 
     // Accounting / introspection (for /proc).
     u64 rss_pages() const { return __atomic_load_n(&m_rss, __ATOMIC_RELAXED); }
