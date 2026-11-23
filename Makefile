@@ -349,7 +349,7 @@ $(OBJDIR)/$(LKPI_NETDRV)/phy/%: LKPI_DRV_CFLAGS = -include net/lkpi_phy.h
 $(OBJDIR)/$(LKPI_NETDRV)/usb/%: LKPI_DRV_CFLAGS = -include net/lkpi_usbnet.h
 $(OBJDIR)/$(LKPI_NETDRV)/ethernet/intel/%: LKPI_DRV_CFLAGS = -include net/lkpi_phy.h -DCONFIG_E1000E=1 -DCONFIG_IGC=1
 # Intel 1 GbE server/desktop NICs (igb: 82575/82576/82580, I350, I210/I211, I354), Linux 7.4-rc3.
-$(OBJDIR)/$(LKPI_NETDRV)/ethernet/intel/igb/%: LKPI_DRV_CFLAGS = -include net/lkpi_netdrv.h -DCONFIG_IGB=1
+$(OBJDIR)/$(LKPI_NETDRV)/ethernet/intel/igb/%: LKPI_DRV_CFLAGS = -include net/lkpi_netdrv.h -DCONFIG_IGB=1 -DLKPI_REAL_MSIX
 # Qualcomm Atheros/Killer Ethernet (alx: AR8161/8171/E2200..; atl1c: AR813x/815x, L1c/L2c), Linux 7.4-rc3; MDIO library.
 $(OBJDIR)/$(LKPI_NETDRV)/ethernet/atheros/%: LKPI_DRV_CFLAGS = -include net/lkpi_netdrv.h
 $(OBJDIR)/$(LKPI_NETDRV)/mdio.c.o: LKPI_DRV_CFLAGS = -include net/lkpi_netdrv.h

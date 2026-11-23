@@ -19,8 +19,18 @@ extern "C" void lkpi_phys_free(void* virt, unsigned order) {
 extern "C" u64 lkpi_direct_to_phys(const void* virt) { return mm::direct_virt_to_phys(virt); }
 extern "C" void* lkpi_phys_to_direct(u64 phys) { return mm::phys_to_virt(phys); }
 // wc: write-combining (scan-out buffers), otherwise normal cached memory.
-extern "C" void* lkpi_vmap_phys(const u64* phys, unsigned long count, bool wc) {
-    return vmalloc::map_pages(phys, count, vmm::WRITE | (wc ? vmm::CACHE_WC : 0));
+// cache: 0 write-back, 1 write-combining, 2 uncached
+static u32 cache_flags(int cache) { return cache == 1 ? vmm::CACHE_WC : cache == 2 ? vmm::CACHE_UC : 0; }
+extern "C" void* lkpi_vmap_phys(const u64* phys, unsigned long count, int cache) {
+    return vmalloc::map_pages(phys, count, vmm::WRITE | cache_flags(cache));
+}
+// 0 write-back, 1 write-combining, 2 uncached, 3 other, -1 unmapped (self-tests)
+extern "C" int lkpi_kernel_cache_type(const void* virt) {
+    u32 t = vmm::kernel_cache_type(reinterpret_cast<uptr>(virt));
+    return t == ~0u ? -1 : t == 0 ? 0 : t == vmm::CACHE_WC ? 1 : t == vmm::CACHE_UC ? 2 : 3;
+}
+extern "C" bool lkpi_set_kernel_cache(unsigned long virt, unsigned long pages, int cache) {
+    return vmm::set_kernel_cache(virt, pages, cache_flags(cache));
 }
 extern "C" void lkpi_vunmap(const void* virt) { vmalloc::unmap_physical(const_cast<void*>(virt)); }
 

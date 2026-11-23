@@ -134,14 +134,17 @@ void __folio_batch_release(struct folio_batch *fb);
 void *vmap(struct page **pages, unsigned int count, unsigned long flags, pgprot_t prot);
 void vunmap(const void *addr);
 void *vmap_pfn(unsigned long *pfns, unsigned int count, pgprot_t prot);
-/* Cache attributes of the direct map: everything stays write-back here;
- * drivers flush with clflush where they need coherency. */
-#define set_pages_array_wc(pages, n) 0
-#define set_pages_array_uc(pages, n) 0
-#define set_pages_array_wb(pages, n) 0
-#define set_pages_wb(page, n) 0
-#define set_memory_wc(addr, n) 0
-#define set_memory_wb(addr, n) 0
+/* Cache attributes of kernel memory (x86 PAT): pages a GPU reads without
+ * snooping (write-combined GTT, TTM's ttm_write_combined/ttm_uncached pools)
+ * get the same cache type in the direct map as in their other mappings. */
+int set_pages_array_wc(struct page **pages, int n);
+int set_pages_array_uc(struct page **pages, int n);
+int set_pages_array_wb(struct page **pages, int n);
+int set_pages_wb(struct page *page, int n);
+int set_pages_uc(struct page *page, int n);
+int set_memory_wc(unsigned long addr, int n);
+int set_memory_uc(unsigned long addr, int n);
+int set_memory_wb(unsigned long addr, int n);
 
 /* Shared memory files (GEM objects' backing store). */
 struct file;

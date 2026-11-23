@@ -269,6 +269,106 @@ bool AddressSpace::protect(uptr virt, u32 flags) {
     return true;
 }
 
+namespace {
+void flush_local(uptr start, usize pages); // below
+// Replace the huge page `e` (level 3: 1 GiB, level 2: 2 MiB) by a table of
+// 512 entries mapping the same memory with the same rights and cache type.
+bool split_huge(u64& e, int level) {
+    u64 table = alloc_table();
+    if (!table)
+        return false;
+    u64* t = mm::phys_to_virt<u64>(table);
+    u64 child = 1ull << (12 + 9 * (level - 2)); // what each new entry maps
+    u64 base = (e & PTE_ADDR_MASK) & ~((child << 9) - 1);
+    u64 low = e & 0xFFF & ~PTE_HUGE;            // present, rw, user, PWT, PCD, accessed, dirty, global
+    bool pat = e & PTE_PAT_LARGE;
+    u64 nx = e & PTE_NX;
+    for (int i = 0; i < 512; i++) {
+        if (level == 3) // 2 MiB entries: still huge, PAT stays at bit 12
+            t[i] = (base + i * child) | low | PTE_HUGE | (pat ? PTE_PAT_LARGE : 0) | nx;
+        else            // 4 KiB entries: PAT moves to bit 7
+            t[i] = (base + i * child) | low | (pat ? PTE_PAT_4K : 0) | nx;
+    }
+    // Intermediate levels are permissive (as walk() makes them); one store,
+    // so other CPUs see either the old huge page or the new table.
+    __atomic_store_n(&e, table | PTE_PRESENT | PTE_WRITABLE | (e & PTE_USER), __ATOMIC_RELEASE);
+    return true;
+}
+} // namespace
+
+bool AddressSpace::set_cache(uptr virt, usize pages, u32 cache, bool* split) {
+    LockGuard guard(m_lock);
+    for (usize n = 0; n < pages; n++, virt += PAGE_SIZE) {
+        u64* table = mm::phys_to_virt<u64>(m_pml4);
+        for (int level = 4; level > 1; level--) {
+            u64& e = table[table_index(virt, level)];
+            if (!(e & PTE_PRESENT))
+                return false;
+            if (e & PTE_HUGE) {
+                if (!split_huge(e, level))
+                    return false;
+                if (split)
+                    *split = true;
+            }
+            table = mm::phys_to_virt<u64>(e & PTE_ADDR_MASK);
+        }
+        u64& e = table[table_index(virt, 1)];
+        if (!(e & PTE_PRESENT))
+            return false;
+        u64 v = e & ~(PTE_PWT | PTE_PCD | PTE_PAT_4K);
+        if (cache & CACHE_WC)
+            v |= PTE_PAT_4K | PTE_PWT; // PAT index 5
+        else if (cache & CACHE_UC)
+            v |= PTE_PCD | PTE_PWT;    // PAT index 3
+        e = v;
+    }
+    return true;
+}
+
+bool set_kernel_cache(uptr virt, usize pages, u32 cache) {
+    if (!pages)
+        return true;
+    virt &= ~(PAGE_SIZE - 1);
+    bool split = false;
+    bool ok = g_kernel_space.set_cache(virt, pages, cache, &split);
+    // A huge page split into smaller ones: every CPU drops all its TLB
+    // entries (global ones too), as Linux does after a split, so no CPU
+    // keeps a 1 GiB / 2 MiB translation next to the new 4 KiB ones.
+    usize flush = split ? ~usize(0) >> 1 : pages;
+    flush_local(virt, flush);
+    shootdown(virt, flush);
+    // Cache lines filled through the old write-back mapping must not linger
+    // (the GPU wouldn't see data still sitting in them).
+    // clflush reaches every CPU's caches (wbinvd only this one's).
+    if (cache & (CACHE_WC | CACHE_UC)) {
+        for (uptr p = virt; p < virt + pages * PAGE_SIZE; p += 64)
+            asm volatile("clflush (%0)" ::"r"(p) : "memory");
+        asm volatile("mfence" ::: "memory");
+    }
+    return ok;
+}
+
+u32 kernel_cache_type(uptr virt) {
+    const u64* table = mm::phys_to_virt<u64>(g_kernel_space.root());
+    for (int level = 4; level >= 1; level--) {
+        u64 e = table[table_index(virt, level)];
+        if (!(e & PTE_PRESENT))
+            return ~0u;
+        if (level == 1 || (e & PTE_HUGE)) {
+            bool pat = level == 1 ? (e & PTE_PAT_4K) : (e & PTE_PAT_LARGE);
+            unsigned index = (pat ? 4 : 0) | (e & PTE_PCD ? 2 : 0) | (e & PTE_PWT ? 1 : 0);
+            static const u32 types[8] = {0, CACHE_WT, CACHE_UC, CACHE_UC, 0, CACHE_WC, CACHE_UC, CACHE_UC};
+            return types[index];
+        }
+        table = mm::phys_to_virt<u64>(e & PTE_ADDR_MASK);
+    }
+    return ~0u;
+}
+
+bool set_direct_cache(u64 phys, usize pages, u32 cache) {
+    return set_kernel_cache(mm::g_hhdm_offset + (phys & ~(PAGE_SIZE - 1)), pages, cache);
+}
+
 bool AddressSpace::is_writable(uptr virt) const {
     LockGuard guard(m_lock);
     const u64* table = mm::phys_to_virt<u64>(m_pml4);
