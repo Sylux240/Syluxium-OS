@@ -241,7 +241,8 @@ logs)
     for f in /var/log/Xorg.0.log /var/log/Xorg.0.log.old /var/log/tdm.log /var/log/tdm.out \
              /var/log/syluxium-shell.log /var/log/seatd.log /var/log/bluetoothd.log /var/log/bluealsa.log \
              /var/log/syluxium-netconfig.log /var/log/syluxium-wifi.log /var/log/wpa_supplicant.log \
-             /var/log/dbus-system.log /var/log/polkitd.log /var/log/cups/error_log; do
+             /var/log/dbus-system.log /var/log/polkitd.log /var/log/cups/error_log \
+             /var/log/syluxium-install.log; do
         [ -f "$f" ] && sed -E 's/(psk|password|passphrase)=[^ ]*/\1=********/Ig' "$f" > "$L/$(basename "$f")" 2>/dev/null
     done
     [ -d /run/syluxium-diag ] && cp /run/syluxium-diag/* "$L/" 2>/dev/null
