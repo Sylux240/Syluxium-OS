@@ -45,18 +45,55 @@ void ring_printf(const char* fmt, ...) {
     va_end(args);
 }
 
+// Identical lines in a row are collapsed, as Linux's logging does ("last
+// message repeated N times"): a driver's debug output can repeat one line
+// thousands of times (amdgpu's "Allow idle optimizations (MALL)" toggles
+// many times a second) and bury everything else in the ring and on the stick.
+char g_last[1024], g_prev[1024]; // the last two lines (debug lines can alternate in a pair: "true"/"false")
+char g_text[1024]; // the line being logged (under g_print_lock)
+int g_last_level = -1;
+u32 g_repeats = 0;
+bool g_pair = false; // the repeats alternate between the last two lines
+
+void flush_repeats() {
+    if (!g_repeats)
+        return;
+    u64 us = clock::now_ns() / 1000;
+    const char* lines = g_pair ? "lines" : "line";
+    const char* times = g_repeats == 1 ? "once more" : "times";
+    if (g_repeats == 1) {
+        print_unlocked("  (the last %s repeated once more)\n", lines);
+        ring_printf("<%d>[%5lu.%06lu] (the last %s repeated once more)\n", g_last_level, us / 1'000'000,
+                    us % 1'000'000, lines);
+    } else {
+        print_unlocked("  (the last %s repeated %u %s)\n", lines, g_repeats, times);
+        ring_printf("<%d>[%5lu.%06lu] (the last %s repeated %u %s)\n", g_last_level, us / 1'000'000,
+                    us % 1'000'000, lines, g_repeats, times);
+    }
+    g_pair = false;
+    g_repeats = 0;
+}
+
 void log_line(int level, const char* tag, const char* fmt, va_list args) {
     LockGuard guard(g_print_lock);
-    va_list copy;
-    va_copy(copy, args);
-    print_unlocked("%s ", tag);
-    vprint_unlocked(fmt, args);
-    print_unlocked("\n");
+    char* text = g_text;
+    vsnprintf(text, sizeof(g_text), fmt, args);
+    if (level == g_last_level && (__builtin_strcmp(text, g_last) == 0 || (level == 7 && __builtin_strcmp(text, g_prev) == 0))) {
+        if (__builtin_strcmp(text, g_last) != 0) { // the other line of an alternating pair
+            g_pair = true;
+            __builtin_memcpy(g_prev, g_last, sizeof(g_prev));
+            __builtin_memcpy(g_last, text, sizeof(g_last));
+        }
+        g_repeats++;
+        return;
+    }
+    flush_repeats();
+    __builtin_memcpy(g_prev, g_last, sizeof(g_prev));
+    __builtin_memcpy(g_last, text, sizeof(g_last));
+    g_last_level = level;
+    print_unlocked("%s %s\n", tag, text);
     u64 us = clock::now_ns() / 1000;
-    ring_printf("<%d>[%5lu.%06lu] ", level, us / 1'000'000, us % 1'000'000);
-    vformat(ring_sink, nullptr, fmt, copy);
-    ring_sink('\n', nullptr);
-    va_end(copy);
+    ring_printf("<%d>[%5lu.%06lu] %s\n", level, us / 1'000'000, us % 1'000'000, text);
 }
 
 } // namespace
