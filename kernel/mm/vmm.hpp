@@ -67,6 +67,10 @@ private:
     mutable IrqSpinlock m_lock;
 };
 
+// Translate through the page tables this CPU uses right now (CR3), not the
+// kernel's own: the kernel half of every address space must agree (checks).
+bool translate_current(uptr virt, u64* phys_out);
+
 // Build the kernel page tables and switch to them.
 void init();
 
