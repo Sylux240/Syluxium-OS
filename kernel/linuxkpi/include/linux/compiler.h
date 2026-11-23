@@ -46,14 +46,20 @@
 #define READ_ONCE(x) (*(const volatile __typeof__(x)*)&(x))
 #define WRITE_ONCE(x, v) (*(volatile __typeof__(x)*)&(x) = (v))
 
-#define mb() __atomic_thread_fence(__ATOMIC_SEQ_CST)
-#define rmb() __atomic_thread_fence(__ATOMIC_ACQUIRE)
-#define wmb() __atomic_thread_fence(__ATOMIC_RELEASE)
-#define smp_mb() mb()
-#define smp_rmb() rmb()
-#define smp_wmb() wmb()
-#define dma_rmb() rmb()
-#define dma_wmb() wmb()
+/* As on Linux/x86: mb/rmb/wmb are real fences (mfence/lfence/sfence), since
+ * drivers order stores to write-combining memory (GPU rings, page tables
+ * in VRAM through the BAR, GTT pages mapped WC) against doorbells and
+ * DMA with them; a compiler-only fence leaves WC stores in the CPU's
+ * write-combining buffers. smp_* and dma_* order normal (write-back)
+ * memory, where x86's TSO only needs the compiler barrier, except smp_mb. */
+#define mb() __asm__ __volatile__("mfence" ::: "memory")
+#define rmb() __asm__ __volatile__("lfence" ::: "memory")
+#define wmb() __asm__ __volatile__("sfence" ::: "memory")
+#define smp_mb() __atomic_thread_fence(__ATOMIC_SEQ_CST)
+#define smp_rmb() __atomic_thread_fence(__ATOMIC_ACQUIRE)
+#define smp_wmb() __atomic_thread_fence(__ATOMIC_RELEASE)
+#define dma_rmb() __atomic_thread_fence(__ATOMIC_ACQUIRE)
+#define dma_wmb() __atomic_thread_fence(__ATOMIC_RELEASE)
 #define smp_store_release(p, v) __atomic_store_n(p, v, __ATOMIC_RELEASE)
 #define smp_load_acquire(p) __atomic_load_n(p, __ATOMIC_ACQUIRE)
 

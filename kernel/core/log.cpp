@@ -1,3 +1,5 @@
+#include <arch/x86_64/cpu.hpp>
+#include <boot/limine_requests.hpp>
 #include <core/log.hpp>
 #include <drivers/serial.hpp>
 #include <lib/format.hpp>
@@ -55,6 +57,19 @@ int g_last_level = -1;
 u32 g_repeats = 0;
 bool g_pair = false; // the repeats alternate between the last two lines
 
+int serial_level();
+void console_sink(char c, void*);
+// print_unlocked for a line of `level`: serial and screen, or screen only.
+void print_level(int level, const char* fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    if (level <= serial_level())
+        vprint_unlocked(fmt, args);
+    else
+        vformat(console_sink, nullptr, fmt, args);
+    va_end(args);
+}
+
 void flush_repeats() {
     if (!g_repeats)
         return;
@@ -62,17 +77,42 @@ void flush_repeats() {
     const char* lines = g_pair ? "lines" : "line";
     const char* times = g_repeats == 1 ? "once more" : "times";
     if (g_repeats == 1) {
-        print_unlocked("  (the last %s repeated once more)\n", lines);
+        print_level(g_last_level, "  (the last %s repeated once more)\n", lines);
         ring_printf("<%d>[%5lu.%06lu] (the last %s repeated once more)\n", g_last_level, us / 1'000'000,
                     us % 1'000'000, lines);
     } else {
-        print_unlocked("  (the last %s repeated %u %s)\n", lines, g_repeats, times);
+        print_level(g_last_level, "  (the last %s repeated %u %s)\n", lines, g_repeats, times);
         ring_printf("<%d>[%5lu.%06lu] (the last %s repeated %u %s)\n", g_last_level, us / 1'000'000,
                     us % 1'000'000, lines, g_repeats, times);
     }
     g_pair = false;
     g_repeats = 0;
 }
+
+// Which log lines go to the serial port. A real UART at 115200 baud takes
+// ~9 ms per line, all of it with interrupts off under the log lock: on a PC
+// with a serial port (an H97 board) every debug line (DRM's mode-setting
+// debug, drmtrace) stalled the CPUs that much, and an X server start that
+// logs thousands of lines froze the machine. As Linux (whose console
+// leaves out debug lines, and which uses no serial console unless asked):
+// on real hardware only warnings and errors reach the serial port; boot
+// option "serial" sends everything, as in a VM (where the port is instant).
+// The log ring, dmesg and the stick's syluxium-log.txt keep every line.
+int g_serial_level = -1;
+int serial_level() {
+    if (g_serial_level < 0) {
+        bool vm = (arch::cpuid(1).ecx >> 31) & 1; // CPUID: running under a hypervisor
+        const char* c = boot::cmdline();
+        bool asked = false;
+        for (const char* p = c; (p = __builtin_strstr(p, "serial")) != nullptr; p += 6)
+            if ((p == c || p[-1] == ' ') && (p[6] == 0 || p[6] == ' '))
+                asked = true;
+        g_serial_level = vm || asked ? 7 : 4;
+    }
+    return g_serial_level;
+}
+
+void console_sink(char c, void*) { console::putc(c); }
 
 void log_line(int level, const char* tag, const char* fmt, va_list args) {
     LockGuard guard(g_print_lock);
@@ -91,7 +131,15 @@ void log_line(int level, const char* tag, const char* fmt, va_list args) {
     __builtin_memcpy(g_prev, g_last, sizeof(g_prev));
     __builtin_memcpy(g_last, text, sizeof(g_last));
     g_last_level = level;
-    print_unlocked("%s %s\n", tag, text);
+    if (level <= serial_level()) {
+        print_unlocked("%s %s\n", tag, text);
+    } else {
+        // Screen only (where the console still shows: before a GPU driver takes it).
+        console::write(tag, __builtin_strlen(tag));
+        console::putc(' ');
+        console::write(text, __builtin_strlen(text));
+        console::putc('\n');
+    }
     u64 us = clock::now_ns() / 1000;
     ring_printf("<%d>[%5lu.%06lu] %s\n", level, us / 1'000'000, us % 1'000'000, text);
 }

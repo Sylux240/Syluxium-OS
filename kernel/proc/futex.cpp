@@ -1,3 +1,4 @@
+#include <core/panic.hpp>
 #include <arch/x86_64/interrupts.hpp>
 #include <arch/x86_64/protect.hpp>
 #include <core/log.hpp>
@@ -418,6 +419,10 @@ long wake(u64 uaddr, int count, u32 bitset, bool is_private) {
     for (sched::Thread* t = b.waiters.front(); t && woken < count;) {
         sched::Thread* next = b.waiters.next_of(t);
         if (matches(t, key) && (t->futex_bitset & bitset)) {
+            if (t->state != sched::ThreadState::Blocked && t->state != sched::ThreadState::Ready &&
+                t->state != sched::ThreadState::Running)
+                panic("futex: wake: waiter %p in the bucket is not a live thread (state %d, tid %lu)", t,
+                      static_cast<int>(t->state), t->tid);
             b.waiters.remove(t);
             // Woken while we still hold the bucket lock: the sleeper re-takes
             // it before returning, so it can't exit (and be freed) under us.

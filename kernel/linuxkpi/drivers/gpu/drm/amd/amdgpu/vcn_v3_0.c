@@ -990,6 +990,11 @@ static int vcn_v3_0_start_dpg_mode(struct amdgpu_device *adev, int inst_idx, boo
 	struct amdgpu_ring *ring;
 	uint32_t rb_bufsz, tmp;
 
+	/* LinuxKPI: the buffers the engine will read, for hardware reports */
+	if (amdgpu_vcn_lkpi_report(adev, inst_idx, indirect ? "dynamic power gating, SRAM via PSP" :
+				   "dynamic power gating"))
+		return -EINVAL;
+
 	/* disable register anti-hang mechanism */
 	WREG32_P(SOC15_REG_OFFSET(VCN, inst_idx, mmUVD_POWER_STATUS), 1,
 		~UVD_POWER_STATUS__UVD_POWER_STATUS_MASK);
@@ -1154,6 +1159,10 @@ static int vcn_v3_0_start(struct amdgpu_device *adev)
 			r = vcn_v3_0_start_dpg_mode(adev, i, adev->vcn.indirect_sram);
 			continue;
 		}
+
+		/* LinuxKPI: the buffers the engine will read, for hardware reports */
+		if (amdgpu_vcn_lkpi_report(adev, i, "static power gating"))
+			return -EINVAL;
 
 		/* disable VCN power gating */
 		vcn_v3_0_disable_static_power_gating(adev, i);
