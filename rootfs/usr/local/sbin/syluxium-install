@@ -247,7 +247,7 @@ interface_help_hidden: yes
     path: boot():/boot/syluxium.elf
     cmdline: root=UUID=$UUID
 
-/Syluxium (safe mode: no ACPI interpreter, no power saving)
+/Syluxium (safe mode)
     protocol: limine
     path: boot():/boot/syluxium.elf
     cmdline: root=UUID=$UUID desktop acpi=noaml nohz=off idle=hlt

@@ -71,6 +71,15 @@ if [ -n "$slot" ]; then
 fi
 ncards=$(echo "$cards" | grep -c card)
 mkdir -p /run/syluxium && echo "$card" > /run/syluxium/display-card
+# Hardware video decoding (VA-API) on AMD: the video engine (VCN) froze a
+# machine (RX 6700 XT) at its first use. Off in the desktop sessions until
+# that is fixed (programs decode in software); boot option "vaapi" keeps it.
+rm -f /run/syluxium/vaapi-off
+if ! grep -qw vaapi /proc/cmdline; then
+    for d in /sys/class/drm/card*/device/driver; do
+        [ "$(basename "$(readlink "$d" 2>/dev/null)" 2>/dev/null)" = amdgpu ] && touch /run/syluxium/vaapi-off && break
+    done
+fi
 if [ -n "$card" ] && ! grep -qw xfbdev /proc/cmdline; then
     {
         echo "# Written at boot by syluxium-display-config: kernel display driver ${driver:-?} ($card)."

@@ -129,12 +129,14 @@ fi
 # If Wayfire fails right away on the GPU driver (its EGL/GLES setup), the
 # next start draws in software instead of leaving a black screen.
 # (/usr/games on the PATH as in the Xfce desktop: Debian's games live there.)
+VAAPI_ENV=""
+[ -e /run/syluxium/vaapi-off ] && VAAPI_ENV="LIBVA_DRIVER_NAME=syluxium-off VDPAU_DRIVER=syluxium-off"
 while :; do
 started=$(cut -d. -f1 /proc/uptime)
 su "$U" -s /bin/bash -c "export XDG_RUNTIME_DIR=$RT XDG_SESSION_TYPE=wayland LIBSEAT_BACKEND=seatd \
     WLR_RENDERER_ALLOW_SOFTWARE=1 GDK_BACKEND=wayland,x11 MOZ_ENABLE_WAYLAND=1 \
     WLR_XWAYLAND=/usr/local/lib/syluxium/xwayland SYLUXIUM_SHELL_SOFTWARE=$SOFTWARE \
-    XDG_CONFIG_DIRS=/etc/xdg/syluxium:/etc/xdg XDG_CURRENT_DESKTOP=XFCE XDG_MENU_PREFIX=xfce- $FALLBACK_ENV $SYLUXIUM_SHELL_ENV \
+    XDG_CONFIG_DIRS=/etc/xdg/syluxium:/etc/xdg XDG_CURRENT_DESKTOP=XFCE XDG_MENU_PREFIX=xfce- $FALLBACK_ENV $SYLUXIUM_SHELL_ENV $VAAPI_ENV \
     PATH=$PATH:/usr/local/games:/usr/games; \
     cd ~; exec dbus-run-session $PRELOAD wayfire $SYLUXIUM_WAYFIRE_ARGS -c $CONF" >> $LOG 2>&1
     status=$?
