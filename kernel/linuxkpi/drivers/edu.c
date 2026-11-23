@@ -9,7 +9,9 @@
  */
 #define pr_fmt(fmt) "edu: " fmt
 
+#include <drm/gpu_scheduler.h>
 #include <linux/completion.h>
+#include <linux/dma-fence.h>
 #include <linux/delay.h>
 #include <linux/dma-mapping.h>
 #include <linux/firmware.h>
@@ -56,6 +58,7 @@ struct edu {
     struct work_struct work;
     struct timer_list timer;
     int work_ran_in_irq;
+    struct dma_fence *sched_hw_fence; /* drm_sched test: signalled by the next factorial interrupt */
 };
 
 static int passed, failed;
@@ -79,8 +82,15 @@ static irqreturn_t edu_irq(int irq, void* data)
     writel(status, e->regs + EDU_IRQ_ACK);
     e->last_irq = status;
     atomic_inc(&e->irqs);
-    if (status & IRQ_FACT)
-        complete(&e->fact_done);
+    if (status & IRQ_FACT) {
+        struct dma_fence *f = xchg(&e->sched_hw_fence, NULL);
+        if (f) { /* a drm_sched test job finished on the "GPU" */
+            dma_fence_signal(f);
+            dma_fence_put(f);
+        } else {
+            complete(&e->fact_done);
+        }
+    }
     if (status & IRQ_DMA)
         complete(&e->dma_done);
     return IRQ_HANDLED;
@@ -110,6 +120,133 @@ static int edu_dma(struct edu* e, dma_addr_t addr, bool to_ram)
     writeq(DMA_LEN, e->regs + EDU_DMA_COUNT);
     writeq(DMA_START | DMA_IRQ | (to_ram ? DMA_TO_RAM : 0), e->regs + EDU_DMA_CMD);
     return wait_for_completion_timeout(&e->dma_done, msecs_to_jiffies(1000)) ? 0 : -ETIMEDOUT;
+}
+
+
+/* The GPU job scheduler (drm_sched) the way amdgpu uses it, with this
+ * device as the "GPU": each job starts a factorial and its hardware fence
+ * is signalled from the device's interrupt, as amdgpu's ring fences are.
+ * One job in flight at a time; jobs depend on the previous job's finished
+ * fence (a chain, like a context's submissions), and the last finished
+ * fence is waited for. Before amdgpu's first command submission nothing in
+ * Syluxium ran drm_sched (ring and IB tests bypass it). */
+struct edu_job {
+    struct drm_sched_job base;
+    struct edu *e;
+    int n;
+};
+
+static struct edu *sched_edu;
+static DEFINE_SPINLOCK(sched_fence_lock);
+static u64 sched_fence_ctx;
+static atomic_t sched_ran, sched_freed;
+static int sched_order_bad, sched_last = -1;
+
+static const char *edu_fence_name(struct dma_fence *f) { return "edu"; }
+static const struct dma_fence_ops edu_fence_ops = {
+    .get_driver_name = edu_fence_name,
+    .get_timeline_name = edu_fence_name,
+};
+
+static struct dma_fence *edu_run_job(struct drm_sched_job *sj)
+{
+    struct edu_job *j = container_of(sj, struct edu_job, base);
+    struct edu *e = j->e;
+    struct dma_fence *f = kzalloc(sizeof(*f), GFP_KERNEL);
+
+    if (!f)
+        return ERR_PTR(-ENOMEM);
+    dma_fence_init(f, &edu_fence_ops, &sched_fence_lock, sched_fence_ctx, j->n + 1);
+    if (j->n != sched_last + 1)
+        sched_order_bad++;
+    sched_last = j->n;
+    atomic_inc(&sched_ran);
+    dma_fence_get(f); /* the interrupt's reference */
+    WRITE_ONCE(e->sched_hw_fence, f);
+    writel(STATUS_IRQ_FACT, e->regs + EDU_STATUS);
+    writel(5, e->regs + EDU_FACTORIAL);
+    return f; /* the scheduler's reference */
+}
+
+static enum drm_gpu_sched_stat edu_timedout_job(struct drm_sched_job *sj)
+{
+    dev_info(&sched_edu->pdev->dev, "drm_sched test: job %d timed out\n",
+             container_of(sj, struct edu_job, base)->n);
+    return DRM_GPU_SCHED_STAT_NOMINAL;
+}
+
+static void edu_free_job(struct drm_sched_job *sj)
+{
+    drm_sched_job_cleanup(sj);
+    kfree(container_of(sj, struct edu_job, base));
+    atomic_inc(&sched_freed);
+}
+
+static const struct drm_sched_backend_ops edu_sched_ops = {
+    .run_job = edu_run_job,
+    .timedout_job = edu_timedout_job,
+    .free_job = edu_free_job,
+};
+
+#define SCHED_JOBS 64
+
+static void edu_sched_test(struct edu *e)
+{
+    struct drm_gpu_scheduler sched;
+    struct drm_gpu_scheduler *list[1] = {&sched};
+    struct drm_sched_entity entity;
+    struct dma_fence *prev = NULL, *last = NULL;
+    long left;
+    int i, r;
+
+    memset(&sched, 0, sizeof(sched));
+    memset(&entity, 0, sizeof(entity));
+    sched_edu = e;
+    sched_fence_ctx = dma_fence_context_alloc(1);
+    r = drm_sched_init(&sched, &edu_sched_ops, NULL, DRM_SCHED_PRIORITY_COUNT, 1, 0, msecs_to_jiffies(2000), NULL,
+                       NULL, "edu", &e->pdev->dev);
+    check(e, r == 0, "drm_sched_init (GPU job scheduler)");
+    if (r)
+        return;
+    r = drm_sched_entity_init(&entity, DRM_SCHED_PRIORITY_NORMAL, list, 1, NULL);
+    check(e, r == 0, "drm_sched_entity_init");
+    if (r) {
+        drm_sched_fini(&sched);
+        return;
+    }
+    for (i = 0; i < SCHED_JOBS; i++) {
+        struct edu_job *j = kzalloc(sizeof(*j), GFP_KERNEL);
+
+        if (!j)
+            break;
+        j->e = e;
+        j->n = i;
+        r = drm_sched_job_init(&j->base, &entity, 1, NULL);
+        if (r) {
+            kfree(j);
+            break;
+        }
+        if (prev)
+            drm_sched_job_add_dependency(&j->base, prev); /* takes the reference */
+        drm_sched_job_arm(&j->base);
+        prev = dma_fence_get(&j->base.s_fence->finished);
+        if (i == SCHED_JOBS - 1)
+            last = dma_fence_get(prev);
+        drm_sched_entity_push_job(&j->base);
+    }
+    if (prev)
+        dma_fence_put(prev); /* the last job's: no later job took it */
+    left = last ? dma_fence_wait_timeout(last, false, msecs_to_jiffies(5000)) : 0;
+    check(e, i == SCHED_JOBS && left > 0 && last->error == 0,
+          "drm_sched: 64 chained jobs ran, hardware fences signalled from the device interrupt");
+    check(e, atomic_read(&sched_ran) == SCHED_JOBS && !sched_order_bad, "drm_sched: every job ran once, in order");
+    if (last)
+        dma_fence_put(last);
+    for (i = 0; i < 100 && atomic_read(&sched_freed) < SCHED_JOBS; i++)
+        msleep(10); /* free_job runs from the scheduler's work item */
+    drm_sched_entity_destroy(&entity);
+    drm_sched_fini(&sched);
+    check(e, atomic_read(&sched_freed) == SCHED_JOBS, "drm_sched: every finished job freed (free_job)");
 }
 
 static int edu_probe(struct pci_dev* pdev, const struct pci_device_id* id)
@@ -275,6 +412,8 @@ static int edu_probe(struct pci_dev* pdev, const struct pci_device_id* id)
         if (pg)
             __free_pages(pg, 0);
     }
+
+    edu_sched_test(e);
 
     dev_info(&pdev->dev, "LinuxKPI self-test: %d passed, %d failed (%d interrupts)\n", passed, failed,
              atomic_read(&e->irqs));
