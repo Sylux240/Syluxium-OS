@@ -9,8 +9,33 @@
 # "nogpu" (kernel) keeps GPU drivers from loading at all.
 out=/etc/X11/xorg.conf.d/20-display.conf
 log=/boot/logs/display.txt
-card=$(ls /dev/dri/card* 2>/dev/null | head -1)
 drminfo=$(command -v drminfo || echo /opt/syluxium/tests/drminfo)
+# Machines with two GPUs (an H97 with a GTX 980 and a GTX 1650): the card
+# with a monitor connected drives the desktop; with none or several
+# connected, the one with the most outputs connected, then the one the
+# firmware showed the boot screen on (boot_vga), then the first.
+cards=$(ls /dev/dri/card* 2>/dev/null)
+card=""
+best=-1
+cardlist=""
+for c in $cards; do
+    n=0
+    conn=""
+    if [ -x "$drminfo" ]; then
+        conn=$("$drminfo" -c "$c" 2>/dev/null)
+        n=${conn%% *}
+        case "$n" in ''|*[!0-9]*) n=0 ;; esac
+    fi
+    bootvga=$(cat "/sys/dev/char/226:${c#/dev/dri/card}/device/boot_vga" 2>/dev/null)
+    cardlist="$cardlist
+  $c: $("$drminfo" "$c" 2>/dev/null | cut -d' ' -f1) $(readlink -f "/sys/dev/char/226:${c#/dev/dri/card}/device" 2>/dev/null | sed 's|.*/||')${bootvga:+ boot_vga $bootvga}; outputs: ${conn:-?}"
+    # (score: connected outputs, then boot_vga)
+    score=$((n * 2 + ${bootvga:-0}))
+    if [ "$score" -gt "$best" ]; then
+        best=$score
+        card=$c
+    fi
+done
 driver=""
 info=""
 if [ -n "$card" ] && [ -x "$drminfo" ]; then
@@ -36,16 +61,32 @@ if [ "$accel" = glamor ] && ! ls /usr/lib/x86_64-linux-gnu/libgallium-*.so /usr/
     info="$info (no Mesa: acceleration off)"
 fi
 grep -qw noaccel /proc/cmdline && accel=none
+# The chosen card's PCI address as Xorg writes it (decimal bus:device:function),
+# so the X server binds that GPU; other GPUs aren't added as extra screens.
+busid=""
+slot=$(sed -n 's/^PCI_SLOT_NAME=//p' "/sys/dev/char/226:${card#/dev/dri/card}/device/uevent" 2>/dev/null)
+if [ -n "$slot" ]; then
+    b=${slot#*:}; d=${b#*:}; f=${d#*.}; b=${b%%:*}; d=${d%%.*}
+    busid="PCI:$((0x$b)):$((0x$d)):$((0x$f))"
+fi
+ncards=$(echo "$cards" | grep -c card)
+mkdir -p /run/syluxium && echo "$card" > /run/syluxium/display-card
 if [ -n "$card" ] && ! grep -qw xfbdev /proc/cmdline; then
-    cat > "$out" <<CFG
-# Written at boot by syluxium-display-config: kernel display driver ${driver:-?} ($card).
-Section "Device"
-    Identifier "Display"
-    Driver     "modesetting"
-    Option     "kmsdev" "$card"
-    Option     "AccelMethod" "$accel"
-EndSection
-CFG
+    {
+        echo "# Written at boot by syluxium-display-config: kernel display driver ${driver:-?} ($card)."
+        if [ "$ncards" -gt 1 ]; then
+            echo "Section \"ServerFlags\""
+            echo "    Option \"AutoAddGPU\" \"false\""
+            echo "EndSection"
+        fi
+        echo "Section \"Device\""
+        echo "    Identifier \"Display\""
+        echo "    Driver     \"modesetting\""
+        [ -n "$busid" ] && [ "$ncards" -gt 1 ] && echo "    BusID      \"$busid\""
+        echo "    Option     \"kmsdev\" \"$card\""
+        echo "    Option     \"AccelMethod\" \"$accel\""
+        echo "EndSection"
+    } > "$out"
     choice="modesetting on $card, driver ${driver:-unknown}, acceleration $accel"
 else
     cat > "$out" <<CFG
@@ -62,6 +103,7 @@ if mkdir -p /boot/logs 2>/dev/null; then
     {
         echo "display: $choice"
         [ -n "$info" ] && echo "drm: $info"
+        echo "cards (the one with a monitor connected drives the desktop):$cardlist"
         echo "cmdline: $(cat /proc/cmdline)"
         for d in /sys/bus/pci/devices/*; do
             [ -r "$d/class" ] || continue
@@ -71,4 +113,6 @@ if mkdir -p /boot/logs 2>/dev/null; then
         done
     } > "$log" 2>/dev/null
 fi
+# Every card, its outputs and (NVIDIA) GSP-RM state, for the stick's log folder.
+[ "$ncards" -gt 1 ] || grep -qw gpu /proc/cmdline && syluxium-diag cards > /dev/null 2>&1
 echo "display: $choice"

@@ -840,8 +840,48 @@ int lkpi_gpu_fail_step(void);
 #define LKPI_INJECT(n, r) do { if (lkpi_gpu_fail_step() == (n) && (r) >= 0) { \
 	pr_err("nouveau: gpufail=%d: failing this step on purpose\n", n); (r) = -EIO; } } while (0)
 
+/* LinuxKPI: set by r535_gsp_load() when the GSP-RM firmware was found and
+ * the GSP path chosen for the device being probed. */
+int lkpi_nouveau_gsp_loaded;
+
+static int nouveau_drm_probe_once(struct pci_dev *pdev,
+				  const struct pci_device_id *pent);
+
+/* LinuxKPI: Turing and Ampere use NVIDIA's GSP-RM firmware by default here
+ * (Linux 6.12 asks for nouveau.config=NvGspRm=1): clocks and power
+ * management, and NVK. If the GSP doesn't come up, the device is probed
+ * again on nouveau's own (non-GSP) path, as before, rather than lost. */
 static int nouveau_drm_probe(struct pci_dev *pdev,
 			     const struct pci_device_id *pent)
+{
+	static char no_gsp[192];
+	char *saved = nouveau_config;
+	int ret;
+
+	lkpi_nouveau_gsp_loaded = 0;
+	ret = nouveau_drm_probe_once(pdev, pent);
+	if (!ret) {
+		dev_info(&pdev->dev, "nouveau: %s\n", lkpi_nouveau_gsp_loaded ?
+			 "GSP-RM firmware running (535.113.01): the GPU manages its clocks and power; NVK can run" :
+			 "running without GSP-RM (nouveau's own path: no reclocking on Maxwell 2 and newer)");
+		return 0;
+	}
+	if (!lkpi_nouveau_gsp_loaded || ret == -EPROBE_DEFER)
+		return ret;
+	dev_warn(&pdev->dev, "nouveau: the GSP-RM firmware didn't start (%d): probing again without GSP "
+		 "(boot option nouveau.config=NvGspRm=0 skips the attempt)\n", ret);
+	snprintf(no_gsp, sizeof(no_gsp), "%s%sNvGspRm=0", saved ? saved : "", saved && *saved ? "," : "");
+	nouveau_config = no_gsp;
+	lkpi_nouveau_gsp_loaded = 0;
+	ret = nouveau_drm_probe_once(pdev, pent);
+	nouveau_config = saved;
+	if (!ret)
+		dev_info(&pdev->dev, "nouveau: running without GSP-RM after the GSP failed\n");
+	return ret;
+}
+
+static int nouveau_drm_probe_once(struct pci_dev *pdev,
+				  const struct pci_device_id *pent)
 {
 	struct nvkm_device *device;
 	struct nouveau_drm *drm;
