@@ -681,6 +681,9 @@ $(INITRAMFS): $(KERNEL) $(PICKER) $(DEBIAN_CONFIGURED) tools/merge-accounts.py t
 #      boots don't wait for the firmware to load ~600 MiB and RAM stays free.
 # ---------------------------------------------------------------------------
 $(IMAGE): $(KERNEL) $(INITRAMFS) $(PICKER) limine.conf limine-splash.png $(LIMINE_DIR)/limine
+	@# Limine boots its default instead when a one-shot entry name is too long
+	@# (the picker names the entry): keep every title under 60 characters.
+	@awk '/^\// && length($$0) > 60 {print "limine.conf: entry title over 60 characters (Limine would boot the default instead): " $$0; bad=1} END {exit bad}' limine.conf
 	@echo "  IMG   $@"
 	@# Sized to fit: kernel + initramfs + 32 MiB headroom, at least 128 MiB.
 	@# Built as $@.tmp and renamed only on success, so a failed build never
