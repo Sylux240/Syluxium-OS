@@ -457,7 +457,13 @@ void file_put(File* f) {
 
 // ---- Mounts ----
 
+namespace {
+u64 g_mount_generation = 0; // grows with every mount table change
+}
+u64 mount_generation() { return __atomic_load_n(&g_mount_generation, __ATOMIC_ACQUIRE); }
+
 long mount_at(const char* path, Inode* fs_root, const char* source, const char* type, const char* options) {
+    __atomic_add_fetch(&g_mount_generation, 1, __ATOMIC_RELEASE); // /proc/<pid>/mount*: a change for EPOLLET waiters
     Inode* target;
     if (long r = resolve(path, nullptr, true, &target); r < 0)
         return r;
@@ -505,6 +511,7 @@ long find_mount(const char* path, Inode* node, Inode* top, usize* index) {
 
 // MS_MOVE: the mount at `from` now sits on `to`.
 long move_mount(const char* from, const char* to) {
+    __atomic_add_fetch(&g_mount_generation, 1, __ATOMIC_RELEASE); // /proc/<pid>/mount*: a change for EPOLLET waiters
     Inode *target, *node;
     if (long r = resolve(to, nullptr, true, &target); r < 0)
         return r;
@@ -540,6 +547,7 @@ long unmount(const char* path) { return unmount_at(path, nullptr, path); }
 // copies (MS_REC). A relative path resolves from cwd even when something has
 // been mounted over "/" since (LXC's chroot does exactly that).
 long unmount_at(const char* path, Inode* cwd, const char* canon) {
+    __atomic_add_fetch(&g_mount_generation, 1, __ATOMIC_RELEASE); // /proc/<pid>/mount*: a change for EPOLLET waiters
     Inode* node;
     if (long r = resolve(path, cwd, true, &node); r < 0)
         return r;

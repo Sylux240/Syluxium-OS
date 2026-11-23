@@ -161,6 +161,11 @@ public:
     // Regular files epoll may watch anyway (procfs: Android's init watches
     // /proc/self/mountinfo); other regular files and directories it refuses.
     virtual bool epoll_regular() const { return false; }
+    // Edge-triggered epoll (EPOLLET): a counter that grows with every new
+    // event on this file, so a waiter is told again only about new events
+    // here. 0 = not tracked (epoll then falls back to the system-wide poll
+    // sequence, which re-reports after any event anywhere).
+    virtual u64 poll_generation() const { return 0; }
     // A "magic" symlink (/proc/<pid>/ns/*): readlink shows its text, but lookups
     // and open() take the link inode itself instead of following it.
     virtual bool magic_link() const { return false; }
@@ -262,6 +267,7 @@ u64 next_fs_dev(); // a fresh st_dev for a newly mounted file system
 long mount_at(const char* path, Inode* fs_root, const char* source, const char* type,
               const char* options = nullptr); // options: what /proc/mounts lists (default "rw,relatime")
 long unmount(const char* path);
+u64 mount_generation(); // grows with every mount, move and unmount
 long unmount_at(const char* path, Inode* cwd, const char* canon); // umount2: relative to cwd
 void mount_source(const char* path, char* out, usize size); // what /proc/mounts shows as its device
 long move_mount(const char* from, const char* to); // MS_MOVE

@@ -484,13 +484,19 @@ public:
             u32 ready = mask & it->events & ~(EPOLLET | EPOLLONESHOT | EPOLLEXCLUSIVE | EPOLLWAKEUP);
             if (!ready)
                 continue;
-            // Edge-triggered: report again only after some new event happened.
-            if ((it->events & EPOLLET) && it->reported && it->reported_seq == seq)
+            // Edge-triggered: report again only after a new event. Files that
+            // count their own events (poll_generation) are judged by that;
+            // the rest by the system-wide poll sequence (any event anywhere),
+            // which can keep re-reporting a file whose owner never drains it
+            // (libmount's inotify watch on /run/mount spun that way).
+            u64 gen = it->file->inode->poll_generation();
+            u64 mark = gen ? gen : seq;
+            if ((it->events & EPOLLET) && it->reported && it->reported_seq == mark)
                 continue;
             if (consume) {
                 out[n] = EpollEvent{ready, it->data};
                 it->reported = true;
-                it->reported_seq = seq;
+                it->reported_seq = mark;
                 if (it->events & EPOLLONESHOT)
                     it->disabled = true;
             }
