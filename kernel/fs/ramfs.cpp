@@ -220,6 +220,7 @@ RegularFile::RegularFile() {
 }
 
 RegularFile::~RegularFile() {
+    vfs::forget_xattrs(dev, ino);
     inotify::inode_gone(this); // watches on it get IN_IGNORED (pointer is about to be reused)
     free_pages_from(0);
     kfree(m_pages);

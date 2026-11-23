@@ -9,6 +9,7 @@ namespace ramfs {
 class Dir : public vfs::Inode {
 public:
     Dir();
+    ~Dir() override { vfs::forget_xattrs(dev, ino); }
     vfs::Inode* lookup(const char* name, usize len) override;
     long create(const char* name, usize len, u32 mode, const char* target, vfs::Inode** out) override;
     long unlink(const char* name, usize len, bool remove_dir) override;

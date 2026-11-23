@@ -1585,6 +1585,7 @@ public:
         victim->nlink = 0;
         victim->size = 0;
         victim->save();
+        vfs::forget_xattrs(victim->dev, victim->number); // the number may come back for another file
         vol->free_inode(victim->number, dir);
         vol->forget(victim->number);
     }

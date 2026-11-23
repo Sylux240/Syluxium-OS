@@ -259,6 +259,9 @@ long remove_node(const char* path);            // unplugged device: drop its /de
 File* open_inode(Inode* inode, u32 flags);
 void file_get(File* f);
 void file_put(File* f);
+// A file is gone for good (its inode number may be handed out again): drop
+// its extended attributes (kept in memory, see syscall/sys_file.cpp).
+void forget_xattrs(u64 dev, u64 ino);
 // Called just before a file's last reference goes away (epoll uses it to
 // drop the file from every set watching it). Set once at boot.
 extern void (*file_release_hook)(File* f);

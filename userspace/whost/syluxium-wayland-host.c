@@ -1115,6 +1115,11 @@ static void handle_map(struct wl_listener *l, void *data) {
 
 static void handle_unmap(struct wl_listener *l, void *data) {
 	struct view *v = wl_container_of(l, v, unmap);
+	if (v->kind == VIEW_TOPLEVEL && v->x_mapped) {
+		char *id = view_app_id(v);
+		diag("unmapped: %s (pid %d) \"%s\"", id, (int)view_pid(v), v->toplevel && v->toplevel->title ? v->toplevel->title : "");
+		free(id);
+	}
 	view_unmap_x(v);
 }
 

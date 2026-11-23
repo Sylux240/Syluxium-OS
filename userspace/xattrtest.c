@@ -16,7 +16,7 @@ static void check(int ok, const char* what) {
         fails++;
 }
 
-int main(void) {
+int main(int argc, char** argv) {
     const char* f = "/tmp/xattr-test";
     const char* d = "/tmp/xattr-dir";
     int fd = open(f, O_RDWR | O_CREAT | O_TRUNC, 0644);
@@ -46,6 +46,37 @@ int main(void) {
     close(fd);
     unlink(f);
     rmdir(d);
+
+    // A file's attributes go with it: a new file that gets the same inode
+    // number back (ext4 reuses them) starts without any. The directory is
+    // the first argument (default /tmp; RAM files never reuse numbers).
+    {
+        char r[256];
+        snprintf(r, sizeof(r), "%s/xattr-reuse", argc > 1 ? argv[1] : "/tmp");
+        int t = open(r, O_RDWR | O_CREAT | O_TRUNC, 0644);
+        struct stat st;
+        fstat(t, &st);
+        ino_t old = st.st_ino;
+        setxattr(r, "user.stale", "x", 1, 0);
+        close(t);
+        unlink(r);
+        int reused = 0;
+        for (int i = 0; i < 300 && !reused; i++) {
+            t = open(r, O_RDWR | O_CREAT | O_TRUNC, 0644);
+            fstat(t, &st);
+            close(t);
+            if (st.st_ino == old)
+                reused = 1;
+            else
+                unlink(r);
+        }
+        if (reused)
+            check(getxattr(r, "user.stale", buf, sizeof(buf)) < 0 && errno == ENODATA,
+                  "a reused inode number brings no old attributes");
+        else
+            printf("  [PASS] inode numbers not reused on this file system (nothing to check)\n");
+        unlink(r);
+    }
     printf("xattrtest: %s (%d failures)\n", fails ? "FAILED" : "all passed", fails);
     return fails;
 }

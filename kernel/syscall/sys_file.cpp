@@ -1394,6 +1394,23 @@ long remove(By by, u64 a0, u64 uname) {
     return -err::NODATA;
 }
 
+void forget(u64 dev, u64 ino) {
+    LockGuard guard(g_lock);
+    usize b = (dev * 31 + ino) % BUCKETS;
+    for (File** pp = &g_files[b]; *pp; pp = &(*pp)->next) {
+        File* f = *pp;
+        if (f->dev != dev || f->ino != ino)
+            continue;
+        *pp = f->next;
+        while (Attr* a = f->attrs) {
+            f->attrs = a->next;
+            kfree(a);
+        }
+        kfree(f);
+        return;
+    }
+}
+
 } // namespace xattrs
 
 long sys_setxattr(SYSCALL_ARGS) { SYSCALL_UNUSED; return xattrs::set(xattrs::By::Path, a0, a1, a2, a3, a4); }
@@ -2569,6 +2586,8 @@ long sys_kcmp(SYSCALL_ARGS) {
     return x == y ? 0 : reinterpret_cast<uptr>(x) < reinterpret_cast<uptr>(y) ? 1 : 2;
 }
 
+void xattrs_forget(u64 dev, u64 ino) { xattrs::forget(dev, ino); }
+
 long socket_vectored(u64 fd, const KIoVec* iov, u64 count, bool write, bool* is_socket) {
     *is_socket = false;
     FileRef f(proc::current(), static_cast<long>(fd));
@@ -2681,3 +2700,7 @@ void register_file() {
 }
 
 } // namespace syscall
+
+namespace vfs {
+void forget_xattrs(u64 dev, u64 ino) { syscall::xattrs_forget(dev, ino); }
+} // namespace vfs

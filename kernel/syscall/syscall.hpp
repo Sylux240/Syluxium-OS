@@ -37,6 +37,7 @@ struct KIoVec {
     u64 base, len;
 };
 long socket_vectored(u64 fd, const KIoVec* iov, u64 count, bool write, bool* is_socket);
+void xattrs_forget(u64 dev, u64 ino); // (vfs::forget_xattrs)
 
 } // namespace syscall
 
