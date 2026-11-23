@@ -296,7 +296,7 @@ bool split_huge(u64& e, int level) {
 }
 } // namespace
 
-bool AddressSpace::set_cache(uptr virt, usize pages, u32 cache) {
+bool AddressSpace::set_cache(uptr virt, usize pages, u32 cache, bool* split) {
     LockGuard guard(m_lock);
     for (usize n = 0; n < pages; n++, virt += PAGE_SIZE) {
         u64* table = mm::phys_to_virt<u64>(m_pml4);
@@ -304,8 +304,12 @@ bool AddressSpace::set_cache(uptr virt, usize pages, u32 cache) {
             u64& e = table[table_index(virt, level)];
             if (!(e & PTE_PRESENT))
                 return false;
-            if ((e & PTE_HUGE) && !split_huge(e, level))
-                return false;
+            if (e & PTE_HUGE) {
+                if (!split_huge(e, level))
+                    return false;
+                if (split)
+                    *split = true;
+            }
             table = mm::phys_to_virt<u64>(e & PTE_ADDR_MASK);
         }
         u64& e = table[table_index(virt, 1)];
@@ -325,9 +329,14 @@ bool set_kernel_cache(uptr virt, usize pages, u32 cache) {
     if (!pages)
         return true;
     virt &= ~(PAGE_SIZE - 1);
-    bool ok = g_kernel_space.set_cache(virt, pages, cache);
-    flush_local(virt, pages);
-    shootdown(virt, pages);
+    bool split = false;
+    bool ok = g_kernel_space.set_cache(virt, pages, cache, &split);
+    // A huge page split into smaller ones: every CPU drops all its TLB
+    // entries (global ones too), as Linux does after a split, so no CPU
+    // keeps a 1 GiB / 2 MiB translation next to the new 4 KiB ones.
+    usize flush = split ? ~usize(0) >> 1 : pages;
+    flush_local(virt, flush);
+    shootdown(virt, flush);
     // Cache lines filled through the old write-back mapping must not linger
     // (the GPU wouldn't see data still sitting in them).
     // clflush reaches every CPU's caches (wbinvd only this one's).
@@ -493,6 +502,10 @@ void shootdown_handler(interrupts::Frame*) {
 
 } // namespace
 
+bool translate_current(uptr virt, u64* phys_out) {
+    return translate_in(arch::read_cr3() & PTE_ADDR_MASK, virt, phys_out);
+}
+
 void init_ap() {
     if (g_nx)
         arch::wrmsr(MSR_EFER, arch::rdmsr(MSR_EFER) | EFER_NXE);
@@ -508,10 +521,21 @@ void shootdown(uptr start, usize pages, const AddressSpace* user) {
     if (!arch::interrupts_enabled())
         panic("vmm::shootdown() with interrupts disabled would deadlock");
 
+    // Spinlock (not IrqSpinlock): while waiting for the lock we keep
+    // servicing other CPUs' shootdown requests. It also keeps us on this CPU
+    // from here on: `me` must be the CPU we are really on. It was taken
+    // before the lock, so a caller preempted and moved to another CPU left
+    // that CPU out of the shootdown, and the CPU that did the caller's local
+    // invlpg may be a different one too: a kernel stack's old translation
+    // survived on one CPU, and a new thread whose stack got the same address
+    // read a stranger's stack there (its start frame "zeroed": RIP 0).
+    g_shoot_lock.lock();
+    Cpu* me = this_cpu();
+    flush_local(start, pages); // whichever CPU the caller flushed, this one too
+
     // Our page-table changes must be visible before we look at what other
     // CPUs are running (they publish `current` before loading its CR3).
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
-    Cpu* me = this_cpu();
     auto wanted = [&](Cpu* c) {
         if (!c || c == me || !__atomic_load_n(&c->online, __ATOMIC_ACQUIRE))
             return false;
@@ -521,9 +545,6 @@ void shootdown(uptr start, usize pages, const AddressSpace* user) {
         return t && t->aspace == user;
     };
 
-    // Spinlock (not IrqSpinlock): while waiting for the lock we keep
-    // servicing other CPUs' shootdown requests.
-    g_shoot_lock.lock();
     u32 targets = 0;
     Cpu* chosen[256];
     for (u32 i = 0; i < percpu::count() && targets < 256; i++) {

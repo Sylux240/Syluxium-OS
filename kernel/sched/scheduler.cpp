@@ -110,6 +110,41 @@ void finish_switch() {
     }
 }
 
+// A thread that has never run starts from the frame create_thread() put at
+// the top of its stack. If that frame is gone the thread was either picked
+// twice (the first run already overwrote it) or its stack page was handed to
+// someone else and cleared: say which, rather than `ret` to address 0.
+void check_start_frame(Thread* next) {
+    u64 initial = next->kernel_stack_top() - 9 * 8;
+    if (next->started) {
+        if (next->saved_rsp == initial && *reinterpret_cast<u64*>(initial + 7 * 8) != reinterpret_cast<u64>(&thread_start_trampoline))
+            panic("sched: %s (tid %lu) picked to run a second time from its start frame (cpu %u, state %d)", next->name,
+                  next->tid, next->cpu ? next->cpu->index : ~0u, static_cast<int>(next->state));
+        return;
+    }
+    next->started = true;
+    u64* frame = reinterpret_cast<u64*>(next->saved_rsp);
+    if (next->saved_rsp != initial || frame[7] != reinterpret_cast<u64>(&thread_start_trampoline)) {
+        u64 phys = 0;
+        vmm::AddressSpace::kernel().translate(initial & ~0xFFFull, &phys);
+        u64* direct = phys ? reinterpret_cast<u64*>(mm::phys_to_virt<u8>(phys) + (initial & 0xFFF)) : frame;
+        u64 nonzero = 0; // how much of the stack page isn't zero (a cleared page, or overwritten?)
+        for (u64* w = reinterpret_cast<u64*>(initial & ~0xFFFull); w < reinterpret_cast<u64*>(initial); w++)
+            nonzero += *w != 0;
+        u64 phys_cr3 = 0;
+        vmm::translate_current(initial & ~0xFFFull, &phys_cr3);
+        // Flush this CPU's TLB entry and look again: a different answer means
+        // it held a stale translation.
+        asm volatile("invlpg (%0)" ::"r"(initial) : "memory");
+        u64 after = frame[7];
+        panic("sched: new thread %s (tid %lu): start frame clobbered before it ran (rsp %#lx, initial %#lx, "
+              "slot %#lx, flags %#lx, direct-map slot %#lx, slot after invlpg %#lx; stack page phys %#lx "
+              "(through CR3 %#lx: %#lx), %lu nonzero words below)",
+              next->name, next->tid, next->saved_rsp, initial, frame[7], frame[6], direct[7], after, phys,
+              arch::read_cr3(), phys_cr3, nonzero);
+    }
+}
+
 // Take a runnable thread from another CPU. Called with our own lock held;
 // try_lock on the victim avoids lock-order deadlocks between two stealers.
 Thread* steal_for(Cpu* me) {
@@ -288,6 +323,17 @@ Thread* create_thread(const char* name, void (*entry)(void*), void* arg, bool de
     for (int i = 0; i < 6; i++)
         *--sp = 0;                                             // rbp rbx r12 r13 r14 r15
     t->saved_rsp = reinterpret_cast<u64>(sp);
+    {
+        // The frame must be in the page the page tables name (not in an old
+        // page a stale TLB entry of this CPU still points at).
+        u64 phys = 0;
+        uptr top_page = reinterpret_cast<uptr>(sp) & ~0xFFFull;
+        vmm::AddressSpace::kernel().translate(top_page, &phys);
+        u64* direct = reinterpret_cast<u64*>(mm::phys_to_virt<u8>(phys) + (reinterpret_cast<uptr>(sp) & 0xFFF));
+        if (!phys || direct[7] != reinterpret_cast<u64>(&thread_start_trampoline))
+            panic("sched: create_thread(%s): start frame written to va %p is not in its page %#lx (stale TLB "
+                  "entry on CPU %u?)", name, sp, phys, this_cpu()->index);
+    }
 
     g_threads_lock.lock();
     g_all_threads.push_back(t);
@@ -346,6 +392,9 @@ void schedule() {
         next = steal_for(cpu);
     if (!next)
         next = rq.idle;
+    if (next != prev && __atomic_load_n(&next->on_cpu, __ATOMIC_ACQUIRE) && next != rq.idle)
+        panic("sched: %s (tid %lu, state %d) picked to run while still on CPU %u", next->name, next->tid,
+              static_cast<int>(next->state), next->cpu ? next->cpu->index : ~0u);
 
     next->state = ThreadState::Running;
     next->slice_left = TIME_SLICE_TICKS;
@@ -364,6 +413,7 @@ void schedule() {
     cpu->switch_prev = prev;
     cpu->context_switches++;
 
+    check_start_frame(next);
     save_thread_state(prev);
     context_switch(prev, next);
     // We're back: some CPU (maybe a different one) switched to us.
@@ -393,6 +443,11 @@ void wake(Thread* t) {
 
     bool queued = false;
     if (t->state == ThreadState::Blocked) {
+        // A blocked thread is on no run queue: if it is, two CPUs would end
+        // up running it (a freed thread woken through a stale pointer, or a
+        // double wakeup) - stop here with its name rather than crash later.
+        if (t->run_node.linked())
+            panic("sched: wake(%s, tid %lu): blocked thread already on a run queue", t->name, t->tid);
         if (t->sleep_node.linked())
             c->rq.sleepers.remove(t);
         t->wake_deadline = 0;
@@ -484,6 +539,9 @@ Thread* create(const char* name, void (*entry)(void*), void* arg, bool detached)
 }
 
 void start(Thread* t, int cpu_index) {
+    if (t->state != ThreadState::Blocked || t->run_node.linked() || t->cpu)
+        panic("sched: start(%s, tid %lu): already started or queued (state %d)", t->name, t->tid,
+              static_cast<int>(t->state));
     if (cpu_index >= 0) {
         t->cpu = percpu::get(static_cast<u32>(cpu_index));
         if (!t->cpu)
@@ -633,6 +691,7 @@ void enter() {
     cpu->switch_prev = boot;
     g_running = true;
 
+    check_start_frame(next);
     context_switch(boot, next);
     panic("sched: boot context resumed");
 }

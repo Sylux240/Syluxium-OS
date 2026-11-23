@@ -53,7 +53,7 @@ public:
     // mappings, splitting 1 GiB / 2 MiB pages that cover the range into
     // 4 KiB ones. Local TLB only: set_direct_cache() does the rest.
     // Returns false if part of the range isn't mapped.
-    bool set_cache(uptr virt, usize pages, u32 cache);
+    bool set_cache(uptr virt, usize pages, u32 cache, bool* split = nullptr);
 
     // Whether an existing 4 KiB mapping is writable.
     bool is_writable(uptr virt) const;
@@ -84,6 +84,10 @@ bool set_direct_cache(u64 phys, usize pages, u32 cache); // the direct map of th
 // The cache type of a kernel mapping: 0 (write-back), CACHE_WC, CACHE_UC,
 // CACHE_WT, or ~0u if unmapped (self-tests).
 u32 kernel_cache_type(uptr virt);
+
+// Translate through the page tables this CPU uses right now (CR3), not the
+// kernel's own: the kernel half of every address space must agree (checks).
+bool translate_current(uptr virt, u64* phys_out);
 
 // Build the kernel page tables and switch to them.
 void init();
