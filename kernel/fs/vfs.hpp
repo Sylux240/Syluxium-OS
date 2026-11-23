@@ -101,9 +101,15 @@ public:
     virtual void* linux_file(File* f) { return nullptr; }
     // Read-only page cache for private mappings (programs, libraries on
     // disk): the page holding file offset `offset` (page aligned), shared by
-    // every process that maps it; the caller takes its own reference. Writes
-    // to the file drop the cache (new mappings see new data).
+    // every process that maps it. The caller gets its own reference, taken
+    // under the cache's lock: taken afterwards, a cache dropped in between
+    // (a write, inode eviction) freed the page while it was being mapped.
+    // Writes to the file drop the cache (new mappings see new data).
     virtual long cache_page(u64 offset, u64* phys) { return -err::NODEV; }
+    // The same for a private mapping of a RAM file (memfd, tmpfs): its own
+    // page, with a reference for the caller taken while hole punching can't
+    // remove it.
+    virtual long private_page(u64 offset, u64* phys) { return -err::NODEV; }
     // A mapping (VMA) referring to this inode was created (+1) or removed (-1):
     // keeps unlinked-but-mapped files alive.
     virtual void mmap_ref(int delta) {}

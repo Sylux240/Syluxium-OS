@@ -71,6 +71,8 @@ app)
     say "binder: $(ls -l /dev/anbox-binder /dev/binderfs/ 2>&1 | tr '\n' '|')"
     LA="lxc-attach -P /var/lib/waydroid/lxc -n waydroid --clear-env --"
     say "crash: $($LA /system/bin/logcat -d -b crash 2>&1 | grep -v 'runtime.cc:675' | tail -30 | tr '\n' '|' | cut -c1-5000)"
+    say "props: multi_windows=$($LA /system/bin/getprop persist.waydroid.multi_windows) boot=$($LA /system/bin/getprop sys.boot_completed) active_apps=$($LA /system/bin/getprop waydroid.active_apps)"
+    say "launch: $($LA /system/bin/logcat -d -b all 2>&1 | grep -i 'START u0\|ActivityTaskManager\|WindowManager\|hwcomposer\|Waydroid\|SurfaceFlinger' | grep -v 'option\[' | tail -40 | tr '\n' '|' | cut -c1-7000)"
     say "fatal: $($LA /system/bin/logcat -d -b all 2>&1 | grep ' [EF] ' | grep -i 'system_server\|AndroidRuntime\|FATAL\|libc ' | grep -v 'runtime.cc:675' | tail -40 | tr '\n' '|' | cut -c1-6000)"
     ;;
 esac

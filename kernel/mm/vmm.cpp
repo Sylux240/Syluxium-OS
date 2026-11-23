@@ -216,7 +216,7 @@ void free_table_page(u64 phys) {
 // would hand a page that is still in use to someone else - the heap,
 // a page table - and the damage would show up much later elsewhere
 // ("kfree: not a heap pointer", "pmm: bad free" of a page table).
-void report_bad_put(const char* why, u64 phys, u32 flags, u32 refcount) {
+void report_bad_put(const char* why, u64 phys, u32 flags, u32 refcount, uptr virt = 0) {
     char chain[16 * 17 + 1];
     usize n = 0;
     const u64* fp = static_cast<const u64*>(__builtin_frame_address(0));
@@ -231,33 +231,36 @@ void report_bad_put(const char* why, u64 phys, u32 flags, u32 refcount) {
             break;
         fp = next;
     }
-    klog::warn("vmm: user page %#lx released %s (flags %#x, refcount %u); not freed. Call chain:%s", phys, why, flags,
-               refcount, chain);
+    klog::warn("vmm: user page %#lx (user address %#lx) released %s (flags %#x, refcount %u); not freed. Call chain:%s",
+               phys, virt, why, flags, refcount, chain);
 }
 
 // Drop one reference to a mapped user page; free it on the last one.
-void put_user_page(u64 phys) {
+// Returns false for a release that doesn't fit (reported, not freed).
+bool put_user_page(u64 phys, uptr virt = 0) {
     pmm::PageFrame* f = pmm::frame(phys);
     if (!f || !(f->flags & pmm::PF_ALLOCATED))
-        return; // not RAM we own (e.g. a device mapping)
+        return true; // not RAM we own (e.g. a device mapping)
     if (f->flags & (pmm::PF_RESERVED | pmm::PF_SLAB | pmm::PF_HEAP_LARGE | pmm::PF_PAGE_TABLE)) {
-        report_bad_put("but the kernel owns it", phys, f->flags, f->refcount);
-        return;
+        report_bad_put("but the kernel owns it", phys, f->flags, f->refcount, virt);
+        return false;
     }
     u32 old = __atomic_load_n(&f->refcount, __ATOMIC_ACQUIRE);
     do {
         if (old == 0) {
-            report_bad_put("with no references left (one release too many)", phys, f->flags, 0);
-            return;
+            report_bad_put("with no references left (one release too many)", phys, f->flags, 0, virt);
+            return false;
         }
     } while (!__atomic_compare_exchange_n(&f->refcount, &old, old - 1, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE));
     if (old == 1)
         pmm::free_page(phys);
+    return true;
 }
 
 } // namespace
 
-void AddressSpace::destroy_user() {
+usize AddressSpace::destroy_user(uptr* bad, usize bad_max) {
+    usize nbad = 0;
     KASSERT(this != &g_kernel_space);
     u64* pml4 = mm::phys_to_virt<u64>(m_pml4);
     for (int i4 = 0; i4 < 256; i4++) {
@@ -273,8 +276,15 @@ void AddressSpace::destroy_user() {
                     continue;
                 u64* pt = mm::phys_to_virt<u64>(pd[i2] & PTE_ADDR_MASK);
                 for (int i1 = 0; i1 < 512; i1++) {
-                    if (pt[i1] & PTE_PRESENT)
-                        put_user_page(pt[i1] & PTE_ADDR_MASK);
+                    if (!(pt[i1] & PTE_PRESENT))
+                        continue;
+                    uptr virt = (static_cast<uptr>(i4) << 39) | (static_cast<uptr>(i3) << 30) |
+                                (static_cast<uptr>(i2) << 21) | (static_cast<uptr>(i1) << 12);
+                    if (!put_user_page(pt[i1] & PTE_ADDR_MASK, virt)) {
+                        if (bad && nbad < bad_max)
+                            bad[nbad] = virt;
+                        nbad++;
+                    }
                 }
                 free_table_page(pd[i2] & PTE_ADDR_MASK);
             }
@@ -285,6 +295,7 @@ void AddressSpace::destroy_user() {
     }
     free_table_page(m_pml4);
     m_pml4 = 0;
+    return nbad;
 }
 
 bool AddressSpace::protect(uptr virt, u32 flags) {

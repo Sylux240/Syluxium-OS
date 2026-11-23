@@ -30,7 +30,10 @@ public:
 
     // Free every user-half page table and every page mapped there
     // (dropping one reference per mapping). Must not be the active one.
-    void destroy_user();
+    // Free every user page and page table. Releases that don't fit (pages
+    // the kernel owns, or with no references left) are reported and not
+    // freed; their user addresses go to `bad` (up to bad_max), the count back.
+    usize destroy_user(uptr* bad = nullptr, usize bad_max = 0);
 
     // Change the flags of an existing 4 KiB mapping. Returns false if unmapped.
     bool protect(uptr virt, u32 flags);

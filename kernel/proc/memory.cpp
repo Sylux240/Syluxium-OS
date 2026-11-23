@@ -1,4 +1,5 @@
 #include <core/log.hpp>
+#include <mm/heap.hpp>
 #include <lib/string.hpp>
 #include <mm/layout.hpp>
 #include <mm/pmm.hpp>
@@ -646,9 +647,9 @@ bool Memory::populate(Vma* v, uptr page) {
         u64 delta = page - v->start;
         u64 file_phys;
         bool whole = delta + PAGE_SIZE <= v->file_bytes && ((v->file_offset + delta) & (PAGE_SIZE - 1)) == 0;
-        if (whole && (v->file->shared_mappable() ? v->file->mmap_phys(v->file_offset + delta, &file_phys)
+        // (both hand over the mapping's reference, taken under their own locks)
+        if (whole && (v->file->shared_mappable() ? v->file->private_page(v->file_offset + delta, &file_phys)
                                                  : v->file->cache_page(v->file_offset + delta, &file_phys)) == 0) {
-            __atomic_add_fetch(&pmm::frame(file_phys)->refcount, 1, __ATOMIC_ACQ_REL); // the mapping's reference
             if (!m_as->map(page, file_phys, prot_to_map_flags(v->prot) & ~vmm::WRITE)) {
                 vmm::release_user_page(file_phys);
                 return false;
@@ -809,6 +810,21 @@ long Memory::write_remote(uptr addr, const void* data, usize len) {
 
 void Memory::destroy() {
     LockGuard guard(m_lock);
+    // The mappings as they were, for the report below (a bad release names a
+    // page some code freed while this process still mapped it).
+    struct Snap {
+        uptr start, end;
+        u8 kind;
+        u64 ino;
+        bool file;
+    };
+    constexpr usize MAX_SNAP = 192;
+    auto* snap = static_cast<Snap*>(kmalloc(sizeof(Snap) * MAX_SNAP));
+    usize nsnap = 0;
+    if (snap) {
+        for (Vma* v = m_vmas.front(); v && nsnap < MAX_SNAP; v = m_vmas.next_of(v))
+            snap[nsnap++] = Snap{v->start, v->end, static_cast<u8>(v->kind), v->file ? v->file->ino : 0, v->file != nullptr};
+    }
     while (Vma* v = m_vmas.pop_front()) {
         dev_untrack(v);
         if (v->kind == VMA_DEVICE && m_as)
@@ -820,10 +836,30 @@ void Memory::destroy() {
         delete v;
     }
     if (m_as) {
-        m_as->destroy_user(); // frees every user page and page table
+        uptr bad[8];
+        usize nbad = m_as->destroy_user(bad, 8); // frees every user page and page table
+        if (nbad && snap) {
+            static const char* kinds[] = {"normal", "heap", "stack", "device"};
+            for (usize b = 0; b < nbad && b < 8; b++) {
+                const Snap* in = nullptr;
+                for (usize i = 0; i < nsnap; i++)
+                    if (bad[b] >= snap[i].start && bad[b] < snap[i].end)
+                        in = &snap[i];
+                if (in)
+                    klog::warn("vmm: bad release at %#lx: in %#lx-%#lx (%s, %s ino %lu)", bad[b], in->start, in->end,
+                               kinds[in->kind & 3], in->file ? "file" : "anonymous", in->ino);
+                else
+                    klog::warn("vmm: bad release at %#lx: outside every mapping (a page table entry no VMA covers)", bad[b]);
+            }
+            klog::warn("vmm: the process's %lu mappings at exit:", nsnap);
+            for (usize i = 0; i < nsnap; i++)
+                klog::warn("vmm:   %#lx-%#lx %s %s ino %lu", snap[i].start, snap[i].end, kinds[snap[i].kind & 3],
+                           snap[i].file ? "file" : "anon", snap[i].ino);
+        }
         delete m_as;
         m_as = nullptr;
     }
+    kfree(snap);
 }
 
 } // namespace proc

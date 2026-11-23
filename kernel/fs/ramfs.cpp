@@ -391,6 +391,21 @@ long RegularFile::mmap_phys(u64 offset, u64* phys) {
     return 0;
 }
 
+long RegularFile::private_page(u64 offset, u64* phys) {
+    if (offset >= align_up<u64>(size, PAGE_SIZE))
+        return -err::FAULT;
+    u64 index = offset / PAGE_SIZE;
+    if (!page(index, true)) // (allocates; may grow the table)
+        return -err::NOMEM;
+    LockGuard guard(m_pages_lock); // punch_hole takes pages out under this lock
+    u64 p = index < m_slots ? m_pages[index] : 0;
+    if (!p)
+        return -err::FAULT; // punched meanwhile: the fault is retried
+    __atomic_add_fetch(&pmm::frame(p)->refcount, 1, __ATOMIC_ACQ_REL); // the caller's
+    *phys = p;
+    return 0;
+}
+
 void RegularFile::mmap_ref(int delta) {
     if (__atomic_add_fetch(&m_maps, static_cast<u32>(delta), __ATOMIC_ACQ_REL) == 0)
         maybe_free();

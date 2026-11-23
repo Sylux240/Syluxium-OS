@@ -824,6 +824,7 @@ public:
             m_cache[index] = p; // the cache's own reference
         }
         *phys = m_cache[index];
+        __atomic_add_fetch(&pmm::frame(*phys)->refcount, 1, __ATOMIC_ACQ_REL); // the caller's (see vfs::Inode)
         return 0;
     }
 

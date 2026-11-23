@@ -994,13 +994,15 @@ long sys_capget(SYSCALL_ARGS) {
         bool full;
         if (h.pid == 0 || h.pid == proc::current()->vpid) {
             Process* me = proc::current();
-            full = me->userns ? me->ns_caps : me->cred.euid == 0;
+            // (capabilities kept across a uid switch count too: zygote gives
+            // system_server, uid 1000, the ones Android's input reader checks)
+            full = (me->userns ? me->ns_caps : me->cred.euid == 0) || me->keep_caps || me->caps_retained;
         } else {
             LockGuard guard(proc::table_lock());
             Process* t = proc::find_visible(h.pid, proc::current());
             if (!t)
                 return -err::SRCH;
-            full = t->userns ? t->ns_caps : t->cred.euid == 0;
+            full = (t->userns ? t->ns_caps : t->cred.euid == 0) || t->keep_caps || t->caps_retained;
         }
         u32 data[6] = {0xFFFFFFFF, 0xFFFFFFFF, 0, 0x000001FF, 0x000001FF, 0}; // effective, permitted, inheritable x2
         if (!full)
