@@ -143,6 +143,7 @@ ensure_started() {
     log "starting the Android container"
     $HELPER start >> "$LOG" 2>&1 || fail "The Android container didn't start (see /var/log/waydroid-container.log)."
 
+    local started_at=0 # (log line where this start's session output begins; 0: was running)
     if ! session_running; then
         local disp
         disp=$(wayland_display)
@@ -150,6 +151,7 @@ ensure_started() {
         audio_socket
         rm -f "$STATE/ready"
         log "starting the Android session on $disp"
+        started_at=$(wc -l < "$LOG")
         WAYLAND_DISPLAY=$disp setsid $WAYDROID session start >> "$LOG" 2>&1 < /dev/null &
         echo $! > "$STATE/session.pid"
         for _ in $(seq 240); do
@@ -169,26 +171,20 @@ ensure_started() {
         sleep 1
     done
     $WAYDROID app list 2>/dev/null | grep -q '^packageName:' || fail "Android did not finish starting (see $LOG)."
-    # ...and booted: Android ignores app starts until sys.boot_completed.
-    local j
-    for j in $(seq 300); do
-        [ "$($HELPER getprop sys.boot_completed 2>/dev/null)" = 1 ] && break
-        session_running || fail "Android stopped while starting (see $LOG)."
-        sleep 1
-    done
-    [ "$($HELPER getprop sys.boot_completed 2>/dev/null)" = 1 ] ||
-        log "Android's boot did not report completion; going on"
-    # ...and its user unlocked (credential storage available): until then
-    # Android shows only a placeholder home and drops app starts.
-    local k
-    for k in $(seq 300); do
-        [ "$($HELPER getprop sys.user.0.ce_available 2>/dev/null)" = true ] && break
-        session_running || fail "Android stopped while starting (see $LOG)."
-        sleep 1
-    done
-    [ "$($HELPER getprop sys.user.0.ce_available 2>/dev/null)" = true ] ||
-        log "Android's user storage did not unlock; going on"
-    i=$((i + j + k))
+    # ...and its user unlocked: until then Android shows only a placeholder
+    # home and drops app starts. Waydroid's session says so in its output
+    # ("Android with user 0 is ready").
+    local j=0
+    if [ "$started_at" -gt 0 ]; then
+        for j in $(seq 400); do
+            tail -n +"$((started_at + 1))" "$LOG" | grep -q 'Android with user [0-9]* is ready' && break
+            session_running || fail "Android stopped while starting (see $LOG)."
+            sleep 1
+        done
+        tail -n +"$((started_at + 1))" "$LOG" | grep -q 'Android with user [0-9]* is ready' ||
+            log "Android did not report its user ready; going on"
+    fi
+    i=$((i + j))
     touch "$STATE/ready"
     log "Android is ready (${i}s)"
     fix_menu_entries

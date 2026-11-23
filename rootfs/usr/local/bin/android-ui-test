@@ -60,7 +60,7 @@ app)
         say "t=$((i * 5))s container=$st $ready windows: $(xdotool search --onlyvisible --name . getwindowname %@ 2>/dev/null | tr '\n' '|' | cut -c1-200)"
         [ -n "$ready" ] && break
     done
-    for i in 1 2 3 4 5 6 7 8; do
+    for i in $(seq 1 24); do
         sleep 5
         say "windows: $(xdotool search --onlyvisible --name . getwindowname %@ 2>/dev/null | tr '\n' '|' | cut -c1-300)"
     done
