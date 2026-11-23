@@ -1,0 +1,17 @@
+<!DOCTYPE Menu PUBLIC "-//freedesktop//DTD Menu 1.0//EN"
+  "http://www.freedesktop.org/standards/menu-spec/1.0/menu.dtd">
+
+<!-- Start menu: "Android Apps" with the Android apps installed on this
+     computer (Waydroid's menu entries, tidied by syluxium-android) and the
+     Android Apps overview. -->
+<Menu>
+	<Name>Applications</Name>
+	<Menu>
+		<Name>Android</Name>
+		<Directory>syluxium-android.directory</Directory>
+		<Include>
+			<Category>X-WayDroid-App</Category>
+			<Category>X-Syluxium-Android</Category>
+		</Include>
+	</Menu>
+</Menu>

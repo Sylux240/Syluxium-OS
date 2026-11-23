@@ -124,6 +124,10 @@ void fill_stat(const Inode* n, LinuxStat* st) {
     st->st_mode = n->mode;
     st->st_uid = n->uid;
     st->st_gid = n->gid;
+    if (Process* p = proc::current(); p && p->userns) { // owners as the user namespace names them
+        st->st_uid = proc::uid_to_ns(n->uid);
+        st->st_gid = proc::gid_to_ns(n->gid);
+    }
     st->st_rdev = n->rdev;
     st->st_size = static_cast<i64>(n->size);
     st->st_blksize = 4096;
@@ -136,6 +140,15 @@ void fill_stat(const Inode* n, LinuxStat* st) {
 bool can_read(const File* f) { return (f->flags & O_ACCMODE) != O_WRONLY; }
 bool can_write(const File* f) { return (f->flags & O_ACCMODE) != O_RDONLY; }
 
+// The open file's lock guards its offset. Pipes, sockets and anonymous
+// event files (eventfd, timerfd, ...) have none, and one thread or process
+// commonly blocks reading one while another writes it (bubblewrap wakes its
+// child through a shared eventfd): they go unlocked, as on Linux.
+bool offset_locked(const File* f) {
+    u32 type = f->inode->mode & S_IFMT;
+    return f->inode->seekable() || !(f->inode->anon_kind || type == S_IFIFO || type == S_IFSOCK);
+}
+
 // read/write at the file's offset (or a given one for pread/pwrite).
 long do_read(File* f, u64 user_buf, u64 count, i64 offset = -1) {
     if (!can_read(f) || (f->flags & O_PATH))
@@ -147,8 +160,8 @@ long do_read(File* f, u64 user_buf, u64 count, i64 offset = -1) {
     // File systems and drivers fill the user buffer directly: a SMAP window
     // for the duration of the read (and of the write below).
     protect::UserAccess window;
-    if (offset >= 0)
-        return f->inode->read_file(f, static_cast<u64>(offset), reinterpret_cast<void*>(user_buf), count);
+    if (offset >= 0 || !offset_locked(f))
+        return f->inode->read_file(f, offset >= 0 ? static_cast<u64>(offset) : 0, reinterpret_cast<void*>(user_buf), count);
     LockGuard guard(f->lock);
     isize n = f->inode->read_file(f, f->offset, reinterpret_cast<void*>(user_buf), count);
     if (n > 0 && f->inode->seekable())
@@ -168,6 +181,8 @@ long do_write(File* f, u64 user_buf, u64 count, i64 offset = -1) {
             inotify::file_event(f, inotify::IN_MODIFY);
         return n;
     }
+    if (!offset_locked(f))
+        return f->inode->write_file(f, 0, reinterpret_cast<const void*>(user_buf), count);
     LockGuard guard(f->lock);
     if (f->flags & O_APPEND)
         f->offset = f->inode->size;
@@ -179,23 +194,20 @@ long do_write(File* f, u64 user_buf, u64 count, i64 offset = -1) {
     return n;
 }
 
-long do_openat(long dirfd, u64 user_path, u32 flags, u32 mode) {
+long do_openat_path(long dirfd, const char* kpath, u32 flags, u32 mode) {
     Process* p = proc::current();
-    UserPath path(user_path);
-    if (path.error())
-        return path.error();
 
     Inode* base;
-    if (long r = dir_for(p, dirfd, path.c_str(), &base); r < 0)
+    if (long r = dir_for(p, dirfd, kpath, &base); r < 0)
         return r;
 
     Inode* inode = nullptr;
-    long r = resolve(path.c_str(), base, !(flags & O_NOFOLLOW), &inode);
+    long r = resolve(kpath, base, !(flags & O_NOFOLLOW), &inode);
     if (r == -err::NOENT && (flags & O_CREAT)) {
         Inode* parent;
         const char* name;
         usize len;
-        if ((r = resolve_parent(path.c_str(), base, &parent, &name, &len)) < 0)
+        if ((r = resolve_parent(kpath, base, &parent, &name, &len)) < 0)
             return r;
         if ((r = proc::permission(parent, proc::MAY_WRITE | proc::MAY_EXEC)) < 0)
             return r;
@@ -222,7 +234,7 @@ long do_openat(long dirfd, u64 user_path, u32 flags, u32 mode) {
         return -err::NOTDIR;
     if (is_dir(inode->mode) && (flags & O_ACCMODE) != O_RDONLY)
         return -err::ISDIR;
-    if (is_lnk(inode->mode) && !(flags & O_PATH))
+    if (is_lnk(inode->mode) && !(flags & O_PATH) && !inode->magic_link())
         return -err::LOOP; // O_NOFOLLOW on a symlink
     if ((flags & O_TRUNC) && is_reg(inode->mode) && (flags & O_ACCMODE) != O_RDONLY && inode->size) {
         inode->truncate(0);
@@ -230,6 +242,8 @@ long do_openat(long dirfd, u64 user_path, u32 flags, u32 mode) {
     }
 
     inode = inode->open_redirect();
+    if ((inode->mode & S_IFMT) == S_IFSOCK && !(flags & O_PATH))
+        return -err::NXIO; // sockets are not opened, as on Linux (reached through /proc/self/fd/N)
     if ((inode->mode & S_IFMT) == S_IFIFO && !(flags & O_PATH)) { // a named pipe
         inode = pipe::fifo_for(inode);
         if (!inode)
@@ -240,14 +254,14 @@ long do_openat(long dirfd, u64 user_path, u32 flags, u32 mode) {
         char abs[512];
         const char* base_path = p->cwd_path;
         char dir_path[512];
-        if (path.c_str()[0] != '/' && dirfd != AT_FDCWD) {
+        if (kpath[0] != '/' && dirfd != AT_FDCWD) {
             FileRef dir(p, dirfd);
             if (dir && dir->path) {
                 snprintf(dir_path, sizeof(dir_path), "%s", dir->path);
                 base_path = dir_path;
             }
         }
-        join_path(base_path, path.c_str(), abs, sizeof(abs));
+        join_path(base_path, kpath, abs, sizeof(abs));
         file_set_path(f, abs);
     }
     if (is_reg(inode->mode) || is_dir(inode->mode))
@@ -256,6 +270,13 @@ long do_openat(long dirfd, u64 user_path, u32 flags, u32 mode) {
     if (fd < 0)
         file_put(f);
     return fd;
+}
+
+long do_openat(long dirfd, u64 user_path, u32 flags, u32 mode) {
+    UserPath path(user_path);
+    if (path.error())
+        return path.error();
+    return do_openat_path(dirfd, path.c_str(), flags, mode);
 }
 
 // The inode fstatat/statx look at: path relative to dirfd, or the fd itself
@@ -391,12 +412,66 @@ long sys_pwrite64(SYSCALL_ARGS) {
     return do_write(f.get(), a1, a2, static_cast<i64>(a3));
 }
 
+// readv/writev on a socket: one message, as Linux does. Per-iovec writes
+// would turn each piece into its own datagram (liblog writes a header, a
+// priority, a tag and a message with one writev; logd drops a lone header).
+long vectored_socket(File* f, const KIoVec* iov, u64 count, bool write) {
+    if (write ? !can_write(f) : !can_read(f))
+        return -err::BADF;
+    usize total = 0;
+    for (u64 i = 0; i < count; i++) {
+        if (iov[i].len > 0x7ffff000 - total)
+            return -err::INVAL;
+        total += iov[i].len;
+    }
+    constexpr usize MAX_MSG = 256 * 1024; // larger ones go in pieces, like a stream
+    usize n = min(total, MAX_MSG);
+    u8* k = static_cast<u8*>(kmalloc(n ? n : 1));
+    if (!k)
+        return -err::NOMEM;
+    long r = 0;
+    if (write) {
+        usize pos = 0;
+        for (u64 i = 0; i < count && pos < n && r >= 0; i++) {
+            usize part = min<usize>(iov[i].len, n - pos);
+            if (part)
+                r = uaccess::copy_from(k + pos, reinterpret_cast<const void*>(iov[i].base), part);
+            pos += part;
+        }
+        if (r >= 0)
+            r = f->inode->write_file(f, 0, k, n);
+    } else {
+        r = f->inode->read_file(f, 0, k, n);
+        usize pos = 0;
+        for (u64 i = 0; r > 0 && i < count && pos < static_cast<usize>(r); i++) {
+            usize part = min<usize>(iov[i].len, static_cast<usize>(r) - pos);
+            if (long e = part ? uaccess::copy_to(reinterpret_cast<void*>(iov[i].base), k + pos, part) : 0; e < 0) {
+                r = e;
+                break;
+            }
+            pos += part;
+        }
+    }
+    kfree(k);
+    return r;
+}
+
 long vectored(u64 fd, u64 user_iov, u64 count, bool write) {
     FileRef f(proc::current(), static_cast<long>(fd));
     if (!f)
         return -err::BADF;
     if (count > 1024)
         return -err::INVAL;
+    if ((f->inode->mode & S_IFMT) == S_IFSOCK) {
+        auto* iov = static_cast<KIoVec*>(kmalloc(sizeof(KIoVec) * (count ? count : 1)));
+        if (!iov)
+            return -err::NOMEM;
+        long r = count ? uaccess::copy_from(iov, reinterpret_cast<const void*>(user_iov), sizeof(KIoVec) * count) : 0;
+        if (r >= 0)
+            r = vectored_socket(f.get(), iov, count, write);
+        kfree(iov);
+        return r;
+    }
     if (write && f->inode->whole_writes()) {
         // Gathered into one buffer and written at once.
         IoVec vecs[64];
@@ -449,6 +524,85 @@ long sys_open(SYSCALL_ARGS) { SYSCALL_UNUSED; return do_openat(AT_FDCWD, a0, sta
 // RESOLVE_* restrictions (no symlinks, stay beneath dirfd, ...) aren't
 // implemented: asking for any answers ENOSYS (callers fall back to openat)
 // rather than opening something the caller meant to forbid.
+// openat2's RESOLVE_* restrictions, checked by walking the path one
+// component at a time before the ordinary open (bubblewrap opens every
+// bind-mount source this way): NO_XDEV (no mount crossings), NO_MAGICLINKS
+// (/proc/<pid>/fd/N and friends), NO_SYMLINKS, BENEATH (never above the
+// start directory: no absolute paths, no ".." past it) and IN_ROOT (the
+// start directory acts as "/").
+long check_resolve(Inode* base, const char* path, u64 res, u32 open_flags) {
+    constexpr u64 NO_XDEV = 1, NO_MAGICLINKS = 2, NO_SYMLINKS = 4, BENEATH = 8, IN_ROOT = 0x10;
+    bool scoped = res & (BENEATH | IN_ROOT);
+    if (path[0] == '/' && (res & BENEATH))
+        return -err::XDEV;
+    Inode* stack[64];
+    int depth = 0;
+    Inode* cur = base;
+    const char* p = path;
+    for (;;) {
+        while (*p == '/')
+            p++;
+        if (!*p)
+            return 0;
+        const char* start = p;
+        while (*p && *p != '/')
+            p++;
+        usize len = static_cast<usize>(p - start);
+        const char* rest = p;
+        while (*rest == '/')
+            rest++;
+        bool last = !*rest;
+        if (len == 1 && start[0] == '.')
+            continue;
+        if (len == 2 && start[0] == '.' && start[1] == '.') {
+            if (!scoped)
+                return 0; // ".." without a scope: nothing left to restrict but symlinks; let the open walk it
+            if (depth == 0) {
+                if (res & BENEATH)
+                    return -err::XDEV;
+                continue; // IN_ROOT: ".." at the root stays there
+            }
+            cur = stack[--depth];
+            continue;
+        }
+        char name[256];
+        if (len >= sizeof(name))
+            return -err::NAMETOOLONG;
+        memcpy(name, start, len);
+        name[len] = 0;
+        Inode* next;
+        if (long r = resolve(name, cur, false, &next); r < 0)
+            return last ? 0 : r; // a missing last component is the open's business (O_CREAT)
+        if ((res & NO_XDEV) && next->dev != base->dev)
+            return -err::XDEV;
+        if (is_lnk(next->mode) && !(last && (open_flags & O_NOFOLLOW))) {
+            bool magic = next->jump_target() != nullptr || next->magic_link();
+            if (magic && (res & NO_MAGICLINKS))
+                return -err::LOOP;
+            if (magic && scoped)
+                return -err::XDEV;
+            if (res & NO_SYMLINKS)
+                return -err::LOOP;
+            if (scoped) {
+                char text[256];
+                isize n = next->readlink(text, sizeof(text) - 1);
+                if (n > 0 && text[0] == '/' && (res & BENEATH))
+                    return -err::XDEV;
+            }
+            if (long r = resolve(name, cur, true, &next); r < 0)
+                return last ? 0 : r;
+            if ((res & NO_XDEV) && next->dev != base->dev)
+                return -err::XDEV;
+        }
+        if (!last) {
+            if (depth == 64)
+                return -err::LOOP;
+            stack[depth++] = cur;
+        }
+        cur = next;
+    }
+}
+
 long sys_openat2(SYSCALL_ARGS) {
     SYSCALL_UNUSED;
     struct OpenHow {
@@ -462,8 +616,49 @@ long sys_openat2(SYSCALL_ARGS) {
         return -err::INVAL;
     if (how.resolve & ~0x3Full)
         return -err::INVAL;
-    if (how.resolve)
-        return -err::NOSYS;
+    if (how.resolve & ~0x20ull) { // RESOLVE_CACHED alone needs nothing (everything is "cached" here)
+        UserPath path(a1);
+        if (path.error())
+            return path.error();
+        const char* kpath = path.c_str();
+        char scoped[PATH_MAX];
+        if (how.resolve & 0x10) { // RESOLVE_IN_ROOT: dirfd is "/": "/x" and "../x" stay below it
+            usize n = 0;
+            for (const char* q = kpath; *q;) {
+                while (*q == '/')
+                    q++;
+                const char* s0 = q;
+                while (*q && *q != '/')
+                    q++;
+                usize len = static_cast<usize>(q - s0);
+                if (len == 0 || (len == 1 && s0[0] == '.'))
+                    continue;
+                if (len == 2 && s0[0] == '.' && s0[1] == '.') {
+                    while (n > 0 && scoped[n - 1] != '/')
+                        n--;
+                    if (n > 0)
+                        n--;
+                    continue;
+                }
+                if (n + len + 2 >= sizeof(scoped))
+                    return -err::NAMETOOLONG;
+                if (n)
+                    scoped[n++] = '/';
+                memcpy(scoped + n, s0, len);
+                n += len;
+            }
+            if (n == 0)
+                scoped[n++] = '.';
+            scoped[n] = 0;
+            kpath = scoped;
+        }
+        Inode* base;
+        if (long r = dir_for(proc::current(), static_cast<i32>(a0), kpath, &base); r < 0)
+            return r;
+        if (long r = check_resolve(base, kpath, how.resolve, static_cast<u32>(how.flags)); r < 0)
+            return r;
+        return do_openat_path(static_cast<i32>(a0), kpath, static_cast<u32>(how.flags), static_cast<u32>(how.mode));
+    }
     return do_openat(static_cast<i32>(a0), a1, static_cast<u32>(how.flags), static_cast<u32>(how.mode));
 }
 
@@ -770,11 +965,67 @@ long do_mkdirat(long dirfd, u64 user_path, u32 mode) {
 // mknod/mknodat: named pipes (FIFOs) and plain files. Device nodes are made
 // by the kernel itself (devtmpfs-style), so only root may ask, and gets
 // EPERM like an unprivileged container would.
-long do_mknodat(long dirfd, u64 user_path, u32 mode) {
+// The device node in the system's /dev (any depth) with this type and number.
+Inode* find_device_node(Inode* dir, u32 type, u64 rdev, int depth) {
+    vfs::DirEntry e;
+    for (u64 i = 0; dir->readdir(i, &e) > 0; i++) {
+        usize len = strlen(e.name);
+        if ((len == 1 && e.name[0] == '.') || (len == 2 && e.name[0] == '.' && e.name[1] == '.'))
+            continue;
+        Inode* n = dir->lookup(e.name, len);
+        if (!n)
+            continue;
+        if ((n->mode & S_IFMT) == type && n->rdev == rdev)
+            return n;
+        if (depth < 3 && vfs::is_dir(n->mode))
+            if (Inode* f = find_device_node(n, type, rdev, depth + 1))
+                return f;
+    }
+    return nullptr;
+}
+
+// A device node made by mknod (root; containers build their own /dev): the
+// same device as the system's node with that number, under the new name.
+long mknod_device(Inode* parent, const char* name, usize len, u32 type, u64 linux_dev) {
+    if (!proc::capable())
+        return -err::PERM;
+    // Linux's dev_t: major in bits 8-19 (and 32+), minor in bits 0-7 and 20-31.
+    u32 major = static_cast<u32>(((linux_dev >> 8) & 0xFFF) | ((linux_dev >> 32) & ~0xFFFu));
+    u32 minor = static_cast<u32>((linux_dev & 0xFF) | ((linux_dev >> 12) & ~0xFFu));
+    u64 rdev = (major << 8) | (minor & 0xFF) | (static_cast<u64>(minor & ~0xFFu) << 12);
+    Inode* dev;
+    if (vfs::resolve_global("/dev", &dev) < 0)
+        return -err::NODEV;
+    Inode* node = find_device_node(dev, type, rdev, 0);
+    if (!node)
+        return -err::NODEV; // no such device here
+    if (!parent->is_ramfs_dir())
+        return -err::PERM; // tmpfs (where containers make their /dev) only
+    if (long r = static_cast<ramfs::Dir*>(parent)->attach(name, len, node); r < 0)
+        return r;
+    node->nlink++;
+    return 0;
+}
+
+long do_mknodat(long dirfd, u64 user_path, u32 mode, u64 linux_dev) {
     Process* p = proc::current();
     u32 type = mode & S_IFMT;
-    if (type == S_IFCHR || type == S_IFBLK)
-        return -err::PERM;
+    if (type == S_IFCHR || type == S_IFBLK) {
+        UserPath path(user_path);
+        if (path.error())
+            return path.error();
+        Inode* base;
+        if (long r = dir_for(p, dirfd, path.c_str(), &base); r < 0)
+            return r;
+        Inode* parent;
+        const char* name;
+        usize len;
+        if (long r = resolve_parent(path.c_str(), base, &parent, &name, &len); r < 0)
+            return r;
+        if (parent->lookup(name, len))
+            return -err::EXIST;
+        return mknod_device(parent, name, len, type, linux_dev);
+    }
     if (type != 0 && type != S_IFREG && type != S_IFIFO)
         return -err::INVAL; // sockets are made by bind()
     UserPath path(user_path);
@@ -804,8 +1055,8 @@ long do_mknodat(long dirfd, u64 user_path, u32 mode) {
     return r;
 }
 
-long sys_mknod(SYSCALL_ARGS) { SYSCALL_UNUSED; return do_mknodat(AT_FDCWD, a0, static_cast<u32>(a1)); }
-long sys_mknodat(SYSCALL_ARGS) { SYSCALL_UNUSED; return do_mknodat(static_cast<i32>(a0), a1, static_cast<u32>(a2)); }
+long sys_mknod(SYSCALL_ARGS) { SYSCALL_UNUSED; return do_mknodat(AT_FDCWD, a0, static_cast<u32>(a1), a2); }
+long sys_mknodat(SYSCALL_ARGS) { SYSCALL_UNUSED; return do_mknodat(static_cast<i32>(a0), a1, static_cast<u32>(a2), a3); }
 
 long sys_mkdir(SYSCALL_ARGS) { SYSCALL_UNUSED; return do_mkdirat(AT_FDCWD, a0, static_cast<u32>(a1)); }
 long sys_mkdirat(SYSCALL_ARGS) { SYSCALL_UNUSED; return do_mkdirat(static_cast<i32>(a0), a1, static_cast<u32>(a2)); }
@@ -1689,7 +1940,7 @@ long do_renameat(long olddirfd, u64 old_user, long newdirfd, u64 new_user, u32 f
     if (long r = existing ? proc::may_delete(ndir, existing) : proc::permission(ndir, proc::MAY_WRITE | proc::MAY_EXEC); r < 0)
         return r;
     Inode* moved = inotify::active() ? odir->lookup(oname, olen) : nullptr;
-    long r = odir->rename(oname, olen, ndir, nname, nlen);
+    long r = odir->rename(oname, olen, vfs::unwrap(ndir), nname, nlen); // (bind-mount wrappers: the real directory)
     if (r == 0 && moved) {
         u32 isdir = is_dir(moved->mode) ? inotify::IN_ISDIR : 0;
         u32 cookie = inotify::next_cookie();
@@ -1727,12 +1978,16 @@ long sys_sync_file_range(SYSCALL_ARGS) {
 
 long sys_mount(SYSCALL_ARGS) {
     SYSCALL_UNUSED;
-    if (!proc::capable())
+    // Root, or a user namespace's owner in its own mount namespace (bind
+    // mounts, tmpfs, proc, ... there; disks and FUSE stay root's).
+    bool host = proc::capable();
+    if (!host && !proc::mounts_capable())
         return -err::PERM;
     UserPath source(a0), target(a1), type(a2);
     if (target.error()) return target.error();
     char abs[512];
     join_path(proc::current()->cwd_path, target.c_str(), abs, sizeof(abs));
+    { char c[512]; if (vfs::canonical_path(abs, "/", c, sizeof(c)) == 0) snprintf(abs, sizeof(abs), "%s", c); } // (/proc/self/fd/N paths: the real one)
 
     // Mount flags (containers): bind mounts, moves, remounts and propagation
     // changes. Read-only and propagation are accepted, not enforced: there is
@@ -1750,18 +2005,23 @@ long sys_mount(SYSCALL_ARGS) {
             return source.error();
         char src_abs[512];
         join_path(proc::current()->cwd_path, source.c_str(), src_abs, sizeof(src_abs));
+    { char c[512]; if (vfs::canonical_path(src_abs, "/", c, sizeof(c)) == 0) snprintf(src_abs, sizeof(src_abs), "%s", c); } // (/proc/self/fd/N paths: the real one)
         Inode* src;
         if (long r = vfs::resolve(src_abs, nullptr, true, &src); r < 0)
             return r;
-        // (MS_REC needs nothing more: mounts hang on directories, so the ones
-        // below src show through the bind as well.)
-        return vfs::mount_at(abs, src, src_abs, "bind");
+        // Directories come through a wrapper (vfs::bind_source): the mounts
+        // below src show through it (MS_REC), and mounts made below the bind
+        // stay there. (Recorded copies of the submounts, vfs::bind_replicate,
+        // cover the same real directories and won over mounts made inside the
+        // bind: bubblewrap's private /tmp landed on the system's.)
+        return vfs::mount_at(abs, vfs::bind_source(src), src_abs, "bind");
     }
     if (mflags & MS_MOVE) {
         if (source.error())
             return source.error();
         char src_abs[512];
         join_path(proc::current()->cwd_path, source.c_str(), src_abs, sizeof(src_abs));
+    { char c[512]; if (vfs::canonical_path(src_abs, "/", c, sizeof(c)) == 0) snprintf(src_abs, sizeof(src_abs), "%s", c); } // (/proc/self/fd/N paths: the real one)
         return vfs::move_mount(src_abs, abs);
     }
     if (mflags & (MS_UNBINDABLE | MS_PRIVATE | MS_SLAVE | MS_SHARED)) {
@@ -1800,6 +2060,14 @@ long sys_mount(SYSCALL_ARGS) {
     }
 
     const char* t = type.c_str();
+    if (!host) {
+        static const char* const ns_types[] = {"tmpfs", "ramfs", "proc", "sysfs", "devpts", "mqueue", "cgroup2"};
+        bool ok = false;
+        for (const char* n : ns_types)
+            ok |= strcmp(t, n) == 0;
+        if (!ok)
+            return -err::PERM;
+    }
     // No type (or "auto"): detect it from the device.
     if ((!t[0] || strcmp(t, "auto") == 0) && !source.error()) {
         const char* src = source.c_str();
@@ -1895,19 +2163,20 @@ long sys_mount(SYSCALL_ARGS) {
 
 long sys_umount2(SYSCALL_ARGS) {
     SYSCALL_UNUSED;
-    if (!proc::capable())
+    if (!proc::mounts_capable())
         return -err::PERM;
     UserPath target(a0);
     if (target.error())
         return target.error();
     char abs[512];
     join_path(proc::current()->cwd_path, target.c_str(), abs, sizeof(abs));
+    { char c[512]; if (vfs::canonical_path(abs, "/", c, sizeof(c)) == 0) snprintf(abs, sizeof(abs), "%s", c); }
     block::sync_all();
     char source[64];
     vfs::mount_source(abs, source, sizeof(source));
     Inode* mounted = nullptr;
     vfs::resolve(abs, nullptr, true, &mounted);
-    long r = vfs::unmount(abs);
+    long r = vfs::unmount_at(target.c_str(), proc::current()->cwd, abs);
     if (r == 0) {
         loop::unmounted(source); // mount -o loop's device goes with it
         fuse::unmounted(mounted); // a FUSE server's loop ends
@@ -1918,7 +2187,7 @@ long sys_umount2(SYSCALL_ARGS) {
 // chroot(path): the caller's "/" (and its children's) becomes `path`.
 long sys_chroot(SYSCALL_ARGS) {
     SYSCALL_UNUSED;
-    if (!proc::capable())
+    if (!proc::ns_capable()) // root, or capabilities in its user namespace (sandboxes)
         return -err::PERM;
     UserPath path(a0);
     if (path.error())
@@ -1939,6 +2208,12 @@ long sys_chroot(SYSCALL_ARGS) {
         snprintf(p->cwd_path, sizeof(p->cwd_path), "%s", rest);
     }
     p->root = dir;
+    // Shared file system context (clone(CLONE_FS)): the parent's root moves too.
+    if (p->fs_shared_with) {
+        LockGuard guard(proc::table_lock());
+        if (Process* peer = proc::find(p->fs_shared_with); peer && peer->state == proc::State::Running)
+            peer->root = dir;
+    }
     return 0;
 }
 
@@ -1948,7 +2223,7 @@ long sys_chroot(SYSCALL_ARGS) {
 // rest of the system keeps its root.
 long sys_pivot_root(SYSCALL_ARGS) {
     SYSCALL_UNUSED;
-    if (!proc::capable())
+    if (!proc::mounts_capable())
         return -err::PERM;
     UserPath new_root(a0), put_old(a1);
     if (new_root.error())
@@ -1977,6 +2252,8 @@ long sys_pivot_root(SYSCALL_ARGS) {
     else
         return -err::INVAL; // put_old must be under new_root
     p->root = nr;
+    if (p->mntns)
+        vfs::pivot_mounts(nr_abs, po_new);
     if (po != nr) // pivot_root(".", ".") stacks the old root on the new one; nothing to show then
         if (long r = vfs::mount_at(po_new, old_root, "rootfs", "rootfs"); r < 0) {
             p->root = old_root == vfs::root() ? nullptr : old_root;
@@ -2015,8 +2292,8 @@ long sys_kcmp(SYSCALL_ARGS) {
     if (type < KCMP_FILE || type >= KCMP_EPOLL_TFD)
         return -err::INVAL;
     LockGuard guard(proc::table_lock());
-    Process* p1 = proc::find(static_cast<int>(a0));
-    Process* p2 = proc::find(static_cast<int>(a1));
+    Process* p1 = proc::find_visible(static_cast<int>(a0), proc::current());
+    Process* p2 = proc::find_visible(static_cast<int>(a1), proc::current());
     if (!p1 || !p2)
         return -err::SRCH;
     Process* self = proc::current();
@@ -2038,6 +2315,15 @@ long sys_kcmp(SYSCALL_ARGS) {
         y = p2;
     }
     return x == y ? 0 : reinterpret_cast<uptr>(x) < reinterpret_cast<uptr>(y) ? 1 : 2;
+}
+
+long socket_vectored(u64 fd, const KIoVec* iov, u64 count, bool write, bool* is_socket) {
+    *is_socket = false;
+    FileRef f(proc::current(), static_cast<long>(fd));
+    if (!f || (f->inode->mode & S_IFMT) != S_IFSOCK)
+        return 0;
+    *is_socket = true;
+    return vectored_socket(f.get(), iov, count, write);
 }
 
 void register_file() {

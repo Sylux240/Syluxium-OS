@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Android App Installer
+Comment=Install an Android app (.apk)
+Exec=syluxium-apk-install %f
+Icon=android
+MimeType=application/vnd.android.package-archive;
+InitialPreference=12
+NoDisplay=true
+Categories=System;PackageManager;

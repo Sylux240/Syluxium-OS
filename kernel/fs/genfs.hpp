@@ -29,6 +29,11 @@ public:
     GeneratedFile(Generator gen, const void* ctx, u32 perms = 0444);
     isize read(u64 offset, void* buf, usize count) override;
     bool seekable() const override { return true; }
+    bool epoll_regular() const override { return true; }
+    // Edge-triggered epoll on /proc files (libmount watches mountinfo with
+    // EPOLLIN | EPOLLET): one event, then another only when the mount table
+    // changes, as on Linux. Without it libmount re-read mountinfo endlessly.
+    u64 poll_generation() const override { return 1 + vfs::mount_generation(); }
 
 private:
     Generator m_gen;

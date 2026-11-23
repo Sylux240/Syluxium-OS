@@ -22,6 +22,9 @@ public:
     dev::Device* hw = nullptr;
     Device* parent = nullptr;  // partitions: the disk they're on
     bool removable = false;    // USB sticks, card readers (/sys/block/<name>/removable)
+    // Not cached here (loop devices: their file is cached by its own disk, and
+    // reading it through the cache from inside the cache would deadlock).
+    bool uncached = false;
 
     u64 size_bytes() const { return sector_count * sector_size; }
 

@@ -31,6 +31,13 @@ void register_ipc();
 void register_inotify();
 void register_compat(); // 32-bit (ia32) table + int $0x80 gate (compat32.cpp)
 
+// readv/writev on a socket as one message (iovecs already in kernel memory,
+// pointing at user buffers). *is_socket false: fd isn't one, nothing done.
+struct KIoVec {
+    u64 base, len;
+};
+long socket_vectored(u64 fd, const KIoVec* iov, u64 count, bool write, bool* is_socket);
+
 } // namespace syscall
 
 // Shorthand for handler definitions.

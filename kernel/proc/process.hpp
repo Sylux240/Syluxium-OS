@@ -55,6 +55,43 @@ struct PidNs {
     u32 refs = 1;            // one per process in it
 };
 
+// A user namespace (clone/unshare CLONE_NEWUSER, also without privileges:
+// bubblewrap, Chromium's sandbox). Its ids map onto the parent's through
+// uid_map/gid_map (written once, through /proc/<pid>/{uid,gid}_map). The
+// kernel keeps checking files and signals by the real (host) ids; a
+// process holds every capability *inside* the namespace it created (until
+// it execs a program as a non-root id there), which lets it set up its own
+// mount, PID, UTS, IPC and network namespaces, mount there, chroot and
+// pivot_root, but never touch what the rest of the system sees.
+struct UserNs {
+    struct Extent {
+        u32 first, lower, count; // ns ids [first, first + count) are parent ids [lower, ...)
+    };
+    static constexpr u32 MAX_EXTENTS = 5;
+    UserNs* parent = nullptr; // nullptr: made from the system's
+    u32 owner = 0;            // host uid of its creator
+    Extent uid[MAX_EXTENTS], gid[MAX_EXTENTS];
+    u32 nuid = 0, ngid = 0;
+    bool uid_written = false, gid_written = false;
+    bool setgroups_deny = false;
+    u32 refs = 1;
+};
+void userns_get(UserNs* ns);
+void userns_put(UserNs* ns);
+// The current process's view of ids: host -> namespace (65534 when not
+// mapped) and namespace -> host (false when not mapped).
+u32 uid_to_ns(u32 kuid);
+u32 gid_to_ns(u32 kgid);
+bool uid_from_ns(u32 uid, u32* kuid);
+bool gid_from_ns(u32 gid, u32* kgid);
+u32 id_in_ns(UserNs* ns, u32 host_id, bool gid); // a host id as `ns` names it (65534: not mapped)
+// Privileged inside the caller's own namespaces: host root, or the holder
+// of capabilities in its user namespace.
+bool ns_capable();
+// ns_capable() and the mount namespace belongs to that user namespace:
+// mounting, chroot and pivot_root without host privileges.
+bool mounts_capable();
+
 // Host and domain name (UTS namespace): shared until unshare(CLONE_NEWUTS).
 struct Uts {
     char nodename[65] = "syluxium";
@@ -74,6 +111,7 @@ struct Process {
     vfs::Inode* ctty = nullptr; // controlling terminal (what /dev/tty opens); nullptr = the console
     char name[64] = {};
     char exe_path[256] = {};
+    vfs::Inode* exe_inode = nullptr; // the program file (kept alive by its mappings): /proc/<pid>/exe
 
     Memory* mem = nullptr;
     bool compat = false;  // a 32-bit (ia32) program: compat syscalls, 32-bit signal frames, < 4 GiB
@@ -90,6 +128,14 @@ struct Process {
     int vpid = 0;               // pid inside pidns (= pid in the system's)
     PidNs* child_pidns = nullptr; // setns(pid): where our children will live
     Uts* uts = nullptr;         // nullptr: the system's
+    UserNs* userns = nullptr;   // nullptr: the system's
+    bool ns_caps = false;       // every capability inside `userns`
+    bool own_mounts = false;    // mntns was made inside `userns` (mounts_capable)
+    bool no_new_privs = false;  // prctl(PR_SET_NO_NEW_PRIVS): setuid/setgid bits are ignored by exec
+    // clone(CLONE_FS) without CLONE_THREAD: the parent shares this process's
+    // file system context; a chroot here changes the parent's root too
+    // (Chromium's sandbox chroots its zygote that way). 0 = none.
+    int fs_shared_with = 0;
     // ITIMER_REAL / alarm(): absolute deadline (clock ns, 0 = off) and reload interval.
     u64 alarm_deadline = 0, alarm_interval = 0;
     u32 umask = 022;
@@ -165,6 +211,10 @@ int wait(Process* p);
 // System call implementations.
 long do_clone(interrupts::Frame* frame, u64 flags, u64 new_sp, u64 parent_tid, u64 child_tid, u64 tls);
 long do_execve(interrupts::Frame* frame, const char* path, const char* const* argv, const char* const* envp);
+// execveat: run an inode already found (an fd's file, e.g. a memfd); `path`
+// names it for argv-less uses (/proc/self/exe, "#!" scripts).
+long do_execve_inode(interrupts::Frame* frame, vfs::Inode* inode, const char* path, const char* const* argv,
+                     const char* const* envp);
 long do_wait4(int pid, int* status_out, int options, u32* uid_out = nullptr);
 
 // End the whole current process (all threads) with a wait() status word

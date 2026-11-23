@@ -66,6 +66,16 @@ constexpr u32 KEEP = 0xFFFFFFFF; // -1: leave this id alone
 
 bool one_of(u32 v, u32 a, u32 b, u32 c) { return v == a || v == b || v == c; }
 
+// Ids as the caller names them (inside its user namespace) -> host ids.
+// -1 stays -1; an id the namespace doesn't map is invalid.
+bool from_ns(u32* id, bool gid) {
+    if (*id == KEEP)
+        return true;
+    return gid ? proc::gid_from_ns(*id, id) : proc::uid_from_ns(*id, id);
+}
+// May change ids freely: root, or capabilities in its user namespace.
+bool id_privileged() { return proc::ns_capable(); }
+
 // setresuid/setresgid core: unprivileged callers may only shuffle their own ids.
 long set_res(u32* real, u32* eff, u32* saved, u32* fs, u32 r, u32 e, u32 sv, bool privileged) {
     if (!privileged) {
@@ -82,16 +92,18 @@ long set_res(u32* real, u32* eff, u32* saved, u32* fs, u32 r, u32 e, u32 sv, boo
 
 } // namespace
 
-long sys_getuid(SYSCALL_ARGS) { SYSCALL_UNUSED; return my_cred().ruid; }
-long sys_geteuid(SYSCALL_ARGS) { SYSCALL_UNUSED; return my_cred().euid; }
-long sys_getgid(SYSCALL_ARGS) { SYSCALL_UNUSED; return my_cred().rgid; }
-long sys_getegid(SYSCALL_ARGS) { SYSCALL_UNUSED; return my_cred().egid; }
+long sys_getuid(SYSCALL_ARGS) { SYSCALL_UNUSED; return proc::uid_to_ns(my_cred().ruid); }
+long sys_geteuid(SYSCALL_ARGS) { SYSCALL_UNUSED; return proc::uid_to_ns(my_cred().euid); }
+long sys_getgid(SYSCALL_ARGS) { SYSCALL_UNUSED; return proc::gid_to_ns(my_cred().rgid); }
+long sys_getegid(SYSCALL_ARGS) { SYSCALL_UNUSED; return proc::gid_to_ns(my_cred().egid); }
 
 long sys_setuid(SYSCALL_ARGS) {
     SYSCALL_UNUSED;
     proc::Cred& c = my_cred();
     u32 uid = static_cast<u32>(a0);
-    if (c.euid == 0) {
+    if (!from_ns(&uid, false))
+        return -err::INVAL;
+    if (id_privileged()) {
         c.ruid = c.euid = c.suid = c.fsuid = uid;
         return 0;
     }
@@ -105,7 +117,9 @@ long sys_setgid(SYSCALL_ARGS) {
     SYSCALL_UNUSED;
     proc::Cred& c = my_cred();
     u32 gid = static_cast<u32>(a0);
-    if (c.euid == 0) {
+    if (!from_ns(&gid, true))
+        return -err::INVAL;
+    if (id_privileged()) {
         c.rgid = c.egid = c.sgid = c.fsgid = gid;
         return 0;
     }
@@ -119,8 +133,10 @@ long sys_setreuid(SYSCALL_ARGS) {
     SYSCALL_UNUSED;
     proc::Cred& c = my_cred();
     u32 r = static_cast<u32>(a0), e = static_cast<u32>(a1);
-    if (c.euid != 0 && ((r != KEEP && r != c.ruid && r != c.euid) ||
-                        (e != KEEP && !one_of(e, c.ruid, c.euid, c.suid))))
+    if (!from_ns(&r, false) || !from_ns(&e, false))
+        return -err::INVAL;
+    if (!id_privileged() && ((r != KEEP && r != c.ruid && r != c.euid) ||
+                             (e != KEEP && !one_of(e, c.ruid, c.euid, c.suid))))
         return -err::PERM;
     u32 old_ruid = c.ruid;
     if (r != KEEP) c.ruid = r;
@@ -135,8 +151,10 @@ long sys_setregid(SYSCALL_ARGS) {
     SYSCALL_UNUSED;
     proc::Cred& c = my_cred();
     u32 r = static_cast<u32>(a0), e = static_cast<u32>(a1);
-    if (c.euid != 0 && ((r != KEEP && r != c.rgid && r != c.egid) ||
-                        (e != KEEP && !one_of(e, c.rgid, c.egid, c.sgid))))
+    if (!from_ns(&r, true) || !from_ns(&e, true))
+        return -err::INVAL;
+    if (!id_privileged() && ((r != KEEP && r != c.rgid && r != c.egid) ||
+                             (e != KEEP && !one_of(e, c.rgid, c.egid, c.sgid))))
         return -err::PERM;
     u32 old_rgid = c.rgid;
     if (r != KEEP) c.rgid = r;
@@ -150,33 +168,37 @@ long sys_setregid(SYSCALL_ARGS) {
 long sys_setresuid(SYSCALL_ARGS) {
     SYSCALL_UNUSED;
     proc::Cred& c = my_cred();
-    return set_res(&c.ruid, &c.euid, &c.suid, &c.fsuid, static_cast<u32>(a0), static_cast<u32>(a1),
-                   static_cast<u32>(a2), c.euid == 0);
+    u32 r = static_cast<u32>(a0), e = static_cast<u32>(a1), s = static_cast<u32>(a2);
+    if (!from_ns(&r, false) || !from_ns(&e, false) || !from_ns(&s, false))
+        return -err::INVAL;
+    return set_res(&c.ruid, &c.euid, &c.suid, &c.fsuid, r, e, s, id_privileged());
 }
 
 long sys_setresgid(SYSCALL_ARGS) {
     SYSCALL_UNUSED;
     proc::Cred& c = my_cred();
-    return set_res(&c.rgid, &c.egid, &c.sgid, &c.fsgid, static_cast<u32>(a0), static_cast<u32>(a1),
-                   static_cast<u32>(a2), c.euid == 0);
+    u32 r = static_cast<u32>(a0), e = static_cast<u32>(a1), s = static_cast<u32>(a2);
+    if (!from_ns(&r, true) || !from_ns(&e, true) || !from_ns(&s, true))
+        return -err::INVAL;
+    return set_res(&c.rgid, &c.egid, &c.sgid, &c.fsgid, r, e, s, id_privileged());
 }
 
 long sys_setfsuid(SYSCALL_ARGS) {
     SYSCALL_UNUSED;
     proc::Cred& c = my_cred();
     u32 old = c.fsuid, u = static_cast<u32>(a0);
-    if (c.euid == 0 || one_of(u, c.ruid, c.euid, c.suid) || u == c.fsuid)
+    if (from_ns(&u, false) && u != KEEP && (id_privileged() || one_of(u, c.ruid, c.euid, c.suid) || u == c.fsuid))
         c.fsuid = u;
-    return old;
+    return proc::uid_to_ns(old);
 }
 
 long sys_setfsgid(SYSCALL_ARGS) {
     SYSCALL_UNUSED;
     proc::Cred& c = my_cred();
     u32 old = c.fsgid, g = static_cast<u32>(a0);
-    if (c.euid == 0 || one_of(g, c.rgid, c.egid, c.sgid) || g == c.fsgid)
+    if (from_ns(&g, true) && g != KEEP && (id_privileged() || one_of(g, c.rgid, c.egid, c.sgid) || g == c.fsgid))
         c.fsgid = g;
-    return old;
+    return proc::gid_to_ns(old);
 }
 
 long sys_getgroups(SYSCALL_ARGS) {
@@ -189,7 +211,10 @@ long sys_getgroups(SYSCALL_ARGS) {
         return c.ngroups;
     if (static_cast<u32>(size) < c.ngroups)
         return -err::INVAL;
-    if (long r = uaccess::copy_to(reinterpret_cast<void*>(a1), c.groups, c.ngroups * sizeof(u32)); r < 0)
+    u32 shown[proc::NGROUPS_MAX];
+    for (u32 i = 0; i < c.ngroups; i++)
+        shown[i] = proc::gid_to_ns(c.groups[i]);
+    if (long r = uaccess::copy_to(reinterpret_cast<void*>(a1), shown, c.ngroups * sizeof(u32)); r < 0)
         return r;
     return c.ngroups;
 }
@@ -197,13 +222,20 @@ long sys_getgroups(SYSCALL_ARGS) {
 long sys_setgroups(SYSCALL_ARGS) {
     SYSCALL_UNUSED;
     proc::Cred& c = my_cred();
-    if (c.euid != 0)
+    if (!id_privileged())
+        return -err::PERM;
+    // In a user namespace: only once its gid_map is written, and not after
+    // "deny" went into /proc/<pid>/setgroups (unprivileged maps require it).
+    if (proc::UserNs* ns = proc::current()->userns; ns && (ns->setgroups_deny || !ns->gid_written))
         return -err::PERM;
     if (a0 > proc::NGROUPS_MAX)
         return -err::INVAL;
     u32 groups[proc::NGROUPS_MAX];
     if (a0 && uaccess::copy_from(groups, reinterpret_cast<const void*>(a1), a0 * sizeof(u32)) < 0)
         return -err::FAULT;
+    for (u64 i = 0; i < a0; i++)
+        if (!from_ns(&groups[i], true))
+            return -err::INVAL;
     memcpy(c.groups, groups, a0 * sizeof(u32));
     c.ngroups = static_cast<u32>(a0);
     return 0;
@@ -379,6 +411,61 @@ long sys_execve(SYSCALL_ARGS) {
     return r;
 }
 
+// execveat(dirfd, path, argv, envp, flags): execve with the path relative to
+// dirfd, or (AT_EMPTY_PATH, empty path) the file dirfd itself: fexecve, which
+// LXC uses to re-run itself from a memfd.
+long sys_execveat(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    constexpr long AT_FDCWD = -100;
+    constexpr u32 AT_SYMLINK_NOFOLLOW = 0x100, AT_EMPTY_PATH = 0x1000;
+    int dirfd = static_cast<int>(a0);
+    u32 flags = static_cast<u32>(a4);
+    if (flags & ~(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH))
+        return -err::INVAL;
+    char* path = static_cast<char*>(kmalloc(4096));
+    if (!path)
+        return -err::NOMEM;
+    long r = uaccess::string_from(reinterpret_cast<const char*>(a1), path, 4096);
+    StringVector argv, envp;
+    if (r >= 0)
+        r = argv.copy_from_user(a2);
+    if (r >= 0)
+        r = envp.copy_from_user(a3);
+    if (r >= 0) {
+        if (path[0] == '/' || (path[0] && dirfd == static_cast<int>(AT_FDCWD))) {
+            r = proc::do_execve(frame, path, argv.get(), envp.get());
+        } else if (!path[0] && !(flags & AT_EMPTY_PATH)) {
+            r = -err::NOENT;
+        } else if (vfs::File* f = proc::fd_get(proc::current(), dirfd)) {
+            if (!path[0]) {
+                char name[300];
+                if (f->path)
+                    snprintf(name, sizeof(name), "%s", f->path);
+                else
+                    snprintf(name, sizeof(name), "/dev/fd/%d", dirfd);
+                r = proc::do_execve_inode(frame, f->inode, name, argv.get(), envp.get());
+            } else if (!vfs::is_dir(f->inode->mode) || !f->path) {
+                r = vfs::is_dir(f->inode->mode) ? -err::NOENT : -err::NOTDIR;
+            } else {
+                // Relative to the directory: by its absolute path.
+                char* full = static_cast<char*>(kmalloc(8192));
+                if (!full) {
+                    r = -err::NOMEM;
+                } else {
+                    snprintf(full, 8192, "%s/%s", f->path, path);
+                    r = proc::do_execve(frame, full, argv.get(), envp.get());
+                    kfree(full);
+                }
+            }
+            vfs::file_put(f);
+        } else {
+            r = -err::BADF;
+        }
+    }
+    kfree(path);
+    return r;
+}
+
 // waitid(idtype, id, siginfo*, options, rusage*): wait with the child's
 // status in a siginfo (CLD_EXITED/KILLED/DUMPED, pid, uid, status).
 long sys_waitid(SYSCALL_ARGS) {
@@ -496,6 +583,18 @@ long sys_tgkill(SYSCALL_ARGS) {
     if (a2)
         signal::send_thread(t, static_cast<int>(a2), signal::SI_TKILL);
     return 0;
+}
+
+// rt_sigqueueinfo / rt_tgsigqueueinfo: signals with a payload (Android's
+// libc and BoringSSL's self-tests). Delivered like kill / tgkill; the payload
+// (si_value) isn't carried yet.
+long sys_rt_sigqueueinfo(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    return sys_kill(a0, a1, 0, 0, 0, 0, frame);
+}
+long sys_rt_tgsigqueueinfo(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    return sys_tgkill(a0, a1, a2, 0, 0, 0, frame);
 }
 
 long sys_tkill(SYSCALL_ARGS) {
@@ -799,6 +898,8 @@ long sys_prlimit64(SYSCALL_ARGS) {
     return 0; // setting limits: accepted, not enforced yet
 }
 
+long sys_setrlimit(SYSCALL_ARGS) { SYSCALL_UNUSED; return 0; } // accepted, not enforced yet (as prlimit64)
+
 long sys_getrlimit(SYSCALL_ARGS) {
     SYSCALL_UNUSED;
     return uaccess::put(reinterpret_cast<RLimit*>(a1), default_limit(static_cast<u32>(a0)));
@@ -844,10 +945,22 @@ long put_ids(u64 pr, u64 pe, u64 ps, u32 r, u32 e, u32 sv) {
     if (long x = uaccess::put(reinterpret_cast<u32*>(pe), e); x < 0) return x;
     return uaccess::put(reinterpret_cast<u32*>(ps), sv);
 }
-long sys_getresuid(SYSCALL_ARGS) { SYSCALL_UNUSED; proc::Cred& c = my_cred(); return put_ids(a0, a1, a2, c.ruid, c.euid, c.suid); }
-long sys_getresgid(SYSCALL_ARGS) { SYSCALL_UNUSED; proc::Cred& c = my_cred(); return put_ids(a0, a1, a2, c.rgid, c.egid, c.sgid); }
+long sys_getresuid(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    proc::Cred& c = my_cred();
+    return put_ids(a0, a1, a2, proc::uid_to_ns(c.ruid), proc::uid_to_ns(c.euid), proc::uid_to_ns(c.suid));
+}
+long sys_getresgid(SYSCALL_ARGS) {
+    SYSCALL_UNUSED;
+    proc::Cred& c = my_cred();
+    return put_ids(a0, a1, a2, proc::gid_to_ns(c.rgid), proc::gid_to_ns(c.egid), proc::gid_to_ns(c.sgid));
+}
 
-// capget/capset: everything runs as root with every capability.
+// capget/capset: root (or a process with capabilities in its user
+// namespace) has every capability, everyone else none, as Linux reports
+// them; bubblewrap refuses to run unprivileged when it sees capabilities it
+// shouldn't have, and Chromium's sandbox checks them after each step.
+// capset may drop them (it does nothing else).
 long sys_capget(SYSCALL_ARGS) {
     SYSCALL_UNUSED;
     struct Header {
@@ -863,7 +976,20 @@ long sys_capget(SYSCALL_ARGS) {
         return a1 ? -err::INVAL : 0;
     }
     if (a1) {
+        bool full;
+        if (h.pid == 0 || h.pid == proc::current()->vpid) {
+            Process* me = proc::current();
+            full = me->userns ? me->ns_caps : me->cred.euid == 0;
+        } else {
+            LockGuard guard(proc::table_lock());
+            Process* t = proc::find_visible(h.pid, proc::current());
+            if (!t)
+                return -err::SRCH;
+            full = t->userns ? t->ns_caps : t->cred.euid == 0;
+        }
         u32 data[6] = {0xFFFFFFFF, 0xFFFFFFFF, 0, 0x000001FF, 0x000001FF, 0}; // effective, permitted, inheritable x2
+        if (!full)
+            memset(data, 0, sizeof(data));
         int words = h.version == 0x19980330 ? 3 : 6;
         return uaccess::copy_to(reinterpret_cast<void*>(a1), data, static_cast<usize>(words) * 4);
     }
@@ -872,6 +998,27 @@ long sys_capget(SYSCALL_ARGS) {
 
 long sys_capset(SYSCALL_ARGS) {
     SYSCALL_UNUSED;
+    struct Header {
+        u32 version;
+        i32 pid;
+    } h;
+    if (long r = uaccess::get(&h, reinterpret_cast<Header*>(a0)); r < 0)
+        return r;
+    if (h.pid != 0 && h.pid != proc::current()->vpid)
+        return -err::PERM;
+    u32 data[6] = {};
+    int words = h.version == 0x19980330 ? 3 : 6;
+    if (a1 && uaccess::copy_from(data, reinterpret_cast<const void*>(a1), static_cast<usize>(words) * 4) < 0)
+        return -err::FAULT;
+    Process* me = proc::current();
+    bool want_any = data[0] | data[1] | (words == 6 ? data[3] | data[4] : 0);
+    bool have = me->userns ? me->ns_caps : me->cred.euid == 0;
+    if (want_any && !have)
+        return -err::PERM; // can't gain capabilities
+    // Dropping every capability inside a user namespace is real (sandboxes
+    // check it); root outside one stays root by its uid.
+    if (!want_any && me->userns)
+        me->ns_caps = false;
     return 0;
 }
 
@@ -945,6 +1092,16 @@ long sys_reboot(SYSCALL_ARGS) {
         return 0;
     if (cmd != RESTART && cmd != RESTART2 && cmd != HALT && cmd != POWER_OFF)
         return -err::INVAL;
+    // Inside a PID namespace (a container: Android's init) a reboot ends the
+    // namespace, not the machine: its init dies (and with it everything in it).
+    if (Process* me = proc::current(); me->pidns) {
+        klog::info("%s[%d]: %s inside a PID namespace: ending the namespace", me->name, me->pid,
+                   cmd == POWER_OFF || cmd == HALT ? "power off" : "restart");
+        LockGuard guard(proc::table_lock());
+        if (Process* init = me->pidns->init)
+            signal::send(init, 9 /* SIGKILL */);
+        return 0;
+    }
     // Each step is logged and the boot log saved after it, so a shutdown
     // that hangs (a disk that never answers, firmware that ignores the
     // power-off) shows where on the stick.
@@ -1035,9 +1192,14 @@ long sys_prctl(SYSCALL_ARGS) {
         return uaccess::copy_to(reinterpret_cast<void*>(a1), name, 16);
     }
     case PR_GET_DUMPABLE: return 1;
-    case PR_SET_DUMPABLE: case PR_SET_PDEATHSIG: case PR_SET_NO_NEW_PRIVS: return 0;
+    case PR_SET_DUMPABLE: case PR_SET_PDEATHSIG: return 0;
+    case PR_SET_NO_NEW_PRIVS: // one way: setuid/setgid bits are ignored from now on (exec)
+        if (a1 != 1 || a2 || a3 || a4)
+            return -err::INVAL;
+        proc::current()->no_new_privs = true;
+        return 0;
     case PR_GET_PDEATHSIG: return uaccess::put(reinterpret_cast<i32*>(a1), 0);
-    case PR_GET_NO_NEW_PRIVS: return 0;
+    case PR_GET_NO_NEW_PRIVS: return proc::current()->no_new_privs ? 1 : 0;
     // Capabilities (libcap-ng, daemons dropping privileges): every process is
     // root with every capability, so these succeed without changing anything.
     case 7:  return 0;                       // PR_GET_KEEPCAPS
@@ -1196,7 +1358,9 @@ proc::Uts* own_uts() {
 }
 
 long set_name(u64 user, u64 len, bool host) {
-    if (!proc::capable())
+    // Root, or the owner of a user namespace with its own UTS namespace.
+    Process* me = proc::current();
+    if (!proc::ns_capable() || (me->userns && !me->uts))
         return -err::PERM;
     if (len > 64)
         return -err::INVAL;
@@ -1222,13 +1386,37 @@ long sys_unshare(SYSCALL_ARGS) {
                           CLONE_NEWNET | CLONE_NEWTIME | CLONE_FS | CLONE_FILES | CLONE_SYSVSEM;
     if (flags & ~known)
         return -err::INVAL;
-    if ((flags & (known & ~(CLONE_FS | CLONE_FILES | CLONE_SYSVSEM | CLONE_NEWUSER))) && !proc::capable())
+    Process* me = proc::current();
+    // CLONE_NEWUSER first: the capabilities it brings cover the other new
+    // namespaces in the same call (unprivileged sandboxes: unshare -Urm, bwrap).
+    if (flags & CLONE_NEWUSER) {
+        if (me->live_threads > 1)
+            return -err::INVAL; // as Linux: only a single-threaded process
+        auto* ns = new proc::UserNs;
+        ns->parent = me->userns;
+        proc::userns_get(ns->parent);
+        ns->owner = me->cred.euid;
+        ns->setgroups_deny = ns->parent && ns->parent->setgroups_deny; // inherited, as on Linux
+        proc::UserNs* old = me->userns;
+        me->userns = ns;
+        me->ns_caps = true;
+        me->own_mounts = false;
+        proc::userns_put(old);
+    }
+    if ((flags & (known & ~(CLONE_FS | CLONE_FILES | CLONE_SYSVSEM | CLONE_NEWUSER))) && !proc::ns_capable())
         return -err::PERM;
     if (flags & CLONE_NEWNS) { // a private copy of the mount table
-        Process* p = proc::current();
-        void* old = p->mntns;
-        p->mntns = vfs::mount_ns_copy(old);
+        void* old = me->mntns;
+        me->mntns = vfs::mount_ns_copy(old);
         vfs::mount_ns_put(old);
+        if (me->userns)
+            me->own_mounts = true;
+    }
+    if (flags & CLONE_NEWPID) { // the children go into a new PID namespace (the first is its init)
+        if (me->pidns || me->child_pidns)
+            return -err::INVAL; // one level of PID namespaces
+        auto* ns = new proc::PidNs;
+        me->child_pidns = ns;
     }
     if (flags & CLONE_NEWUTS) {
         Process* p = proc::current();
@@ -1290,12 +1478,13 @@ long sys_setns(SYSCALL_ARGS) {
 
 long sys_personality(SYSCALL_ARGS) {
     SYSCALL_UNUSED;
-    // PER_LINUX (with flags such as ADDR_NO_RANDOMIZE) only; 0xffffffff queries.
+    // PER_LINUX (with flags such as ADDR_NO_RANDOMIZE) and PER_LINUX32 (8:
+    // Android's 32-bit libc sets it); 0xffffffff queries.
     Process* me = proc::current();
     u32 old = me->personality;
     if (a0 == 0xffffffff)
         return old;
-    if ((a0 & 0xff) != 0)
+    if ((a0 & 0xff) != 0 && (a0 & 0xff) != 8)
         return -err::INVAL;
     me->personality = static_cast<u32>(a0);
     return old;
@@ -1504,6 +1693,7 @@ void register_process() {
     set(57, sys_fork, "fork");
     set(58, sys_vfork, "vfork");
     set(59, sys_execve, "execve");
+    set(322, sys_execveat, "execveat");
     set(61, sys_wait4, "wait4");
     set(62, sys_kill, "kill");
     set(130, sys_rt_sigsuspend, "rt_sigsuspend");
@@ -1525,6 +1715,9 @@ void register_process() {
     set(273, sys_set_robust_list, "set_robust_list");
     set(274, sys_get_robust_list, "get_robust_list");
     set(302, sys_prlimit64, "prlimit64");
+    set(160, sys_setrlimit, "setrlimit");
+    set(129, sys_rt_sigqueueinfo, "rt_sigqueueinfo");
+    set(297, sys_rt_tgsigqueueinfo, "rt_tgsigqueueinfo");
     set(318, sys_getrandom, "getrandom");
     set(309, sys_getcpu, "getcpu");
     set(157, sys_prctl, "prctl");

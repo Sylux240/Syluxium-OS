@@ -30,6 +30,9 @@ Inode* top_dir() {
     Inode* r = g_process_root ? g_process_root() : nullptr;
     return r ? r : g_root;
 }
+Inode* cross_down(Inode* dir);
+// The same, with whatever the caller has mounted on it.
+Inode* process_top() { return cross_down(top_dir()); }
 
 // ---- Mount table ----
 // A mount covers a directory (any file system) with another file system's
@@ -55,6 +58,7 @@ struct MountTable {
     Mount mounts[MAX_MOUNTS];
     usize count = 0;
     u32 refs = 1;
+    bool pivoted = false; // pivot_root ran in it: the system's root shows only as its put_old mount
 };
 MountTable g_system_mounts;
 void* (*g_process_mounts)() = nullptr; // set by the process layer
@@ -101,13 +105,16 @@ long follow(Inode* link, Inode* dir, Inode** out, int depth) {
     if (n < 0)
         return n;
     target[n] = 0;
-    return resolve_impl(target, dir, true, out, depth + 1, top_dir());
+    return resolve_impl(target, dir, true, out, depth + 1, process_top());
 }
 
 // `top`: the "/" of this walk (absolute paths start there, ".." stops there).
 long resolve_impl(const char* path, Inode* cwd, bool follow_last, Inode** out, int depth, Inode* top) {
     if (!path || !*path)
         return -err::NOENT;
+    // (`top` is already crossed: something mounted on "/" itself - a
+    // container's root bound over it, as LXC does when it can't pivot_root -
+    // is what "/" shows; see process_top().)
     Inode* node = (*path == '/' || !cwd) ? top : cwd;
 
     const char* p = path;
@@ -137,6 +144,17 @@ long resolve_impl(const char* path, Inode* cwd, bool follow_last, Inode** out, i
         if (len == 1 && start[0] == '.')
             continue;
         if (len == 2 && start[0] == '.' && start[1] == '.') {
+            // ".." from a root that something has been mounted over (from
+            // underneath, by a working directory kept there) leads into what
+            // was mounted: Linux's behaviour, which LXC relies on to reach a
+            // container's root ("It is weird, but chdir("..") moves us in a new root").
+            if (node == g_root || node == top_dir()) {
+                Inode* over = cross_down(node);
+                if (over != node && node != top) {
+                    node = over;
+                    continue;
+                }
+            }
             if (node == g_root || node == top)
                 continue;
             for (Inode* c; node != g_root && node != top && (c = covered_by(node));)
@@ -154,9 +172,13 @@ long resolve_impl(const char* path, Inode* cwd, bool follow_last, Inode** out, i
             return -err::NOENT;
         next = cross_down(next);
         if (is_lnk(next->mode) && (!last || follow_last || trailing_slash)) {
-            long r = follow(next, node, &next, depth);
-            if (r < 0)
-                return r;
+            if (Inode* jump = next->jump_target()) {
+                next = jump;
+            } else if (!next->magic_link()) {
+                long r = follow(next, node, &next, depth);
+                if (r < 0)
+                    return r;
+            }
         }
         node = next;
     }
@@ -164,7 +186,147 @@ long resolve_impl(const char* path, Inode* cwd, bool follow_last, Inode** out, i
     return 0;
 }
 
+// ---- Bind mounts of directories ----
+// Mounts hang on the inode they cover. A bind mount shows the same
+// directories at a second place, so a mount made on one of them through
+// the bind (bubblewrap's tmpfs on /newroot/dev) would also cover the
+// original (/oldroot/dev), and vice versa. Directories seen through a bind
+// therefore get inodes of their own: wrappers that pass every operation to
+// the real directory (and show its submounts, as MS_REC does). A mount on a
+// wrapper covers only that path. Files, devices and links aren't wrapped.
+constexpr u8 KIND_BIND = 0xD1;
+
+class BindDir : public Inode {
+public:
+    Inode* real;
+    BindDir* top; // the bind's root (it keeps the wrappers)
+
+    BindDir(Inode* r, BindDir* root_wrapper, Inode* parent_wrapper) : real(r), top(root_wrapper ? root_wrapper : this) {
+        anon_kind = KIND_BIND;
+        parent = parent_wrapper ? parent_wrapper : this;
+        sync();
+    }
+
+    void sync() {
+        ino = real->ino;
+        mode = real->mode;
+        nlink = real->nlink;
+        uid = real->uid;
+        gid = real->gid;
+        size = real->size;
+        rdev = real->rdev;
+        dev = real->dev;
+        atime = real->atime;
+        mtime = real->mtime;
+        ctime = real->ctime;
+    }
+
+    // The wrapper for a directory below this one: one per real directory
+    // (`key`, as its parent's lookup gives it) and bind. `shown` is what the
+    // bind shows there: the directory, or what was mounted on it when the bind
+    // first looked. It keeps showing that, as Linux's MS_REC copies of the
+    // submounts outlive the originals (bubblewrap unmounts its staging tmpfs
+    // on /tmp and keeps a tmpfs of its own mounted inside the bind).
+    Inode* wrap(Inode* key, Inode* shown) {
+        if (Inode* w = cached(key))
+            return w;
+        if (!is_dir(shown->mode))
+            return shown;
+        auto* w = new BindDir(shown, top, this);
+        auto* c = new Cached{key, w, nullptr};
+        LockGuard guard(top->m_cache_lock);
+        for (Cached* o = top->m_cache; o; o = o->next)
+            if (o->key == key) { // made by someone else meanwhile
+                delete c;
+                delete w;
+                return o->wrapper;
+            }
+        c->next = top->m_cache;
+        top->m_cache = c;
+        return w;
+    }
+    Inode* cached(Inode* key) {
+        LockGuard guard(top->m_cache_lock);
+        for (Cached* c = top->m_cache; c; c = c->next)
+            if (c->key == key) {
+                c->wrapper->sync();
+                return c->wrapper;
+            }
+        return nullptr;
+    }
+
+    Inode* lookup(const char* name, usize len) override {
+        Inode* c = real->lookup(name, len);
+        if (!c)
+            return nullptr;
+        if (Inode* w = cached(c))
+            return w;
+        return wrap(c, cross_down(c)); // the real directory's submounts show through (MS_REC)
+    }
+    long create(const char* name, usize len, u32 new_mode, const char* target, Inode** out) override {
+        long r = real->create(name, len, new_mode, target, out);
+        if (r == 0 && out && *out)
+            *out = wrap(*out, *out);
+        sync();
+        return r;
+    }
+    long unlink(const char* name, usize len, bool remove_dir) override {
+        long r = real->unlink(name, len, remove_dir);
+        sync();
+        return r;
+    }
+    long readdir(u64 index, DirEntry* out) override { return real->readdir(index, out); }
+    long rename(const char* old_name, usize old_len, Inode* new_dir, const char* new_name, usize new_len) override {
+        long r = real->rename(old_name, old_len, unwrap(new_dir), new_name, new_len);
+        sync();
+        return r;
+    }
+    long link(const char* name, usize len, Inode* target) override { return real->link(name, len, unwrap(target)); }
+    long statfs(FsStats* out) override { return real->statfs(out); }
+    long set_owner(u32 new_mode, u32 new_uid, u32 new_gid) override {
+        long r = real->set_owner(new_mode, new_uid, new_gid);
+        sync();
+        return r;
+    }
+    long set_times(Timespec access, Timespec modify) override {
+        long r = real->set_times(access, modify);
+        sync();
+        return r;
+    }
+    long revalidate() override {
+        long r = real->revalidate();
+        sync();
+        return r;
+    }
+    isize read(u64 offset, void* buf, usize count) override { return real->read(offset, buf, count); }
+    bool seekable() const override { return real->seekable(); }
+    void on_open(File* f) override { real->on_open(f); }
+    void on_release(File* f) override { real->on_release(f); }
+    u16 poll(File* f) override { return real->poll(f); }
+
+private:
+    struct Cached {
+        Inode* key; // the real directory the parent's lookup gave
+        BindDir* wrapper;
+        Cached* next;
+    };
+    Cached* m_cache = nullptr; // (the root's)
+    Spinlock m_cache_lock;
+};
+
 } // namespace
+
+Inode* unwrap(Inode* n) {
+    while (n && n->anon_kind == KIND_BIND)
+        n = static_cast<BindDir*>(n)->real;
+    return n;
+}
+
+Inode* bind_source(Inode* src) {
+    if (!is_dir(src->mode))
+        return src;
+    return new BindDir(unwrap(src), nullptr, nullptr);
+}
 
 long Inode::statfs(FsStats* out) {
     // RAM-backed: report system memory, like tmpfs.
@@ -194,9 +356,10 @@ void init() {
 Inode* root() { return g_root; }
 
 long resolve(const char* path, Inode* cwd, bool follow_last, Inode** out) {
-    return resolve_impl(path, cwd, follow_last, out, 0, top_dir());
+    return resolve_impl(path, cwd, follow_last, out, 0, process_top());
 }
 
+// (The global walk ignores what the caller has mounted on "/": a container's root.)
 long resolve_global(const char* path, Inode** out) { return resolve_impl(path, nullptr, true, out, 0, g_root); }
 
 void set_process_root_hook(Inode* (*fn)()) { g_process_root = fn; }
@@ -225,7 +388,7 @@ long resolve_parent(const char* path, Inode* cwd, Inode** parent, const char** n
 
     Inode* dir;
     if (name_start == 0) {
-        dir = (*path == '/' || !cwd) ? top_dir() : cwd;
+        dir = (*path == '/' || !cwd) ? cross_down(top_dir()) : cwd;
     } else {
         char buf[1024];
         if (name_start >= sizeof(buf))
@@ -435,7 +598,13 @@ void file_put(File* f) {
 
 // ---- Mounts ----
 
+namespace {
+u64 g_mount_generation = 0; // grows with every mount table change
+}
+u64 mount_generation() { return __atomic_load_n(&g_mount_generation, __ATOMIC_ACQUIRE); }
+
 long mount_at(const char* path, Inode* fs_root, const char* source, const char* type, const char* options) {
+    __atomic_add_fetch(&g_mount_generation, 1, __ATOMIC_RELEASE); // /proc/<pid>/mount*: a change for EPOLLET waiters
     Inode* target;
     if (long r = resolve(path, nullptr, true, &target); r < 0)
         return r;
@@ -463,7 +632,7 @@ long mount_at(const char* path, Inode* fs_root, const char* source, const char* 
 // The mount `path` names, as the caller sees it: the newest mount whose root
 // `node` (what path resolves to) is, or that covers it, preferring one
 // recorded under that path. Mount lock held.
-long find_mount(const char* path, Inode* node, usize* index) {
+long find_mount(const char* path, Inode* node, Inode* top, usize* index) {
     long best = -1;
     for (usize i = g_mount_count; i-- > 0;) {
         if (g_mounts[i].root != node && g_mounts[i].covered != node)
@@ -476,21 +645,23 @@ long find_mount(const char* path, Inode* node, usize* index) {
             best = static_cast<long>(i);
     }
     if (best < 0)
-        return node == top_dir() ? 1 : -err::INVAL; // pivot_root(".", ".") left nothing to detach
+        return node == top_dir() || node == top ? 1 : -err::INVAL; // pivot_root(".", ".") left nothing to detach
     *index = static_cast<usize>(best);
     return 0;
 }
 
 // MS_MOVE: the mount at `from` now sits on `to`.
 long move_mount(const char* from, const char* to) {
+    __atomic_add_fetch(&g_mount_generation, 1, __ATOMIC_RELEASE); // /proc/<pid>/mount*: a change for EPOLLET waiters
     Inode *target, *node;
     if (long r = resolve(to, nullptr, true, &target); r < 0)
         return r;
     if (long r = resolve(from, nullptr, true, &node); r < 0)
         return r;
+    Inode* top = process_top();
     LockGuard guard(g_mount_lock);
     usize i;
-    if (long r = find_mount(from, node, &i); r != 0)
+    if (long r = find_mount(from, node, top, &i); r != 0)
         return r < 0 ? r : -err::INVAL;
     g_mounts[i].covered = target;
     snprintf(g_mounts[i].path, sizeof(g_mounts[i].path), "%s", to);
@@ -508,13 +679,55 @@ void mount_source(const char* path, char* out, usize size) {
         }
 }
 
-long unmount(const char* path) {
+long unmount(const char* path) { return unmount_at(path, nullptr, path); }
+
+// umount2(): `path` as the caller wrote it (relative to `cwd`), `canon` its
+// absolute form. The mount is the newest one sitting on the directory the
+// last component names (looked up without stepping into what's mounted
+// there), as Linux identifies it; the recorded path only breaks ties between
+// copies (MS_REC). A relative path resolves from cwd even when something has
+// been mounted over "/" since (LXC's chroot does exactly that).
+long unmount_at(const char* path, Inode* cwd, const char* canon) {
+    __atomic_add_fetch(&g_mount_generation, 1, __ATOMIC_RELEASE); // /proc/<pid>/mount*: a change for EPOLLET waiters
     Inode* node;
-    if (long r = resolve(path, nullptr, true, &node); r < 0)
+    if (long r = resolve(path, cwd, true, &node); r < 0)
         return r;
+    Inode* covered = nullptr;
+    {
+        Inode* parent;
+        const char* name;
+        usize len;
+        bool dots = (path[0] == '.' && (!path[1] || (path[1] == '.' && !path[2])));
+        if (!dots && resolve_parent(path, cwd, &parent, &name, &len) == 0 &&
+            !(len == 1 && name[0] == '.') && !(len == 2 && name[0] == '.' && name[1] == '.'))
+            covered = parent->lookup(name, len);
+    }
+    Inode* top = process_top();
     LockGuard guard(g_mount_lock);
-    usize found;
-    if (long r = find_mount(path, node, &found); r != 0)
+    usize found = 0;
+    long r = 1;
+    if (covered) {
+        long best = -1;
+        for (usize i = g_mount_count; i-- > 0;) {
+            if (g_mounts[i].covered != covered)
+                continue;
+            if (strcmp(g_mounts[i].path, canon) == 0) {
+                best = static_cast<long>(i);
+                break;
+            }
+            if (best < 0)
+                best = static_cast<long>(i);
+        }
+        if (best >= 0) {
+            found = static_cast<usize>(best);
+            r = 0;
+        } else {
+            return -err::INVAL; // nothing mounted there
+        }
+    } else {
+        r = find_mount(canon, node, top, &found);
+    }
+    if (r != 0)
         return r < 0 ? r : 0;
     for (usize i = found + 1; i-- > found;) {
         // Something mounted inside it? (Bind mounts share their file
@@ -550,8 +763,33 @@ Inode* ram_root() { return g_ram_root; }
 
 void set_permission_hook(long (*fn)(Inode*, int)) { g_permission = fn; }
 
+// pivot_root in a private mount namespace: every mount point is renamed to
+// how it looks from the new root (Linux's mountinfo is relative to it, and
+// bubblewrap finds its mounts there): mounts under `new_root` lose that
+// prefix, the others move under `put_old` (as seen from the new root).
+void pivot_mounts(const char* new_root, const char* put_old) {
+    LockGuard guard(g_mount_lock);
+    MountTable* t = current_table();
+    if (t == &g_system_mounts)
+        return; // the system's table keeps the system's view
+    usize n = strlen(new_root);
+    bool top = n == 1;
+    for (usize i = 0; i < t->count; i++) {
+        Mount& m = t->mounts[i];
+        char out[256];
+        if (top || (strncmp(m.path, new_root, n) == 0 && (m.path[n] == '/' || !m.path[n])))
+            snprintf(out, sizeof(out), "%s", top ? m.path : (m.path[n] ? m.path + n : "/"));
+        else
+            snprintf(out, sizeof(out), "%s%s", strcmp(put_old, "/") == 0 ? "" : put_old,
+                     strcmp(m.path, "/") == 0 ? "" : m.path);
+        snprintf(m.path, sizeof(m.path), "%s", out[0] ? out : "/");
+    }
+    t->pivoted = true;
+}
+
 void for_each_mount(void (*fn)(const char*, const char*, const char*, const char*, void*), void* ctx) {
-    fn(g_root_source, "/", g_root_type, "", ctx); // not "rootfs": tools like df skip entries by that name
+    if (!current_table()->pivoted)
+        fn(g_root_source, "/", g_root_type, "", ctx); // not "rootfs": tools like df skip entries by that name
     LockGuard guard(g_mount_lock);
     for (usize i = 0; i < g_mount_count; i++)
         fn(g_mounts[i].source, g_mounts[i].path, g_mounts[i].type, g_mounts[i].options, ctx);
@@ -571,6 +809,7 @@ void* mount_ns_copy(void* from) {
     for (usize i = 0; i < src->count; i++)
         t->mounts[i] = src->mounts[i];
     t->count = src->count;
+    t->pivoted = src->pivoted;
     return t;
 }
 
@@ -582,6 +821,36 @@ void mount_ns_get(void* ns) {
 void mount_ns_put(void* ns) {
     if (ns && __atomic_sub_fetch(&static_cast<MountTable*>(ns)->refs, 1, __ATOMIC_ACQ_REL) == 0)
         delete static_cast<MountTable*>(ns);
+}
+
+} // namespace vfs
+
+namespace vfs {
+
+// MS_BIND | MS_REC: every mount below `src` (by path, as the caller sees
+// them) gets a copy recorded below `dst`. It hangs on the same directory, so
+// lookups don't change - but unmounting the original (by its path) leaves the
+// copy, as Linux's replicated mounts do (LXC detaches the originals after
+// binding a container's root over "/").
+void bind_replicate(const char* src, const char* dst) {
+    LockGuard guard(g_mount_lock);
+    usize len = strlen(src);
+    if (len > 1 && src[len - 1] == '/')
+        len--;
+    usize n = g_mount_count;
+    for (usize i = 0; i < n && g_mount_count < MAX_MOUNTS; i++) {
+        const Mount m = g_mounts[i];
+        bool below = len == 1 ? m.path[0] == '/' && m.path[1] : strncmp(m.path, src, len) == 0 && m.path[len] == '/';
+        if (!below)
+            continue;
+        Mount& c = g_mounts[g_mount_count++];
+        c = m;
+        const char* rest = m.path + (len == 1 ? 0 : len); // "/sub/dir"
+        if (strcmp(dst, "/") == 0)
+            snprintf(c.path, sizeof(c.path), "%s", rest);
+        else
+            snprintf(c.path, sizeof(c.path), "%s%s", dst, rest);
+    }
 }
 
 } // namespace vfs

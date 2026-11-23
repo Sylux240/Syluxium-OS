@@ -90,6 +90,7 @@ long bind(int n, int fd, const LoopInfo64* info) {
     auto* d = new LoopDisk;
     snprintf(d->name, sizeof(d->name), "loop%d", n);
     snprintf(d->model, sizeof(d->model), "Loop device");
+    d->uncached = true;
     d->file = f;
     d->offset = info ? info->lo_offset : 0;
     u64 size = f->inode->size > d->offset ? f->inode->size - d->offset : 0;

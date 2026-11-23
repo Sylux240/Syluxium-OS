@@ -57,6 +57,7 @@ public:
     }
 
     bool seekable() const override { return false; }
+    u64 poll_generation() const override { return __atomic_load_n(&m_generation, __ATOMIC_ACQUIRE) + 1; }
 
     // Queue an event (g_lock held). Identical back-to-back events merge.
     void push(int wd, u32 mask, u32 cookie, const char* name, usize name_len) {
@@ -88,6 +89,7 @@ public:
         m_count++;
         m_bytes += q->bytes;
         m_changed = true;
+        __atomic_add_fetch(&m_generation, 1, __ATOMIC_RELEASE);
     }
 
     isize read_file(vfs::File* f, u64, void* buf, usize count) override {
@@ -211,6 +213,7 @@ public:
     }
 
     bool m_changed = false;
+    u64 m_generation = 0; // events queued so far (edge-triggered epoll)
 
 private:
     u32 m_opens = 0;

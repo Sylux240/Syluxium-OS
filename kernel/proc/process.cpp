@@ -275,7 +275,11 @@ const Cred& cred() {
     return p ? p->cred : g_kernel_cred;
 }
 
-bool capable() { return cred().euid == 0; }
+// Host root outside any user namespace (root inside one is not root here).
+bool capable() {
+    Process* p = current();
+    return cred().euid == 0 && !(p && p->userns);
+}
 
 bool in_group(u32 gid) {
     const Cred& c = cred();
@@ -528,10 +532,18 @@ long do_clone(interrupts::Frame* frame, u64 flags, u64 new_sp, u64 parent_tid, u
     constexpr u64 CLONE_NEWPID = 0x20000000;
     if (flags & CLONE_THREAD)
         return clone_thread(frame, flags, new_sp, parent_tid, child_tid, tls);
+    constexpr u64 CLONE_NEWUSER = 0x10000000, CLONE_NEWNS = 0x20000, CLONE_NEWUTS = 0x04000000,
+                  CLONE_NEWIPC = 0x08000000, CLONE_NEWNET = 0x40000000, CLONE_NEWCGROUP = 0x02000000, CLONE_FS = 0x200;
     Process* parent = current();
+    // New namespaces need privileges, in the caller's user namespace or in
+    // the one this clone creates (unprivileged sandboxes do both at once).
+    bool new_user = flags & CLONE_NEWUSER;
+    if ((flags & (CLONE_NEWPID | CLONE_NEWNS | CLONE_NEWUTS | CLONE_NEWIPC | CLONE_NEWNET | CLONE_NEWCGROUP)) &&
+        !new_user && !ns_capable())
+        return -err::PERM;
+    if (new_user && (flags & CLONE_FS))
+        return -err::INVAL; // as Linux: a new user namespace can't share the file system context
     if (flags & CLONE_NEWPID) {
-        if (!capable())
-            return -err::PERM;
         if (parent->pidns)
             return -err::INVAL; // one level of PID namespaces
     }
@@ -551,6 +563,7 @@ long do_clone(interrupts::Frame* frame, u64 flags, u64 new_sp, u64 parent_tid, u
 
     memcpy(child->name, parent->name, sizeof(child->name));
     memcpy(child->exe_path, parent->exe_path, sizeof(child->exe_path));
+    child->exe_inode = parent->exe_inode;
     memcpy(child->cwd_path, parent->cwd_path, sizeof(child->cwd_path));
     child->cwd = parent->cwd;
     child->root = parent->root;
@@ -567,6 +580,24 @@ long do_clone(interrupts::Frame* frame, u64 flags, u64 new_sp, u64 parent_tid, u
         child->uts = parent->uts;
         uts_get(child->uts);
     }
+    if (new_user) {
+        auto* ns = new UserNs;
+        ns->parent = parent->userns;
+        userns_get(ns->parent);
+        ns->owner = parent->cred.euid;
+        ns->setgroups_deny = ns->parent && ns->parent->setgroups_deny; // inherited, as on Linux
+        child->userns = ns;
+        child->ns_caps = true;
+        child->own_mounts = (flags & CLONE_NEWNS) != 0;
+    } else {
+        child->userns = parent->userns;
+        userns_get(child->userns);
+        child->ns_caps = parent->ns_caps;
+        child->own_mounts = parent->own_mounts || (parent->userns && (flags & CLONE_NEWNS));
+    }
+    child->no_new_privs = parent->no_new_privs;
+    if (flags & CLONE_FS)
+        child->fs_shared_with = parent->pid;
     child->umask = parent->umask;
     child->personality = parent->personality;
     child->cred = parent->cred;
@@ -601,6 +632,8 @@ long do_clone(interrupts::Frame* frame, u64 flags, u64 new_sp, u64 parent_tid, u
             child->pidns = parent->pidns ? parent->pidns : parent->child_pidns;
             __atomic_add_fetch(&child->pidns->refs, 1, __ATOMIC_RELAXED);
             child->vpid = child->pidns->next++;
+            if (child->vpid == 1 && !child->pidns->init)
+                child->pidns->init = child; // the first child after unshare(CLONE_NEWPID)
         }
         child->pgid = parent->pgid;
         child->sid = parent->sid;
@@ -647,11 +680,13 @@ long do_clone(interrupts::Frame* frame, u64 flags, u64 new_sp, u64 parent_tid, u
 namespace {
 
 long exec_impl(interrupts::Frame* frame, const char* path, const char* const* argv, const char* const* envp,
-               int depth) {
+               int depth, vfs::Inode* given = nullptr) {
     Process* p = current();
-    vfs::Inode* inode;
-    if (long r = vfs::resolve(path, p->cwd, true, &inode); r < 0)
-        return r;
+    vfs::Inode* inode = given;
+    if (!inode) {
+        if (long r = vfs::resolve(path, p->cwd, true, &inode); r < 0)
+            return r;
+    }
     if (!vfs::is_reg(inode->mode))
         return -err::ACCES;
     if (long r = permission(inode, MAY_EXEC); r < 0)
@@ -702,10 +737,13 @@ long exec_impl(interrupts::Frame* frame, const char* path, const char* const* ar
     // setuid / setgid programs run with their owner's / group's identity
     // (not for scripts: the "#!" path above already recursed). The saved ids
     // follow the effective ones, as POSIX says.
+    // Not inside a user namespace (its owner may not hand out host root) nor
+    // after PR_SET_NO_NEW_PRIVS, as on Linux.
     Cred next = p->cred;
-    if (inode->mode & vfs::S_ISUID)
+    bool may_raise = !p->userns && !p->no_new_privs;
+    if ((inode->mode & vfs::S_ISUID) && may_raise)
         next.euid = inode->uid;
-    if ((inode->mode & vfs::S_ISGID) && (inode->mode & 0010))
+    if ((inode->mode & vfs::S_ISGID) && (inode->mode & 0010) && may_raise)
         next.egid = inode->gid;
     next.suid = next.fsuid = next.euid;
     next.sgid = next.fsgid = next.egid;
@@ -754,9 +792,13 @@ long exec_impl(interrupts::Frame* frame, const char* path, const char* const* ar
     old->put(); // a vfork parent may still hold it
 
     p->cred = next;
+    // In a user namespace, capabilities survive exec only for its root.
+    if (p->userns)
+        p->ns_caps = uid_to_ns(next.euid) == 0;
     snprintf(p->name, sizeof(p->name), "%s", basename(path));
     // /proc/self/exe is the real file (symlinks resolved), as on Linux:
     // programs find their own install directory through it.
+    p->exe_inode = inode;
     if (vfs::canonical_path(path, p->cwd_path, p->exe_path, sizeof(p->exe_path)) < 0)
         snprintf(p->exe_path, sizeof(p->exe_path), "%s", path);
     snprintf(t->name, sizeof(t->name), "%s", p->name);
@@ -784,6 +826,11 @@ long exec_impl(interrupts::Frame* frame, const char* path, const char* const* ar
 
 long do_execve(interrupts::Frame* frame, const char* path, const char* const* argv, const char* const* envp) {
     return exec_impl(frame, path, argv, envp, 0);
+}
+
+long do_execve_inode(interrupts::Frame* frame, vfs::Inode* inode, const char* path, const char* const* argv,
+                     const char* const* envp) {
+    return exec_impl(frame, path, argv, envp, 0, inode);
 }
 
 // ---- wait4 -----------------------------------------------------------------
@@ -1146,10 +1193,98 @@ proc::Process::~Process() {
         delete child_pidns;
     if (uts)
         proc::uts_put(uts);
+    proc::userns_put(userns);
     vfs::mount_ns_put(mntns);
 }
 
 namespace proc {
+
+void userns_get(UserNs* ns) {
+    if (ns)
+        __atomic_add_fetch(&ns->refs, 1, __ATOMIC_RELAXED);
+}
+
+void userns_put(UserNs* ns) {
+    while (ns && __atomic_sub_fetch(&ns->refs, 1, __ATOMIC_ACQ_REL) == 0) {
+        UserNs* parent = ns->parent;
+        delete ns;
+        ns = parent; // each namespace holds a reference on its parent
+    }
+}
+
+namespace {
+constexpr u32 OVERFLOW_ID = 65534;
+
+// One level of mapping: ns id -> parent id (down) or back (up).
+bool map_down(const UserNs::Extent* e, u32 n, u32 id, u32* out) {
+    for (u32 i = 0; i < n; i++)
+        if (id >= e[i].first && id - e[i].first < e[i].count) {
+            *out = e[i].lower + (id - e[i].first);
+            return true;
+        }
+    return false;
+}
+bool map_up(const UserNs::Extent* e, u32 n, u32 id, u32* out) {
+    for (u32 i = 0; i < n; i++)
+        if (id >= e[i].lower && id - e[i].lower < e[i].count) {
+            *out = e[i].first + (id - e[i].lower);
+            return true;
+        }
+    return false;
+}
+// Host id -> id inside `ns` (through every level), or false.
+bool host_to_ns(UserNs* ns, u32 id, bool gid, u32* out) {
+    if (!ns) {
+        *out = id;
+        return true;
+    }
+    u32 up;
+    if (!host_to_ns(ns->parent, id, gid, &up))
+        return false;
+    return gid ? map_up(ns->gid, ns->ngid, up, out) : map_up(ns->uid, ns->nuid, up, out);
+}
+bool ns_to_host(UserNs* ns, u32 id, bool gid, u32* out) {
+    for (; ns; ns = ns->parent)
+        if (!(gid ? map_down(ns->gid, ns->ngid, id, &id) : map_down(ns->uid, ns->nuid, id, &id)))
+            return false;
+    *out = id;
+    return true;
+}
+UserNs* my_userns() {
+    Process* p = current();
+    return p ? p->userns : nullptr;
+}
+} // namespace
+
+u32 uid_to_ns(u32 kuid) {
+    u32 out;
+    return host_to_ns(my_userns(), kuid, false, &out) ? out : OVERFLOW_ID;
+}
+u32 gid_to_ns(u32 kgid) {
+    u32 out;
+    return host_to_ns(my_userns(), kgid, true, &out) ? out : OVERFLOW_ID;
+}
+u32 id_in_ns(UserNs* ns, u32 host_id, bool gid) {
+    u32 out;
+    return host_to_ns(ns, host_id, gid, &out) ? out : OVERFLOW_ID;
+}
+bool uid_from_ns(u32 uid, u32* kuid) { return ns_to_host(my_userns(), uid, false, kuid); }
+bool gid_from_ns(u32 gid, u32* kgid) { return ns_to_host(my_userns(), gid, true, kgid); }
+
+bool ns_capable() {
+    Process* p = current();
+    if (!p)
+        return true; // kernel threads
+    return p->userns ? p->ns_caps : p->cred.euid == 0;
+}
+
+bool mounts_capable() {
+    Process* p = current();
+    if (!p)
+        return true;
+    return p->userns ? p->ns_caps && p->own_mounts : p->cred.euid == 0;
+}
+
 Uts* system_uts() {
     static Uts u;
     return &u;

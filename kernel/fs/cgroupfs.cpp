@@ -63,6 +63,11 @@ public:
         }
     }
 
+    long statfs(FsStats* out) override {
+        *out = FsStats{0x63677270 /* CGROUP2_SUPER_MAGIC */, 4096, 0, 0, 0, 0};
+        return 0;
+    }
+
     // mkdir: a child group, with its control files.
     long create(const char* name, usize len, u32 new_mode, const char* target, vfs::Inode** out) override {
         if (!vfs::is_dir(new_mode))

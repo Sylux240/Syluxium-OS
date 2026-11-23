@@ -6,6 +6,7 @@
 application/vnd.debian.binary-package=syluxium-debinstaller.desktop
 application/x-debian-package=syluxium-debinstaller.desktop
 application/x-deb=syluxium-debinstaller.desktop
+application/vnd.android.package-archive=syluxium-apk-install.desktop
 application/vnd.appimage=syluxium-appimage.desktop
 application/x-iso9660-appimage=syluxium-appimage.desktop
 inode/directory=thunar.desktop

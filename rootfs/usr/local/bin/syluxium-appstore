@@ -7,6 +7,7 @@ install updates, and install downloaded .deb packages.
     syluxium-appstore --updates          the store, on the Updates page
     syluxium-appstore --search TEXT      the store, searching for TEXT
     syluxium-appstore --settings         the store with its Settings (software sources) open
+    syluxium-appstore --android          the store, on the Android Apps page (F-Droid)
     syluxium-appstore --deb FILE.deb     the package installer for one file
                                          (what opening a .deb does)
 """
@@ -1249,6 +1250,14 @@ class Store:
         fsw.add(self.featured_box)
         self.stack.add_named(fsw, "featured")
         self.stack.add_named(self.list_page(), "list")
+        # Android apps (F-Droid, through Waydroid): their own page and catalog.
+        self.android = None
+        try:
+            from syluxium_android_store import AndroidPage
+            self.android = AndroidPage(self)
+            self.stack.add_named(self.android.widget, "android")
+        except ImportError as e:
+            print("Android Apps page unavailable:", e)
 
         bottom = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4, margin=8)
         self.status = label("", xalign=0)
@@ -1321,7 +1330,8 @@ class Store:
         view.append_column(col)
         for title, icon, key in [("Featured", "package_favourite", "featured"),
                                  ("Installed", "system-file-manager", "installed"),
-                                 ("Updates", "system-software-update", "updates")] + \
+                                 ("Updates", "system-software-update", "updates"),
+                                 ("Android Apps", "android", "android")] + \
                 [(t, i, "cat:" + t) for t, i, _ in CATEGORIES]:
             self.side.append([self.icons.get([icon, "package"], 22), GLib.markup_escape_text(title), key])
         self.side_view = view
@@ -1437,6 +1447,10 @@ class Store:
         self.pkgs, self.installed, self.upgradable = pkgs, inst, up
         self.show_update_count()
         self.build_featured()
+        if not pkgs and self.start_page == "android":
+            self.select_side("android")
+            self.start_page = None
+            return
         if not pkgs:
             self.stack.set_visible_child_name("empty")
             self.empty_button.grab_focus()
@@ -1485,6 +1499,11 @@ class Store:
     # ---- pages ----
     def on_side(self, sel):
         model, it = sel.get_selected()
+        if it and model[it][2] == "android":
+            if self.android:  # its own catalog: works without Debian's
+                self.stack.set_visible_child_name("android")
+                self.android.activate()
+            return
         if not it or not self.pkgs:
             return
         key = model[it][2]
@@ -2038,6 +2057,8 @@ def main(argv):
         DebInstaller(argv[1])
     elif len(argv) > 1 and argv[1] == "--updates":
         Store(page="updates")
+    elif len(argv) > 1 and argv[1] == "--android":
+        Store(page="android")
     elif len(argv) > 2 and argv[1] == "--search":
         Store(search=argv[2])
     elif len(argv) > 1 and argv[1] == "--settings":
