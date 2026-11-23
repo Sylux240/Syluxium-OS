@@ -402,6 +402,10 @@ void shootdown_handler(interrupts::Frame*) {
 
 } // namespace
 
+bool translate_current(uptr virt, u64* phys_out) {
+    return translate_in(arch::read_cr3() & PTE_ADDR_MASK, virt, phys_out);
+}
+
 void init_ap() {
     if (g_nx)
         arch::wrmsr(MSR_EFER, arch::rdmsr(MSR_EFER) | EFER_NXE);
@@ -417,10 +421,21 @@ void shootdown(uptr start, usize pages, const AddressSpace* user) {
     if (!arch::interrupts_enabled())
         panic("vmm::shootdown() with interrupts disabled would deadlock");
 
+    // Spinlock (not IrqSpinlock): while waiting for the lock we keep
+    // servicing other CPUs' shootdown requests. It also keeps us on this CPU
+    // from here on: `me` must be the CPU we are really on. It was taken
+    // before the lock, so a caller preempted and moved to another CPU left
+    // that CPU out of the shootdown, and the CPU that did the caller's local
+    // invlpg may be a different one too: a kernel stack's old translation
+    // survived on one CPU, and a new thread whose stack got the same address
+    // read a stranger's stack there (its start frame "zeroed": RIP 0).
+    g_shoot_lock.lock();
+    Cpu* me = this_cpu();
+    flush_local(start, pages); // whichever CPU the caller flushed, this one too
+
     // Our page-table changes must be visible before we look at what other
     // CPUs are running (they publish `current` before loading its CR3).
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
-    Cpu* me = this_cpu();
     auto wanted = [&](Cpu* c) {
         if (!c || c == me || !__atomic_load_n(&c->online, __ATOMIC_ACQUIRE))
             return false;
@@ -430,9 +445,6 @@ void shootdown(uptr start, usize pages, const AddressSpace* user) {
         return t && t->aspace == user;
     };
 
-    // Spinlock (not IrqSpinlock): while waiting for the lock we keep
-    // servicing other CPUs' shootdown requests.
-    g_shoot_lock.lock();
     u32 targets = 0;
     Cpu* chosen[256];
     for (u32 i = 0; i < percpu::count() && targets < 256; i++) {
