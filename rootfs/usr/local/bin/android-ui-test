@@ -5,6 +5,8 @@
 #   android-ui-test store          the App Store's Android Apps page (F-Droid;
 #                                  downloads the catalog: needs QEMU's user networking)
 #   android-ui-test menu           the Start menu (Android Apps folder)
+#   android-ui-test app PACKAGE    open an Android app as a desktop window
+#                                  (Android must be set up: syluxium-android-container init)
 say() { echo "ANDTEST $*" > /dev/console; }
 startdesktop > /dev/null 2>&1 &
 export DISPLAY=:0
@@ -49,6 +51,21 @@ store)
     ;;
 menu)
     xdotool key ctrl+Escape ;;
+app)
+    asuser syluxium-android launch "$2"
+    for i in $(seq 1 60); do
+        sleep 5
+        st=$(/usr/local/sbin/syluxium-android-container status 2>/dev/null)
+        ready=$([ -f /run/user/1000/syluxium-android/ready ] && echo ready)
+        say "t=$((i * 5))s container=$st $ready windows: $(xdotool search --onlyvisible --name . getwindowname %@ 2>/dev/null | tr '\n' '|' | cut -c1-200)"
+        [ -n "$ready" ] && break
+    done
+    sleep 40
+    say "log: $(tail -5 /home/syluxium/.cache/syluxium-android.log 2>/dev/null | tr '\n' '|')"
+    say "host: $(tail -5 /run/user/1000/syluxium-wayland-host.log 2>/dev/null | tr '\n' '|' | cut -c1-400)"
+    say "waydroid.log: $(grep -v 'lxc-info\|seccomp' /var/lib/waydroid/waydroid.log 2>/dev/null | tail -25 | tr '\n' '|' | cut -c1-3000)"
+    say "binder: $(ls -l /dev/anbox-binder /dev/binderfs/ 2>&1 | tr '\n' '|')"
+    ;;
 esac
 sleep 20
 say "ready for screenshot"

@@ -53,6 +53,12 @@ adapt_config() {
 
 running() { [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; }
 
+# Waydroid's container manager answers on the system bus (id.waydro.Container).
+manager_on_bus() {
+    dbus-send --system --print-reply --dest=org.freedesktop.DBus / org.freedesktop.DBus.NameHasOwner \
+        string:id.waydro.Container 2>/dev/null | grep -q 'boolean true'
+}
+
 # Android gets binder devices of its own (fresh contexts: its servicemanager
 # runs as uid 1000 and the system's /dev/binder may have another manager):
 # anbox-binder, anbox-vndbinder, anbox-hwbinder from a binderfs instance,
@@ -92,10 +98,14 @@ start)
     # The container manager: on the system bus, starts LXC when a session asks.
     setsid waydroid container start >> "$LOG" 2>&1 < /dev/null &
     echo $! > "$PIDFILE"
-    for _ in $(seq 50); do
-        waydroid status 2>/dev/null | grep -q 'Container:' && break
+    # Ready once it owns its name on the system bus: a session started before
+    # that would make D-Bus start a second manager.
+    for _ in $(seq 100); do
+        manager_on_bus && break
+        kill -0 "$(cat "$PIDFILE")" 2>/dev/null || break
         sleep 0.2
     done
+    manager_on_bus || { echo "the container manager did not start (see $LOG)" >&2; exit 4; }
     exit 0
     ;;
 stop)

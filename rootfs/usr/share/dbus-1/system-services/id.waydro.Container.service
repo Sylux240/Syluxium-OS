@@ -1,0 +1,7 @@
+[D-BUS Service]
+Name=id.waydro.Container
+# Syluxium: started with a full PATH (D-Bus activation has none; Waydroid
+# runs modprobe and friends from /usr/sbin). Normally the container manager
+# is already running: syluxium-android-container starts it.
+Exec=/usr/bin/env PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin /usr/bin/waydroid container start
+User=root
