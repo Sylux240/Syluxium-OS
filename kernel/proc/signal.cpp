@@ -327,6 +327,17 @@ void deliver(interrupts::Frame* frame) {
     // Thread-directed signals first, then process-wide ones.
     u64 mine = __atomic_load_n(&t->sig_pending, __ATOMIC_ACQUIRE) & (~t->sigmask | UNBLOCKABLE);
     u64 shared = __atomic_load_n(&p->sig_pending, __ATOMIC_ACQUIRE) & (~t->sigmask | UNBLOCKABLE);
+    if (!mine && !shared) {
+        // Another thread took the process-wide signal pending() saw (or it
+        // is blocked here). Without this check the "signal" was ctz(0) + 1 =
+        // 65: sigactions[65] read past the array, and the default action
+        // killed the whole process ("Unknown signal 65", status 193).
+        if (t->restore_sigmask) {
+            t->sigmask = t->saved_sigmask;
+            t->restore_sigmask = false;
+        }
+        return;
+    }
     int sig;
     i32 si_code, si_pid;
     u32 si_uid;
@@ -348,6 +359,19 @@ void deliver(interrupts::Frame* frame) {
         si_code = p->sig_code[sig], si_pid = p->sig_pid[sig], si_uid = p->sig_uid[sig];
     }
     proc::SigAction act = p->sigactions[sig];
+
+    // Ignored (SIG_IGN, or a default of "ignore": SIGCHLD, SIGWINCH, ...):
+    // pending() drops those, but another child's SIGCHLD can be queued again
+    // between that check and here (while some thread blocks it, as glibc
+    // does around fork and pthread_create). It was taken for a fatal default
+    // and killed the process ("Child exited", status 145).
+    if (sig != SIGKILL && is_ignored(p, sig)) {
+        if (t->restore_sigmask) {
+            t->sigmask = t->saved_sigmask;
+            t->restore_sigmask = false;
+        }
+        return;
+    }
 
     if (act.handler == SIG_DFL || sig == SIGKILL) {
         arch::sti();

@@ -4,6 +4,8 @@
 //   drminfo -n [card]         prints only the driver name
 //   drminfo -t [card] [count] GEM dumb-buffer test: create, mmap, write,
 //                             read back, munmap, destroy (count times)
+//   drminfo -c [card]         connectors: "<connected count> <name>:<state> ..."
+//                             (which card has the monitor: two-GPU machines)
 #include <errno.h>
 #include <fcntl.h>
 #include <stdint.h>
@@ -24,6 +26,19 @@ struct drm_mode_create_dumb { uint32_t height, width, bpp, flags, handle, pitch;
 struct drm_mode_map_dumb { uint32_t handle, pad; uint64_t offset; };
 struct drm_mode_destroy_dumb { uint32_t handle; };
 
+struct drm_mode_card_res {
+    uint64_t fb_id_ptr, crtc_id_ptr, connector_id_ptr, encoder_id_ptr;
+    uint32_t count_fbs, count_crtcs, count_connectors, count_encoders;
+    uint32_t min_width, max_width, min_height, max_height;
+};
+struct drm_mode_get_connector {
+    uint64_t encoders_ptr, modes_ptr, props_ptr, prop_values_ptr;
+    uint32_t count_modes, count_props, count_encoders;
+    uint32_t encoder_id, connector_id, connector_type, connector_type_id;
+    uint32_t connection, mm_width, mm_height, subpixel, pad;
+};
+#define DRM_IOCTL_MODE_GETRESOURCES _IOWR('d', 0xA0, struct drm_mode_card_res)
+#define DRM_IOCTL_MODE_GETCONNECTOR _IOWR('d', 0xA7, struct drm_mode_get_connector)
 #define DRM_IOCTL_VERSION _IOWR('d', 0x00, struct drm_version)
 #define DRM_IOCTL_MODE_CREATE_DUMB _IOWR('d', 0xB2, struct drm_mode_create_dumb)
 #define DRM_IOCTL_MODE_MAP_DUMB _IOWR('d', 0xB3, struct drm_mode_map_dumb)
@@ -49,16 +64,50 @@ static int dumb_test(int fd, int count) {
     return 0;
 }
 
+static const char* connector_type_name(uint32_t t) {
+    static const char* const names[] = {"Unknown", "VGA", "DVI-I", "DVI-D", "DVI-A", "Composite", "SVIDEO", "LVDS",
+                                        "Component", "DIN", "DP", "HDMI-A", "HDMI-B", "TV", "eDP", "Virtual", "DSI",
+                                        "DPI", "Writeback", "SPI", "USB"};
+    return t < sizeof(names) / sizeof(names[0]) ? names[t] : "?";
+}
+
+// "<connected count> DP-1:connected HDMI-A-1:disconnected ..."
+static int connectors(int fd) {
+    struct drm_mode_card_res r = {0};
+    if (ioctl(fd, DRM_IOCTL_MODE_GETRESOURCES, &r)) { printf("0 (no modesetting: %s)\n", strerror(errno)); return 0; }
+    uint32_t n = r.count_connectors > 64 ? 64 : r.count_connectors;
+    uint32_t ids[64];
+    struct drm_mode_card_res r2 = {.connector_id_ptr = (uintptr_t)ids, .count_connectors = n};
+    if (n && ioctl(fd, DRM_IOCTL_MODE_GETRESOURCES, &r2)) { printf("0 (%s)\n", strerror(errno)); return 0; }
+    char list[2048] = "";
+    int connected = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        struct drm_mode_get_connector c = {.connector_id = ids[i]};
+        if (ioctl(fd, DRM_IOCTL_MODE_GETCONNECTOR, &c))
+            continue;
+        const char* state = c.connection == 1 ? "connected" : c.connection == 2 ? "disconnected" : "unknown";
+        connected += c.connection == 1;
+        char one[64];
+        snprintf(one, sizeof(one), " %s-%u:%s", connector_type_name(c.connector_type), c.connector_type_id, state);
+        if (strlen(list) + strlen(one) < sizeof(list))
+            strcat(list, one);
+    }
+    printf("%d%s\n", connected, list);
+    return 0;
+}
+
 int main(int argc, char** argv) {
-    int name_only = 0, test = 0, count = 100;
+    int name_only = 0, test = 0, conn = 0, count = 100;
     int a = 1;
     if (a < argc && !strcmp(argv[a], "-n")) { name_only = 1; a++; }
     else if (a < argc && !strcmp(argv[a], "-t")) { test = 1; a++; }
+    else if (a < argc && !strcmp(argv[a], "-c")) { conn = 1; a++; }
     const char* card = a < argc ? argv[a++] : "/dev/dri/card0";
     if (a < argc) count = atoi(argv[a]);
     int fd = open(card, O_RDWR | O_CLOEXEC);
     if (fd < 0) { fprintf(stderr, "%s: %s\n", card, strerror(errno)); return 1; }
     if (test) return dumb_test(fd, count);
+    if (conn) return connectors(fd);
     char name[64] = "", date[64] = "", desc[256] = "";
     struct drm_version v = {.name_len = sizeof(name) - 1, .name = name, .date_len = sizeof(date) - 1, .date = date,
                             .desc_len = sizeof(desc) - 1, .desc = desc};

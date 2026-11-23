@@ -11,7 +11,7 @@
 
 void *lkpi_phys_alloc(unsigned order, bool zero);
 void lkpi_phys_free(void *virt, unsigned order);
-void *lkpi_vmap_phys(const u64 *phys, unsigned long count, bool wc);
+void *lkpi_vmap_phys(const u64 *phys, unsigned long count, int cache); /* mm.cpp: 0 write-back, 1 WC, 2 UC */
 void lkpi_vunmap(const void *virt);
 
 /* ---- pages ---- */
@@ -163,10 +163,50 @@ void __folio_batch_release(struct folio_batch *fb)
 }
 
 /* ---- kernel mappings ---- */
+/* mm.cpp: 0 write-back, 1 write-combining, 2 uncached */
+static int prot_cache(pgprot_t prot)
+{
+	if (pgprot_val(prot) & LKPI_PROT_UC)
+		return 2;
+	return (pgprot_val(prot) & LKPI_PROT_WC) ? 1 : 0;
+}
 static void *vmap_phys_list(u64 *phys, unsigned int count, pgprot_t prot)
 {
-	return lkpi_vmap_phys(phys, count, (pgprot_val(prot) & (LKPI_PROT_WC | LKPI_PROT_UC)) != 0);
+	return lkpi_vmap_phys(phys, count, prot_cache(prot));
 }
+
+/* ---- cache attributes of kernel memory (x86 PAT) ---- */
+bool lkpi_set_kernel_cache(unsigned long virt, unsigned long pages, int cache); /* mm.cpp */
+
+static int set_pages_array_cache(struct page **pages, int n, int cache)
+{
+	int ret = 0;
+	for (int i = 0; i < n;) {
+		unsigned long v = (unsigned long)page_address(pages[i]);
+		int run = 1;
+		/* contiguous runs: one TLB shootdown each */
+		while (i + run < n && (unsigned long)page_address(pages[i + run]) == v + (unsigned long)run * PAGE_SIZE)
+			run++;
+		if (!v || !lkpi_set_kernel_cache(v, run, cache))
+			ret = -EINVAL;
+		i += run;
+	}
+	return ret;
+}
+int set_pages_array_wc(struct page **pages, int n) { return set_pages_array_cache(pages, n, 1); }
+int set_pages_array_uc(struct page **pages, int n) { return set_pages_array_cache(pages, n, 2); }
+int set_pages_array_wb(struct page **pages, int n) { return set_pages_array_cache(pages, n, 0); }
+int set_pages_wb(struct page *page, int n)
+{
+	return lkpi_set_kernel_cache((unsigned long)page_address(page), n, 0) ? 0 : -EINVAL;
+}
+int set_pages_uc(struct page *page, int n)
+{
+	return lkpi_set_kernel_cache((unsigned long)page_address(page), n, 2) ? 0 : -EINVAL;
+}
+int set_memory_wc(unsigned long addr, int n) { return lkpi_set_kernel_cache(addr, n, 1) ? 0 : -EINVAL; }
+int set_memory_uc(unsigned long addr, int n) { return lkpi_set_kernel_cache(addr, n, 2) ? 0 : -EINVAL; }
+int set_memory_wb(unsigned long addr, int n) { return lkpi_set_kernel_cache(addr, n, 0) ? 0 : -EINVAL; }
 
 /* vmap(VM_MAP_PUT_PAGES): the mapping owns the pages and the array; Linux
  * frees them with vfree() (i915's shmem_unpin_map). Remembered here. */
@@ -268,17 +308,17 @@ int sg_alloc_table_from_pages_segment(struct sg_table *sgt, struct page **pages,
 
 int dma_map_sgtable(struct device *dev, struct sg_table *sgt, enum dma_data_direction dir, unsigned long attrs)
 {
-	struct scatterlist *sg;
-	unsigned int i;
-	for_each_sg(sgt->sgl, sg, sgt->orig_nents, i) {
-		sg->dma_address = lkpi_direct_to_phys(sg_virt(sg));
-		sg->dma_length = sg->length;
-	}
+	/* the DMA mask applies (bounce buffers, glue/gpu.c) */
+	if (!lkpi_dma_map_sg(dev, sgt->sgl, sgt->orig_nents, dir))
+		return -EIO;
 	sgt->nents = sgt->orig_nents;
 	return 0;
 }
 
-void dma_unmap_sgtable(struct device *dev, struct sg_table *sgt, enum dma_data_direction dir, unsigned long attrs) { }
+void dma_unmap_sgtable(struct device *dev, struct sg_table *sgt, enum dma_data_direction dir, unsigned long attrs)
+{
+	lkpi_dma_unmap_sg(dev, sgt->sgl, sgt->orig_nents, dir);
+}
 
 /* ---- shmem files: a growable array of pages, filled on first use ---- */
 struct lkpi_shmem {

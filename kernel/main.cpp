@@ -530,6 +530,7 @@ void kernel_main_thread(void*) {
 
     // Every CPU is now off the bootloader's stacks and page tables.
     sysfs::init(); // needs the final CPU count
+    linuxkpi::publish_params(); // /sys/module/*/parameters
     cpupower::publish(); // cpufreq files; idle CPUs go tickless from here
     watchdog::start();   // stuck CPUs print where they are
     if (strstr(boot::cmdline(), "watchdog_test")) // test aid: the stuck-operation report

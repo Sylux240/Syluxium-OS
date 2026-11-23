@@ -32,6 +32,7 @@ struct Thread {
     bool detached = false; // freed automatically when it exits
     bool reaped = false;   // stack freed; join() may delete the struct
     bool timed_out = false;
+    bool started = false;  // picked to run at least once (its start frame used)
 
     Cpu* cpu = nullptr;    // run queue it belongs to / CPU it last ran on
     void* stack = nullptr;

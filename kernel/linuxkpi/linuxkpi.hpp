@@ -17,6 +17,10 @@ namespace linuxkpi {
 // Start the timer and workqueue threads and run every driver's
 // module_init(). Call before dev::probe_all() so PCI drivers can bind.
 void init();
+// /sys/module/<module>/parameters/<name> for the Linux drivers' module
+// parameters (numbers and switches can be changed at run time, e.g.
+// drm/parameters/debug). After sysfs::init().
+void publish_params();
 
 // The AML interpreter runs now: retry GPU probes that failed while their
 // ACPI companion wasn't available yet.

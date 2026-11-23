@@ -40,6 +40,23 @@ private:
     const void* m_ctx;
 };
 
+// A generated file that can also be written (module parameters,
+// /sys/module/<module>/parameters/<name>): `write(text, len, ctx)` returns
+// bytes taken or a negative errno.
+class ControlFile : public GeneratedFile {
+public:
+    using Writer = isize (*)(const char* text, usize len, const void* ctx);
+    ControlFile(Generator gen, Writer writer, const void* ctx, u32 perms = 0644)
+        : GeneratedFile(gen, ctx, perms), m_writer(writer), m_wctx(ctx) {}
+    isize write(u64 offset, const void* buf, usize count) override {
+        return m_writer(static_cast<const char*>(buf), count, m_wctx);
+    }
+
+private:
+    Writer m_writer;
+    const void* m_wctx;
+};
+
 // A symlink whose target is computed when it's followed.
 class GeneratedLink : public vfs::Inode {
 public:

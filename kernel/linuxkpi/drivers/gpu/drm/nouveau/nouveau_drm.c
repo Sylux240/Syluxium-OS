@@ -840,8 +840,41 @@ int lkpi_gpu_fail_step(void);
 #define LKPI_INJECT(n, r) do { if (lkpi_gpu_fail_step() == (n) && (r) >= 0) { \
 	pr_err("nouveau: gpufail=%d: failing this step on purpose\n", n); (r) = -EIO; } } while (0)
 
+/* LinuxKPI: set by r535_gsp_load() when the GSP-RM firmware was found and
+ * the GSP path chosen for the device being probed. */
+int lkpi_nouveau_gsp_loaded;
+
+static int nouveau_drm_probe_once(struct pci_dev *pdev,
+				  const struct pci_device_id *pent);
+
+/* LinuxKPI: NVIDIA's GSP-RM firmware (Turing/Ampere: boot option
+ * nouveau.config=NvGspRm=1; Ada always): clocks and power management, and
+ * NVK. The log says on every boot whether it runs. */
 static int nouveau_drm_probe(struct pci_dev *pdev,
 			     const struct pci_device_id *pent)
+{
+	int ret;
+
+	lkpi_nouveau_gsp_loaded = 0;
+	ret = nouveau_drm_probe_once(pdev, pent);
+	if (!ret) {
+		dev_info(&pdev->dev, "nouveau: %s\n", lkpi_nouveau_gsp_loaded ?
+			 "GSP-RM firmware running (535.113.01): the GPU manages its clocks and power; NVK can run" :
+			 "running without GSP-RM (nouveau's own path: no reclocking on Maxwell 2 and newer)");
+		return 0;
+	}
+	if (!lkpi_nouveau_gsp_loaded || ret == -EPROBE_DEFER)
+		return ret;
+	/* No second probe in the same boot: the GPU is left half-started by the
+	 * failed GSP boot (its falcons hold state only a reset clears), and
+	 * probing it again froze a real machine (an H97 with a GTX 1650). */
+	dev_warn(&pdev->dev, "nouveau: the GSP-RM firmware didn't start (%d): this GPU stays off for this boot; "
+		 "boot without nouveau.config=NvGspRm=1 to use nouveau's own path\n", ret);
+	return ret;
+}
+
+static int nouveau_drm_probe_once(struct pci_dev *pdev,
+				  const struct pci_device_id *pent)
 {
 	struct nvkm_device *device;
 	struct nouveau_drm *drm;

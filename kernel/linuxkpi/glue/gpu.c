@@ -21,6 +21,7 @@ static struct {
 	bool known;
 	bool taken;                     /* a GPU driver claimed it */
 	const char *taken_by;
+	struct device *taken_dev;       /* the PCI GPU whose BAR holds it (NULL: by address only) */
 	struct platform_device *pdev;   /* simple-framebuffer device, while registered */
 } boot_fb;
 static DEFINE_MUTEX(aperture_lock);
@@ -149,9 +150,10 @@ int aperture_remove_conflicting_pci_devices(struct pci_dev *pdev, const char *na
 	if (!primary && boot_fb.known && (pdev->class >> 8) == PCI_CLASS_DISPLAY_VGA &&
 	    pdev->vendor == PCI_VENDOR_ID_INTEL && fb_not_on_other_gpu(pdev))
 		primary = true;
-	if (primary)
+	if (primary) {
+		boot_fb.taken_dev = &pdev->dev;
 		remove_boot_fb(name);
-	else
+	} else
 		printk(KERN_INFO "aperture: %s: firmware framebuffer %#llx is not on this device: it stays\n", name,
 		       (u64)boot_fb.base);
 	return 0;
@@ -335,15 +337,43 @@ const struct pci_device_id *lkpi_pci_match_id(const struct pci_device_id *ids, s
 	return NULL;
 }
 
+/* Scatter-gather mappings honour the device's DMA mask like dma_map_single:
+ * an entry above it goes through a bounce buffer under it (pci.cpp), copied
+ * on map/unmap/sync by direction. 0 (and nothing left mapped) on failure. */
+dma_addr_t lkpi_dma_map_virt(struct device *dev, void *virt, size_t size, int dir);
+void lkpi_dma_unmap(dma_addr_t a);
+void lkpi_dma_sync(dma_addr_t a, size_t size, int for_cpu);
+
+void lkpi_dma_unmap_sg(struct device *dev, struct scatterlist *sgl, int nents, int dir)
+{
+	struct scatterlist *sg;
+	int i;
+	for_each_sg(sgl, sg, nents, i)
+		if (sg->dma_address)
+			lkpi_dma_unmap(sg->dma_address);
+}
+
 int lkpi_dma_map_sg(struct device *dev, struct scatterlist *sgl, int nents, int dir)
 {
 	struct scatterlist *sg;
 	int i;
 	for_each_sg(sgl, sg, nents, i) {
-		sg->dma_address = lkpi_direct_to_phys(sg_virt(sg));
+		sg->dma_address = lkpi_dma_map_virt(dev, sg_virt(sg), sg->length, dir);
 		sg->dma_length = sg->length;
+		if (!sg->dma_address && sg->length) {
+			lkpi_dma_unmap_sg(dev, sgl, i, dir);
+			return 0;
+		}
 	}
 	return nents;
+}
+
+void lkpi_dma_sync_sg(struct device *dev, struct scatterlist *sgl, int nents, int for_cpu)
+{
+	struct scatterlist *sg;
+	int i;
+	for_each_sg(sgl, sg, nents, i)
+		lkpi_dma_sync(sg->dma_address, sg->length, for_cpu);
 }
 
 void *memdup_user_nul(const void __user *src, size_t len)
@@ -376,6 +406,13 @@ int lkpi_kstrtobool_from_user(const char __user *s, size_t count, bool *res)
 }
 
 /* glue/fbdev.c: only a GPU driver's console framebuffer takes the console. */
+/* fbdev.c: may this device's framebuffer carry the kernel console? Only the
+ * GPU that took the boot screen over (two GPUs: not the one without it). */
+bool lkpi_boot_fb_owner(struct device *dev)
+{
+	return boot_fb.taken && (!boot_fb.taken_dev || boot_fb.taken_dev == dev);
+}
+
 bool lkpi_boot_fb_taken_by_gpu(void)
 {
 	return boot_fb.taken;

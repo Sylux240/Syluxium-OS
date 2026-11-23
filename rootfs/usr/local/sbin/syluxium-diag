@@ -12,6 +12,9 @@
 #   syluxium-diag mark <text>     milestones.txt: "<seconds since boot> <text>"
 #   syluxium-diag gpu-clients     gpu-clients.txt: why programs do or don't get the
 #                                 GPU (Mesa's own explanation); GPU Test entry only
+#   syluxium-diag cards           gpu-cards.txt (and stdout): one entry per DRM card -
+#                                 driver, PCI device, render node, outputs connected,
+#                                 NVIDIA GSP-RM firmware; which card drives the desktop
 #   syluxium-diag gpu [name]      gpu.txt (or gpu-<name>.txt): the GPU stack top to
 #                                 bottom - kernel driver start (firmware, IP blocks,
 #                                 errors), /dev/dri and the sysfs files libdrm reads,
@@ -41,6 +44,29 @@ mesa_filter() {
 }
 
 # The GPU stack, top to bottom (see "gpu" above).
+# One line per DRM card (two-GPU machines: which is which, which has the
+# monitor and drives the desktop, NVIDIA GSP-RM firmware or not).
+gpu_cards() {
+    drminfo=$(command -v drminfo || echo /opt/syluxium/tests/drminfo)
+    for c in /dev/dri/card*; do
+        [ -e "$c" ] || { echo "no /dev/dri/card*"; break; }
+        m=${c#/dev/dri/card}
+        dev=$(readlink -f "/sys/dev/char/226:$m/device" 2>/dev/null)
+        pci=${dev##*/}
+        render=$(ls "$dev/drm" 2>/dev/null | grep renderD | tr '\n' ' ')
+        irq=$(grep -h "" "$dev/irq" 2>/dev/null)
+        echo "$c: $("$drminfo" "$c" 2>/dev/null | cut -d' ' -f1-2) pci $pci $(cat "$dev/vendor" 2>/dev/null):$(cat "$dev/device" 2>/dev/null) render ${render:-none} irq ${irq:-?} boot_vga $(cat "$dev/boot_vga" 2>/dev/null || echo -)"
+        echo "    outputs: $("$drminfo" -c "$c" 2>/dev/null)"
+        if [ "$(cat "$dev/vendor" 2>/dev/null)" = 0x10de ]; then
+            gsp=$(dmesg 2>/dev/null | grep "$pci" | grep -E "GSP|gsp" | tail -3)
+            echo "    GSP-RM: ${gsp:-no GSP lines for $pci (pre-Turing GPU, or nouveau did not get that far)}" | sed '2,$s/^/            /'
+        fi
+    done
+    echo "desktop on: $(cat /run/syluxium/display-card 2>/dev/null || echo unknown) (syluxium-display-config: the card with a monitor connected)"
+    grep -h -E "BusID|kmsdev|AutoAddGPU" /etc/X11/xorg.conf.d/20-display.conf 2>/dev/null | sed 's/^ */    xorg.conf: /'
+    [ -r /var/log/Xorg.0.log ] && grep -E "modeset\(0\): (glamor|Output .* connected)|kmsdev|PCI:.*BusID|platform: " /var/log/Xorg.0.log 2>/dev/null | head -12 | sed 's/^/    Xorg: /'
+}
+
 gpu_report() {
     echo "== GPU report at $(up) s as $(id -un), $(uname -srv)"
     echo "cmdline: $(cat /proc/cmdline)"
@@ -51,6 +77,8 @@ gpu_report() {
         esac
     done
     lspci -nnk 2>/dev/null | grep -A3 -E "VGA|Display|3D controller"
+    echo; echo "== DRM cards: driver, PCI device, render node, outputs; which one drives the screen"
+    gpu_cards
     echo; echo "== Kernel: GPU driver start (firmware, IP blocks, rings, errors)"
     dmesg 2>/dev/null | grep -E "amdgpu|radeon|nouveau|i915|virtio_gpu|virtio-pci|\[drm\]|drm:|aperture|firmware|GPU|gpu_sched|ring |IP block|VRAM|GTT|PSP|SMU|DMUB|DCN|VCN|MES" \
         | grep -v -E "\[drm:[0-9a-f]+\] [^*]" | head -400
@@ -153,6 +181,12 @@ android_report() {
     echo "== end at $(up) s"
 }
 
+if [ "$1" = cards ]; then
+    out=/dev/null
+    grep -q " /boot/logs-stick " /proc/mounts && [ "$(id -u)" = 0 ] && [ -d /boot/logs ] && out=/boot/logs/gpu-cards.txt
+    { echo "== DRM cards at $(up) s"; gpu_cards; } 2>&1 | tee "$out"
+    exit 0
+fi
 if [ "$1" = gpu ] && [ -n "$GPU_OUT" ]; then
     gpu_report > "$GPU_OUT" 2>&1
     exit 0
@@ -241,7 +275,8 @@ logs)
     for f in /var/log/Xorg.0.log /var/log/Xorg.0.log.old /var/log/tdm.log /var/log/tdm.out \
              /var/log/syluxium-shell.log /var/log/seatd.log /var/log/bluetoothd.log /var/log/bluealsa.log \
              /var/log/syluxium-netconfig.log /var/log/syluxium-wifi.log /var/log/wpa_supplicant.log \
-             /var/log/dbus-system.log /var/log/polkitd.log /var/log/cups/error_log; do
+             /var/log/dbus-system.log /var/log/polkitd.log /var/log/cups/error_log \
+             /var/log/syluxium-install.log; do
         [ -f "$f" ] && sed -E 's/(psk|password|passphrase)=[^ ]*/\1=********/Ig' "$f" > "$L/$(basename "$f")" 2>/dev/null
     done
     [ -d /run/syluxium-diag ] && cp /run/syluxium-diag/* "$L/" 2>/dev/null

@@ -2,6 +2,7 @@
 // interrupts (MSI/MSI-X vectors), DMA, MMIO mappings and firmware loading.
 
 #include <arch/x86_64/interrupts.hpp>
+#include <arch/x86_64/percpu.hpp>
 #include <boot/limine_requests.hpp>
 #include <lib/string.hpp>
 #include <core/log.hpp>
@@ -784,9 +785,105 @@ int pcie_capability_clear_and_set_word(struct pci_dev* p, int pos, u16 clear, u1
     return pcie_capability_write_word(p, pos, static_cast<u16>((v & ~clear) | set));
 }
 
-int pci_alloc_irq_vectors(struct pci_dev* p, unsigned int min_vecs, unsigned int, unsigned int flags) {
+} // extern "C"
+
+namespace {
+// The MSI-X table: entries 0..n-1 deliver vectors[i], spread over the CPUs
+// (entry 0 stays on the boot CPU, as the single vector did); the other
+// entries are masked. MSI and legacy INTx are switched off.
+bool msix_program(struct pci_dev* p, unsigned n) {
+    auto* f = static_cast<pci::Function*>(p->lkpi_function);
+    u16 control = pci::read16(*f, f->msix_cap + 2);
+    u32 table = pci::read32(*f, f->msix_cap + 4);
+    auto* base = static_cast<volatile u8*>(pci::map_bar(*f, table & 7));
+    if (!base)
+        return false;
+    if (f->msi_cap) // a device may have both: only one may be on
+        pci::write16(*f, f->msi_cap + 2, pci::read16(*f, f->msi_cap + 2) & ~1);
+    // Function mask while the table changes.
+    pci::write16(*f, f->msix_cap + 2, control | 0x8000 | 0x4000);
+    u32 entries = (control & 0x7FF) + 1;
+    u32 cpus = percpu::online_count() ? percpu::online_count() : 1;
+    for (u32 i = 0; i < entries; i++) {
+        volatile u32* e = reinterpret_cast<volatile u32*>(base + (table & ~7u) + i * 16);
+        if (i < n) {
+            u32 dest = 0;
+            for (u32 c = 0, seen = 0; c < percpu::count(); c++) {
+                Cpu* cpu = percpu::get(c);
+                if (!cpu || !cpu->online)
+                    continue;
+                if (seen++ == i % cpus) {
+                    dest = cpu->lapic_id;
+                    break;
+                }
+            }
+            u64 address = 0xFEE00000ull | (static_cast<u64>(dest) << 12);
+            e[0] = static_cast<u32>(address);
+            e[1] = static_cast<u32>(address >> 32);
+            e[2] = p->lkpi_vectors[i];
+            e[3] = 0;
+        } else {
+            e[3] = 1; // masked
+        }
+    }
+    pci::write16(*f, f->msix_cap + 2, (control | 0x8000) & ~0x4000);
+    pci::write16(*f, 0x04, pci::read16(*f, 0x04) | 0x400); // INTx off
+    p->msix_enabled = 1;
+    p->msi_enabled = 0;
+    p->lkpi_nvec = n;
+    return true;
+}
+
+// Up to `want` MSI-X vectors (at least `min`), reusing the ones this device
+// already has. Returns how many, or 0.
+unsigned msix_alloc(struct pci_dev* p, unsigned min, unsigned want) {
+    auto* f = static_cast<pci::Function*>(p->lkpi_function);
+    if (!f || !f->msix_cap)
+        return 0;
+    u32 entries = (pci::read16(*f, f->msix_cap + 2) & 0x7FF) + 1;
+    if (want > entries)
+        want = entries;
+    if (want > LKPI_MAX_MSIX)
+        want = LKPI_MAX_MSIX;
+    if (want < min)
+        return 0;
+    // Vector 0 is the device's existing one (pdev->irq, set at enable time).
+    if (!p->lkpi_nvec_owned && p->irq && p->irq < 256) {
+        p->lkpi_vectors[0] = p->irq;
+        p->lkpi_nvec_owned = 1;
+    }
+    while (p->lkpi_nvec_owned < want) {
+        u8 v = interrupts::allocate_vector();
+        if (!v)
+            break;
+        interrupts::set_handler(v, irq_trampoline);
+        p->lkpi_vectors[p->lkpi_nvec_owned++] = v;
+    }
+    unsigned n = p->lkpi_nvec_owned < want ? p->lkpi_nvec_owned : want;
+    if (n < min || n == 0)
+        return 0;
+    if (!msix_program(p, n))
+        return 0;
+    p->irq = p->lkpi_vectors[0];
+    if (n > 1)
+        dev_info(&p->dev, "MSI-X: %u interrupt vectors", n);
+    return n;
+}
+} // namespace
+
+extern "C" {
+
+// Several vectors for drivers that ask for them (virtio queues,
+// megaraid_sas reply queues, ...) on MSI-X devices; one otherwise.
+int pci_alloc_irq_vectors(struct pci_dev* p, unsigned int min_vecs, unsigned int max_vecs, unsigned int flags) {
+    if (max_vecs < min_vecs)
+        max_vecs = min_vecs;
+    if (max_vecs > 1 && (flags & PCI_IRQ_MSIX)) {
+        if (unsigned n = msix_alloc(p, min_vecs ? min_vecs : 1, max_vecs))
+            return static_cast<int>(n);
+    }
     if (min_vecs > 1)
-        return -ENOSPC; // one vector per device for now
+        return -ENOSPC;
     if (p->irq)
         return 1;
     if ((flags & (PCI_IRQ_MSI | PCI_IRQ_MSIX)) && setup_msi(p) == 0)
@@ -797,8 +894,35 @@ int pci_alloc_irq_vectors(struct pci_dev* p, unsigned int min_vecs, unsigned int
     }
     return -ENOSPC;
 }
-void pci_free_irq_vectors(struct pci_dev*) {}
-int pci_irq_vector(struct pci_dev* p, unsigned int nr) { return nr == 0 && p->irq ? static_cast<int>(p->irq) : -EINVAL; }
+// Back to the one vector (entry 0) the device started with: drivers try a
+// smaller count next (virtio: one vector per queue, then shared ones).
+void pci_free_irq_vectors(struct pci_dev* p) {
+    if (p->lkpi_nvec > 1)
+        msix_program(p, 1);
+}
+int pci_irq_vector(struct pci_dev* p, unsigned int nr) {
+    if (p->lkpi_nvec && nr < p->lkpi_nvec)
+        return static_cast<int>(p->lkpi_vectors[nr]);
+    return nr == 0 && p->irq ? static_cast<int>(p->irq) : -EINVAL;
+}
+// Linux's older MSI-X interface, for network drivers built with
+// LKPI_REAL_MSIX (struct msix_entry {u32 vector; u16 entry;}): entries must
+// be 0..n-1 in order, as every driver here asks for them.
+struct lkpi_msix_entry {
+    u32 vector;
+    u16 entry;
+};
+int lkpi_pci_enable_msix_range(struct pci_dev* p, struct lkpi_msix_entry* e, int minvec, int maxvec) {
+    for (int i = 0; i < maxvec; i++)
+        if (e[i].entry != i)
+            return -EINVAL;
+    unsigned n = msix_alloc(p, minvec > 0 ? minvec : 1, maxvec > 0 ? maxvec : 1);
+    if (!n)
+        return -ENOSPC;
+    for (unsigned i = 0; i < n; i++)
+        e[i].vector = p->lkpi_vectors[i];
+    return static_cast<int>(n);
+}
 int pci_enable_msi(struct pci_dev* p) { return setup_msi(p); }
 void pci_disable_msi(struct pci_dev*) {}
 

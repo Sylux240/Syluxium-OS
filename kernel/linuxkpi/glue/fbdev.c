@@ -15,6 +15,7 @@ void lkpi_console_attach(void *vaddr, u32 width, u32 height, u32 pitch, u32 red_
 void lkpi_console_detach(void *vaddr);
 bool lkpi_console_text_mode(void);
 bool lkpi_boot_fb_taken_by_gpu(void);
+bool lkpi_boot_fb_owner(struct device *dev);
 
 static struct fb_info *console_info;
 static struct delayed_work console_flush_work;
@@ -80,6 +81,12 @@ int register_framebuffer(struct fb_info *info)
 	 * already draws on; a GPU driver's replaces it. */
 	if (!lkpi_boot_fb_taken_by_gpu() || !vaddr || var->bits_per_pixel != 32)
 		return 0;
+	/* A second GPU (no boot screen on it) keeps its framebuffer to itself:
+	 * the console stays where the monitor is. */
+	if (!lkpi_boot_fb_owner(info->device)) {
+		printk(KERN_INFO "fbdev: %s: not the boot display's GPU: the console stays where it is\n", info->fix.id);
+		return 0;
+	}
 	console_info = info;
 	/* What fbcon does when it takes a framebuffer over: set the mode, so the
 	 * screen scans out this framebuffer (DRM's fbdev emulation does no mode

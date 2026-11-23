@@ -28,7 +28,15 @@ if not runner.ready():
     sys.exit(126)
 # The password goes in on standard input; the program keeps the display
 # (sudo keeps DISPLAY and XAUTHORITY).
-p = subprocess.Popen(["sudo", "-S", "-p", "", "--"] + args, stdin=subprocess.PIPE)
+# sudo's env_reset drops the display's credentials (XAUTHORITY): pass the
+# session's display to the program explicitly, or a window run as root
+# can't connect ("Authorization required") and a GTK program exits.
+xauth = os.environ.get("XAUTHORITY") or os.path.expanduser("~/.Xauthority")
+display_env = [f"{k}={os.environ[k]}" for k in ("DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR", "LANG")
+               if os.environ.get(k)]
+if os.path.exists(xauth):
+    display_env.append(f"XAUTHORITY={xauth}")
+p = subprocess.Popen(["sudo", "-S", "-p", "", "--", "env"] + display_env + args, stdin=subprocess.PIPE)
 try:
     p.stdin.write(((runner.password or "") + "\n").encode())
     p.stdin.close()
