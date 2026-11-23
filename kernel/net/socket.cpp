@@ -386,7 +386,7 @@ long Socket::ioctl(u64 request, u64 arg) {
         memcpy(&dst, rt + 8, 16);
         memcpy(&gw, rt + 24, 16);
         LockGuard guard(g_lock);
-        if (dst.addr != 0)
+        if (dst.addr != 0 || contained_caller())
             return 0; // only the default route matters for us; others are implied by netmasks
         set_gateway(request == 0x890B ? be32(gw.addr) : 0);
         return 0;
@@ -421,6 +421,9 @@ long Socket::ioctl(u64 request, u64 arg) {
     f = interface_by_name(req.name);
     if (!f)
         return -err::NODEV;
+    // Settings (flags, addresses, MTU) from a container: accepted, not applied.
+    if ((request == 0x8914 || request == 0x8916 || request == 0x891C || request == 0x8922) && contained_caller())
+        return 0;
     switch (request) {
     case 0x8913: // SIOCGIFFLAGS: RUNNING follows the carrier (up with a link), as on Linux
         req.flags = static_cast<u16>((f->flags & ~IFF_RUNNING) | ((f->flags & IFF_UP) && f->link_up ? IFF_RUNNING : 0));

@@ -230,6 +230,12 @@ void dhcp_kick(Interface* iface);
 bool dhcp_configured();
 u32 dns_server();
 void set_gateway(u32 gw);
+// The caller runs in a container (its own PID namespace, e.g. Android's).
+// There are no network namespaces yet, so a container shares the system's
+// network: its changes to interfaces, addresses and routes are accepted and
+// not applied (Android's netd and IpClient set up "their" eth0 when they
+// start, which would take the system's address and routes away).
+bool contained_caller();
 
 // ---- sockets ----
 

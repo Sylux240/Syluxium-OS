@@ -34,17 +34,33 @@ notify() { # title, text (shown only in a desktop session)
         notify-send -a "Android Apps" -i android "$1" "$2" 2>/dev/null
 }
 
+# (the message box doesn't hold this script up: callers such as the App Store
+# wait for its exit; programs that show the error themselves set
+# SYLUXIUM_ANDROID_QUIET=1)
 fail() {
     log "error: $*"
-    if [ -n "$DISPLAY$WAYLAND_DISPLAY" ]; then
-        if command -v zenity > /dev/null; then zenity --error --title="Android Apps" --text="$*" 2>/dev/null
-        elif command -v xmessage > /dev/null; then xmessage -center "Android Apps: $*"; fi
+    if [ -n "$DISPLAY$WAYLAND_DISPLAY" ] && [ -z "$SYLUXIUM_ANDROID_QUIET" ]; then
+        if command -v zenity > /dev/null; then
+            setsid zenity --error --title="Android Apps" --text="$*" > /dev/null 2>&1 < /dev/null &
+        elif command -v xmessage > /dev/null; then
+            setsid xmessage -center "Android Apps: $*" > /dev/null 2>&1 < /dev/null &
+        fi
     fi
     echo "syluxium-android: $*" >&2
     exit 1
 }
 
 session_running() { $WAYDROID status 2>/dev/null | grep -q 'Session:.*RUNNING'; }
+# Stopped for sure: "waydroid status" can miss a running session while
+# Android is busy starting (a slow D-Bus answer), so three looks, a second apart.
+session_gone() {
+    local k
+    for k in 1 2 3; do
+        session_running && return 1
+        sleep 1
+    done
+    return 0
+}
 # Android is ready once its package manager answers.
 android_ready() { session_running && [ -f "$STATE/ready" ]; }
 
@@ -167,7 +183,7 @@ ensure_started() {
     local i
     for i in $(seq 600); do
         $WAYDROID app list 2>/dev/null | grep -q '^packageName:' && break
-        session_running || fail "Android stopped while starting (see $LOG)."
+        session_gone && fail "Android stopped while starting (see $LOG)."
         sleep 1
     done
     $WAYDROID app list 2>/dev/null | grep -q '^packageName:' || fail "Android did not finish starting (see $LOG)."
@@ -178,7 +194,7 @@ ensure_started() {
     if [ "$started_at" -gt 0 ]; then
         for j in $(seq 400); do
             tail -n +"$((started_at + 1))" "$LOG" | grep -q 'Android with user [0-9]* is ready' && break
-            session_running || fail "Android stopped while starting (see $LOG)."
+            session_gone && fail "Android stopped while starting (see $LOG)."
             sleep 1
         done
         tail -n +"$((started_at + 1))" "$LOG" | grep -q 'Android with user [0-9]* is ready' ||
@@ -188,7 +204,9 @@ ensure_started() {
     touch "$STATE/ready"
     log "Android is ready (${i}s)"
     fix_menu_entries
-    (menu_watcher &) 2>/dev/null
+    # (detached from the caller's output: a caller reading it, such as the
+    # App Store or the .apk dialog, would wait for it until Android stops)
+    (menu_watcher > /dev/null 2>&1 < /dev/null &)
     return 0
 }
 

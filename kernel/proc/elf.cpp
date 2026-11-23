@@ -129,7 +129,8 @@ public:
     u64 sp() const { return m_top - m_used; }
 
     u64 push_bytes(const void* data, usize len) {
-        if (m_used + len > STACK_IMAGE_MAX) {
+        // (no buffer: out of memory; ok() says so before anything is used)
+        if (!m_buf || m_used + len > STACK_IMAGE_MAX) {
             m_overflow = true;
             return 0;
         }
