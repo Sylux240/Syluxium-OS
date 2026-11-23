@@ -136,7 +136,7 @@ static void limine_entries(void)
         char *line = p;
         while (*p && *p != '\n') p++;
         if (*p) *p++ = 0;
-        if (line[0] == '/' && line[1] != '/' && NENTRIES < 8) {
+        if (line[0] == '/' && line[1] != '/' && NENTRIES < 10) {
             struct entry *e = &ENTRIES[NENTRIES++];
             UINTN i = 0;
             for (line++; line[i] && line[i] != '\r' && i < sizeof(e->title) - 1; i++) e->title[i] = line[i];

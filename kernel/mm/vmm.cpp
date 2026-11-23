@@ -6,6 +6,7 @@
 #include <boot/limine_requests.hpp>
 #include <core/log.hpp>
 #include <core/panic.hpp>
+#include <lib/format.hpp>
 #include <mm/layout.hpp>
 #include <mm/pmm.hpp>
 #include <mm/vmm.hpp>
@@ -210,12 +211,47 @@ void free_table_page(u64 phys) {
     __atomic_sub_fetch(&g_table_pages, 1, __ATOMIC_RELAXED);
 }
 
+// A user-page release that doesn't fit: report it with the call chain (the
+// code that dropped a reference it didn't hold), and don't free. Freeing
+// would hand a page that is still in use to someone else - the heap,
+// a page table - and the damage would show up much later elsewhere
+// ("kfree: not a heap pointer", "pmm: bad free" of a page table).
+void report_bad_put(const char* why, u64 phys, u32 flags, u32 refcount) {
+    char chain[16 * 17 + 1];
+    usize n = 0;
+    const u64* fp = static_cast<const u64*>(__builtin_frame_address(0));
+    for (int i = 0; i < 12 && reinterpret_cast<u64>(fp) >= 0xFFFF800000000000ull && (reinterpret_cast<u64>(fp) & 7) == 0;
+         i++) {
+        u64 ret = fp[1];
+        if (ret < 0xFFFF800000000000ull)
+            break;
+        n += static_cast<usize>(snprintf(chain + n, sizeof(chain) - n, " %016lx", ret));
+        const u64* next = reinterpret_cast<const u64*>(fp[0]);
+        if (next <= fp || n >= sizeof(chain) - 18)
+            break;
+        fp = next;
+    }
+    klog::warn("vmm: user page %#lx released %s (flags %#x, refcount %u); not freed. Call chain:%s", phys, why, flags,
+               refcount, chain);
+}
+
 // Drop one reference to a mapped user page; free it on the last one.
 void put_user_page(u64 phys) {
     pmm::PageFrame* f = pmm::frame(phys);
     if (!f || !(f->flags & pmm::PF_ALLOCATED))
         return; // not RAM we own (e.g. a device mapping)
-    if (__atomic_sub_fetch(&f->refcount, 1, __ATOMIC_ACQ_REL) == 0)
+    if (f->flags & (pmm::PF_RESERVED | pmm::PF_SLAB | pmm::PF_HEAP_LARGE | pmm::PF_PAGE_TABLE)) {
+        report_bad_put("but the kernel owns it", phys, f->flags, f->refcount);
+        return;
+    }
+    u32 old = __atomic_load_n(&f->refcount, __ATOMIC_ACQUIRE);
+    do {
+        if (old == 0) {
+            report_bad_put("with no references left (one release too many)", phys, f->flags, 0);
+            return;
+        }
+    } while (!__atomic_compare_exchange_n(&f->refcount, &old, old - 1, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE));
+    if (old == 1)
         pmm::free_page(phys);
 }
 
