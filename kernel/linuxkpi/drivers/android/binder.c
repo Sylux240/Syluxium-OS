@@ -5655,7 +5655,7 @@ static int binder_ioctl_get_freezer_info(
 
 	mutex_lock(&binder_procs_lock);
 	hlist_for_each_entry(target_proc, &binder_procs, proc_node) {
-		if (target_proc->pid == info->pid) {
+		if (target_proc->pid == lkpi_pid_global(info->pid)) { /* LinuxKPI: PID namespaces */
 			found = true;
 			binder_inner_proc_lock(target_proc);
 			txns_pending = binder_txns_pending_ilocked(target_proc);
