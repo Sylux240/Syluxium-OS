@@ -116,6 +116,21 @@ void writer(void*) {
         elapsed = t;
         save();
     }
+    // Boot option "logfast" (GPU test entries): every second instead, so a
+    // machine that freezes when a program first uses the GPU leaves the
+    // kernel's last lines (the 20 s rhythm lost them).
+    bool fast = false;
+    for (const char* c = boot::cmdline(); (c = strstr(c, "logfast")) != nullptr; c += 7)
+        if ((c == boot::cmdline() || c[-1] == ' ') && (c[7] == 0 || c[7] == ' '))
+            fast = true;
+    if (fast) {
+        klog::info("Boot logs: saved every second for 15 minutes (logfast)");
+        for (u32 ms = elapsed * 1000; ms < 900'000; ms += 1000) {
+            sched::sleep_ms(1000);
+            save();
+        }
+        elapsed = 900;
+    }
     for (; elapsed < 900; elapsed += 20) {
         sched::sleep_ms(20'000);
         save();

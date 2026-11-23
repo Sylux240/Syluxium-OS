@@ -200,9 +200,9 @@ int lkpi_dev_printk(const char* level, const struct device* d, const char* fmt, 
 #define dev_info_once(...) lkpi_print_once(dev_info, __VA_ARGS__)
 #define dev_notice_once(...) lkpi_print_once(dev_notice, __VA_ARGS__)
 #define dev_dbg_once dev_dbg
-#define dev_err_ratelimited dev_err
-#define dev_warn_ratelimited dev_warn
-#define dev_info_ratelimited dev_info
+#define dev_err_ratelimited(d, fmt, ...) lkpi_rl_call(dev_err(d, fmt, ##__VA_ARGS__))
+#define dev_warn_ratelimited(d, fmt, ...) lkpi_rl_call(dev_warn(d, fmt, ##__VA_ARGS__))
+#define dev_info_ratelimited(d, fmt, ...) lkpi_rl_call(dev_info(d, fmt, ##__VA_ARGS__))
 #define dev_dbg_ratelimited dev_dbg
 #define dev_err_probe(d, err, fmt, ...) ({ dev_err(d, fmt, ##__VA_ARGS__); (err); })
 

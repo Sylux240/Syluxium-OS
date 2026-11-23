@@ -92,6 +92,21 @@ gpu_report() {
     ls -l /dev/dri 2>&1
     ls -l /sys/class/drm 2>&1
     syluxium-drm-devices 2>&1
+    # Boot option "amdgputest": the first user-space GPU work on each AMD
+    # card, one step at a time, every step synced to the stick before it
+    # runs (amdgpu-steps.txt): a freeze shows the step it happened in.
+    if grep -qw amdgputest /proc/cmdline; then
+        for n in /dev/dri/renderD*; do
+            [ "$(drminfo -n "$n" 2>/dev/null || /opt/syluxium/tests/drminfo -n "$n" 2>/dev/null)" = amdgpu ] || continue
+            echo; echo "== amdgputest $n: context, buffers, GPU address space, SDMA/GFX/compute writes"
+            out=/dev/null
+            [ -d /boot/logs ] && [ "$(id -u)" = 0 ] && out=/boot/logs/amdgpu-steps-${n##*/}.txt
+            t=$(command -v amdgputest || echo /opt/syluxium/tests/amdgputest)
+            timeout 60 "$t" "$n" "$out" 2>&1
+            echo "-- exit $?"
+            sync
+        done
+    fi
     echo; echo "== Mesa's driver choice without X (EGL GBM, surfaceless and device platforms)"
     for p in gbm surfaceless device; do
         echo "-- eglinfo -B -p $p"

@@ -168,11 +168,68 @@ bool lkpi_cmdline_word(const char *w); /* pci.cpp */
  * object class created or the method called and the NVIF status. */
 const char *lkpi_drm_file_driver(struct file *filp); /* drm_file.c */
 
-static void drm_trace(struct file *f, unsigned int cmd, unsigned long arg, long r, unsigned long ms)
+/* amdgpu: what a call asks for, read before the call (the in/out unions
+ * get overwritten): buffer size and domains, virtual address mappings, and
+ * for command submission the engine and IB of every chunk, printed before
+ * the call too, so a submission that never returns still shows. */
+static void amdgpu_trace_args(unsigned int cmd, unsigned long arg, char *out, size_t len, bool *announce)
+{
+	u64 a[5] = {0};
+	static const char *const ips[] = {"GFX", "COMPUTE", "SDMA", "UVD", "VCE", "UVD_ENC", "VCN_DEC", "VCN_ENC",
+					  "VCN_JPEG", "VPE"};
+
+	*announce = false;
+	out[0] = 0;
+	if (!arg || copy_from_user(a, (void __user *)arg, min_t(size_t, _IOC_SIZE(cmd), sizeof(a))))
+		return;
+	switch (_IOC_NR(cmd)) {
+	case 0x40: /* GEM_CREATE: bo_size, alignment, domains, domain_flags */
+		snprintf(out, len, " gem_create %llu KiB domains %#llx flags %#llx", a[0] >> 10, a[2], a[3]);
+		break;
+	case 0x48: /* GEM_VA: handle, pad, operation, flags, va, offset, size */
+		snprintf(out, len, " gem_va op %u flags %#x handle %u va %#llx size %#llx", (u32)a[1], (u32)(a[1] >> 32),
+			 (u32)a[0], a[2], a[4]);
+		break;
+	case 0x44: { /* CS: ctx, bo_list, num_chunks, flags, chunks */
+		u32 n = (u32)a[1], i;
+		u64 ptrs[8];
+		size_t used;
+
+		snprintf(out, len, " cs ctx %u chunks %u:", (u32)a[0], n);
+		*announce = true;
+		if (n > 8)
+			n = 8;
+		if (copy_from_user(ptrs, (void __user *)a[2], n * sizeof(u64)))
+			break;
+		for (i = 0; i < n; i++) {
+			u32 chunk[4];
+			u32 ib[8];
+
+			used = strlen(out);
+			if (copy_from_user(chunk, (void __user *)ptrs[i], sizeof(chunk)))
+				break;
+			if (chunk[0] == 1 && !copy_from_user(ib, (void __user *)(*(u64 *)&chunk[2]), sizeof(ib)))
+				snprintf(out + used, len - used, " IB %s va %#llx %u bytes ring %u",
+					 ib[5] < ARRAY_SIZE(ips) ? ips[ib[5]] : "?", *(u64 *)&ib[2], ib[4], ib[7]);
+			else
+				snprintf(out + used, len - used, " chunk %u", chunk[0]);
+		}
+		break;
+	}
+	case 0x49: /* WAIT_CS: handle, timeout, ip, instance, ring, ctx */
+		snprintf(out, len, " wait_cs seq %llu ip %u", a[0], (u32)a[2]);
+		break;
+	}
+}
+
+static void drm_trace(struct file *f, unsigned int cmd, unsigned long arg, long r, unsigned long ms, const char *pre)
 {
 	static int traced;
-	char extra[96] = "";
+	char extra[160] = "";
 	const char *drv = lkpi_drm_file_driver(f);
+
+	if (pre && *pre)
+		snprintf(extra, sizeof(extra), "%s", pre);
 
 	if (traced >= 6000)
 		return;
@@ -203,16 +260,33 @@ static void drm_trace(struct file *f, unsigned int cmd, unsigned long arg, long 
 
 long lkpi_file_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 {
-	static int logged, slow_logged, trace = -1;
-	u64 start = ktime_get_ns();
-	long r = f->f_op && f->f_op->unlocked_ioctl ? f->f_op->unlocked_ioctl(f, cmd, arg) : -ENOTTY;
-	unsigned long ms = (unsigned long)((ktime_get_ns() - start) / 1000000);
+	static int logged, slow_logged, trace = -1, announced;
+	char pre[160] = "";
+	u64 start;
+	long r;
+	unsigned long ms;
 
 	if (_IOC_TYPE(cmd) == 'd') {
 		if (trace < 0)
 			trace = lkpi_cmdline_word("drmtrace");
+		if (trace && _IOC_NR(cmd) >= 0x40 && _IOC_NR(cmd) < 0xa0) {
+			const char *drv = lkpi_drm_file_driver(f);
+			bool announce = false;
+			if (drv && !strcmp(drv, "amdgpu"))
+				amdgpu_trace_args(cmd, arg, pre, sizeof(pre), &announce);
+			if (announce && announced < 2000) {
+				announced++;
+				pr_info("drmtrace: %s[%d] amdgpu submitting:%s\n", current->comm, current->pid, pre);
+			}
+		}
+	}
+	start = ktime_get_ns();
+	r = f->f_op && f->f_op->unlocked_ioctl ? f->f_op->unlocked_ioctl(f, cmd, arg) : -ENOTTY;
+	ms = (unsigned long)((ktime_get_ns() - start) / 1000000);
+
+	if (_IOC_TYPE(cmd) == 'd') {
 		if (trace && _IOC_NR(cmd) >= 0x40)
-			drm_trace(f, cmd, arg, r, ms);
+			drm_trace(f, cmd, arg, r, ms, pre);
 		/* A GPU ioctl that takes seconds (a fence or the GPU not
 		 * answering: nouveau gives up on a channel after 15 s) is
 		 * always worth a line. */

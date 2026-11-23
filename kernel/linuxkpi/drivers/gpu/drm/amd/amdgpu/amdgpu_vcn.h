@@ -519,4 +519,6 @@ int amdgpu_vcn_ras_sw_init(struct amdgpu_device *adev);
 int amdgpu_vcn_psp_update_sram(struct amdgpu_device *adev, int inst_idx,
 			       enum AMDGPU_UCODE_ID ucode_id);
 
+int amdgpu_vcn_lkpi_report(struct amdgpu_device *adev, int inst, const char *mode); /* LinuxKPI */
+
 #endif

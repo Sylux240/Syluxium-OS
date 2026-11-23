@@ -1532,3 +1532,50 @@ bool video_get_options(const char *name, char **option)
 		*option = NULL;
 	return false;
 }
+
+/* Rate-limited messages (linux/kernel.h, linux/ratelimit.h): as on Linux,
+ * at most `burst` messages per call site in `interval`, then one line with
+ * the number dropped once the interval is over. Races between CPUs only
+ * blur the count. */
+#include <linux/ratelimit.h>
+struct lkpi_rl lkpi_printk_rl;
+
+static int lkpi_ratelimit_n(unsigned long *begin, int *printed, int *missed, int interval, int burst)
+{
+	unsigned long now = jiffies;
+
+	if (!*begin)
+		*begin = now;
+	if (time_after(now, *begin + interval)) {
+		int dropped = *missed;
+		*begin = now;
+		*printed = 0;
+		*missed = 0;
+		if (dropped)
+			printk(KERN_WARNING "(%d similar messages dropped by the rate limit)\n", dropped);
+	}
+	if (*printed < burst) {
+		(*printed)++;
+		return 1;
+	}
+	(*missed)++;
+	return 0;
+}
+
+int lkpi_ratelimit(struct lkpi_rl *s, int interval, int burst)
+{
+	return lkpi_ratelimit_n(&s->begin, &s->printed, &s->missed, interval ? interval : DEFAULT_RATELIMIT_INTERVAL,
+				burst ? burst : DEFAULT_RATELIMIT_BURST);
+}
+
+int lkpi_ratelimit_state(struct ratelimit_state *rs)
+{
+	unsigned long begin = rs->begin;
+	int r;
+
+	if (!rs->interval)
+		return 1;
+	r = lkpi_ratelimit_n(&begin, &rs->printed, &rs->missed, rs->interval, rs->burst);
+	rs->begin = begin;
+	return r;
+}
