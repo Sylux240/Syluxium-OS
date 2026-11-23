@@ -65,6 +65,7 @@ app)
         say "windows: $(xdotool search --onlyvisible --name . getwindowname %@ 2>/dev/null | tr '\n' '|' | cut -c1-300)"
     done
     say "log: $(grep -v 'Failed to get service waydroidplatform' /home/syluxium/.cache/syluxium-android.log 2>/dev/null | tail -45 | tr '\n' '|' | cut -c1-6000)"
+    say "cfgperm: $(ls -la /var/lib/waydroid/ 2>&1 | head -12 | tr '\n' '|')"
     say "cfg: $(tr '\n' '|' < /var/lib/waydroid/waydroid.cfg 2>&1 | cut -c1-3000)"
     say "container log: $(tail -15 /var/log/waydroid-container.log 2>/dev/null | tr '\n' '|' | cut -c1-2000)"
     say "host: $(grep -v 'wayland-host-icon\|Traceback\|File \|\^\^\|sys.stdout' /run/user/1000/syluxium-wayland-host.log 2>/dev/null | tail -40 | tr '\n' '|' | cut -c1-4000)"

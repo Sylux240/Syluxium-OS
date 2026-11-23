@@ -52,6 +52,10 @@ adapt_config() {
             sed -i '/^\[properties\]/a persist.waydroid.multi_windows = true' /var/lib/waydroid/waydroid.cfg
         # (Waydroid copies [properties] into waydroid_base.prop only at init:
         # Android reads it from there when it starts.)
+        # The desktop user's session reads the config (configparser skips a
+        # file it can't read: KeyError 'binder', and the session stops).
+        chmod 755 /var/lib/waydroid
+        chmod 644 /var/lib/waydroid/waydroid.cfg
         b=/var/lib/waydroid/waydroid_base.prop
         if [ -f "$b" ]; then
             sed -i '/^persist.waydroid.multi_windows=/d' "$b"
