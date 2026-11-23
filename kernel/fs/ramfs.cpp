@@ -266,7 +266,10 @@ void RegularFile::free_pages_from(u64 first) {
     LockGuard guard(m_pages_lock);
     for (u64 i = first; i < m_slots; i++) {
         if (m_pages[i]) {
-            pmm::free_page(m_pages[i]);
+            // The file's own reference: a private mapping that still uses the
+            // page holds one of its own, so the page lives until that goes
+            // (freeing it here left the mapping on a page the kernel reused).
+            vmm::release_user_page(m_pages[i]);
             m_pages[i] = 0;
         }
     }
