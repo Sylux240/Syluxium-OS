@@ -1277,3 +1277,89 @@ int amdgpu_vcn_psp_update_sram(struct amdgpu_device *adev, int inst_idx,
 
 	return psp_execute_ip_fw_load(&adev->psp, &ucode);
 }
+
+/* LinuxKPI (Syluxium): where every buffer the video engine is told about
+ * lives, for hardware reports. One line per buffer: GPU address, memory
+ * domain (VRAM through the frame buffer aperture, or GTT through the GART
+ * with the page table entry the GART table holds for it). A VCN that reads
+ * an address no buffer maps (an MMHUB fault at 0) shows up here as an
+ * address of 0 or a GART entry without the valid bit. Printed for the first
+ * starts and whenever something looks wrong. Returns nonzero (the start is
+ * refused) only when PSP gave no firmware address; other doubts are logged. */
+static int lkpi_vcn_where(struct amdgpu_device *adev, const char *what, u64 addr, struct amdgpu_bo *bo,
+			  bool print)
+{
+	const char *dom = "-";
+	int bad = 0;
+	char extra[64] = "";
+
+	if (bo && bo->tbo.resource)
+		dom = bo->tbo.resource->mem_type == TTM_PL_VRAM ? "VRAM" :
+		      bo->tbo.resource->mem_type == TTM_PL_TT ? "GTT" :
+		      bo->tbo.resource->mem_type == TTM_PL_SYSTEM ? "SYSTEM (not bound!)" : "other";
+	if (addr >= adev->gmc.fb_start && addr <= adev->gmc.fb_end) {
+		snprintf(extra, sizeof(extra), " (frame buffer aperture)");
+	} else if (addr >= adev->gmc.gart_start && addr <= adev->gmc.gart_end) {
+		u64 idx = (addr - adev->gmc.gart_start) >> AMDGPU_GPU_PAGE_SHIFT;
+		u64 pte = adev->gart.ptr ? READ_ONCE(((volatile u64 *)adev->gart.ptr)[idx]) : 0;
+		snprintf(extra, sizeof(extra), " (GART page %llu, pte %#llx)", idx, pte);
+		if (!(pte & AMDGPU_PTE_VALID))
+			bad = 1;
+	} else if (adev->gmc.agp_size && addr >= adev->gmc.agp_start && addr <= adev->gmc.agp_end) {
+		/* pinned GTT buffers can be reached through the AGP aperture: system page at agp offset */
+		snprintf(extra, sizeof(extra), " (AGP aperture: system page %#llx)", addr - adev->gmc.agp_start);
+	} else {
+		snprintf(extra, sizeof(extra), " (outside VRAM, GART and AGP aperture)");
+		bad = 1;
+	}
+	if (print || bad)
+		dev_info(adev->dev, "vcn: %-14s %#014llx %s%s%s\n", what, addr, dom, extra, bad ? "  <-- PROBLEM" : "");
+	return bad;
+}
+
+int amdgpu_vcn_lkpi_report(struct amdgpu_device *adev, int inst, const char *mode)
+{
+	static int reports;
+	struct amdgpu_vcn_inst *v = &adev->vcn.inst[inst];
+	bool print = reports < 6;
+	int bad = 0, fatal = 0, j;
+	u64 tmr;
+
+	reports++;
+	if (print) {
+		struct amdgpu_vmhub *gfx = &adev->vmhub[AMDGPU_GFXHUB(0)], *mm = &adev->vmhub[AMDGPU_MMHUB0(0)];
+		dev_info(adev->dev, "vcn: instance %d start (%s), firmware via %s; GART %#llx-%#llx (table at %#llx), "
+			 "frame buffer %#llx-%#llx, AGP %#llx-%#llx\n", inst, mode,
+			 adev->firmware.load_type == AMDGPU_FW_LOAD_PSP ? "PSP" : "driver",
+			 adev->gmc.gart_start, adev->gmc.gart_end,
+			 adev->gart.bo ? amdgpu_bo_gpu_offset(adev->gart.bo) : 0ull, adev->gmc.fb_start, adev->gmc.fb_end,
+			 adev->gmc.agp_size ? adev->gmc.agp_start : 0ull, adev->gmc.agp_size ? adev->gmc.agp_end : 0ull);
+		if (gfx->ctx0_ptb_addr_lo32 && mm->ctx0_ptb_addr_lo32)
+			dev_info(adev->dev, "vcn: VMID0 page table base: GFX hub %#x%08x, MM hub (video) %#x%08x\n",
+				 RREG32(gfx->ctx0_ptb_addr_hi32), RREG32(gfx->ctx0_ptb_addr_lo32),
+				 RREG32(mm->ctx0_ptb_addr_hi32), RREG32(mm->ctx0_ptb_addr_lo32));
+	}
+	if (adev->firmware.load_type == AMDGPU_FW_LOAD_PSP) {
+		tmr = (u64)adev->firmware.ucode[AMDGPU_UCODE_ID_VCN + inst].tmr_mc_addr_hi << 32 |
+		      adev->firmware.ucode[AMDGPU_UCODE_ID_VCN + inst].tmr_mc_addr_lo;
+		bad += lkpi_vcn_where(adev, "firmware (TMR)", tmr, NULL, print);
+		fatal = !tmr; /* the firmware lives in VRAM: 0 means PSP never said where */
+	}
+	bad += lkpi_vcn_where(adev, "VCPU stack/ctx", v->gpu_addr, v->vcpu_bo, print);
+	bad += lkpi_vcn_where(adev, "fw_shared", v->fw_shared.gpu_addr, v->vcpu_bo, print);
+	if ((adev->pg_flags & AMD_PG_SUPPORT_VCN_DPG) && adev->vcn.indirect_sram)
+		bad += lkpi_vcn_where(adev, "DPG SRAM", v->dpg_sram_gpu_addr, v->dpg_sram_bo, print);
+	bad += lkpi_vcn_where(adev, "dec ring", v->ring_dec.gpu_addr, v->ring_dec.ring_obj, print);
+	if (v->ring_dec.rptr_gpu_addr)
+		bad += lkpi_vcn_where(adev, "dec rptr wb", v->ring_dec.rptr_gpu_addr, adev->wb.wb_obj, print);
+	for (j = 0; j < adev->vcn.num_enc_rings; j++) {
+		char name[24];
+
+		snprintf(name, sizeof(name), "enc%d ring", j);
+		bad += lkpi_vcn_where(adev, name, v->ring_enc[j].gpu_addr, v->ring_enc[j].ring_obj, print);
+	}
+	if (bad)
+		dev_err(adev->dev, "vcn: instance %d: %d buffer(s) the video engine reads look unmapped%s\n", inst,
+			bad, fatal ? "; PSP gave no firmware address: not starting the video engine" : "");
+	return fatal;
+}
