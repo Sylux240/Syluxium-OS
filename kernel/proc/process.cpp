@@ -792,6 +792,7 @@ long exec_impl(interrupts::Frame* frame, const char* path, const char* const* ar
     old->put(); // a vfork parent may still hold it
 
     p->cred = next;
+    p->keep_caps = p->caps_retained = false; // PR_SET_KEEPCAPS ends at exec, as on Linux
     // In a user namespace, capabilities survive exec only for its root.
     if (p->userns)
         p->ns_caps = uid_to_ns(next.euid) == 0;

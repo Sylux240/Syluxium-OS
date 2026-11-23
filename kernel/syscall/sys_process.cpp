@@ -97,7 +97,20 @@ long sys_geteuid(SYSCALL_ARGS) { SYSCALL_UNUSED; return proc::uid_to_ns(my_cred(
 long sys_getgid(SYSCALL_ARGS) { SYSCALL_UNUSED; return proc::gid_to_ns(my_cred().rgid); }
 long sys_getegid(SYSCALL_ARGS) { SYSCALL_UNUSED; return proc::gid_to_ns(my_cred().egid); }
 
+// PR_SET_KEEPCAPS: a switch away from root keeps the capabilities (Linux
+// keeps the permitted set; clearing KEEPCAPS afterwards doesn't take it
+// back). Checked when the uid syscalls return.
+struct KeepCapsOnSwitch {
+    bool was_root = proc::current()->cred.euid == 0;
+    ~KeepCapsOnSwitch() {
+        Process* me = proc::current();
+        if (was_root && me->cred.euid != 0 && me->keep_caps)
+            me->caps_retained = true;
+    }
+};
+
 long sys_setuid(SYSCALL_ARGS) {
+    KeepCapsOnSwitch keep_caps_guard;
     SYSCALL_UNUSED;
     proc::Cred& c = my_cred();
     u32 uid = static_cast<u32>(a0);
@@ -130,6 +143,7 @@ long sys_setgid(SYSCALL_ARGS) {
 }
 
 long sys_setreuid(SYSCALL_ARGS) {
+    KeepCapsOnSwitch keep_caps_guard;
     SYSCALL_UNUSED;
     proc::Cred& c = my_cred();
     u32 r = static_cast<u32>(a0), e = static_cast<u32>(a1);
@@ -166,6 +180,7 @@ long sys_setregid(SYSCALL_ARGS) {
 }
 
 long sys_setresuid(SYSCALL_ARGS) {
+    KeepCapsOnSwitch keep_caps_guard;
     SYSCALL_UNUSED;
     proc::Cred& c = my_cred();
     u32 r = static_cast<u32>(a0), e = static_cast<u32>(a1), s = static_cast<u32>(a2);
@@ -1012,7 +1027,10 @@ long sys_capset(SYSCALL_ARGS) {
         return -err::FAULT;
     Process* me = proc::current();
     bool want_any = data[0] | data[1] | (words == 6 ? data[3] | data[4] : 0);
-    bool have = me->userns ? me->ns_caps : me->cred.euid == 0;
+    // PR_SET_KEEPCAPS kept them across a switch away from root: a daemon
+    // that dropped to its own user (dbus-daemon as messagebus) may still
+    // set what it kept, as on Linux.
+    bool have = (me->userns ? me->ns_caps : me->cred.euid == 0) || me->keep_caps || me->caps_retained;
     if (want_any && !have)
         return -err::PERM; // can't gain capabilities
     // Dropping every capability inside a user namespace is real (sandboxes
@@ -1202,8 +1220,15 @@ long sys_prctl(SYSCALL_ARGS) {
     case PR_GET_NO_NEW_PRIVS: return proc::current()->no_new_privs ? 1 : 0;
     // Capabilities (libcap-ng, daemons dropping privileges): every process is
     // root with every capability, so these succeed without changing anything.
-    case 7:  return 0;                       // PR_GET_KEEPCAPS
-    case 8:  return a1 > 1 ? -err::INVAL : 0; // PR_SET_KEEPCAPS
+    case 7:  return proc::current()->keep_caps ? 1 : 0; // PR_GET_KEEPCAPS
+    case 8: { // PR_SET_KEEPCAPS: keep capabilities across setuid away from root (dbus-daemon)
+        if (a1 > 1)
+            return -err::INVAL;
+        Process* me = proc::current();
+        bool privileged = me->userns ? me->ns_caps : me->cred.euid == 0;
+        me->keep_caps = a1 == 1 && (privileged || me->keep_caps);
+        return 0;
+    }
     case 23: return a1 <= 40 ? 1 : -err::INVAL; // PR_CAPBSET_READ: in the bounding set
     case 24: return 0;                       // PR_CAPBSET_DROP
     case 27: return 0;                       // PR_GET_SECUREBITS
