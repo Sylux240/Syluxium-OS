@@ -4,8 +4,8 @@
 booted by [Limine](https://github.com/limine-bootloader/limine), aided with AI for a more efficient workflow.
 
 Syluxium runs **Linux applications out of the box**: Firefox, Wine, the Xfce desktop, CUPS, apt and the whole
-Debian package archive, unmodified, on top of a kernel written from scratch. **Android app support**
-(binder IPC and container support in the kernel, for Waydroid) is being built now.
+Debian package archive, unmodified, on top of a kernel written from scratch. **Android apps** are arriving:
+Android boots in a Waydroid container on the Syluxium kernel and its apps open as desktop windows (early preview).
 
 Highlights:
 - **Its own kernel**: SMP scheduler, virtual memory, ext4 with journaling, FAT32/exFAT, a TCP/IP stack
@@ -239,7 +239,8 @@ Legend: ✅ done · 🟡 partly done · ⬜ to do
 - ✅ Image Writer: .iso/.img to USB sticks and SD cards with a read-back check
 - ✅ Firefox (Debian firefox-esr) preinstalled and the default browser
 - ✅ Windows programs: double-click an .exe (Wine)
-- 🟡 Android apps: binder IPC and container support in the kernel (for Waydroid) in progress
+- 🟡 Android apps: Android (LineageOS via Waydroid) boots on the kernel's binder IPC and containers, and its
+     apps open in their own desktop windows; APK installs and F-Droid in progress
 - ✅ Notifications: Dusk glass bubbles in the lower right for every program (the desktop's
      org.freedesktop.Notifications service: notify-send, Firefox, GTK programs), AutoPlay and Wi-Fi
 
