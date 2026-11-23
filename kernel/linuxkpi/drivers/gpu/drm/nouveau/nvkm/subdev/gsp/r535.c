@@ -2673,9 +2673,15 @@ r535_gsp_load(struct nvkm_gsp *gsp, int ver, const struct nvkm_gsp_fwif *fwif)
 	    (ret = r535_gsp_load_fw(gsp, "booter_unload", fwif->ver, &gsp->fws.booter.unload)) ||
 	    (ret = r535_gsp_load_fw(gsp, "bootloader", fwif->ver, &gsp->fws.bl))) {
 		r535_gsp_dtor_fws(gsp);
+		nvkm_info(subdev, "GSP-RM firmware %s not found (%d): nouveau's own path\n", fwif->ver, ret);
 		return ret;
 	}
 
+	{
+		extern int lkpi_nouveau_gsp_loaded; /* nouveau_drm.c: fall back if it fails to start */
+		lkpi_nouveau_gsp_loaded = 1;
+	}
+	nvkm_info(subdev, "GSP-RM firmware %s loaded\n", fwif->ver);
 	return 0;
 }
 
