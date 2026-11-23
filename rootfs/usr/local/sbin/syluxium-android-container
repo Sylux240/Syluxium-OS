@@ -98,7 +98,16 @@ start)
     setup_binder || { echo "binderfs devices could not be made" >&2; exit 3; }
     adapt_config
     mkdir -p /run/dbus
-    [ -S /run/dbus/system_bus_socket ] || dbus-daemon --system --fork
+    # The system bus (Waydroid's container manager lives on it): started if
+    # nothing answers there (a socket can be left over from a bus that died).
+    if ! dbus-send --system --print-reply --dest=org.freedesktop.DBus / org.freedesktop.DBus.GetId > /dev/null 2>&1; then
+        rm -f /run/dbus/system_bus_socket /run/dbus/pid
+        dbus-daemon --system --fork
+        for _ in $(seq 25); do
+            dbus-send --system --print-reply --dest=org.freedesktop.DBus / org.freedesktop.DBus.GetId > /dev/null 2>&1 && break
+            sleep 0.2
+        done
+    fi
     # LXC needs the cgroup2 hierarchy.
     mkdir -p /sys/fs/cgroup
     grep -q ' /sys/fs/cgroup cgroup2 ' /proc/mounts || mount -t cgroup2 cgroup2 /sys/fs/cgroup
@@ -107,12 +116,20 @@ start)
     echo $! > "$PIDFILE"
     # Ready once it owns its name on the system bus: a session started before
     # that would make D-Bus start a second manager.
-    for _ in $(seq 100); do
+    for _ in $(seq 300); do
         manager_on_bus && break
         kill -0 "$(cat "$PIDFILE")" 2>/dev/null || break
         sleep 0.2
     done
-    manager_on_bus || { echo "the container manager did not start (see $LOG)" >&2; exit 4; }
+    if ! manager_on_bus; then
+        if kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+            echo "$(date '+%F %T') the container manager is slow to appear on D-Bus; going on" >> "$LOG"
+        else
+            echo "the container manager did not start (see $LOG)" >&2
+            tail -20 "$LOG" >&2
+            exit 4
+        fi
+    fi
     exit 0
     ;;
 stop)
