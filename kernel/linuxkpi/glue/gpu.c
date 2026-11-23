@@ -21,6 +21,7 @@ static struct {
 	bool known;
 	bool taken;                     /* a GPU driver claimed it */
 	const char *taken_by;
+	struct device *taken_dev;       /* the PCI GPU whose BAR holds it (NULL: by address only) */
 	struct platform_device *pdev;   /* simple-framebuffer device, while registered */
 } boot_fb;
 static DEFINE_MUTEX(aperture_lock);
@@ -149,9 +150,10 @@ int aperture_remove_conflicting_pci_devices(struct pci_dev *pdev, const char *na
 	if (!primary && boot_fb.known && (pdev->class >> 8) == PCI_CLASS_DISPLAY_VGA &&
 	    pdev->vendor == PCI_VENDOR_ID_INTEL && fb_not_on_other_gpu(pdev))
 		primary = true;
-	if (primary)
+	if (primary) {
+		boot_fb.taken_dev = &pdev->dev;
 		remove_boot_fb(name);
-	else
+	} else
 		printk(KERN_INFO "aperture: %s: firmware framebuffer %#llx is not on this device: it stays\n", name,
 		       (u64)boot_fb.base);
 	return 0;
@@ -404,6 +406,13 @@ int lkpi_kstrtobool_from_user(const char __user *s, size_t count, bool *res)
 }
 
 /* glue/fbdev.c: only a GPU driver's console framebuffer takes the console. */
+/* fbdev.c: may this device's framebuffer carry the kernel console? Only the
+ * GPU that took the boot screen over (two GPUs: not the one without it). */
+bool lkpi_boot_fb_owner(struct device *dev)
+{
+	return boot_fb.taken && (!boot_fb.taken_dev || boot_fb.taken_dev == dev);
+}
+
 bool lkpi_boot_fb_taken_by_gpu(void)
 {
 	return boot_fb.taken;

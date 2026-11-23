@@ -120,6 +120,11 @@ fi
 } > /run/syluxium-diag/shell.txt 2>/dev/null
 chmod 666 /run/syluxium-diag/shell.txt 2>/dev/null
 chown -R "$U" "$HOME_/.config/syluxium-shell"
+# Two GPUs: Wayfire uses the card syluxium-display-config chose (the one with
+# the monitor), not whichever wlroots finds first.
+if [ "$(ls /dev/dri/card* 2>/dev/null | wc -l)" -gt 1 ] && [ -s /run/syluxium/display-card ]; then
+    SYLUXIUM_SHELL_ENV="$SYLUXIUM_SHELL_ENV WLR_DRM_DEVICES=$(cat /run/syluxium/display-card)"
+fi
 # Logging out ends Wayfire: a new session starts (the shell has no login screen).
 # If Wayfire fails right away on the GPU driver (its EGL/GLES setup), the
 # next start draws in software instead of leaving a black screen.

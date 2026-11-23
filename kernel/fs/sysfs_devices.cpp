@@ -12,6 +12,8 @@
 #include <lib/spinlock.hpp>
 #include <lib/string.hpp>
 #include <linuxkpi/linuxkpi.hpp>
+#include <mm/layout.hpp>
+#include <video/framebuffer.hpp>
 
 namespace sysfs {
 
@@ -27,6 +29,22 @@ bool gen_subvendor(TextBuffer& o, const void* c) { o.printf("0x%04x\n", static_c
 bool gen_subdevice(TextBuffer& o, const void* c) { o.printf("0x%04x\n", static_cast<const dev::Device*>(c)->subsystem_device); return true; }
 bool gen_class(TextBuffer& o, const void* c) { o.printf("0x%06x\n", static_cast<const dev::Device*>(c)->class_code); return true; }
 bool gen_revision(TextBuffer& o, const void* c) { o.printf("0x%02x\n", static_cast<const dev::Device*>(c)->revision); return true; }
+
+// Linux "boot_vga": 1 for the display device the firmware drew the boot
+// screen on (its framebuffer lies in one of the device's memory BARs).
+// Taken before any GPU driver replaces the firmware framebuffer.
+u64 g_boot_fb_phys = 0;
+bool gen_boot_vga(TextBuffer& o, const void* c) {
+    auto* d = static_cast<const dev::Device*>(c);
+    bool boot = false;
+    for (u32 i = 0; i < d->resource_count && g_boot_fb_phys; i++) {
+        const dev::Resource& r = d->resources[i];
+        if (r.type == dev::Resource::Mmio && g_boot_fb_phys >= r.start && g_boot_fb_phys < r.start + r.size)
+            boot = true;
+    }
+    o.printf("%d\n", boot ? 1 : 0);
+    return true;
+}
 
 bool gen_irq(TextBuffer& o, const void* c) {
     auto* d = static_cast<const dev::Device*>(c);
@@ -133,6 +151,9 @@ void populate_devices() {
     vfs::add_node("/sys/kernel/syluxium/devices", new GeneratedFile(gen_device_list, nullptr));
     vfs::add_node("/sys/kernel/syluxium/firmware", new GeneratedFile(gen_firmware, nullptr));
 
+    video::Framebuffer& fb = video::primary_framebuffer();
+    if (fb.valid() && !g_boot_fb_phys)
+        g_boot_fb_phys = mm::direct_virt_to_phys(fb.base());
     dev::for_each([](dev::Device* d, void*) {
         if (d->bus != dev::Bus::Pci)
             return;
@@ -146,6 +167,8 @@ void populate_devices() {
         add(dir, "class", new GeneratedFile(gen_class, d));
         add(dir, "revision", new GeneratedFile(gen_revision, d));
         add(dir, "irq", new GeneratedFile(gen_irq, d));
+        if ((d->class_code >> 16) == 0x03)
+            add(dir, "boot_vga", new GeneratedFile(gen_boot_vga, d));
         add(dir, "resource", new GeneratedFile(gen_resource, d));
         add(dir, "config", new GeneratedFile(gen_config, d, 0644));
         add(dir, "uevent", new GeneratedFile(gen_uevent, d));
