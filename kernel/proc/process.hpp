@@ -132,6 +132,9 @@ struct Process {
     bool ns_caps = false;       // every capability inside `userns`
     bool keep_caps = false;     // PR_SET_KEEPCAPS: capabilities survive a switch away from root (cleared by exec)
     bool caps_retained = false; // kept through such a switch (until exec)
+    // PR_CAP_AMBIENT_RAISE by a process holding capabilities: they survive
+    // exec as the new program's (Android's init starts logd & co. this way).
+    bool ambient_caps = false;
     bool own_mounts = false;    // mntns was made inside `userns` (mounts_capable)
     bool no_new_privs = false;  // prctl(PR_SET_NO_NEW_PRIVS): setuid/setgid bits are ignored by exec
     // clone(CLONE_FS) without CLONE_THREAD: the parent shares this process's

@@ -67,8 +67,11 @@ app)
     say "log: $(tail -8 /home/syluxium/.cache/syluxium-android.log 2>/dev/null | tr '\n' '|')"
     say "container log: $(tail -15 /var/log/waydroid-container.log 2>/dev/null | tr '\n' '|' | cut -c1-2000)"
     say "host: $(grep -v 'wayland-host-icon\|Traceback\|File \|\^\^\|sys.stdout' /run/user/1000/syluxium-wayland-host.log 2>/dev/null | tail -40 | tr '\n' '|' | cut -c1-4000)"
-    say "waydroid.log: $(grep -v 'lxc-info\|seccomp' /var/lib/waydroid/waydroid.log 2>/dev/null | tail -25 | tr '\n' '|' | cut -c1-3000)"
+    say "waydroid.log: $(grep -v 'lxc-info\|seccomp\|waiting .* seconds\|RUNNING$\|STOPPED$' /var/lib/waydroid/waydroid.log 2>/dev/null | tail -45 | tr '\n' '|' | cut -c1-6000)"
     say "binder: $(ls -l /dev/anbox-binder /dev/binderfs/ 2>&1 | tr '\n' '|')"
+    LA="lxc-attach -P /var/lib/waydroid/lxc -n waydroid --clear-env --"
+    say "crash: $($LA /system/bin/logcat -d -b crash 2>&1 | grep -v 'runtime.cc:675' | tail -30 | tr '\n' '|' | cut -c1-5000)"
+    say "fatal: $($LA /system/bin/logcat -d -b all 2>&1 | grep ' [EF] ' | grep -i 'system_server\|AndroidRuntime\|FATAL\|libc ' | grep -v 'runtime.cc:675' | tail -40 | tr '\n' '|' | cut -c1-6000)"
     ;;
 esac
 sleep 20

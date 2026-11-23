@@ -1231,9 +1231,33 @@ long sys_prctl(SYSCALL_ARGS) {
     }
     case 23: return a1 <= 40 ? 1 : -err::INVAL; // PR_CAPBSET_READ: in the bounding set
     case 24: return 0;                       // PR_CAPBSET_DROP
-    case 27: return 0;                       // PR_GET_SECUREBITS
-    case 28: return 0;                       // PR_SET_SECUREBITS
-    case 47: return a1 == 1 /* IS_SET */ ? 0 : 0; // PR_CAP_AMBIENT
+    case 27: return proc::current()->keep_caps ? 0x10 : 0; // PR_GET_SECUREBITS (SECBIT_KEEP_CAPS)
+    case 28: { // PR_SET_SECUREBITS: SECBIT_KEEP_CAPS is PR_SET_KEEPCAPS by another name
+        // (Android's init keeps a service's capabilities across setuid this
+        // way, then sets them: "cannot set capabilities for logd" otherwise).
+        constexpr u64 SECBIT_KEEP_CAPS = 0x10;
+        Process* me = proc::current();
+        bool privileged = me->userns ? me->ns_caps : me->cred.euid == 0;
+        if (!privileged)
+            return -err::PERM;
+        me->keep_caps = (a1 & SECBIT_KEEP_CAPS) != 0;
+        return 0;
+    }
+    case 47: { // PR_CAP_AMBIENT: IS_SET 1, RAISE 2, LOWER 3, CLEAR_ALL 4
+        Process* me = proc::current();
+        bool have = (me->userns ? me->ns_caps : me->cred.euid == 0) || me->keep_caps || me->caps_retained;
+        switch (a1) {
+        case 1: return me->ambient_caps ? 1 : 0;
+        case 2:
+            if (!have)
+                return -err::PERM;
+            me->ambient_caps = true;
+            return 0;
+        case 3: return 0;
+        case 4: me->ambient_caps = false; return 0;
+        default: return -err::INVAL;
+        }
+    }
     case 36: case 37: return 0;              // PR_SET/GET_CHILD_SUBREAPER
     case 22: return 0;                       // PR_SET_SECCOMP / 21 GET: no filters
     case 21: return 0;

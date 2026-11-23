@@ -924,8 +924,12 @@ long sys_fchdir(SYSCALL_ARGS) {
     if (long r = proc::permission(f->inode, proc::MAY_EXEC); r < 0)
         return r;
     p->cwd = f->inode;
-    // The path it was opened by (always absolute); getcwd reports it.
-    snprintf(p->cwd_path, sizeof(p->cwd_path), "%s", f->path ? f->path : "/");
+    // The path it was opened by (always absolute); getcwd reports it. The
+    // caller's own root is "/" whatever it was opened as: after
+    // pivot_root(".", ".") LXC fchdir()s back into the new root it opened
+    // by its old path, then works with "." there.
+    bool own_root = p->root && f->inode == p->root;
+    snprintf(p->cwd_path, sizeof(p->cwd_path), "%s", own_root ? "/" : f->path ? f->path : "/");
     return 0;
 }
 
@@ -2026,6 +2030,10 @@ long sys_mount(SYSCALL_ARGS) {
         return vfs::move_mount(src_abs, abs);
     }
     if (mflags & (MS_UNBINDABLE | MS_PRIVATE | MS_SLAVE | MS_SHARED)) {
+        // The caller's own root always qualifies (right after
+        // pivot_root(".", "."), LXC makes "/" shared again).
+        if (strcmp(abs, "/") == 0)
+            return 0;
         Inode* n;
         return vfs::resolve(abs, nullptr, true, &n);
     }
@@ -2180,6 +2188,13 @@ long sys_umount2(SYSCALL_ARGS) {
     Inode* mounted = nullptr;
     vfs::resolve(abs, nullptr, true, &mounted);
     long r = vfs::unmount_at(target.c_str(), proc::current()->cwd, abs);
+    // pivot_root(".", ".") stacks the old root on the new one, then the caller
+    // detaches it with umount2(".", MNT_DETACH) (LXC, runc). That stack isn't
+    // kept here (the old root isn't shown under the new one), so detaching
+    // the caller's own root has nothing left to remove.
+    constexpr u64 MNT_DETACH = 2;
+    if (r == -err::INVAL && (a1 & MNT_DETACH) && proc::current()->root && mounted == proc::current()->root)
+        return 0;
     if (r == 0) {
         loop::unmounted(source); // mount -o loop's device goes with it
         fuse::unmounted(mounted); // a FUSE server's loop ends

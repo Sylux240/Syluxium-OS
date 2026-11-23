@@ -793,6 +793,8 @@ long exec_impl(interrupts::Frame* frame, const char* path, const char* const* ar
 
     p->cred = next;
     p->keep_caps = p->caps_retained = false; // PR_SET_KEEPCAPS ends at exec, as on Linux
+    if (p->ambient_caps && !(inode->mode & (vfs::S_ISUID | vfs::S_ISGID)))
+        p->caps_retained = true; // ambient capabilities become the program's own
     // In a user namespace, capabilities survive exec only for its root.
     if (p->userns)
         p->ns_caps = uid_to_ns(next.euid) == 0;

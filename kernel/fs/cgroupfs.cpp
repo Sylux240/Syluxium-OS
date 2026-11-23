@@ -63,6 +63,15 @@ public:
         }
     }
 
+    // The group and its control files are on the cgroup file system's
+    // device (openat2's RESOLVE_NO_XDEV: LXC opens cgroup.procs that way).
+    void set_dev(u64 d) {
+        dev = d;
+        for (const Default& f : g_files)
+            if (vfs::Inode* n = lookup(f.name, strlen(f.name)))
+                n->dev = d;
+    }
+
     long statfs(FsStats* out) override {
         *out = FsStats{0x63677270 /* CGROUP2_SUPER_MAGIC */, 4096, 0, 0, 0, 0};
         return 0;
@@ -76,7 +85,7 @@ public:
             return -err::EXIST;
         auto* child = new CgroupDir;
         child->parent = this;
-        child->dev = dev;
+        child->set_dev(dev);
         attach(name, len, child);
         if (out)
             *out = child;
@@ -100,7 +109,7 @@ vfs::Inode* mount() {
     static CgroupDir* root = nullptr;
     if (!root) {
         root = new CgroupDir;
-        root->dev = vfs::next_fs_dev();
+        root->set_dev(vfs::next_fs_dev());
         root->parent = root;
     }
     return root;
