@@ -5,6 +5,10 @@
 #   android-ui-test store          the App Store's Android Apps page (F-Droid;
 #                                  downloads the catalog: needs QEMU's user networking)
 #   android-ui-test menu           the Start menu (Android Apps folder)
+#   android-ui-test apkflow FILE.apk PACKAGE
+#                                  install an app from an .apk (as opening it does),
+#                                  open it from its Start menu entry, screenshot,
+#                                  then remove it again (Android must be set up)
 #   android-ui-test app PACKAGE    open an Android app as a desktop window
 #                                  (Android must be set up: syluxium-android-container init)
 say() { echo "ANDTEST $*" > /dev/console; }
@@ -51,6 +55,30 @@ store)
     ;;
 menu)
     xdotool key ctrl+Escape ;;
+apkflow)
+    cp "$2" /tmp/test-app.apk && chmod 644 /tmp/test-app.apk
+    pkg=$3
+    desk=/home/syluxium/.local/share/applications/waydroid.$pkg.desktop
+    asuser syluxium-apk-install --yes /tmp/test-app.apk
+    for i in $(seq 1 120); do
+        sleep 5
+        [ -f "$desk" ] && break
+    done
+    say "installed: menu entry $([ -f "$desk" ] && echo present || echo MISSING); log: $(tail -3 /home/syluxium/.cache/syluxium-android.log | tr '\n' '|')"
+    say "entry: $(grep -E '^(Name|Exec|Icon|Categories)=' "$desk" 2>/dev/null | tr '\n' '|')"
+    # as the Start menu does: the menu entry through GIO
+    asuser python3 -c 'import sys, gi; gi.require_version("Gio", "2.0"); from gi.repository import Gio
+print("launch:", Gio.DesktopAppInfo.new_from_filename(sys.argv[1]).launch([], None))' "$desk"
+    for i in $(seq 1 24); do
+        sleep 5
+        say "windows: $(xdotool search --onlyvisible --name . getwindowname %@ 2>/dev/null | tr '\n' '|' | cut -c1-300)"
+    done
+    say "apk ready for screenshot"
+    sleep 25
+    asuser syluxium-android remove "$pkg"
+    sleep 20
+    say "removed: menu entry $([ -f "$desk" ] && echo STILL THERE || echo gone); list: $(su -s /bin/sh syluxium -c 'syluxium-android list' 2>/dev/null | tr '\n' ' ')"
+    ;;
 app)
     asuser syluxium-android launch "$2"
     for i in $(seq 1 60); do

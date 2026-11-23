@@ -13,6 +13,8 @@
 #         service), moved to the trash (Thunar, GVfs); results in ~/scene.log;
 #         Thunar shows the trash
 #   run:PROGRAM  start one program (e.g. run:syluxium-taskmgr)
+#   android:PACKAGE  open an Android app as a window (Android set up first:
+#         syluxium-android-container init); "ANDTEST" steps on the console
 #   x11   X11 programs through Xwayland (xwayland-test, all phases);
 #         x11:PHASE,PHASE  only those (e.g. x11:lazy,clip)
 case "$1" in
@@ -47,6 +49,20 @@ files)
     thunar "$d" & sleep 5
     ;;
 run:*) ${1#run:} & sleep 20 ;;
+android:*)
+    con=/run/syluxium-diag/console.txt
+    pkg=${1#android:}
+    echo "ANDTEST shell: opening $pkg (WAYLAND_DISPLAY=$WAYLAND_DISPLAY)" >> "$con"
+    syluxium-android launch "$pkg" > /tmp/android-scene.log 2>&1 &
+    for i in $(seq 1 150); do
+        sleep 5
+        grep -q "Android is ready" "$HOME/.cache/syluxium-android.log" 2>/dev/null && break
+    done
+    sleep 75
+    echo "ANDTEST shell: log $(tail -4 "$HOME/.cache/syluxium-android.log" 2>/dev/null | tr '\n' '|')" >> "$con"
+    echo "ANDTEST shell ready for screenshot" >> "$con"
+    sleep 30
+    ;;
 x11) xwayland-test ;;
 x11:*) xwayland-test $(echo "${1#x11:}" | tr ',' ' ') ;;
 halt) xfce4-session-logout --halt ;;
