@@ -220,6 +220,15 @@ ClassStats class_stats(usize index) {
     return ClassStats{sc.object_size, sc.slabs, sc.in_use};
 }
 
+u64 g_large_pages = 0; // pages in large (multi-page) kmalloc blocks
+
+u64 kernel_heap_pages() {
+    u64 n = __atomic_load_n(&g_large_pages, __ATOMIC_RELAXED);
+    for (usize i = 0; i < SIZE_CLASS_COUNT; i++)
+        n += class_stats(i).slabs; // one page per slab
+    return n;
+}
+
 void dump_stats() {
     kprintf("    slab classes (size: objects in use / slabs):");
     for (usize i = 0; i < SIZE_CLASS_COUNT; i++) {
@@ -242,6 +251,7 @@ void* kmalloc(usize size) {
         u64 phys = pmm::alloc_pages(order);
         if (phys) {
             pmm::frame(phys)->flags |= pmm::PF_HEAP_LARGE;
+            __atomic_add_fetch(&heap::g_large_pages, 1ull << order, __ATOMIC_RELAXED);
             return mm::phys_to_virt(phys);
         }
         // Physically contiguous memory too fragmented: fall back to vmalloc.
@@ -310,6 +320,7 @@ void kfree(void* ptr) {
         heap::slab_free(ptr, *f);
     } else if (f && (f->flags & pmm::PF_HEAP_LARGE) && (phys & (mm::PAGE_SIZE - 1)) == 0) {
         f->flags &= ~pmm::PF_HEAP_LARGE;
+        __atomic_sub_fetch(&heap::g_large_pages, 1ull << f->order, __ATOMIC_RELAXED);
         pmm::free_pages(phys, f->order);
     } else {
         panic("kfree: %p is not a heap pointer (double free?)", ptr);

@@ -29,5 +29,7 @@ constexpr usize MAX_SLAB_OBJECT = 2048;
 
 ClassStats class_stats(usize index);
 void dump_stats();
+extern u64 g_large_pages;
+u64 kernel_heap_pages(); // slab pages + large kmalloc blocks (for /proc/meminfo Slab)
 
 } // namespace heap

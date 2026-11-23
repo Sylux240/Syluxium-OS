@@ -1,0 +1,61 @@
+#!/bin/bash
+# Test aid: kernel memory leak check. Runs each workload ROUNDS times and
+# prints the kernel's memory after every round (/proc/meminfo: free memory,
+# kernel heap, page tables, vmalloc). After a warm-up round, anything that
+# keeps growing round after round is a leak. Console lines start "LEAK".
+#   leaktest [rounds]      all workloads, one round after another
+#   leaktest each [n]      each workload alone, n times
+ROUNDS=${1:-4}
+mi() { awk '/^(MemFree|Slab|PageTables|VmallocUsed):/ {printf "%s=%s ", $1, $2}' /proc/meminfo; echo "threads=$(ls -d /proc/[0-9]*/task/* 2>/dev/null | wc -l)"; }
+say() { echo "LEAK $*" > /dev/console; }
+
+w_fork()   { for i in $(seq 400); do /bin/true; done; }
+w_threads(){ python3 -c '
+import threading
+for r in range(40):
+    ts=[threading.Thread(target=lambda: sum(range(1000))) for _ in range(16)]
+    [t.start() for t in ts]; [t.join() for t in ts]'; }
+w_pipes()  { for i in $(seq 300); do echo x | cat > /dev/null; done; }
+w_files()  { d=$(mktemp -d); for i in $(seq 300); do head -c 65536 /dev/urandom > $d/f$i; done; rm -rf $d; }
+w_mmap()   { python3 -c '
+import mmap, os
+for i in range(300):
+    fd = os.memfd_create("t"); os.ftruncate(fd, 1<<20)
+    m = mmap.mmap(fd, 1<<20); m[0:4096] = b"x"*4096; m.close(); os.close(fd)
+for i in range(200):
+    m = mmap.mmap(-1, 4<<20); m[0] = 1; m[(4<<20)-1] = 1; m.close()'; }
+w_sockets(){ python3 -c '
+import socket
+for i in range(500):
+    a, b = socket.socketpair(); a.send(b"x"*1000); b.recv(1000); a.close(); b.close()
+for i in range(200):
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM); s.bind(("127.0.0.1", 0)); s.listen(1)
+    c = socket.create_connection(s.getsockname()); x, _ = s.accept(); c.send(b"y"); x.recv(1); c.close(); x.close(); s.close()'; }
+w_exec()   { for i in $(seq 100); do bash -c 'ls /usr/bin > /dev/null'; done; }
+
+slab() { awk '/^Slab:/ {print $2}' /proc/meminfo; }
+# "leaktest each N": every workload alone, N times, its total growth.
+if [ "$1" = each ]; then
+    n=${2:-6}
+    for w in fork threads pipes files mmap sockets exec; do
+        w_$w 2> /dev/console; sync; sleep 3       # warm-up
+        before=$(slab)
+        for i in $(seq "$n"); do w_$w 2> /dev/console; done
+        sync; sleep 5
+        say "alone $w x$n: slab $(( $(slab) - before )) kB"
+    done
+    say "done"
+    exit 0
+fi
+say "start: $(mi)"
+for r in $(seq "$ROUNDS"); do
+    line=""
+    for w in fork threads pipes files mmap sockets exec; do
+        before=$(slab)
+        w_$w 2> /dev/console
+        sync; sleep 1
+        line="$line $w:$(( $(slab) - before ))kB"
+    done
+    say "round $r: $(mi) | slab growth per workload:$line"
+done
+say "done"

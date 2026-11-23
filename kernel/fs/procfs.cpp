@@ -7,6 +7,8 @@
 #include <lib/format.hpp>
 #include <lib/string.hpp>
 #include <mm/heap.hpp>
+#include <mm/vmalloc.hpp>
+#include <mm/vmm.hpp>
 #include <mm/pmm.hpp>
 #include <proc/process.hpp>
 #include <sched/sched.hpp>
@@ -1017,11 +1019,18 @@ public:
 bool gen_meminfo(TextBuffer& out, const void*) {
     auto st = pmm::stats();
     u64 total = st.total_pages * 4, free = st.free_pages * 4;
+    // Kernel memory, as Linux reports it: the heap (Slab), page tables,
+    // vmalloc space. Leak checks (and free/top) watch these.
+    u64 slab = heap::kernel_heap_pages() * 4;
+    u64 tables = vmm::page_table_pages() * 4;
+    u64 vmalloc_used = vmalloc::stats().mapped_pages * 4;
     out.printf("MemTotal:       %8lu kB\nMemFree:        %8lu kB\nMemAvailable:   %8lu kB\n"
                "Buffers:               0 kB\nCached:                0 kB\nSwapCached:            0 kB\n"
                "Active:         %8lu kB\nInactive:              0 kB\nSwapTotal:             0 kB\n"
-               "SwapFree:              0 kB\nShmem:                 0 kB\nSlab:                  0 kB\n",
-               total, free, free, total - free);
+               "SwapFree:              0 kB\nShmem:                 0 kB\nSlab:           %8lu kB\n"
+               "SReclaimable:          0 kB\nSUnreclaim:     %8lu kB\nPageTables:     %8lu kB\n"
+               "VmallocTotal:   34359738367 kB\nVmallocUsed:    %8lu kB\n",
+               total, free, free, total - free, slab, slab, tables, vmalloc_used);
     return true;
 }
 
