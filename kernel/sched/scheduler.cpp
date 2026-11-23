@@ -273,6 +273,14 @@ void idle_loop(void*) {
     }
 }
 
+// A thread about to be freed must be on no list: a waker or the timer would
+// otherwise reach freed memory later (the futex use-after-free at exit).
+void check_unqueued(Thread* t, const char* who) {
+    if (t->wait_node.linked() || t->sleep_node.linked() || t->run_node.linked())
+        panic("sched: %s frees %s (tid %lu) still queued: wait %d sleep %d run %d", who, t->name, t->tid,
+              t->wait_node.linked(), t->sleep_node.linked(), t->run_node.linked());
+}
+
 void reaper_loop(void*) {
     for (;;) {
         g_reap_lock.lock();
@@ -297,8 +305,10 @@ void reaper_loop(void*) {
             wake(waiter);
         g_threads_lock.unlock();
 
-        if (detached)
+        if (detached) {
+            check_unqueued(t, "reaper");
             delete t;
+        }
     }
 }
 
@@ -475,6 +485,10 @@ bool block_on(WaitList& list, IrqSpinlock& lock, u64 deadline_ns) {
 
 bool block_on(WaitList& list, IrqSpinlock& lock, u64 deadline_ns, bool (*abort)(void*), void* ctx) {
     Thread* me = current();
+    // On two wait lists at once corrupts both (a waker later finds this
+    // thread through the stale one, after it exited and was freed).
+    if (me->wait_node.linked())
+        panic("sched: block_on: %s (tid %lu) is already on a wait list", me->name, me->tid);
     me->state = ThreadState::Blocked;
     list.push_back(me);
     if (abort) {
@@ -577,6 +591,7 @@ int join(Thread* t) {
         block_on(t->join_waiters, g_threads_lock);
     g_threads_lock.unlock();
     int code = t->exit_code;
+    check_unqueued(t, "join");
     delete t;
     return code;
 }
