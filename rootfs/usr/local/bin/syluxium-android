@@ -90,6 +90,18 @@ audio_socket() {
     log "no PulseAudio/PipeWire: Android has no sound"
 }
 
+# The app's icon as an icon theme name (waydroid.<package>, the same as its
+# windows' app id): Waydroid's entries name a file, which the taskbar of the
+# Wayland shell (looking icons up by name) doesn't show.
+ICONS=$HOME/.local/share/icons/hicolor/256x256/apps
+themed_icon() { # entry, package
+    local icon
+    icon=$(sed -n 's/^Icon=//p' "$1" | head -1)
+    case "$icon" in /*) [ -f "$icon" ] || return 0 ;; *) return 0 ;; esac
+    mkdir -p "$ICONS" && cp -f "$icon" "$ICONS/waydroid.$2.png" || return 0
+    sed -i "0,/^Icon=/s|^Icon=.*|Icon=waydroid.$2|" "$1"
+}
+
 # Waydroid's menu entries (waydroid.<package>.desktop) go to the "Android
 # Apps" folder of the Start menu, with "Remove" as a right-click action.
 fix_menu_entries() {
@@ -98,6 +110,7 @@ fix_menu_entries() {
         [ -f "$f" ] || continue
         grep -q '^X-Syluxium-Android=' "$f" && continue
         pkg=${f##*/waydroid.}; pkg=${pkg%.desktop}
+        themed_icon "$f" "$pkg"
         case "$pkg" in com.android.*|org.lineageos.*|com.google.android.*) # system apps: not shown
             grep -q '^NoDisplay=true' "$f" || echo "NoDisplay=true" >> "$f"
             echo "X-Syluxium-Android=system" >> "$f"; continue ;;
@@ -248,7 +261,7 @@ remove)
     ensure || exit 1
     log "removing $2"
     $WAYDROID app remove "$2" >> "$LOG" 2>&1 || exit 1
-    rm -f "$APPS/waydroid.$2.desktop"
+    rm -f "$APPS/waydroid.$2.desktop" "$ICONS/waydroid.$2.png"
     ;;
 list)
     ensure > /dev/null && list_apps

@@ -58,16 +58,26 @@ android:*)
         echo "ANDTEST shell: installing $apk" >> "$con"
         cp "$apk" /tmp/scene-app.apk
         syluxium-android install /tmp/scene-app.apk > /tmp/android-scene.log 2>&1
-        echo "ANDTEST shell: install rc=$?; entry: $(grep -E '^(Icon|StartupWMClass)=' "$HOME/.local/share/applications/waydroid.$pkg.desktop" 2>&1 | tr '\n' '|')" >> "$con"
+        rc=$?
+        desk=$HOME/.local/share/applications/waydroid.$pkg.desktop
+        for i in $(seq 1 60); do [ -f "$desk" ] && break; sleep 2; done
+        echo "ANDTEST shell: install rc=$rc; entry: $(grep -E '^(Icon|StartupWMClass)=' "$desk" 2>&1 | tr '\n' '|')" >> "$con"
+        # opened from its menu entry, as the Start menu does
+        echo "ANDTEST shell: opening $pkg from its menu entry" >> "$con"
+        python3 -c 'import sys, gi; gi.require_version("Gio", "2.0"); from gi.repository import Gio
+print("launch:", Gio.DesktopAppInfo.new_from_filename(sys.argv[1]).launch([], None))' "$desk" >> /tmp/android-scene.log 2>&1 &
+    else
+        echo "ANDTEST shell: opening $pkg (WAYLAND_DISPLAY=$WAYLAND_DISPLAY)" >> "$con"
+        syluxium-android launch "$pkg" >> /tmp/android-scene.log 2>&1 &
     fi
-    echo "ANDTEST shell: opening $pkg (WAYLAND_DISPLAY=$WAYLAND_DISPLAY)" >> "$con"
-    syluxium-android launch "$pkg" >> /tmp/android-scene.log 2>&1 &
     for i in $(seq 1 150); do
         sleep 5
         grep -q "Android is ready" "$HOME/.cache/syluxium-android.log" 2>/dev/null && break
     done
     sleep 75
     echo "ANDTEST shell: log $(tail -4 "$HOME/.cache/syluxium-android.log" 2>/dev/null | tr '\n' '|')" >> "$con"
+    echo "ANDTEST shell: launch output: $(tail -5 /tmp/android-scene.log | tr '\n' '|')" >> "$con"
+    echo "ANDTEST shell: android log: $(grep -E 'launch|error|Traceback' "$HOME/.cache/syluxium-android.log" 2>/dev/null | tail -5 | tr '\n' '|')" >> "$con"
     echo "ANDTEST shell ready for screenshot" >> "$con"
     sleep 30
     ;;
