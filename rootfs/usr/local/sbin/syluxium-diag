@@ -92,6 +92,19 @@ gpu_report() {
     ls -l /dev/dri 2>&1
     ls -l /sys/class/drm 2>&1
     syluxium-drm-devices 2>&1
+    # Trace boots with an AMD card: stream the kernel log to the stick,
+    # synced every 0.2 s, for the rest of the GPU report and X's start (10
+    # minutes). The first Mesa context on an RX 6700 XT froze the machine
+    # within a second of the last periodic log save; drmtrace logs each
+    # submission before it runs, so the stream ends at the one that hung.
+    if grep -qw drmtrace /proc/cmdline && [ -d /boot/logs ] && [ "$(id -u)" = 0 ] &&
+       ls -l /sys/class/drm/*/device/driver 2>/dev/null | grep -q amdgpu && [ ! -e /run/syluxium-gpu-stream ]; then
+        ( timeout 600 dmesg -w > /boot/logs/gpu-kernel-stream.txt 2>&1 & echo $! > /run/syluxium-gpu-stream
+          end=$(( $(cut -d. -f1 /proc/uptime) + 600 ))
+          while [ -e /run/syluxium-gpu-stream ] && [ "$(cut -d. -f1 /proc/uptime)" -lt "$end" ]; do sync; sleep 0.2; done
+          rm -f /run/syluxium-gpu-stream ) > /dev/null 2>&1 &
+        sleep 0.5
+    fi
     # Boot option "amdgputest": the first user-space GPU work on each AMD
     # card, one step at a time, every step synced to the stick before it
     # runs (amdgpu-steps.txt): a freeze shows the step it happened in.
@@ -151,7 +164,7 @@ print(" ".join(sorted(l[i].decode() for i in range(n.value))) if l else "no disp
             # The kernel log reaches the stick only every 20 s: while vainfo
             # runs, stream it there (synced), so a machine that freezes in
             # the video engine still leaves its last kernel lines.
-            if [ -d /boot/logs ]; then
+            if [ -d /boot/logs ] && [ ! -e /run/syluxium-gpu-stream ]; then
                 ( dmesg -w > /boot/logs/vainfo-kernel.txt 2>&1 & echo $! > /run/syluxium-vainfo-dmesg
                   while [ -e /run/syluxium-vainfo-dmesg ]; do sync; sleep 0.2; done ) &
                 sleep 0.5
