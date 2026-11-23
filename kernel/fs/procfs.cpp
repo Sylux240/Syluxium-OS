@@ -4,6 +4,7 @@
 #include <arch/x86_64/percpu.hpp>
 #include <fs/genfs.hpp>
 #include <fs/procfs.hpp>
+#include <fs/ext2.hpp>
 #include <fs/ramfs.hpp>
 #include <lib/format.hpp>
 #include <lib/string.hpp>
@@ -1025,13 +1026,18 @@ bool gen_meminfo(TextBuffer& out, const void*) {
     u64 slab = heap::kernel_heap_pages() * 4;
     u64 tables = vmm::page_table_pages() * 4;
     u64 vmalloc_used = vmalloc::stats().mapped_pages * 4;
+    // Page cache (ext2/ext4: mmapped files) counts as available: unmapped
+    // pages of it are given back when memory runs low (pmm reclaim).
+    u64 cached = ext2::cached_pages() * 4;
+    u64 shmem = ramfs::file_pages() * 4;
+    u64 available = free + cached;
     out.printf("MemTotal:       %8lu kB\nMemFree:        %8lu kB\nMemAvailable:   %8lu kB\n"
-               "Buffers:               0 kB\nCached:                0 kB\nSwapCached:            0 kB\n"
+               "Buffers:               0 kB\nCached:         %8lu kB\nSwapCached:            0 kB\n"
                "Active:         %8lu kB\nInactive:              0 kB\nSwapTotal:             0 kB\n"
-               "SwapFree:              0 kB\nShmem:                 0 kB\nSlab:           %8lu kB\n"
+               "SwapFree:              0 kB\nShmem:          %8lu kB\nSlab:           %8lu kB\n"
                "SReclaimable:          0 kB\nSUnreclaim:     %8lu kB\nPageTables:     %8lu kB\n"
                "VmallocTotal:   34359738367 kB\nVmallocUsed:    %8lu kB\n",
-               total, free, free, total - free, slab, slab, tables, vmalloc_used);
+               total, free, available, cached + shmem, total - free, shmem, slab, slab, tables, vmalloc_used);
     return true;
 }
 

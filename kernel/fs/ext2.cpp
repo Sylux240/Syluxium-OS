@@ -15,6 +15,8 @@
 
 namespace ext2 {
 
+u64 g_cached_pages = 0; // page cache pages held by all ext2/ext4 volumes (/proc/meminfo Cached)
+
 namespace {
 
 constexpr u16 MAGIC = 0xEF53;
@@ -611,11 +613,30 @@ public:
         if (!m_cache)
             return;
         for (u32 i = 0; i < m_cache_pages; i++)
-            if (m_cache[i])
+            if (m_cache[i]) {
                 vmm::release_user_page(m_cache[i]); // mappings keep their own references
+                __atomic_sub_fetch(&g_cached_pages, 1, __ATOMIC_RELAXED);
+            }
         kfree(m_cache);
         m_cache = nullptr;
         m_cache_pages = 0;
+    }
+
+    // Under memory pressure (volume lock held): give back cached pages no
+    // mapping uses any more (only the cache's reference left). A later
+    // fault simply reads them from disk again.
+    u64 shrink_cache(u64 wanted) {
+        u64 freed = 0;
+        for (u32 i = 0; i < m_cache_pages && freed < wanted; i++) {
+            u64 p = m_cache[i];
+            if (p && __atomic_load_n(&pmm::frame(p)->refcount, __ATOMIC_ACQUIRE) == 1) {
+                m_cache[i] = 0;
+                vmm::release_user_page(p);
+                __atomic_sub_fetch(&g_cached_pages, 1, __ATOMIC_RELAXED);
+                freed++;
+            }
+        }
+        return freed;
     }
 
     long cache_page(u64 offset, u64* phys) override {
@@ -648,6 +669,7 @@ public:
                 return -err::IO;
             }
             m_cache[index] = p; // the cache's own reference (refcount 1)
+            __atomic_add_fetch(&g_cached_pages, 1, __ATOMIC_RELAXED);
         }
         *phys = m_cache[index];
         __atomic_add_fetch(&pmm::frame(*phys)->refcount, 1, __ATOMIC_ACQ_REL); // the caller's (see vfs::Inode)
@@ -2045,6 +2067,29 @@ usize g_volume_count = 0;
 
 } // namespace
 
+u64 cached_pages() { return __atomic_load_n(&g_cached_pages, __ATOMIC_RELAXED); }
+
+// pmm reclaimer: walk every volume's nodes (round-robin, so no file is
+// always the first to lose its cache). Volumes whose lock is busy are skipped:
+// the allocation that needed memory may be holding one.
+u64 reclaim_cache(u64 wanted) {
+    static u32 cursor = 0;
+    u64 freed = 0;
+    for (usize vi = 0; vi < g_volume_count && freed < wanted; vi++) {
+        Volume* v = g_volumes[vi];
+        if (!v->lock.try_lock())
+            continue;
+        for (u32 n = 0; n < 256 && freed < wanted; n++) {
+            u32 bucket = (cursor + n) % 256;
+            for (Node* node = v->cache[bucket]; node && freed < wanted; node = node->next_cached)
+                freed += node->shrink_cache(wanted - freed);
+        }
+        v->lock.unlock();
+    }
+    cursor += 17;
+    return freed;
+}
+
 void shutdown_all() {
     for (usize i = 0; i < g_volume_count; i++) {
         Volume* v = g_volumes[i];
@@ -2169,6 +2214,11 @@ long mount(block::Device* dev, vfs::Inode** root, bool* read_only, const char** 
     *root = v->node(ROOT_INO, nullptr);
     if (g_volume_count < 16)
         g_volumes[g_volume_count++] = v;
+        static bool registered = false;
+        if (!registered) {
+            registered = true;
+            pmm::register_reclaimer(reclaim_cache);
+        }
     return 0;
 }
 

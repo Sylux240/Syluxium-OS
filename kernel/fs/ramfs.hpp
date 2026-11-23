@@ -6,6 +6,8 @@
 // In-memory filesystem: the root filesystem, filled from the initramfs.
 namespace ramfs {
 
+u64 file_pages(); // pages held by RAM files (/proc/meminfo Shmem)
+
 class Dir : public vfs::Inode {
 public:
     Dir();

@@ -110,14 +110,18 @@ Memory* Memory::fork() {
 bool Memory::copy_on_write(Vma* v, uptr page) {
     u64 old_phys;
     if (!m_as->translate(page, &old_phys))
-        return false;
+        return true; // unmapped meanwhile (a RAM file's hole punch): the fault is retried
     pmm::PageFrame* f = pmm::frame(old_phys);
     u32 flags = prot_to_map_flags(v->prot);
 
+    // The entry may vanish under us: a RAM file's hole punch unmaps its page
+    // from every process (zap_file_page, without our lock). Then the fault
+    // is simply retried (and maps the page anew).
+    u64 still;
     if (__atomic_load_n(&f->refcount, __ATOMIC_ACQUIRE) == 1) {
         // Last user of the page: just make it writable again (upgrading
         // permissions needs no shootdown: stale entries just fault again).
-        return m_as->protect(page, flags);
+        return m_as->protect(page, flags) || !m_as->translate(page, &still);
     }
     u64 new_phys = pmm::alloc_page();
     if (!new_phys)
@@ -129,7 +133,7 @@ bool Memory::copy_on_write(Vma* v, uptr page) {
     bool ok = m_as->replace(page, new_phys, flags) != 0;
     vmm::shootdown(page, 1, m_as);
     vmm::release_user_page(ok ? old_phys : new_phys);
-    return ok;
+    return ok || !m_as->translate(page, &still);
 }
 
 Vma* Memory::find(uptr addr) {
@@ -224,13 +228,15 @@ void zap_file_page(vfs::Inode* file, u64 offset, u64 phys) {
 }
 
 void Memory::zap_page(uptr va, u64 phys, bool counted) {
-    LockGuard guard(m_lock);
-    if (!m_as)
-        return;
-    u64 now;
-    if (!m_as->translate(va, &now) || (now & ~(PAGE_SIZE - 1)) != phys)
-        return;  // not mapped, or a private copy
-    if (m_as->unmap(va) == phys && counted) {
+    // Not under m_lock: the punching thread holds the file's lock, which
+    // the owner's own paths take while holding m_lock (a deadlock). The
+    // caller's reference keeps the page tables (freed only by destroy() at
+    // the last reference); unmap_if removes the entry only if it still is
+    // this page, atomically against the owner's munmap or copy-on-write
+    // (whoever removes it releases it: never both).
+    if (!m_as || !m_as->unmap_if(va, phys))
+        return;  // not mapped, or a private copy, or the owner got there first
+    if (counted) {
         vmm::release_user_page(phys);
         __atomic_sub_fetch(&m_rss, 1, __ATOMIC_RELAXED);
     }
@@ -813,6 +819,10 @@ long Memory::prepare_locked(uptr addr, usize len, bool write) {
             if (!copy_on_write(v, page)) // refcount 1 but still read-only after a fork
                 return -err::FAULT;
         }
+        // A hole punch may have unmapped it meanwhile (copy_on_write then
+        // returns "retry"): map it again before the kernel touches it.
+        if (!m_as->translate(page, &phys) && !populate(v, page))
+            return -err::FAULT;
     }
     return 0;
 }

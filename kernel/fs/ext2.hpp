@@ -20,5 +20,7 @@ long mount(block::Device* dev, vfs::Inode** root, bool* read_only, const char** 
 // Shutting down: commit journals, mark every writable volume clean (no
 // replay needed at the next mount) and flush it to the disk.
 void shutdown_all();
+u64 cached_pages();          // page cache pages (/proc/meminfo Cached)
+u64 reclaim_cache(u64 wanted); // pmm reclaimer: drop unmapped cache pages
 
 } // namespace ext2

@@ -151,6 +151,23 @@ bool AddressSpace::map_range(uptr virt, u64 phys, usize length, u32 flags) {
     return true;
 }
 
+bool AddressSpace::unmap_if(uptr virt, u64 phys) {
+    LockGuard guard(m_lock);
+    u64* table = mm::phys_to_virt<u64>(m_pml4);
+    for (int level = 4; level > 1; level--) {
+        u64 e = table[table_index(virt, level)];
+        if (!(e & PTE_PRESENT) || (e & PTE_HUGE))
+            return false;
+        table = mm::phys_to_virt<u64>(e & PTE_ADDR_MASK);
+    }
+    u64& e = table[table_index(virt, 1)];
+    if (!(e & PTE_PRESENT) || (e & PTE_ADDR_MASK) != phys)
+        return false;
+    e = 0;
+    arch::invlpg(virt); // other CPUs: caller follows up with vmm::shootdown()
+    return true;
+}
+
 u64 AddressSpace::unmap(uptr virt) {
     LockGuard guard(m_lock);
     u64* table = mm::phys_to_virt<u64>(m_pml4);

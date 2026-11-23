@@ -5,6 +5,7 @@
 #include <lib/string.hpp>
 #include <mm/layout.hpp>
 #include <mm/pmm.hpp>
+#include <arch/x86_64/cpu.hpp>
 
 namespace pmm {
 
@@ -175,18 +176,48 @@ u64 reclaim_bootloader_memory() {
     return bytes;
 }
 
+constexpr int MAX_RECLAIMERS = 8;
+Reclaimer g_reclaimers[MAX_RECLAIMERS];
+int g_reclaimer_count = 0;
+bool g_reclaim_off = false; // boot option "noreclaim" (testing)
+u32 g_reclaiming = 0; // one reclaim at a time (a reclaimer's own allocations don't recurse)
+
+void register_reclaimer(Reclaimer r) {
+    if (strstr(boot::cmdline(), "noreclaim"))
+        g_reclaim_off = true;
+    if (g_reclaimer_count < MAX_RECLAIMERS)
+        g_reclaimers[g_reclaimer_count++] = r;
+}
+
+u64 reclaim(u64 wanted) {
+    if (g_reclaim_off || !arch::interrupts_enabled() || __atomic_exchange_n(&g_reclaiming, 1u, __ATOMIC_ACQ_REL))
+        return 0;
+    u64 freed = 0;
+    for (int i = 0; i < g_reclaimer_count && freed < wanted; i++)
+        freed += g_reclaimers[i](wanted - freed);
+    __atomic_store_n(&g_reclaiming, 0u, __ATOMIC_RELEASE);
+    return freed;
+}
+
 u64 alloc_pages(unsigned order, bool zero) {
     if (order >= MAX_ORDER)
         return 0;
 
     u64 pfn;
-    {
-        LockGuard guard(g_lock);
+    for (int attempt = 0;; attempt++) {
+        g_lock.lock();
         unsigned k = order;
         while (k < MAX_ORDER && g_free_head[k] == NO_PAGE)
             k++;
-        if (k == MAX_ORDER)
+        if (k == MAX_ORDER) {
+            g_lock.unlock();
+            // Out of free blocks: ask the caches for pages (a few MiB at a
+            // time, so later allocations find some too), then try again.
+            u64 want = 4ull << order;
+            if (attempt == 0 && reclaim(want > 1024 ? want : 1024))
+                continue;
             return 0;
+        }
 
         pfn = g_free_head[k];
         list_remove(pfn, k);
@@ -201,6 +232,19 @@ u64 alloc_pages(unsigned order, bool zero) {
         f.order = static_cast<u8>(order);
         f.refcount = 1;
         g_free_pages -= 1ull << order;
+        g_lock.unlock();
+        break;
+    }
+    // Keep a reserve for allocations that can't reclaim (interrupts off:
+    // memfd faults under a spinlock, drivers in interrupt handlers): below
+    // the low mark, refill to twice it from the caches now.
+    {
+        u64 low = g_total_pages / 64;
+        if (low < 4096)
+            low = 4096; // 16 MiB
+        u64 free_now = __atomic_load_n(&g_free_pages, __ATOMIC_RELAXED);
+        if (free_now < low && g_reclaimer_count)
+            reclaim(2 * low - free_now);
     }
 
     u64 phys = pfn << PAGE_SHIFT;

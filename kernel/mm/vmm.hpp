@@ -46,6 +46,10 @@ public:
 
     // Unmap one 4 KiB page; returns the physical address it pointed to (0 if none).
     u64 unmap(uptr virt);
+    // Unmap only if `virt` still maps `phys` (atomically, under the table
+    // lock): another process's page, which its owner may be replacing or
+    // unmapping at the same time. True if this call removed it.
+    bool unmap_if(uptr virt, u64 phys);
     // Point a present 4 KiB page at another frame in one store (never
     // not-present in between: copy-on-write while other threads read the
     // page). Returns the old frame, 0 if the page wasn't mapped. Local TLB

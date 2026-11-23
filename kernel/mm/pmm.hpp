@@ -70,4 +70,11 @@ u64 frame_to_phys(const PageFrame* frame);
 Stats stats();
 void dump_free_lists();
 
+// Caches that can give pages back under memory pressure (the file systems'
+// page caches). Called when an allocation finds no free block (never from
+// interrupt context or with interrupts off); returns the pages freed.
+using Reclaimer = u64 (*)(u64 wanted);
+void register_reclaimer(Reclaimer r);
+u64 reclaim(u64 wanted); // run them now (also: low memory checks)
+
 } // namespace pmm

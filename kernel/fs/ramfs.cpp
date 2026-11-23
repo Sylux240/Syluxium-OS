@@ -10,6 +10,9 @@
 
 namespace ramfs {
 
+u64 g_file_pages = 0; // pages held by RAM files: tmpfs, memfd, the RAM root (/proc/meminfo Shmem)
+u64 file_pages() { return __atomic_load_n(&g_file_pages, __ATOMIC_RELAXED); }
+
 using namespace vfs;
 
 namespace {
@@ -235,8 +238,11 @@ u64 RegularFile::page(u64 index, bool allocate) {
         {
             LockGuard guard(m_pages_lock);
             if (index < m_slots) {
-                if (!m_pages[index] && allocate)
+                if (!m_pages[index] && allocate) {
                     m_pages[index] = pmm::alloc_page(true);
+                    if (m_pages[index])
+                        __atomic_add_fetch(&g_file_pages, 1, __ATOMIC_RELAXED);
+                }
                 return m_pages[index];
             }
             if (!allocate)
@@ -272,6 +278,7 @@ void RegularFile::free_pages_from(u64 first) {
             // (freeing it here left the mapping on a page the kernel reused).
             vmm::release_user_page(m_pages[i]);
             m_pages[i] = 0;
+            __atomic_sub_fetch(&g_file_pages, 1, __ATOMIC_RELAXED);
         }
     }
 }
@@ -373,6 +380,8 @@ long RegularFile::punch_hole(u64 offset, u64 len) {
             if (i < m_slots) {
                 phys = m_pages[i];
                 m_pages[i] = 0;
+                if (phys)
+                    __atomic_sub_fetch(&g_file_pages, 1, __ATOMIC_RELAXED);
             }
         }
         if (!phys)
