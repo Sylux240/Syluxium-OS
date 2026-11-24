@@ -11,6 +11,7 @@
 
 #include <drm/gpu_scheduler.h>
 #include <linux/completion.h>
+#include <linux/kthread.h>
 #include <linux/dma-fence.h>
 #include <linux/delay.h>
 #include <linux/dma-mapping.h>
@@ -190,17 +191,32 @@ static const struct drm_sched_backend_ops edu_sched_ops = {
 
 #define SCHED_JOBS 64
 
+struct edu_flush_ctx {
+    struct drm_sched_entity *entity;
+    struct completion done;
+};
+
+static int edu_flush_thread(void *data)
+{
+    struct edu_flush_ctx *fc = data;
+
+    drm_sched_entity_destroy(fc->entity); /* flush (no time limit: not exiting), then fini */
+    complete(&fc->done);
+    return 0;
+}
+
 static void edu_sched_test(struct edu *e)
 {
-    struct drm_gpu_scheduler sched;
-    struct drm_gpu_scheduler *list[1] = {&sched};
-    struct drm_sched_entity entity;
+    static struct drm_gpu_scheduler sched; /* static: see the flush test */
+    static struct drm_gpu_scheduler *list[1];
+    static struct drm_sched_entity entity;
     struct dma_fence *prev = NULL, *last = NULL;
     long left;
     int i, r;
 
     memset(&sched, 0, sizeof(sched));
     memset(&entity, 0, sizeof(entity));
+    list[0] = &sched;
     sched_edu = e;
     sched_fence_ctx = dma_fence_context_alloc(1);
     r = drm_sched_init(&sched, &edu_sched_ops, NULL, DRM_SCHED_PRIORITY_COUNT, 1, 0, msecs_to_jiffies(2000), NULL,
@@ -244,9 +260,59 @@ static void edu_sched_test(struct edu *e)
         dma_fence_put(last);
     for (i = 0; i < 100 && atomic_read(&sched_freed) < SCHED_JOBS; i++)
         msleep(10); /* free_job runs from the scheduler's work item */
+    check(e, atomic_read(&sched_freed) == SCHED_JOBS, "drm_sched: every finished job freed (free_job)");
+
+    /* amdgpu closing a device file: a KERNEL-priority entity (the GPU
+     * address space's page-table updates) on the same scheduler gets jobs
+     * and is flushed and destroyed at once, while they are still queued,
+     * from a live process (no PF_EXITING: the flush waits without a time
+     * limit). On an RX 6700 XT that close never returned. Run in a thread:
+     * a hang here fails the check instead of stopping the boot. */
+    {
+        static struct edu_flush_ctx fc; /* static: a hung flush thread keeps using them */
+        static struct drm_sched_entity kentity;
+        struct task_struct *t;
+
+        memset(&kentity, 0, sizeof(kentity));
+        r = drm_sched_entity_init(&kentity, DRM_SCHED_PRIORITY_KERNEL, list, 1, NULL);
+        check(e, r == 0, "drm_sched_entity_init (kernel priority, beside a normal one)");
+        if (!r) {
+            int pushed = 0;
+
+            for (i = 0; i < 8; i++) {
+                struct edu_job *j = kzalloc(sizeof(*j), GFP_KERNEL);
+
+                if (!j)
+                    break;
+                j->e = e;
+                j->n = SCHED_JOBS + i;
+                if (drm_sched_job_init(&j->base, &kentity, 1, NULL)) {
+                    kfree(j);
+                    break;
+                }
+                drm_sched_job_arm(&j->base);
+                drm_sched_entity_push_job(&j->base);
+                pushed++;
+            }
+            fc.entity = &kentity;
+            init_completion(&fc.done);
+            t = kthread_run(edu_flush_thread, &fc, "edu-flush");
+            if (IS_ERR_OR_NULL(t)) {
+                check(e, false, "drm_sched: flush thread");
+            } else {
+                unsigned long ok = wait_for_completion_timeout(&fc.done, msecs_to_jiffies(5000));
+                check(e, ok != 0 && pushed == 8,
+                      "drm_sched: entity flushed and destroyed with jobs still queued (amdgpu's file close)");
+                if (!ok) {
+                    dev_info(&e->pdev->dev, "drm_sched test: flush still waiting after 5 s (%d of %d jobs ran)\n",
+                             atomic_read(&sched_ran) - SCHED_JOBS, pushed);
+                    return; /* the scheduler stays: the hung thread still uses it */
+                }
+            }
+        }
+    }
     drm_sched_entity_destroy(&entity);
     drm_sched_fini(&sched);
-    check(e, atomic_read(&sched_freed) == SCHED_JOBS, "drm_sched: every finished job freed (free_job)");
 }
 
 static int edu_probe(struct pci_dev* pdev, const struct pci_device_id* id)

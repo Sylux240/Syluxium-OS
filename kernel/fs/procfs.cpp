@@ -1,9 +1,11 @@
+#include <arch/x86_64/protect.hpp>
 #include <bpf/bpf.hpp>
 #include <boot/limine_requests.hpp>
 #include <arch/x86_64/cpu.hpp>
 #include <arch/x86_64/percpu.hpp>
 #include <fs/genfs.hpp>
 #include <fs/procfs.hpp>
+#include <core/watchdog.hpp>
 #include <fs/ext2.hpp>
 #include <fs/ramfs.hpp>
 #include <lib/format.hpp>
@@ -287,6 +289,28 @@ private:
 // /proc/pressure/{cpu,memory,io}: pressure stall information. Nothing stalls
 // is measured yet: all zeros, and triggers (written by Android's lmkd) are
 // accepted but never fire.
+// /proc/sysrq-trigger (root only): "w" dumps every thread's call chain into
+// the log, as Alt+SysRq+W does (the GPU report uses it when amdgpu hangs).
+class SysrqTrigger : public vfs::Inode {
+public:
+    SysrqTrigger() {
+        ino = vfs::next_ino();
+        mode = vfs::S_IFREG | 0200;
+        atime = mtime = ctime = vfs::now();
+    }
+    isize read(u64, void*, usize) override { return -err::INVAL; }
+    isize write(u64, const void* buf, usize count) override {
+        char c = 0;
+        if (count) {
+            protect::UserAccess window; // the caller's buffer
+            c = *static_cast<const char*>(buf);
+        }
+        if (c == 'w')
+            watchdog::request_thread_dump();
+        return static_cast<isize>(count);
+    }
+};
+
 class PressureFile : public vfs::Inode {
 public:
     explicit PressureFile(bool full) : m_full(full) {
@@ -1255,6 +1279,7 @@ void init() {
     add("uptime", new GeneratedFile(gen_uptime, nullptr));
     add("stat", new GeneratedFile(gen_stat_global, nullptr));
     add("loadavg", new GeneratedFile(gen_loadavg, nullptr));
+    add("sysrq-trigger", new SysrqTrigger);
     add("cpuinfo", new GeneratedFile(gen_cpuinfo, nullptr));
     {
         auto* pressure = new ramfs::Dir;

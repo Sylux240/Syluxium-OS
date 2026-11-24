@@ -124,8 +124,24 @@ gpu_report() {
             out=/dev/null
             [ -d /boot/logs ] && [ "$(id -u)" = 0 ] && out=/boot/logs/amdgpu-steps-${n##*/}.txt
             t=$(command -v amdgputest || echo /opt/syluxium/tests/amdgputest)
-            timeout 60 "$t" "$n" "$out" 2>&1
-            echo "-- exit $?"
+            # On the RX 6700 XT the test's device close never returned (the
+            # machine kept running): if it is still there after 25 s, dump
+            # every thread's kernel call chain into the log (streamed to
+            # the stick), twice, to see where amdgpu waits.
+            timeout 60 "$t" "$n" "$out" 2>&1 &
+            tp=$!
+            i=0
+            while kill -0 "$tp" 2>/dev/null && [ $i -lt 25 ]; do sleep 1; i=$((i + 1)); done
+            if kill -0 "$tp" 2>/dev/null; then
+                echo "amdgputest still running after 25 s: thread dumps into the kernel log"
+                echo "syluxium-diag: amdgputest hung, thread dump" > /dev/kmsg 2>/dev/null
+                echo w > /proc/sysrq-trigger 2>/dev/null
+                sleep 5
+                echo w > /proc/sysrq-trigger 2>/dev/null
+                sleep 3
+            fi
+            wait "$tp" 2>/dev/null &
+            echo "-- exit (see the step log)"
             sync
         done
     fi
