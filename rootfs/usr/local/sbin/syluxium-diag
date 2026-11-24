@@ -163,7 +163,15 @@ gpu_report() {
         echo "-- eglinfo -B -p surfaceless, DRI_PRIME=pci-$tag (radeonsi on ${r##*/})"
         DRI_PRIME=pci-$tag LIBGL_DEBUG=verbose EGL_LOG_LEVEL=debug MESA_DEBUG=1 timeout 30 eglinfo -B -p surfaceless 2>&1 | mesa_filter | head -40
         echo "-- exit $?"
-        # (fallback: radeonsi forced; devices it can't drive are skipped)
+        # radeonsi forced (devices it can't drive are skipped), first without
+        # Mesa's on-disk shader cache (files on the stick it maps and writes),
+        # then with it: on the RX 6700 XT radeonsi's start stopped the machine
+        # right after its last INFO query, before any further GPU call.
+        kmark "starting eglinfo with radeonsi forced, shader cache off (surfaceless)"
+        echo "-- eglinfo -B -p surfaceless, MESA_LOADER_DRIVER_OVERRIDE=radeonsi MESA_SHADER_CACHE_DISABLE=true"
+        MESA_SHADER_CACHE_DISABLE=true MESA_LOADER_DRIVER_OVERRIDE=radeonsi LIBGL_DEBUG=verbose MESA_DEBUG=1 timeout 30 eglinfo -B -p surfaceless 2>&1 | mesa_filter | head -40
+        echo "-- exit $?"
+        sync
         kmark "starting eglinfo with radeonsi forced (surfaceless)"
         echo "-- eglinfo -B -p surfaceless, MESA_LOADER_DRIVER_OVERRIDE=radeonsi"
         MESA_LOADER_DRIVER_OVERRIDE=radeonsi LIBGL_DEBUG=verbose MESA_DEBUG=1 timeout 30 eglinfo -B -p surfaceless 2>&1 | mesa_filter | head -40

@@ -289,11 +289,21 @@ long lkpi_file_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 	if (_IOC_TYPE(cmd) == 'd') {
 		if (trace < 0)
 			trace = lkpi_cmdline_word("drmtrace");
-		if (trace && _IOC_NR(cmd) >= 0x40 && _IOC_NR(cmd) < 0xa0) {
+		if (trace) {
 			const char *drv = lkpi_drm_file_driver(f);
 			bool announce = false;
-			if (drv && !strcmp(drv, "amdgpu"))
-				amdgpu_trace_args(cmd, arg, pre, sizeof(pre), &announce);
+			/* amdgpu: every call announced before it runs (radeonsi's start
+			 * froze an RX 6700 XT right after its last INFO query returned:
+			 * the call that hung printed nothing). */
+			if (drv && !strcmp(drv, "amdgpu")) {
+				if (_IOC_NR(cmd) >= 0x40 && _IOC_NR(cmd) < 0xa0)
+					amdgpu_trace_args(cmd, arg, pre, sizeof(pre), &announce);
+				if (!announce && announced < 2000) {
+					announced++;
+					pr_info("drmtrace: %s[%d] amdgpu calling ioctl 0x%02x (size %u)%s\n", current->comm,
+						current->pid, _IOC_NR(cmd), _IOC_SIZE(cmd), pre);
+				}
+			}
 			if (announce && announced < 2000) {
 				announced++;
 				pr_info("drmtrace: %s[%d] amdgpu %s:%s\n", current->comm, current->pid,
