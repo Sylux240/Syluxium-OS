@@ -656,29 +656,44 @@ long lkpi_vma_phys(unsigned long off, u64 *phys)
 		*phys = PFN_PHYS(m->base_pfn) + (addr - m->key);
 		return 0;
 	}
-	mutex_lock(&m->lock);
-	if (m->pages[pg] & LKPI_PTE_VALID) {
-		*phys = m->pages[pg] & PAGE_MASK;
+	if (!m->vma.vm_ops || !m->vma.vm_ops->fault)
+		goto no_fault_handler;
+	/* The driver's fault handler runs WITHOUT m->lock: it may move the
+	 * buffer (amdgpu: hidden VRAM to the CPU-visible window), and the move
+	 * revokes mappings through unmap_mapping_range(), which takes m->lock:
+	 * holding it here deadlocked the faulting thread on itself (radeonsi's
+	 * first mapped buffer froze an RX 6700 XT machine). The driver
+	 * serialises faults on a buffer itself (TTM's reservation). A revoke
+	 * between the handler's insert and our read just means: fault again. */
+	for (int attempt = 0;; attempt++) {
+		mutex_lock(&m->lock);
+		if (m->pages[pg] & LKPI_PTE_VALID) {
+			*phys = m->pages[pg] & PAGE_MASK;
+			mutex_unlock(&m->lock);
+			return 0;
+		}
 		mutex_unlock(&m->lock);
-		return 0;
-	}
-	if (!m->vma.vm_ops || !m->vma.vm_ops->fault) {
+		memset(&vmf, 0, sizeof(vmf));
+		vmf.vma = &m->vma;
+		vmf.address = m->vma.vm_start + (pg << PAGE_SHIFT);
+		vmf.pgoff = m->vma.vm_pgoff + pg;
+		ret = m->vma.vm_ops->fault(&vmf);
+		mutex_lock(&m->lock);
+		if (m->pages[pg] & LKPI_PTE_VALID) {
+			*phys = m->pages[pg] & PAGE_MASK;
+		} else if (vmf.page && !(ret & (VM_FAULT_SIGBUS | VM_FAULT_OOM))) {
+			*phys = page_to_phys(vmf.page);
+			m->pages[pg] = *phys | LKPI_PTE_VALID | prot_bits(m->vma.vm_page_prot);
+			/* The fault handler's page reference is kept (as a PTE would). */
+		} else if (!(ret & (VM_FAULT_SIGBUS | VM_FAULT_OOM)) && attempt < 8) {
+			mutex_unlock(&m->lock);
+			continue; /* inserted, then revoked meanwhile (or VM_FAULT_RETRY): again */
+		} else {
+			ret |= VM_FAULT_SIGBUS;
+		}
 		mutex_unlock(&m->lock);
-		return -ENXIO;
+		break;
 	}
-	vmf.vma = &m->vma;
-	vmf.address = m->vma.vm_start + (pg << PAGE_SHIFT);
-	vmf.pgoff = m->vma.vm_pgoff + pg;
-	ret = m->vma.vm_ops->fault(&vmf);
-	if (m->pages[pg] & LKPI_PTE_VALID)
-		*phys = m->pages[pg] & PAGE_MASK;
-	else if (vmf.page && !(ret & (VM_FAULT_SIGBUS | VM_FAULT_OOM))) {
-		*phys = page_to_phys(vmf.page);
-		m->pages[pg] = *phys | LKPI_PTE_VALID | prot_bits(m->vma.vm_page_prot);
-		/* The fault handler's page reference is kept (as a PTE would). */
-	} else
-		ret |= VM_FAULT_SIGBUS;
-	mutex_unlock(&m->lock);
 	if (ret & (VM_FAULT_SIGBUS | VM_FAULT_OOM)) {
 		static int logged;
 		if (logged++ < 30)
@@ -686,6 +701,8 @@ long lkpi_vma_phys(unsigned long off, u64 *phys)
 				current->pid, pg, m->npages, ret);
 	}
 	return (ret & (VM_FAULT_SIGBUS | VM_FAULT_OOM)) ? -EFAULT : 0;
+no_fault_handler:
+	return -ENXIO;
 }
 
 int remap_pfn_range(struct vm_area_struct *vma, unsigned long addr, unsigned long pfn, unsigned long size, pgprot_t prot)
