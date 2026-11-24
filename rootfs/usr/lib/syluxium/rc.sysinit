@@ -2,6 +2,8 @@
 # Syluxium start-up on the Linux kernel (run once by init, before the
 # console shell): what Syluxium's own kernel did itself.
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# Each step's start goes into the kernel log (timestamps show slow steps).
+step() { echo "syluxium-init: $*" > /dev/kmsg 2>/dev/null; }
 
 # ---- file systems ----
 grep -qs " /proc " /proc/mounts || mount -t proc proc /proc
@@ -38,6 +40,7 @@ kmod static-nodes --format=tmpfiles 2>/dev/null | while read -r type path mode _
     mknod -m "$mode" "$path" "${type%%!*}" "${dev%%:*}" "${dev##*:}" 2>/dev/null
 done
 
+step "starting udev"
 # ---- hardware: udev loads the drivers for what's there ----
 udevd=/usr/lib/systemd/systemd-udevd
 [ -x "$udevd" ] || udevd=/lib/systemd/systemd-udevd
@@ -47,6 +50,7 @@ if [ -x "$udevd" ]; then
     udevadm trigger --action=add --type=devices
     udevadm settle --timeout=30
 fi
+step "udev settled; loading /etc/modules"
 # Modules no hardware asks for (Debian's /etc/modules): Android's loop images
 # and binder devices, and more listed there.
 grep -v '^\s*#' /etc/modules 2>/dev/null | while read -r m args; do
@@ -55,7 +59,11 @@ done
 
 # ---- the stick: this boot's log folder (as Syluxium's own kernel kept it) ----
 # SYLUXLOGS gets a folder per boot, "NN-<computer>"; /boot/logs points to it.
-logs=$(findfs LABEL=SYLUXLOGS 2>/dev/null)
+step "stick log folder"
+# (udev already read every partition's label: no new scan of all disks, which
+# empty card readers can slow down for many seconds)
+logs=$(readlink -f /dev/disk/by-label/SYLUXLOGS 2>/dev/null)
+[ -b "$logs" ] || logs=
 if [ -n "$logs" ]; then
     mkdir -p /boot/logs-stick
     if mount -t vfat -o rw,noatime,flush "$logs" /boot/logs-stick; then
@@ -97,7 +105,11 @@ if [ -n "$logs" ]; then
 fi
 
 # ---- the stick's (or disk's) EFI partition at /boot/efi ----
-for dev in $(blkid -t TYPE=vfat -o device 2>/dev/null); do
+step "EFI partition"
+for dev in $(for b in /sys/class/block/*; do
+                 n=/dev/${b##*/}
+                 udevadm info -q property -n "$n" 2>/dev/null | grep -qx ID_FS_TYPE=vfat && echo "$n"
+             done); do
     [ "$dev" = "$logs" ] && continue
     mkdir -p /boot/efi
     mount -t vfat -o rw,noatime "$dev" /boot/efi 2>/dev/null || continue
@@ -105,6 +117,7 @@ for dev in $(blkid -t TYPE=vfat -o device 2>/dev/null); do
     umount /boot/efi
 done
 
+step "network"
 # ---- network: every adapter's settings (DHCP unless set otherwise) ----
 [ -e /etc/resolv.conf ] || ln -sf /run/resolv.conf /etc/resolv.conf
 : > /run/resolv.conf
@@ -113,4 +126,5 @@ syluxium-netconfig apply > /var/log/syluxium-netconfig.log 2>&1 &
 # ---- clock zone, random seed, user runtime dirs ----
 [ -e /etc/localtime ] || ln -sf /usr/share/zoneinfo/UTC /etc/localtime
 chmod 1777 /tmp
+step "start-up done"
 exit 0
