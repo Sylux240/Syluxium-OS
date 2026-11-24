@@ -802,6 +802,16 @@ class Installer:
         box.pack_start(self.progress, False, False, 0)
         self.step_label = S.label("")
         box.pack_start(self.step_label, False, False, 0)
+        # "Show details": the installer's log as it happens (every file it copies).
+        self.details = Gtk.Expander(label="Show details")
+        self.details_view = Gtk.TextView(editable=False, cursor_visible=False, monospace=True)
+        self.details_view.set_wrap_mode(Gtk.WrapMode.CHAR)
+        scroll = Gtk.ScrolledWindow()
+        scroll.set_min_content_height(150)
+        scroll.add(self.details_view)
+        self.details.add(scroll)
+        box.pack_start(self.details, False, False, 0)
+        self.details_pending = []
         self.slide_n = 0
         self.show_slide()
         return box
@@ -944,6 +954,7 @@ class Installer:
         self.installing = True
         self.show(7)
         GLib.timeout_add_seconds(9, self.show_slide)
+        GLib.timeout_add(300, self.flush_details)
         threading.Thread(target=self.worker, args=(self.command(),), daemon=True).start()
 
     def worker(self, cmd):
@@ -957,16 +968,55 @@ class Installer:
                     m = re.match(r"\[install\] (\d+)/(\d+) (.*)", line)
                     if m:
                         GLib.idle_add(self.set_progress, int(m[1]), int(m[2]), m[3])
+                    c = re.search(r"\[install-copy\] (\d+) (\d+)", line)
+                    if c:
+                        GLib.idle_add(self.set_copy_progress, int(c[1]), int(c[2]))
+                    elif not line.startswith("[install] "):
+                        self.details_pending.append(line)
                 ok = p.wait() == 0
         except OSError as e:
             with open(LOG, "a") as log:
                 log.write(f"cannot run the installer: {e}\n")
         GLib.idle_add(self.finished, ok)
 
+    # The bar by time, not step count: copying (step 4) takes most of an
+    # install, so it spans 40-80 %; steps 5..10 share the rest.
+    def overall(self, n, total, copied=None):
+        if n < 4:
+            return n / total
+        if n == 4:
+            return 0.4 + 0.4 * (copied or 0.0)
+        return 0.8 + 0.2 * (n - 5) / max(1, total - 5)
+
     def set_progress(self, n, total, text):
-        self.progress.set_fraction(min(1.0, n / total))
-        self.progress.set_text(f"{n * 100 // total}%")
+        self.step_n, self.step_total = n, total
+        f = min(1.0, self.overall(n, total))
+        self.progress.set_fraction(f)
+        self.progress.set_text(f"{int(f * 100)}%")
         self.step_label.set_text(text)
+
+    def set_copy_progress(self, done, total):
+        if getattr(self, "step_n", 0) != 4 or total <= 0:
+            return
+        part = min(1.0, done / total)
+        f = self.overall(4, self.step_total, part)
+        self.progress.set_fraction(f)
+        self.progress.set_text(f"{int(f * 100)}%")
+        self.step_label.set_text(f"Copying Syluxium: {done / 1e9:.1f} of {total / 1e9:.1f} GB")
+
+    def flush_details(self):
+        # Batched (the copy logs thousands of files): at most the last 2000 lines kept.
+        if self.details_pending and self.details.get_expanded():
+            lines, self.details_pending = self.details_pending, []
+            buf = self.details_view.get_buffer()
+            buf.insert(buf.get_end_iter(), "".join(lines[-2000:]))
+            extra = buf.get_line_count() - 2000
+            if extra > 0:
+                buf.delete(buf.get_start_iter(), buf.get_iter_at_line(extra))
+            self.details_view.scroll_to_iter(buf.get_end_iter(), 0, False, 0, 0)
+        elif not self.details.get_expanded():
+            self.details_pending = self.details_pending[-2000:]
+        return self.installing
 
     def finished(self, ok):
         self.installing = False

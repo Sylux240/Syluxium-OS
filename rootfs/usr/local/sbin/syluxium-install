@@ -116,11 +116,28 @@ UUID=$(dumpe2fs -h "$ROOT" 2>/dev/null | awk '/^Filesystem UUID:/ {print $3}')
 step 4 "Copying Syluxium (this takes a few minutes)"
 mkdir -p "$TARGET"
 mount -t ext4 "$ROOT" "$TARGET"
-for entry in /*; do
-    name=${entry#/}
-    case "$name" in proc|sys|dev|run|tmp|mnt|media|lost+found) continue ;; esac
-    cp -ax "$entry" "$TARGET/"  # -x: not the stick's log/EFI partitions mounted under /boot
+# The longest step (3-4 GB from a USB stick): progress every 2 s as
+# "[install-copy] <bytes copied> <bytes in all>" (the graphical installer's
+# bar moves through it), and every file in the log (its "Show details").
+total=$(df -B1 --output=used / | tail -1 | tr -d ' ')
+base=$(df -B1 --output=used "$TARGET" | tail -1 | tr -d ' ')
+(
+    set -e
+    for entry in /*; do
+        name=${entry#/}
+        case "$name" in proc|sys|dev|run|tmp|mnt|media|lost+found) continue ;; esac
+        echo "[install-detail] copying $entry"
+        stdbuf -oL cp -axv "$entry" "$TARGET/"  # (whole lines: progress lines don't land mid-line) -x: not the stick's log/EFI partitions mounted under /boot
+    done
+) &
+copier=$!
+while kill -0 "$copier" 2>/dev/null; do
+    now=$(df -B1 --output=used "$TARGET" | tail -1 | tr -d ' ')
+    echo "[install-copy] $((now - base)) $total"
+    sleep 2
 done
+wait "$copier" || { echo "copying failed" >&2; exit 1; }
+echo "[install-copy] $total $total"
 mkdir -p "$TARGET"/{proc,sys,dev,run,mnt,media,tmp,boot/efi}
 chmod 1777 "$TARGET/tmp"
 rm -f "$TARGET/boot/logs"; rmdir "$TARGET/boot/logs-stick" 2>/dev/null || true  # the live stick's log folder
