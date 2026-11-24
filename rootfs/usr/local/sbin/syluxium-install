@@ -241,44 +241,34 @@ elif [ -f "$BOOT/picker.efi" ]; then
 else
     cp "$BOOT/BOOTX64.EFI" "$TARGET/boot/efi/EFI/BOOT/"
 fi
-cp "$BOOT/syluxium.elf" "$TARGET/boot/efi/boot/"
+# The Linux kernel and Syluxium's initrd next to Limine (it reads the EFI
+# partition only); the initrd finds the system by its UUID.
+cp "$BOOT/vmlinuz" "$TARGET/boot/efi/boot/vmlinuz"
+cp "$BOOT/initrd.img" "$TARGET/boot/efi/boot/initrd.img"
 cp "$BOOT/limine-bios.sys" "$TARGET/boot/efi/boot/limine/"
 cp "$BOOT/splash.png" "$TARGET/boot/efi/boot/limine/" 2>/dev/null
-cat > "$TARGET/boot/efi/boot/limine/limine.conf" <<CONF
+entry() { # title, extra kernel options
+    printf '\n/%s\n    protocol: linux\n    path: boot():/boot/vmlinuz\n    module_path: boot():/boot/initrd.img\n    cmdline: root=UUID=%s rw %s\n' \
+        "$1" "$UUID" "$2"
+}
+{
+    cat <<CONF
 timeout: 3
+quiet: yes
 default_entry: 1
 wallpaper: boot():/boot/limine/splash.png
 wallpaper_style: centered
-backdrop: 000000
+backdrop: 0b0f26
 term_background: ff000000
 interface_branding: Syluxium
 interface_help_hidden: yes
-
-/Syluxium
-    protocol: limine
-    path: boot():/boot/syluxium.elf
-    cmdline: root=UUID=$UUID desktop
-
-/Syluxium (text console)
-    protocol: limine
-    path: boot():/boot/syluxium.elf
-    cmdline: root=UUID=$UUID
-
-/Syluxium (safe mode)
-    protocol: limine
-    path: boot():/boot/syluxium.elf
-    cmdline: root=UUID=$UUID desktop acpi=noaml nohz=off idle=hlt
-
-/Syluxium (GPU test)
-    protocol: limine
-    path: boot():/boot/syluxium.elf
-    cmdline: root=UUID=$UUID desktop gpu
-
-/Syluxium (Recovery)
-    protocol: limine
-    path: boot():/boot/syluxium.elf
-    cmdline: root=UUID=$UUID recovery
 CONF
+    entry "Syluxium" "desktop quiet loglevel=3"
+    entry "Syluxium (safe mode: no GPU drivers)" "desktop nomodeset"
+    entry "Syluxium (text console)" ""
+    entry "Syluxium (Recovery)" "recovery"
+    entry "Syluxium (Wayland desktop preview)" "desktop shell"
+} > "$TARGET/boot/efi/boot/limine/limine.conf"
 # BIOS boot: only on a whole disk of our own (it rewrites the boot code).
 [ "$MODE" != erase ] || "$BOOT/limine" bios-install "$DISK" > /dev/null
 
