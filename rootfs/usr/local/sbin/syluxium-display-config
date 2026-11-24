@@ -6,6 +6,7 @@
 #   another kernel display driver (simpledrm, 2D virtio-gpu) -> modesetting, no acceleration
 #   no kernel display driver                     -> fbdev (/dev/fb0)
 # Boot options: "xfbdev" forces fbdev, "noaccel" turns acceleration off,
+# "xcard=<driver>" puts the desktop on that driver's card (two GPUs),
 # "nogpu" (kernel) keeps GPU drivers from loading at all.
 out=/etc/X11/xorg.conf.d/20-display.conf
 log=/boot/logs/display.txt
@@ -29,8 +30,14 @@ for c in $cards; do
     bootvga=$(cat "/sys/dev/char/226:${c#/dev/dri/card}/device/boot_vga" 2>/dev/null)
     cardlist="$cardlist
   $c: $("$drminfo" "$c" 2>/dev/null | cut -d' ' -f1) $(readlink -f "/sys/dev/char/226:${c#/dev/dri/card}/device" 2>/dev/null | sed 's|.*/||')${bootvga:+ boot_vga $bootvga}; outputs: ${conn:-?}"
-    # (score: connected outputs, then boot_vga)
+    # (score: connected outputs, then boot_vga; boot option xcard=<driver>
+    # (amdgpu, nouveau, i915, ...) picks that driver's card above all)
     score=$((n * 2 + ${bootvga:-0}))
+    want=$(sed -n 's/.*\bxcard=\([a-z0-9_]*\).*/\1/p' /proc/cmdline)
+    if [ -n "$want" ]; then
+        cdrv=$(basename "$(readlink "/sys/dev/char/226:${c#/dev/dri/card}/device/driver" 2>/dev/null)" 2>/dev/null)
+        [ "$cdrv" = "$want" ] && score=$((score + 1000))
+    fi
     if [ "$score" -gt "$best" ]; then
         best=$score
         card=$c

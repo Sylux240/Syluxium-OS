@@ -393,6 +393,20 @@ long lkpi_probe(const dev::Driver* drv, dev::Device* d) {
     unsigned long early = __atomic_load_n(&g_acpi_early_lookups, __ATOMIC_RELAXED);
     auto* pdrv = static_cast<pci_driver*>(drv->ctx);
     pci::Function* f = pci::function_of(d);
+    // A memory BAR the firmware never placed (size, but address 0): the
+    // driver would map and touch address 0 (amdgpu hit BUG() reading its
+    // registers, a passed-through RX 6700 XT then stayed hung until the host
+    // rebooted). Don't start it; say why. (Assigning BARs ourselves, as Linux
+    // does, is the full fix.)
+    for (int i = 0; i < 6; i++) {
+        const pci::Bar& b = f->bars[i];
+        if (b.size && !b.is_io && b.address == 0) {
+            klog::warn("pci %02x:%02x.%u: BAR %d (%lu KiB) was not assigned by the firmware: not starting %s",
+                       f->bus, f->device, f->function, i, static_cast<unsigned long>(b.size >> 10),
+                       pdrv->name ? pdrv->name : "the driver");
+            return -ENODEV;
+        }
+    }
     auto* pdev = static_cast<pci_dev*>(kzalloc(sizeof(pci_dev), GFP_KERNEL));
     if (!pdev)
         return -ENOMEM;
