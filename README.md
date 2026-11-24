@@ -21,7 +21,8 @@ Highlights:
 - **Native Wayland too**: Wayland programs open as ordinary windows in the Xfce desktop (Dusk frames,
   taskbar, clipboard), and a Syluxium shell on the Wayfire compositor (glass panel, blur, Xwayland for
   X11 programs) is in preview alongside it.
-- **Hardware support of the Linux kernel**: GPU drivers for AMD, NVIDIA (nouveau) and Intel with OpenGL
+- **Hardware support of the Linux kernel**: GPU drivers for AMD, Intel and NVIDIA (NVIDIA's own driver for
+  GeForce GTX 750 / 900 series up to RTX 40, picked automatically; nouveau for other cards) with OpenGL
   and Vulkan, Wi-Fi and Bluetooth, laptop audio, touchpads, USB plug and play, with Debian's firmware
   packages included.
 - **Android apps**: an Android system (LineageOS through Waydroid) runs in a container; apps get their
@@ -50,6 +51,7 @@ Highlights:
 ```sh
 sudo pacman -S clang lld make git python mtools util-linux cpio gcc qemu-full kmod dosfstools
 sudo pacman -S edk2-ovmf   # optional, for UEFI boots in QEMU
+sudo pacman -S docker      # optional, builds NVIDIA's kernel modules (without it: nouveau only)
 ```
 
 ## Build & run
@@ -76,7 +78,8 @@ system itself, ext4).
 
 Boot menu (the picker on UEFI machines; **Esc** lists every entry as text):
 - **Syluxium**: the desktop
-- **Safe mode: no GPU drivers** (`nomodeset`): for display problems
+- **Safe mode: no GPU drivers** (`nomodeset`): for display problems (boot option `nonvidia`: nouveau
+  instead of NVIDIA's driver)
 - **Text console**, **Recovery** (repair disks and packages, reset settings or passwords)
 - **Wayland desktop preview**: the Syluxium shell on Wayfire
 - **In memory**: the whole system loaded into RAM (for sticks whose ext4 partition is damaged)
@@ -88,6 +91,7 @@ rootfs/               Syluxium's own files: desktop (Dusk theme), apps, tools, s
 boot/picker/          graphical UEFI boot picker (runs before Limine)
 tools/debian-fetch.py downloads official Debian packages (+ dependencies, SHA256-checked)
 tools/mkinitrd.py     Syluxium's initrd: finds the system partition (USB, SATA, NVMe, SD, VMs)
+tools/nvidia-modules.sh  NVIDIA's kernel modules for Syluxium's kernel (Debian's DKMS build, in Docker)
 tools/smoke-test.sh   headless QEMU boot: serial log + screenshot (tools/vfio-run.sh: with a real GPU)
 userspace/            test programs and helpers (syluxium-wayland-host: Wayland programs as X windows)
 userspace/windows/    Windows test programs (clang + lld-link) for Wine
@@ -100,15 +104,16 @@ kernel/               Syluxium's own kernel: the experimental version (not part 
 Legend: ✅ done · 🟡 partly done · ⬜ to do
 
 - ✅ Boots on the Linux kernel: live USB stick, installed disks (BIOS and UEFI), in memory, safe mode
-- ✅ Dusk desktop on Xfce, login screen, boot picker and splash
+- ✅ Dusk desktop on Xfce, login screen, boot picker, loading and shutdown screens
 - 🟡 Wayland shell (Wayfire): preview
 - ✅ Installer: step-by-step, alongside Windows, real progress and "Show details"
 - ✅ Network (DHCP, Network Connections, Wi-Fi), sound, USB and input hot-plug
 - ✅ Android apps (Waydroid): desktop windows, .apk install, F-Droid in the App Store
 - ✅ Windows programs (Wine), App Store, updates through apt, Recovery
-- 🟡 Real-hardware testing: NVIDIA (nouveau) and AMD desktops in progress
-- ⬜ NVIDIA's own driver (optional), Steam with Proton out of the box
-- ⬜ Diagnostics (GPU report) adapted to the Linux kernel
+- ✅ GPU drivers: AMD (amdgpu, video decoding), Intel, NVIDIA's own driver (550) or nouveau, chosen per card
+- 🟡 Real-hardware testing: NVIDIA and AMD desktops in progress
+- ⬜ Steam with Proton out of the box (NVIDIA's 32-bit libraries)
+- ✅ Diagnostics (hardware and GPU reports, Device Manager) on the Linux kernel
 
 ## License
 
