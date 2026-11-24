@@ -44,6 +44,18 @@ if [ -e "$STUCK" ]; then
     fi
 fi
 healthy "$GPU" || { echo "vfio-run: $GPU does not look healthy (not answering or not on vfio-pci): not starting"; exit 1; }
+# Radeons survive only the first VM after a host boot unless reset in between
+# (QEMU's reset at VM start fails on a card that was used): the host's
+# amdgpu resets it properly (BACO). /usr/local/sbin/syluxium-gpu-reset, with
+# a sudoers rule for just that script; without it, one VM run per boot.
+if [ -x /usr/local/sbin/syluxium-gpu-reset ]; then
+    sudo -n /usr/local/sbin/syluxium-gpu-reset || { echo "vfio-run: the host reset of $GPU failed: not starting"; exit 1; }
+    healthy "$GPU" || { echo "vfio-run: $GPU not healthy after the host reset: not starting"; exit 1; }
+elif [ -e build/vfio-card-used ] && [ "$(stat -c %Y build/vfio-card-used)" -ge "$(date -d "$(uptime -s)" +%s)" ]; then
+    echo "vfio-run: the card was already used since the host booted and there's no reset helper: reboot first"
+    exit 1
+fi
+touch build/vfio-card-used
 
 case " ${QEMU_EXTRA:-} " in *" -vga none "*) echo "vfio-run: refusing -vga none (see the top of this script)"; exit 1 ;; esac
 dev="-device vfio-pci,host=${GPU#0000:},multifunction=on"

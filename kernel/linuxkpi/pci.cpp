@@ -398,6 +398,14 @@ long lkpi_probe(const dev::Driver* drv, dev::Device* d) {
     // registers, a passed-through RX 6700 XT then stayed hung until the host
     // rebooted). Don't start it; say why. (Assigning BARs ourselves, as Linux
     // does, is the full fix.)
+    // A device that answers with revision 0xff is half dead (a GPU the last
+    // owner left unreset: passed-through Radeons after a VM; amdgpu then hit
+    // BUG()): don't start a driver on it.
+    if (f->revision == 0xff) {
+        klog::warn("pci %02x:%02x.%u: not answering properly (revision 0xff): not starting %s - it needs a reset "
+                   "(power cycle)", f->bus, f->device, f->function, pdrv->name ? pdrv->name : "the driver");
+        return -ENODEV;
+    }
     for (int i = 0; i < 6; i++) {
         const pci::Bar& b = f->bars[i];
         if (b.size && !b.is_io && b.address == 0) {
