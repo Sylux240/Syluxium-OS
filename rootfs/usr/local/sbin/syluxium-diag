@@ -130,13 +130,17 @@ gpu_report() {
         done
     fi
     echo; echo "== Mesa's driver choice without X (EGL GBM, surfaceless and device platforms)"
+    # (markers in the kernel log: the stick's stream shows which program ran)
+    kmark() { echo "syluxium-diag: $*" > /dev/kmsg 2>/dev/null; }
     for p in gbm surfaceless device; do
+        kmark "starting eglinfo -B -p $p"
         echo "-- eglinfo -B -p $p"
         LIBGL_DEBUG=verbose EGL_LOG_LEVEL=debug MESA_DEBUG=1 timeout 30 eglinfo -B -p $p 2>&1 | mesa_filter | head -60
         echo "-- exit $?"
     done
     if [ -n "$DISPLAY" ]; then
         echo; echo "== In the X session ($DISPLAY)"
+        kmark "starting glxinfo -B"
         echo "-- glxinfo -B"
         LIBGL_DEBUG=verbose MESA_DEBUG=1 timeout 30 glxinfo -B 2>&1 | mesa_filter | head -60
         echo "-- exit $?"
@@ -152,6 +156,7 @@ print(" ".join(sorted(l[i].decode() for i in range(n.value))) if l else "no disp
     grep -E "glamor|DRI3|DRI2|AIGLX|GLX|EGL|Acceleration|AccelMethod|kmsdev|using \/dev\/dri|Output .* connected|\\(EE\\)|\\(WW\\) modeset|Backtrace|Segmentation|Fatal|^\\[ *[0-9.]*\\] *[0-9]+: " /var/log/Xorg.0.log 2>/dev/null | grep -v "(WW) warning, (EE) error" | head -80
     echo; echo "== Vulkan (vulkaninfo --summary)"
     if command -v vulkaninfo > /dev/null; then
+        kmark "starting vulkaninfo --summary"
         VK_LOADER_DEBUG=error,warn timeout 30 vulkaninfo --summary 2>&1 | grep -v "extension revision" | head -100
         echo "-- exit $?"
     else
@@ -182,6 +187,7 @@ print(" ".join(sorted(l[i].decode() for i in range(n.value))) if l else "no disp
                   done ) &
                 sleep 0.5
             fi
+            kmark "starting vainfo on $n"
             timeout 20 vainfo --display drm --device "$n" 2>&1 | head -30
             if [ -e /run/syluxium-vainfo-dmesg ]; then
                 kill "$(cat /run/syluxium-vainfo-dmesg)" 2>/dev/null

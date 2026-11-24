@@ -71,8 +71,28 @@ class Kmsg : public CharDevice {
 public:
     Kmsg() : CharDevice(1, 11, 0644) {}
     isize read(u64, void*, usize) override { return 0; } // TODO: ring buffer of the boot log
+    // Into the kernel log (dmesg, the boot log on the stick), one line per
+    // write as on Linux; an optional "<level>" prefix is dropped.
     isize write(u64, const void* buf, usize n) override {
-        kwrite(static_cast<const char*>(buf), n);
+        char line[512];
+        usize len = n < sizeof(line) - 1 ? n : sizeof(line) - 1;
+        {
+            protect::UserAccess window; // buf is the caller's (user) buffer
+            memcpy(line, buf, len);
+        }
+        usize start = 0;
+        if (len > 2 && line[0] == '<') {
+            usize i = 1;
+            while (i < len && i < 5 && line[i] >= '0' && line[i] <= '9')
+                i++;
+            if (i < len && line[i] == '>')
+                start = i + 1;
+        }
+        while (len > start && (line[len - 1] == '\n' || line[len - 1] == '\r'))
+            len--;
+        line[len] = 0;
+        if (len > start)
+            klog::info("%s", line + start);
         return static_cast<isize>(n);
     }
 };

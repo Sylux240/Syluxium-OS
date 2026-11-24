@@ -208,6 +208,24 @@ int main(int argc, char** argv) {
     fails += engine_write(IP_GFX, &ib, &gtt, 32, 0xC0DE0011, "GFX writes into the GTT buffer") != 0;
     fails += engine_write(IP_GFX, &ib, &vram, 32, 0xC0DE0012, "GFX writes into the VRAM buffer") != 0;
     fails += engine_write(IP_COMPUTE, &ib, &gtt, 48, 0xC0DE0021, "compute writes into the GTT buffer") != 0;
+    say(fails ? "work: %d step(s) failed" : "work: all steps passed", fails);
+    // Teardown, step by step too: on an RX 6700 XT the machine froze within
+    // a second after the work steps (here, or in the next program). Wait
+    // first so the kernel log snapshot on the stick catches up.
+    sleep(2);
+    say("step: unmap the CPU mappings");
+    struct bo* all[] = {&gtt, &ib, &vram, &hidden};
+    for (int i = 0; i < 4; i++)
+        if (all[i]->cpu)
+            munmap(all[i]->cpu, all[i]->size);
+    say("step: free the context");
+    union ctx f = {.in = {.op = 2, .ctx_id = ctx_id}};
+    if (ioctl(fd, AMDGPU_CTX, &f))
+        say("note: CTX free: %s", strerror(errno));
+    say("step: close the device (frees the buffers and the GPU address space)");
+    close(fd);
+    say("ok: device closed");
+    sleep(2);
     say(fails ? "done: %d step(s) failed" : "done: all steps passed", fails);
     return fails ? 1 : 0;
 }
