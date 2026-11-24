@@ -1,7 +1,11 @@
 # Syluxium
 
 **A from-scratch x86_64 operating system** written in C, C++20 and Python: its own monolithic kernel,
-booted by [Limine](https://github.com/limine-bootloader/limine), aided with AI for a more efficient workflow.
+booted by [Limine](https://github.com/limine-bootloader/limine).
+
+> **Syluxium 1.0.0 "SpaceTrucker" (experimental).** The original Syluxium with its own kernel. The main
+> Syluxium is now Linux-based: 2.0.0 "TechnoTrucker" on the
+> [`main`](https://github.com/Syluxium-Industries/Syluxium-OS) branch.
 
 Syluxium runs **Linux applications out of the box**: Firefox, Wine, the Xfce desktop, CUPS, apt and the whole
 Debian package archive, unmodified, on top of a kernel written from scratch. **Android apps** are arriving:

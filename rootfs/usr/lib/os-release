@@ -1,0 +1,10 @@
+PRETTY_NAME="Syluxium 1.0.0 SpaceTrucker (experimental)"
+NAME="Syluxium"
+VERSION_ID="1.0.0"
+VERSION="1.0.0 (SpaceTrucker, experimental)"
+VERSION_CODENAME=spacetrucker
+ID=syluxium
+ID_LIKE=debian
+HOME_URL="https://syluxium.com/"
+SUPPORT_URL="https://syluxium.com/"
+BUG_REPORT_URL="https://github.com/Syluxium-Industries/Syluxium-OS/issues"
