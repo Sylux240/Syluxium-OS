@@ -96,8 +96,10 @@ static int bo_create(struct bo* b, const char* name, uint64_t size, uint64_t dom
     say("step: map %s buffer for the CPU", name);
     union gem_mmap m = {.in = {b->handle, 0}};
     if (ioctl(fd, AMDGPU_GEM_MMAP, &m)) { say("FAIL: GEM_MMAP: %s", strerror(errno)); return -1; }
+    say("  GEM_MMAP returned offset %#llx; now mmap()", (unsigned long long)m.out.addr_ptr);
     b->cpu = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, m.out.addr_ptr);
     if (b->cpu == MAP_FAILED) { say("FAIL: mmap: %s", strerror(errno)); b->cpu = NULL; return -1; }
+    say("  mmap() returned %p", (void*)b->cpu);
     say("step: CPU writes and reads back the %s buffer (first touch: page fault into TTM)", name);
     for (uint64_t i = 0; i < size / 4; i++) b->cpu[i] = 0x11110000u + (uint32_t)i;
     for (uint64_t i = 0; i < size / 4; i++)
