@@ -150,7 +150,7 @@ DEBIAN_PKGS  += fonts-wqy-microhei
 # The Linux kernel (Debian's, with its drivers as modules), kmod to load them
 # and udev to load them for the hardware it finds. systemd itself stays out:
 # busybox init runs Syluxium's start-up (rootfs/etc/inittab).
-DEBIAN_PKGS  += linux-image-amd64 kmod udev systemd-standalone-sysusers
+DEBIAN_PKGS  += linux-image-amd64 kmod udev systemd-standalone-sysusers firmware-linux-free
 XFCE_APPS_EXCLUDE := udisks2
 DEBIAN_ROOT  := $(BUILD)/rootfs-debian
 DEBIAN_STAMP := $(DEBIAN_ROOT)/.fetched
@@ -532,6 +532,9 @@ $(DEBIAN_CONFIGURED): $(DEBIAN_STAMP) tools/configure-packages.sh
 # huge (GPU firmware), so only the files our drivers load are kept.
 FIRMWARE_REPO  := http://deb.debian.org/debian|$(DEBIAN_SUITE)|non-free-firmware
 FIRMWARE_PKGS  := firmware-mediatek firmware-realtek firmware-misc-nonfree firmware-intel-graphics firmware-amd-graphics firmware-nvidia-graphics firmware-iwlwifi firmware-brcm80211 firmware-atheros firmware-bnx2
+# Linux kernel: its drivers ask for much more (laptop audio DSPs, older Wi-Fi,
+# CPU microcode): every file of these packages goes into the system.
+FIRMWARE_PKGS  += firmware-intel-sound firmware-sof-signed firmware-libertas amd64-microcode intel-microcode
 FIRMWARE_FILES = mediatek/mt7601u.bin rtlwifi/rtl8188eufw.bin rtlwifi/rtl8723bu_nic.bin rtl_bt/rtl8723b_fw.bin \
                   $(I915_FIRMWARE)
 # i915: display microcontroller (DMC) firmware for Skylake..Alder Lake, GuC/HuC
@@ -633,29 +636,12 @@ $(INITRAMFS): $(PICKER) tools/mkinitrd.py $(DEBIAN_CONFIGURED) tools/merge-accou
 	@rm -rf $(ROOTFS)/var/run $(ROOTFS)/var/lock && ln -s /run $(ROOTFS)/var/run && ln -s /run/lock $(ROOTFS)/var/lock
 	@# DNS servers: the kernel's /run/resolv.conf (filled in by DHCP).
 	@rm -f $(ROOTFS)/etc/resolv.conf && ln -s /run/resolv.conf $(ROOTFS)/etc/resolv.conf
-	@for f in $(FIRMWARE_FILES); do \
-	    src=$$(ls $(FIRMWARE_ROOT)/usr/lib/firmware/$$f $(FIRMWARE_ROOT)/lib/firmware/$$f 2>/dev/null | head -1); \
-	    [ -n "$$src" ] || { echo "  warning: firmware $$f not found"; continue; }; \
-	    mkdir -p $(ROOTFS)/usr/lib/firmware/$$(dirname $$f); cp -L "$$src" $(ROOTFS)/usr/lib/firmware/$$f; done
-	@# GPU firmware sets (shell patterns, see GPU_FIRMWARE)
-	@cd $(FIRMWARE_ROOT)/usr/lib/firmware && for f in $(GPU_FIRMWARE) $(NET_FIRMWARE); do \
-	    [ -f "$$f" ] || continue; skip=; for k in $(GPU_FIRMWARE_SKIP); do case $$f in $$k) skip=1;; esac; done; [ -z "$$skip" ] || continue; \
-	    mkdir -p $(CURDIR)/$(ROOTFS)/usr/lib/firmware/$$(dirname $$f); \
-	    cp -L "$$f" $(CURDIR)/$(ROOTFS)/usr/lib/firmware/$$f; done
-	@# Firmware that is a link to another file in the same set stays a link
-	@# (Intel's Bluetooth firmware: 63 links, 17 MB if copied twice).
-	@cd $(FIRMWARE_ROOT)/usr/lib/firmware && for f in $(GPU_FIRMWARE) $(NET_FIRMWARE); do \
-	    [ -L "$$f" ] || continue; t=$$(readlink "$$f"); case $$t in /*|*..*) continue;; esac; \
-	    [ -e "$(CURDIR)/$(ROOTFS)/usr/lib/firmware/$$(dirname $$f)/$$t" ] || continue; \
-	    ln -sf "$$t" "$(CURDIR)/$(ROOTFS)/usr/lib/firmware/$$f"; done
-	@# NVIDIA GSP-RM firmware (Turing .. Ada; ~60 MB: one 23 MB image for every
-	@# Turing, one 37 MB for Ampere and Ada): clocks, power management and
-	@# NVK on Turing+, and Ada at all. Directory and file links stay links
-	@# (tu117/gsp -> ../tu116/gsp), or each chip would carry its own copy.
-	@cd $(FIRMWARE_ROOT)/usr/lib/firmware && for d in nvidia/tu1*/gsp nvidia/ga10[2-7]/gsp nvidia/ad10*/gsp; do \
-	    [ -e "$$d" ] || continue; mkdir -p $(CURDIR)/$(ROOTFS)/usr/lib/firmware/$$(dirname $$d); \
-	    rm -rf $(CURDIR)/$(ROOTFS)/usr/lib/firmware/$$d; \
-	    cp -a "$$d" $(CURDIR)/$(ROOTFS)/usr/lib/firmware/$$d; done
+	@# All of Debian's firmware packages (Linux drivers find what they need;
+	@# Syluxium's own kernel took only the files its drivers used).
+	@mkdir -p $(ROOTFS)/usr/lib/firmware
+	@cp -a $(FIRMWARE_ROOT)/usr/lib/firmware/. $(ROOTFS)/usr/lib/firmware/
+	@[ ! -d $(FIRMWARE_ROOT)/lib/firmware ] || cp -a $(FIRMWARE_ROOT)/lib/firmware/. $(ROOTFS)/usr/lib/firmware/
+	@[ ! -d $(FIRMWARE_ROOT)/usr/lib/intel-ucode ] || cp -a $(FIRMWARE_ROOT)/usr/lib/intel-ucode $(ROOTFS)/usr/lib/
 	@ln -sf mediatek/mt7601u.bin $(ROOTFS)/usr/lib/firmware/mt7601u.bin # older drivers ask for it at the top level
 	@# Broadcom b43 (older MacBooks, iMacs): cut from Broadcom's driver at build time.
 	@tools/b43-firmware.sh $(ROOTFS)

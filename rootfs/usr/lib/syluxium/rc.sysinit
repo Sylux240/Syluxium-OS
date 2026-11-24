@@ -29,6 +29,15 @@ mkdir -p /mnt /media /boot
 hostname -F /etc/hostname 2>/dev/null || hostname syluxium
 ip link set lo up 2>/dev/null
 
+# ---- static device nodes: opening one loads its module (loop, fuse, uinput,
+# ...), as systemd-tmpfiles arranges on other distributions ----
+kmod static-nodes --format=tmpfiles 2>/dev/null | while read -r type path mode _ _ _ dev; do
+    case "$type" in c*|b*) ;; *) continue ;; esac
+    [ -e "$path" ] && continue
+    mkdir -p "$(dirname "$path")"
+    mknod -m "$mode" "$path" "${type%%!*}" "${dev%%:*}" "${dev##*:}" 2>/dev/null
+done
+
 # ---- hardware: udev loads the drivers for what's there ----
 udevd=/usr/lib/systemd/systemd-udevd
 [ -x "$udevd" ] || udevd=/lib/systemd/systemd-udevd
@@ -38,6 +47,11 @@ if [ -x "$udevd" ]; then
     udevadm trigger --action=add --type=devices
     udevadm settle --timeout=30
 fi
+# Modules no hardware asks for (Debian's /etc/modules): Android's loop images
+# and binder devices, and more listed there.
+grep -v '^\s*#' /etc/modules 2>/dev/null | while read -r m args; do
+    [ -n "$m" ] && modprobe "$m" $args 2>/dev/null
+done
 
 # ---- the stick: this boot's log folder (as Syluxium's own kernel kept it) ----
 # SYLUXLOGS gets a folder per boot, "NN-<computer>"; /boot/logs points to it.

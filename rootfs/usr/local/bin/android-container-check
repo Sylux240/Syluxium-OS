@@ -1,0 +1,44 @@
+#!/bin/bash
+# Test aid: set Android up from the test disk (/dev/sdb: system.img and
+# vendor.img), start its container, and print every log to the console.
+# Lines start with "ACHECK".
+out() { while IFS= read -r l; do echo "ACHECK $1: $l"; done; }
+say() { echo "ACHECK $*"; }
+mkdir -p /etc/waydroid-extra/images
+cat /proc/partitions 2>&1 | out partitions
+dmesg | grep -i " sd[a-z]\|ata[0-9]" | tail -n 12 | out disks
+# The test disk: a whole disk without partitions, other than the system's.
+dev=$1
+if [ -z "$dev" ]; then
+    for d in /sys/block/sd[a-z] /sys/block/vd[a-z]; do
+        [ -e "$d" ] || continue
+        ls "$d" | grep -q "^$(basename "$d")[0-9]" && continue
+        dev=/dev/$(basename "$d"); break
+    done
+fi
+say "test disk: $dev"
+mount -o ro "$dev" /etc/waydroid-extra/images 2>&1 | out mount
+dmesg | tail -n 5 | out dmesg
+ls /etc/waydroid-extra/images 2>&1 | out images
+say "binder: $(ls /dev/anbox-* 2>&1 | tr '\n' ' ')"
+say "init (exit follows)"
+/usr/local/sbin/syluxium-android-container init 2>&1 | tail -n 15 | out init
+say "init exit ${PIPESTATUS[0]}"
+say "start"
+timeout 120 /usr/local/sbin/syluxium-android-container start 2>&1 | tail -n 15 | out start
+say "start exit ${PIPESTATUS[0]}"
+sleep 15
+tail -n 40 /var/log/waydroid-container.log 2>&1 | out container-log
+tail -n 30 /var/lib/waydroid/waydroid.log 2>&1 | out waydroid-log
+for f in /var/lib/waydroid/lxc/waydroid/*.log /var/log/lxc/*.log; do
+    [ -f "$f" ] && tail -n 30 "$f" 2>&1 | out "$(basename "$f")"
+done
+lxc-info -P /var/lib/waydroid/lxc -n waydroid 2>&1 | out lxc-info
+if lxc-info -P /var/lib/waydroid/lxc -n waydroid 2>/dev/null | grep -q STOPPED; then
+    say "container stopped: starting it in the foreground with LXC's debug log"
+    timeout 40 lxc-start -P /var/lib/waydroid/lxc -n waydroid -F -l DEBUG -o /tmp/lxc-debug.log > /tmp/lxc-fg.txt 2>&1 < /dev/null &
+    sleep 30
+    tail -n 25 /tmp/lxc-fg.txt 2>&1 | out lxc-foreground
+    grep -E "ERROR|WARN|Failed|failed" /tmp/lxc-debug.log | tail -n 40 | out lxc-debug
+fi
+say "done"

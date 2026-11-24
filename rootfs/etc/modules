@@ -1,0 +1,5 @@
+# /etc/modules: kernel modules to load at boot time (Syluxium's start-up and
+# Debian's convention). One per line, options may follow.
+# Android (Waydroid): its system images are loop devices, its IPC binder.
+loop
+binder_linux
