@@ -14,6 +14,7 @@
 #include <core/log.hpp>
 #include <core/smbios.hpp>
 #include <fs/ext2.hpp>
+#include <linuxkpi/linuxkpi.hpp>
 #include <fs/genfs.hpp>
 #include <fs/vfs.hpp>
 #include <lib/format.hpp>
@@ -61,6 +62,8 @@ void shutdown_thread(void*) {
     block::sync_all();
     ext2::shutdown_all();
     block::sync_all();
+    linuxkpi::shutdown_devices(); // drivers' shutdown hooks (GPUs left resettable)
+    bootlog::save();
     power_off();
 }
 

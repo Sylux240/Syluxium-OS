@@ -50,6 +50,7 @@ dev="-device vfio-pci,host=${GPU#0000:},multifunction=on"
 [ -e "/sys/bus/pci/devices/$AUDIO" ] && dev="$dev -device vfio-pci,host=${AUDIO#0000:}"
 export QEMU_EXTRA="${QEMU_EXTRA:-} $dev -global q35-pcihost.pci-hole64-size=64G -fw_cfg name=opt/ovmf/X-PciMmio64Mb,string=65536"
 
+export POWERDOWN=1 # the guest powers off (drivers shut down) instead of QEMU being killed
 tools/smoke-test.sh "${@:-uefi}"
 rc=$?
 

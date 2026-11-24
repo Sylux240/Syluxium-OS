@@ -17,6 +17,7 @@
 #include <mm/pmm.hpp>
 #include <mm/heap.hpp>
 #include <proc/futex.hpp>
+#include <linuxkpi/linuxkpi.hpp>
 #include <proc/process.hpp>
 #include <proc/signal.hpp>
 #include <proc/uaccess.hpp>
@@ -1139,7 +1140,10 @@ long sys_reboot(SYSCALL_ARGS) {
         ext2::shutdown_all();
         block::sync_all();
     }
-    klog::info("System %s: file systems clean; asking the firmware (ACPI)", what);
+    klog::info("System %s: file systems clean; shutting the drivers down", what);
+    bootlog::save();
+    linuxkpi::shutdown_devices(); // GPUs left resettable (a VM's passed-through card, the next boot)
+    klog::info("System %s: drivers shut down; asking the firmware (ACPI)", what);
     bootlog::save();
     // Firmware that ignores the request: reported (with every thread) after 10 s.
     static watchdog::Guard* firmware_guard = nullptr;

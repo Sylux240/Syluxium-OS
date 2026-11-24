@@ -26,6 +26,10 @@ void publish_params();
 // ACPI companion wasn't available yet.
 void acpi_ready();
 
+// Power off / restart: every bound PCI driver's shutdown() hook (Linux's
+// device_shutdown), last bound first, each with a 5 s limit.
+void shutdown_devices();
+
 // Internal: PCI/IRQ glue setup (called by init()).
 void init_pci();
 

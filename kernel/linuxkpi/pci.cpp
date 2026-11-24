@@ -1263,6 +1263,41 @@ bool firmware_record(unsigned i, const char** device, const char** file, bool* l
 // are first matched (PCI is enumerated after the drivers register).
 void init_pci() {}
 
+// ---- power off / restart: the drivers' shutdown hooks (Linux's device_shutdown) ----
+namespace {
+struct ShutdownJob {
+    pci_driver* drv;
+    pci_dev* pdev;
+    sched::Semaphore done{0};
+};
+void shutdown_thread(void* arg) {
+    auto* job = static_cast<ShutdownJob*>(arg);
+    job->drv->shutdown(job->pdev);
+    job->done.signal();
+}
+} // namespace
+
+void shutdown_devices() {
+    // Last bound first (Linux: reverse order of registration). Each hook gets
+    // 5 s in a thread of its own: one that hangs mustn't keep the machine on.
+    // amdgpu's hook leaves the GPU so the next start (or a VM's next run, for
+    // a passed-through card) can reset it: without it an RX 6700 XT came to
+    // the next VM unreset and amdgpu crashed on it.
+    for (int i = 255; i >= 0; i--) {
+        pci_dev* pdev = g_bound[i];
+        if (!pdev || !pdev->driver || !pdev->driver->shutdown)
+            continue;
+        auto* job = new ShutdownJob{pdev->driver, pdev};
+        klog::info("System shutdown: %s (%s)", pdev->driver->name, pdev->dev.lkpi_name);
+        sched::spawn("drv-shutdown", shutdown_thread, job, -1, true);
+        if (!job->done.wait_timeout(5'000'000'000ull)) {
+            klog::warn("System shutdown: %s still busy after 5 s: going on without it", pdev->driver->name);
+            continue; // job leaks: the thread may still finish and touch it
+        }
+        delete job;
+    }
+}
+
 extern "C" void lkpi_apply_fakeid() {
     static bool done = false;
     if (done)

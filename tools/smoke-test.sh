@@ -204,9 +204,20 @@ try:
 except BlockingIOError:
     pass
 s.setblocking(True)
-s.sendall(b"quit\n")
+# POWERDOWN=1: the VM's power button instead of quitting QEMU, so the guest
+# shuts its drivers down (a passed-through GPU is left resettable).
+s.sendall(b"system_powerdown\n" if os.environ.get("POWERDOWN") else b"quit\n")
 time.sleep(0.5)
 EOF
+if [[ -n ${POWERDOWN:-} ]]; then
+    for _ in $(seq 80); do kill -0 $QEMU_PID 2>/dev/null || break; sleep 0.5; done
+    if kill -0 $QEMU_PID 2>/dev/null; then
+        echo "powerdown: the guest didn't power off within 40 s: QEMU stopped"
+        kill $QEMU_PID 2>/dev/null
+    else
+        echo "powerdown: the guest powered off"
+    fi
+fi
 wait $QEMU_PID 2>/dev/null || true
 
 python3 "$(dirname "$0")/ppm2png.py" "$PPM" "$OUT/screen-$MODE.png"
