@@ -25,6 +25,13 @@ healthy() {
     local vend
     vend=$(od -An -tx2 -N2 "$cfg" | tr -d ' ')
     [ "$vend" = "${ID%%:*}" ] || return 1
+    # Revision and subsystem too: after a VM the RX 6700 XT kept its vendor
+    # ID but read revision 0xff and subsystem 0000:0000 (not reset; the
+    # next VM's amdgpu crashed on it).
+    local rev sub
+    rev=$(od -An -tx1 -j8 -N1 "$cfg" | tr -d ' ')
+    sub=$(od -An -tx4 -j44 -N4 "$cfg" | tr -d ' ')
+    [ "$rev" != ff ] && [ "$sub" != 00000000 ] && [ "$sub" != ffffffff ] || return 1
     [ "$(basename "$(readlink "/sys/bus/pci/devices/$1/driver" 2>/dev/null)")" = vfio-pci ] || return 1
 }
 
