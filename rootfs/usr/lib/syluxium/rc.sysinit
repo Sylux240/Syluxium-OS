@@ -106,16 +106,28 @@ fi
 
 # ---- the stick's (or disk's) EFI partition at /boot/efi ----
 step "EFI partition"
-for dev in $(for b in /sys/class/block/*; do
-                 n=/dev/${b##*/}
-                 udevadm info -q property -n "$n" 2>/dev/null | grep -qx ID_FS_TYPE=vfat && echo "$n"
-             done); do
-    [ "$dev" = "$logs" ] && continue
+# ---- the EFI partition of the disk Syluxium runs from, at /boot/efi ----
+# Only that disk's: another disk's (an earlier install, Windows) would make the
+# installer take that disk for the running system and hide it.
+rootdev=$(awk '$2 == "/" {d = $1} END {print d}' /proc/mounts)
+rootdisk=
+case "$rootdev" in
+    /dev/*) rootdisk=$(basename "$(readlink -f "/sys/class/block/${rootdev#/dev/}/..")") ;;
+esac
+esp=
+if [ -n "$rootdisk" ] && [ -d "/sys/block/$rootdisk" ]; then
+    for b in /sys/block/"$rootdisk"/"$rootdisk"*; do
+        n=/dev/${b##*/}
+        [ "$n" = "$logs" ] && continue
+        udevadm info -q property -n "$n" 2>/dev/null | grep -qx ID_FS_TYPE=vfat && { esp=$n; break; }
+    done
+else
+    esp=$(readlink -f /dev/disk/by-label/SYLUXIUM 2>/dev/null) # in memory: the stick's
+fi
+if [ -b "$esp" ]; then
     mkdir -p /boot/efi
-    mount -t vfat -o rw,noatime "$dev" /boot/efi 2>/dev/null || continue
-    [ -d /boot/efi/EFI ] && break
-    umount /boot/efi
-done
+    mount -t vfat -o rw,noatime "$esp" /boot/efi 2>/dev/null
+fi
 
 step "network"
 # ---- network: every adapter's settings (DHCP unless set otherwise) ----

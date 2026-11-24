@@ -150,7 +150,7 @@ DEBIAN_PKGS  += fonts-wqy-microhei
 # The Linux kernel (Debian's, with its drivers as modules), kmod to load them
 # and udev to load them for the hardware it finds. systemd itself stays out:
 # busybox init runs Syluxium's start-up (rootfs/etc/inittab).
-DEBIAN_PKGS  += linux-image-amd64 kmod udev systemd-standalone-sysusers firmware-linux-free xserver-xorg-input-libinput
+DEBIAN_PKGS  += linux-image-amd64 kmod udev systemd-standalone-sysusers firmware-linux-free xserver-xorg-input-libinput util-linux
 XFCE_APPS_EXCLUDE := udisks2
 DEBIAN_ROOT  := $(BUILD)/rootfs-debian
 DEBIAN_STAMP := $(DEBIAN_ROOT)/.fetched
