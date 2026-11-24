@@ -176,6 +176,14 @@ gpu_report() {
         echo "-- eglinfo -B -p surfaceless, MESA_LOADER_DRIVER_OVERRIDE=radeonsi"
         MESA_LOADER_DRIVER_OVERRIDE=radeonsi LIBGL_DEBUG=verbose MESA_DEBUG=1 timeout 30 eglinfo -B -p surfaceless 2>&1 | mesa_filter | head -40
         echo "-- exit $?"
+        # The stack X's glamor uses: GBM (scanout buffers) with radeonsi.
+        # (radeonsi worked surfaceless on an RX 6700 XT; X then stopped the
+        # machine while glamor started on the card.)
+        kmark "starting eglinfo -p gbm with radeonsi forced"
+        echo "-- eglinfo -B -p gbm, MESA_LOADER_DRIVER_OVERRIDE=radeonsi"
+        MESA_LOADER_DRIVER_OVERRIDE=radeonsi LIBGL_DEBUG=verbose MESA_DEBUG=1 timeout 30 eglinfo -B -p gbm 2>&1 | mesa_filter | head -40
+        echo "-- exit $?"
+        sync
         break # one AMD card is enough
     done
     if [ -n "$DISPLAY" ]; then

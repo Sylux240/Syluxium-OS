@@ -124,9 +124,11 @@ void writer(void*) {
         if ((c == boot::cmdline() || c[-1] == ' ') && (c[7] == 0 || c[7] == ' '))
             fast = true;
     if (fast) {
-        klog::info("Boot logs: saved every second for 15 minutes (logfast)");
-        for (u32 ms = elapsed * 1000; ms < 900'000; ms += 1000) {
-            sched::sleep_ms(1000);
+        // (every quarter second: a freeze within a second of the last save
+        // still lost the lines that named its cause on an RX 6700 XT)
+        klog::info("Boot logs: saved 4 times a second for 15 minutes (logfast)");
+        for (u32 ms = elapsed * 1000; ms < 900'000; ms += 250) {
+            sched::sleep_ms(250);
             save();
         }
         elapsed = 900;
@@ -167,12 +169,14 @@ void save() {
         if (!file && g_logs_dir->create(name, sizeof(name) - 1, vfs::S_IFREG | 0644, nullptr, &file) != 0)
             file = nullptr;
         if (file) {
-            file->truncate(0);
+            // Over the old copy, then trimmed: a freeze mid-save keeps a
+            // whole log (emptying it first could leave nothing).
             file->write(0, text, len);
+            file->truncate(len);
         }
     } else if (vfs::resolve(path, nullptr, true, &file) == 0) {
-        file->truncate(0);
         file->write(0, text, len);
+        file->truncate(len);
     } else {
         vfs::create_file(path, text, len, 0644);
     }
