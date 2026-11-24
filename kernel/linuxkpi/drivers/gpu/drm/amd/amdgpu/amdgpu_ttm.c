@@ -392,6 +392,13 @@ static int amdgpu_move_blit(struct ttm_buffer_object *bo,
 				       new_mem->size,
 				       amdgpu_bo_encrypted(abo),
 				       bo->base.resv, &fence);
+	{ /* Syluxium: the copy job's fence (matches the fault wait's list) */
+		static int told;
+		if (told++ < 40)
+			pr_info("amdgpu: move copy job: %d, fence %s / %s seqno %llu\n", r,
+				fence ? fence->ops->get_driver_name(fence) : "-",
+				fence ? fence->ops->get_timeline_name(fence) : "-", fence ? fence->seqno : 0);
+	}
 	if (r)
 		goto error;
 
@@ -569,6 +576,13 @@ static int amdgpu_bo_move(struct ttm_buffer_object *bo, bool evict,
 		r = amdgpu_move_blit(bo, evict, new_mem, old_mem);
 	else
 		r = -ENODEV;
+	{ /* Syluxium: how buffers move (an RX 6700 XT stopped in one) */
+		static int moves;
+		if (moves++ < 40)
+			pr_info("amdgpu: move %lu KiB, memory type %u -> %u: %s (%d)\n",
+				(unsigned long)(bo->base.size >> 10), old_mem->mem_type, new_mem->mem_type,
+				adev->mman.buffer_funcs_enabled ? "SDMA copy job" : "no copy engine (CPU copy)", r);
+	}
 
 	if (r) {
 		/* Check that all memory is CPU accessible */

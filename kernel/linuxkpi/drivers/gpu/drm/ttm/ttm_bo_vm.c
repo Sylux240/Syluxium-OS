@@ -69,10 +69,40 @@ static vm_fault_t ttm_bo_vm_fault_idle(struct ttm_buffer_object *bo,
 	}
 
 	/*
-	 * Ordinary wait.
+	 * Ordinary wait. (Syluxium: in 5 s steps, saying which fences it waits
+	 * for: a CPU touch of a buffer amdgpu moved into the visible VRAM
+	 * window never returned on an RX 6700 XT.)
 	 */
-	err = dma_resv_wait_timeout(bo->base.resv, DMA_RESV_USAGE_KERNEL, true,
-				    MAX_SCHEDULE_TIMEOUT);
+	{
+		static int reported;
+		int round = 0;
+
+		if (reported < 40) {
+			reported++;
+			pr_info("ttm: fault waits for the buffer's kernel fences (a move or clear)\n");
+		}
+		for (;;) {
+			struct dma_resv_iter cursor;
+			struct dma_fence *f;
+
+			err = dma_resv_wait_timeout(bo->base.resv, DMA_RESV_USAGE_KERNEL, true, 5 * HZ);
+			if (err != 0)
+				break;
+			if (round++ < 6) {
+				pr_warn("ttm: fault still waiting after %d s; the buffer's kernel fences:\n", round * 5);
+				dma_resv_for_each_fence(&cursor, bo->base.resv, DMA_RESV_USAGE_KERNEL, f)
+					pr_warn("ttm:   %s / %s seqno %llu %s\n", f->ops->get_driver_name(f),
+						f->ops->get_timeline_name(f), f->seqno,
+						dma_fence_is_signaled(f) ? "signalled" : "NOT signalled");
+			}
+		}
+		if (err > 0)
+			err = 0;
+		if (round && reported < 60) {
+			reported++;
+			pr_info("ttm: fault wait ended (%ld)\n", err);
+		}
+	}
 	if (unlikely(err < 0)) {
 		return (err != -ERESTARTSYS) ? VM_FAULT_SIGBUS :
 			VM_FAULT_NOPAGE;

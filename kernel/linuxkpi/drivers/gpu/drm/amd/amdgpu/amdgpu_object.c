@@ -1299,6 +1299,12 @@ vm_fault_t amdgpu_bo_fault_reserve_notify(struct ttm_buffer_object *bo)
 		return VM_FAULT_SIGBUS;
 
 	/* hurrah the memory is not visible ! */
+	{ /* Syluxium: the move a CPU touch of hidden VRAM needs */
+		static int told;
+		if (told++ < 40)
+			pr_info("amdgpu: CPU touch of a buffer in hidden VRAM (%lu KiB): moving it into the visible window\n",
+				(unsigned long)(bo->base.size >> 10));
+	}
 	atomic64_inc(&adev->num_vram_cpu_page_faults);
 	amdgpu_bo_placement_from_domain(abo, AMDGPU_GEM_DOMAIN_VRAM |
 					AMDGPU_GEM_DOMAIN_GTT);
