@@ -1,0 +1,16 @@
+#!/bin/bash
+# The console's root login shell (restarted by init whenever it exits), with
+# the environment Syluxium's own kernel gave it.
+export HOME=/root USER=root LOGNAME=root SHELL=/bin/bash TERM=linux TZ=UTC
+export PATH=/usr/local/bin:/usr/bin:/usr/sbin:/bin:/sbin
+cd /root 2>/dev/null || cd /
+# Test boots (serialmirror): everything the shell prints also goes to the
+# serial port, where QEMU tests read it (Syluxium's own kernel mirrored the
+# console there itself).
+if grep -qw serialmirror /proc/cmdline 2>/dev/null && [ -w /dev/ttyS0 ]; then
+    exec > >(tee -a /dev/ttyS0) 2>&1
+    [ -r /etc/motd ] && cat /etc/motd
+    exec -a -bash /bin/bash -i
+fi
+[ -r /etc/motd ] && cat /etc/motd
+exec -a -bash /bin/bash

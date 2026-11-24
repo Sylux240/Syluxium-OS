@@ -1,0 +1,16 @@
+#!/bin/sh
+# Syluxium shutdown on the Linux kernel (init runs it before power off or
+# restart): programs asked to quit, the kernel log onto the stick, disks synced
+# and unmounted.
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+echo "Syluxium: shutting down..."
+killall5 -15 2>/dev/null
+sleep 2
+killall5 -9 2>/dev/null
+if [ -d /boot/logs/ ]; then
+    dmesg > /boot/logs/syluxium-log.txt 2>/dev/null
+fi
+sync
+umount -a -r -t vfat,ext4,ext3,ext2,exfat,ntfs3 2>/dev/null
+mount -o remount,ro / 2>/dev/null
+sync

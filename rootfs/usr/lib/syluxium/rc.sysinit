@@ -1,0 +1,97 @@
+#!/bin/sh
+# Syluxium start-up on the Linux kernel (run once by init, before the
+# console shell): what Syluxium's own kernel did itself.
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# ---- file systems ----
+grep -qs " /proc " /proc/mounts || mount -t proc proc /proc
+grep -qs " /sys " /proc/mounts || mount -t sysfs sys /sys
+grep -qs " /dev " /proc/mounts || mount -t devtmpfs dev /dev
+mkdir -p /dev/pts /dev/shm
+# (devtmpfs leaves these to userspace: bash's <(...), /dev/stdin users)
+ln -sfn /proc/self/fd /dev/fd
+ln -sf /proc/self/fd/0 /dev/stdin
+ln -sf /proc/self/fd/1 /dev/stdout
+ln -sf /proc/self/fd/2 /dev/stderr
+ln -sf /proc/kcore /dev/core 2>/dev/null
+mount -t devpts -o gid=5,mode=620,ptmxmode=666 devpts /dev/pts
+mount -t tmpfs -o mode=1777,nosuid,nodev shm /dev/shm
+mount -t tmpfs -o mode=755,nosuid,nodev run /run
+mkdir -p /run/lock /run/user /run/syluxium
+mount -t tmpfs -o mode=1777,nosuid,nodev tmp /tmp
+mount -t cgroup2 cgroup2 /sys/fs/cgroup 2>/dev/null # containers (Android)
+mount -t securityfs securityfs /sys/kernel/security 2>/dev/null
+mount -t efivarfs efivarfs /sys/firmware/efi/efivars 2>/dev/null
+mount -o remount,rw / 2>/dev/null
+[ -e /etc/mtab ] || ln -s /proc/mounts /etc/mtab
+mkdir -p /mnt /media /boot
+
+hostname -F /etc/hostname 2>/dev/null || hostname syluxium
+ip link set lo up 2>/dev/null
+
+# ---- hardware: udev loads the drivers for what's there ----
+udevd=/usr/lib/systemd/systemd-udevd
+[ -x "$udevd" ] || udevd=/lib/systemd/systemd-udevd
+if [ -x "$udevd" ]; then
+    "$udevd" --daemon
+    udevadm trigger --action=add --type=subsystems
+    udevadm trigger --action=add --type=devices
+    udevadm settle --timeout=30
+fi
+
+# ---- the stick: this boot's log folder (as Syluxium's own kernel kept it) ----
+# SYLUXLOGS gets a folder per boot, "NN-<computer>"; /boot/logs points to it.
+logs=$(findfs LABEL=SYLUXLOGS 2>/dev/null)
+if [ -n "$logs" ]; then
+    mkdir -p /boot/logs-stick
+    if mount -t vfat -o rw,noatime,flush "$logs" /boot/logs-stick; then
+        vendor=$(cat /sys/class/dmi/id/sys_vendor 2>/dev/null | tr -d '/')
+        product=$(cat /sys/class/dmi/id/product_name 2>/dev/null | tr -d '/')
+        board=$(cat /sys/class/dmi/id/board_name 2>/dev/null | tr -d '/')
+        machine="$vendor $product"
+        case "$product" in ""|"System Product Name"|"To be filled by O.E.M."|"Default string")
+            machine="$(cat /sys/class/dmi/id/board_vendor 2>/dev/null | tr -d '/') $board" ;;
+        esac
+        machine=$(echo "$machine" | sed 's/^ *//; s/ *$//')
+        [ -n "$machine" ] || machine="Unknown PC"
+        highest=0
+        for d in /boot/logs-stick/[0-9][0-9]-*; do
+            [ -d "$d" ] || continue
+            n=$(basename "$d" | cut -c1-2 | sed 's/^0//')
+            [ "$n" -gt "$highest" ] 2>/dev/null && highest=$n
+        done
+        number=$((highest < 99 ? highest + 1 : 99))
+        folder=$(printf '%02d-%s' "$number" "$machine")
+        mkdir -p "/boot/logs-stick/$folder"
+        ln -sfn "/boot/logs-stick/$folder" /boot/logs
+        printf 'Computer: %s\r\nBoot options: %s\r\nKernel: Linux %s\r\n' "$machine" "$(cat /proc/cmdline)" \
+            "$(uname -r)" > /boot/logs/machine.txt
+        sync
+        # The kernel log onto the stick: every 10 s for 15 minutes, then every
+        # 2 minutes (and at shutdown), so a machine that stops leaves its last lines.
+        (
+            i=0
+            while :; do
+                dmesg > /boot/logs/syluxium-log.txt.new 2>/dev/null &&
+                    mv -f /boot/logs/syluxium-log.txt.new /boot/logs/syluxium-log.txt
+                sync
+                if [ $i -lt 90 ]; then sleep 10; else sleep 120; fi
+                i=$((i + 1))
+            done
+        ) > /dev/null 2>&1 &
+    fi
+fi
+
+# ---- the stick's (or disk's) EFI partition at /boot/efi ----
+for dev in $(blkid -t TYPE=vfat -o device 2>/dev/null); do
+    [ "$dev" = "$logs" ] && continue
+    mkdir -p /boot/efi
+    mount -t vfat -o rw,noatime "$dev" /boot/efi 2>/dev/null || continue
+    [ -d /boot/efi/EFI ] && break
+    umount /boot/efi
+done
+
+# ---- clock zone, random seed, user runtime dirs ----
+[ -e /etc/localtime ] || ln -sf /usr/share/zoneinfo/UTC /etc/localtime
+chmod 1777 /tmp
+exit 0

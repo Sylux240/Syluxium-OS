@@ -1,0 +1,10 @@
+# Syluxium on the Linux kernel: busybox init (PID 1).
+# rc.sysinit mounts everything, starts udev (hardware drivers) and the stick's
+# log folder; then a root login shell on the first console, as before. With
+# "desktop" on the kernel command line, that shell's profile starts the
+# desktop (/etc/profile.d/zz-desktop.sh).
+::sysinit:/usr/lib/syluxium/rc.sysinit
+tty1::respawn:/usr/lib/syluxium/console-shell
+tty2::askfirst:/usr/lib/syluxium/console-shell
+::ctrlaltdel:/usr/bin/reboot
+::shutdown:/usr/lib/syluxium/rc.shutdown

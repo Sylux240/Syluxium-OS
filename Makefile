@@ -27,6 +27,9 @@ KERNEL  := $(BUILD)/syluxium.elf
 IMAGE   := $(BUILD)/syluxium.img
 PICKER  := $(BUILD)/picker.efi
 INITRAMFS := $(BUILD)/initramfs.cpio
+# The Linux kernel (Debian's) and Syluxium's small initrd, made with the root file system.
+VMLINUZ := $(BUILD)/vmlinuz
+INITRD  := $(BUILD)/initrd.img
 ROOTFS  := $(BUILD)/rootfs
 
 # Syluxium's own test programs: ordinary Linux binaries built with the host toolchain.
@@ -144,6 +147,10 @@ DGPUFG_APPIMAGE ?= $(lastword $(sort $(wildcard $(HOME)/CLionProjects/dGPUFG-Lin
 DEBIAN_PKGS  += fcitx5 fcitx5-frontend-gtk3 fcitx5-module-xorg fcitx5-chinese-addons fcitx5-anthy fcitx5-hangul
 # Chinese, Japanese and Korean characters (WenQuanYi Micro Hei, ~5 MB)
 DEBIAN_PKGS  += fonts-wqy-microhei
+# The Linux kernel (Debian's, with its drivers as modules), kmod to load them
+# and udev to load them for the hardware it finds. systemd itself stays out:
+# busybox init runs Syluxium's start-up (rootfs/etc/inittab).
+DEBIAN_PKGS  += linux-image-amd64 kmod udev systemd-standalone-sysusers
 XFCE_APPS_EXCLUDE := udisks2
 DEBIAN_ROOT  := $(BUILD)/rootfs-debian
 DEBIAN_STAMP := $(DEBIAN_ROOT)/.fetched
@@ -161,7 +168,7 @@ DEBIAN_I386_PKGS  := hello busybox bash
 # kept: Debian's SDL 2 links it, and without it no SDL 2 program, game or
 # emulator starts; ~3 MB with libsndfile.)
 WINE_EXCLUDE := libavcodec61,libavformat61,libavutil59,libgstreamer-plugins-base1.0-0,libgstreamer1.0-0,libgphoto2-6t64,libgphoto2-port12t64,libpcap0.8t64,libcapi20-3t64,ocl-icd-libopencl1
-DEBIAN_EXCLUDE := cpp,cpp-14,cpp-14-x86-64-linux-gnu,cpp-x86-64-linux-gnu,man-db,groff-base,systemd,udev,xbase-clients,systemd-sysv,libpam-systemd,dbus-user-session,$(WINE_EXCLUDE),$(XFCE_APPS_EXCLUDE)
+DEBIAN_EXCLUDE := cpp,cpp-14,cpp-14-x86-64-linux-gnu,cpp-x86-64-linux-gnu,man-db,groff-base,systemd,initramfs-tools,xbase-clients,systemd-sysv,libpam-systemd,dbus-user-session,$(WINE_EXCLUDE),$(XFCE_APPS_EXCLUDE)
 DEBIAN_I386_EXCLUDE := base-files,debianutils,gawk,libmpfr6,libgmp10,libsigsegv2,readline-common,libreadline8t64
 DEBIAN_I386_PROGS := hello busybox bash
 DEBIAN_I386_ROOT  := $(BUILD)/rootfs-debian-i386
@@ -589,7 +596,7 @@ $(WINE_I386_STAMP): tools/debian-fetch.py Makefile
 	@python3 tools/debian-fetch.py --arch i386 --suite $(DEBIAN_SUITE) --out $(WINE_I386_ROOT) --cache deps/debian --no-deps libwine
 	@touch $@
 
-$(INITRAMFS): $(KERNEL) $(PICKER) $(DEBIAN_CONFIGURED) tools/merge-accounts.py tools/mkfontdir.py tools/debrand-tde.py tools/syluxium_names.py tools/run-triggers.sh tools/wine-setup.sh tools/wine-prefix-links.py tools/install-appimage.sh $(wildcard $(DGPUFG_APPIMAGE)) $(DEBIAN_STAMP) $(DEBIAN_I386_STAMP) $(WINE_I386_STAMP) $(FIRMWARE_STAMP) $(USER_PROGS) $(USER32_PROGS) $(WIN_PROGS) $(SHELL_GLSYNC) $(SHELL_DECOR) $(WHOST) $(shell find rootfs -type f 2>/dev/null) $(shell find rootfs -type d 2>/dev/null) Makefile
+$(INITRAMFS): $(PICKER) tools/mkinitrd.py $(DEBIAN_CONFIGURED) tools/merge-accounts.py tools/mkfontdir.py tools/debrand-tde.py tools/syluxium_names.py tools/run-triggers.sh tools/wine-setup.sh tools/wine-prefix-links.py tools/install-appimage.sh $(wildcard $(DGPUFG_APPIMAGE)) $(DEBIAN_STAMP) $(DEBIAN_I386_STAMP) $(WINE_I386_STAMP) $(FIRMWARE_STAMP) $(USER_PROGS) $(USER32_PROGS) $(WIN_PROGS) $(SHELL_GLSYNC) $(SHELL_DECOR) $(WHOST) $(shell find rootfs -type f 2>/dev/null) $(shell find rootfs -type d 2>/dev/null) Makefile
 	@echo "  ROOT  $(ROOTFS)"
 	@rm -rf $(ROOTFS)
 	@cp -a $(DEBIAN_ROOT) $(ROOTFS)
@@ -656,7 +663,16 @@ $(INITRAMFS): $(KERNEL) $(PICKER) $(DEBIAN_CONFIGURED) tools/merge-accounts.py t
 	@tools/wine-setup.sh $(ROOTFS) $(WINE_I386_ROOT)
 	@# What the installer puts on the new disk: kernel, Limine (UEFI + BIOS stages), its installer.
 	@mkdir -p $(ROOTFS)/usr/lib/syluxium/boot
-	@cp $(KERNEL) $(LIMINE_DIR)/BOOTX64.EFI $(LIMINE_DIR)/limine-bios.sys $(ROOTFS)/usr/lib/syluxium/boot/
+	@# Linux: the module index (packages are unpacked without their install
+	@# scripts), busybox init as /sbin/init (and /init for the in-memory mode),
+	@# the kernel and Syluxium's initrd for the image and the installer.
+	@kver=$$(ls $(ROOTFS)/usr/lib/modules | head -1); [ -n "$$kver" ] || { echo "no kernel modules in the root file system"; exit 1; }; \
+	 depmod -b $(ROOTFS) $$kver && \
+	 cp $(ROOTFS)/boot/vmlinuz-$$kver $(VMLINUZ) && \
+	 python3 tools/mkinitrd.py $(ROOTFS) $$kver $(INITRD)
+	@ln -sf ../bin/busybox $(ROOTFS)/usr/sbin/init
+	@ln -sf usr/sbin/init $(ROOTFS)/init
+	@cp $(VMLINUZ) $(INITRD) $(LIMINE_DIR)/BOOTX64.EFI $(LIMINE_DIR)/limine-bios.sys $(ROOTFS)/usr/lib/syluxium/boot/
 	@cp limine-splash.png $(ROOTFS)/usr/lib/syluxium/boot/splash.png
 	@cp $(PICKER) $(ROOTFS)/usr/lib/syluxium/boot/picker.efi
 	@$(USER_CC) $(USER_CFLAGS) -w -o $(ROOTFS)/usr/lib/syluxium/boot/limine $(LIMINE_DIR)/limine.c
@@ -680,7 +696,10 @@ $(INITRAMFS): $(KERNEL) $(PICKER) $(DEBIAN_CONFIGURED) tools/merge-accounts.py t
 #      root=LABEL=SYLUXLIVE: files are read from the stick when needed, so
 #      boots don't wait for the firmware to load ~600 MiB and RAM stays free.
 # ---------------------------------------------------------------------------
-$(IMAGE): $(KERNEL) $(INITRAMFS) $(PICKER) limine.conf limine-splash.png $(LIMINE_DIR)/limine
+$(VMLINUZ) $(INITRD): $(INITRAMFS)
+	@true
+
+$(IMAGE): $(VMLINUZ) $(INITRD) $(INITRAMFS) $(PICKER) limine.conf limine-splash.png $(LIMINE_DIR)/limine
 	@# Limine boots its default instead when a one-shot entry name is too long
 	@# (the picker names the entry): keep every title under 60 characters.
 	@awk '/^\// && length($$0) > 60 {print "limine.conf: entry title over 60 characters (Limine would boot the default instead): " $$0; bad=1} END {exit bad}' limine.conf
@@ -689,7 +708,7 @@ $(IMAGE): $(KERNEL) $(INITRAMFS) $(PICKER) limine.conf limine-splash.png $(LIMIN
 	@# Built as $@.tmp and renamed only on success, so a failed build never
 	@# leaves a broken image that make would consider up to date.
 	@set -e; tmp=$@.tmp; rm -f $$tmp; \
-	 mb=$$(( ($$(stat -c %s $(KERNEL)) + $$(stat -c %s $(INITRAMFS))) / 1048576 + 32 )); \
+	 mb=$$(( ($$(stat -c %s $(VMLINUZ)) + $$(stat -c %s $(INITRD)) + $$(stat -c %s $(INITRAMFS))) / 1048576 + 32 )); \
 	 [ $$mb -lt 128 ] && mb=128; \
 	 dd if=/dev/zero of=$$tmp bs=1M count=$$mb status=none; \
 	 dd if=/dev/zero bs=1M count=40 status=none >> $$tmp; \
@@ -708,7 +727,8 @@ $(IMAGE): $(KERNEL) $(INITRAMFS) $(PICKER) limine.conf limine-splash.png $(LIMIN
 	 mcopy -i $$logs $$tmp.txt ::/README.TXT; rm -f $$tmp.txt; \
 	 mformat -i $$tmp@@1M -T $$p1 -F -v SYLUXIUM ::; \
 	 mmd   -i $$tmp@@1M ::/EFI ::/EFI/BOOT ::/boot ::/boot/limine; \
-	 mcopy -i $$tmp@@1M $(KERNEL) ::/boot/syluxium.elf; \
+	 mcopy -i $$tmp@@1M $(VMLINUZ) ::/boot/vmlinuz; \
+	 mcopy -i $$tmp@@1M $(INITRD) ::/boot/initrd.img; \
 	 mcopy -i $$tmp@@1M $(INITRAMFS) ::/boot/initramfs.cpio; \
 	 mcopy -i $$tmp@@1M limine.conf $(LIMINE_DIR)/limine-bios.sys limine-splash.png ::/boot/limine; \
 	 mren  -i $$tmp@@1M ::/boot/limine/limine-splash.png ::/boot/limine/splash.png; \

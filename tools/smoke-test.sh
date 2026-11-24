@@ -37,6 +37,9 @@ rm -f "$SOCK" "$LOG" "$PPM"
 # Boot a private copy so this works even while `make run` has the image open.
 # KEEP_DISK=1 reuses the copy from the previous run (persistence tests).
 DISK="$OUT/disk-$MODE.img"
+# Linux: kernel messages on the serial port too, and (test option
+# serialmirror) the console shell's output copied there: tests read the serial log.
+SERIALCMD="console=tty0 console=ttyS0,115200 serialmirror"
 # BOOTDISK=<img> boots that disk image as it is (an installed system).
 if [[ -n ${BOOTDISK:-} ]]; then
     DISK=$BOOTDISK
@@ -46,16 +49,21 @@ elif [[ -z ${KEEP_DISK:-} || ! -f $DISK ]]; then
     # unless DESKTOP=1 (boot straight into TDE like a real install).
     if [[ -n ${ROOTDISK:-} ]]; then
         # Boot an installed system: no initramfs, "/" from the disk labelled SYLUXROOT.
-        printf 'timeout: 0\n\n/Syluxium (disk root)\n    protocol: limine\n    path: boot():/boot/syluxium.elf\n    cmdline: root=LABEL=SYLUXROOT %s\n' \
-            "${ROOTCMD:-}" > "$OUT/limine-test.conf"
+        printf 'timeout: 0\n\n/Syluxium (disk root)\n    protocol: linux\n    path: boot():/boot/vmlinuz\n    module_path: boot():/boot/initrd.img\n    cmdline: root=LABEL=SYLUXROOT rw %s %s\n' \
+            "${ROOTCMD:-}" "$SERIALCMD" > "$OUT/limine-test.conf"
         mcopy -o -i "$DISK@@1M" "$OUT/limine-test.conf" ::/boot/limine/limine.conf
     elif [[ -n ${KCMD:-} ]]; then
         # The text console entry with extra kernel options.
-        printf 'timeout: 0\n\n/Syluxium (test)\n    protocol: limine\n    path: boot():/boot/syluxium.elf\n    cmdline: %s\n    module_path: boot():/boot/initramfs.cpio\n' \
-            "${DESKTOP:+desktop }$KCMD" > "$OUT/limine-test.conf"
+        printf 'timeout: 0\n\n/Syluxium (test)\n    protocol: linux\n    path: boot():/boot/vmlinuz\n    module_path: boot():/boot/initrd.img\n    cmdline: %s %s\n' \
+            "${DESKTOP:+desktop }$KCMD" "$SERIALCMD" > "$OUT/limine-test.conf"
         mcopy -o -i "$DISK@@1M" "$OUT/limine-test.conf" ::/boot/limine/limine.conf
-    elif [[ ${DESKTOP:-0} != 1 ]]; then
-        sed 's/^default_entry: 1$/default_entry: 2/' limine.conf > "$OUT/limine-test.conf"
+    else
+        # The image's own entries (text console unless DESKTOP=1), the serial
+        # console added (tests read the serial log).
+        entry=1
+        [[ ${DESKTOP:-0} != 1 ]] && entry=$(grep '^/' limine.conf | grep -n 'text console' | cut -d: -f1)
+        sed -e "s/^default_entry: 1$/default_entry: $entry/" -e "s|^\(    cmdline: .*\)$|\1 $SERIALCMD|" \
+            limine.conf > "$OUT/limine-test.conf"
         mcopy -o -i "$DISK@@1M" "$OUT/limine-test.conf" ::/boot/limine/limine.conf
     fi
 fi
