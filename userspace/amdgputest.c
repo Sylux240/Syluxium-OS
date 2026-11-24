@@ -208,14 +208,25 @@ int main(int argc, char** argv) {
     fails += engine_write(IP_GFX, &ib, &gtt, 32, 0xC0DE0011, "GFX writes into the GTT buffer") != 0;
     fails += engine_write(IP_GFX, &ib, &vram, 32, 0xC0DE0012, "GFX writes into the VRAM buffer") != 0;
     fails += engine_write(IP_COMPUTE, &ib, &gtt, 48, 0xC0DE0021, "compute writes into the GTT buffer") != 0;
+    // CPU touches of the buffer kinds radeonsi maps at its start (its first
+    // mapped buffer stopped an RX 6700 XT, whose CPU sees 256 MiB of 12 GiB
+    // VRAM): ones the driver must first move into the visible window, a
+    // cleared one (the fault waits for the clear job), one allowed in VRAM
+    // or GTT, and a large one. Each step is on the stick before it runs.
+    struct bo t1 = {0}, t2 = {0}, t3 = {0}, t4 = {0};
+    fails += bo_create(&t1, "VRAM, no CPU-access flag (moved into the window on the fault)", 65536, DOMAIN_VRAM, 0, 1) != 0;
+    fails += bo_create(&t2, "VRAM, cleared (fault waits for the clear job)", 65536, DOMAIN_VRAM, 8, 1) != 0;
+    fails += bo_create(&t3, "VRAM or GTT, CPU access, write-combined, explicit sync", 81920, DOMAIN_VRAM | DOMAIN_GTT,
+                       0x85, 1) != 0;
+    fails += bo_create(&t4, "large VRAM, no flags (16 MiB)", 16u << 20, DOMAIN_VRAM, 0, 1) != 0;
     say(fails ? "work: %d step(s) failed" : "work: all steps passed", fails);
     // Teardown, step by step too: on an RX 6700 XT the machine froze within
     // a second after the work steps (here, or in the next program). Wait
     // first so the kernel log snapshot on the stick catches up.
     sleep(2);
     say("step: unmap the CPU mappings");
-    struct bo* all[] = {&gtt, &ib, &vram, &hidden};
-    for (int i = 0; i < 4; i++)
+    struct bo* all[] = {&gtt, &ib, &vram, &hidden, &t1, &t2, &t3, &t4};
+    for (int i = 0; i < 8; i++)
         if (all[i]->cpu)
             munmap(all[i]->cpu, all[i]->size);
     say("step: free the context");
