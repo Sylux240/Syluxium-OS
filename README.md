@@ -3,10 +3,10 @@
 **A Linux-based operating system with its own desktop, apps and tools**, built on Debian and the
 Linux kernel, booted by [Limine](https://github.com/limine-bootloader/limine).
 
-> **Status: beta.** This is the new Linux-based Syluxium. It is tested in virtual machines; testing on
+> **Syluxium 2.0.0 "TechnoTrucker" (beta).** This is the new Linux-based Syluxium. It is tested in virtual machines; testing on
 > real hardware (desktop PCs with NVIDIA and AMD graphics) is ongoing.
 >
-> Looking for the original Syluxium with its **own kernel written from scratch**? It lives on as the
+> Looking for the original Syluxium with its **own kernel written from scratch**? It lives on as Syluxium 1.0.0 "SpaceTrucker", the
 > [`experimental`](https://github.com/Syluxium-Industries/Syluxium-OS/tree/experimental) branch, for
 > people interested in operating system development.
 

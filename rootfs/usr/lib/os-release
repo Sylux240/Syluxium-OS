@@ -1,0 +1,10 @@
+PRETTY_NAME="Syluxium 2.0.0 TechnoTrucker (beta)"
+NAME="Syluxium"
+VERSION_ID="2.0.0"
+VERSION="2.0.0 (TechnoTrucker, beta)"
+VERSION_CODENAME=technotrucker
+ID=syluxium
+ID_LIKE=debian
+HOME_URL="https://syluxium.com/"
+SUPPORT_URL="https://syluxium.com/"
+BUG_REPORT_URL="https://github.com/Syluxium-Industries/Syluxium-OS/issues"
