@@ -1,16 +1,3 @@
 #!/bin/sh
-# halt: ask every program to quit (they may save their work), wait a
-# moment, then let the kernel flush the disks and halt.
-[ "$(id -u)" = 0 ] || { echo "halt: must be run as root (try: sudo halt)" >&2; exit 1; }
-sync
-kill -TERM -1 2>/dev/null
-sleep 2
-kill -KILL -1 2>/dev/null
-sync
-# Linux with busybox init: init runs the shutdown (rc.shutdown: the kernel
-# log onto the stick, file systems unmounted) and then the halt; elsewhere
-# (Syluxium's own kernel flushed and unmounted by itself) straight away.
-if [ "$(cat /proc/1/comm 2>/dev/null)" = init ] && [ "$(readlink -f /proc/1/exe 2>/dev/null)" = /usr/bin/busybox ]; then
-    exec busybox halt
-fi
-exec busybox halt -f
+# halt: see /usr/lib/syluxium/leave (programs asked to quit, the shutdown screen, init finishes).
+exec /usr/lib/syluxium/leave halt

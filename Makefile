@@ -150,7 +150,7 @@ DEBIAN_PKGS  += fonts-wqy-microhei
 # The Linux kernel (Debian's, with its drivers as modules), kmod to load them
 # and udev to load them for the hardware it finds. systemd itself stays out:
 # busybox init runs Syluxium's start-up (rootfs/etc/inittab).
-DEBIAN_PKGS  += linux-image-amd64 kmod udev systemd-standalone-sysusers firmware-linux-free xserver-xorg-input-libinput util-linux
+DEBIAN_PKGS  += linux-image-amd64 kmod udev systemd-standalone-sysusers firmware-linux-free xserver-xorg-input-libinput util-linux plymouth plymouth-label
 XFCE_APPS_EXCLUDE := udisks2
 DEBIAN_ROOT  := $(BUILD)/rootfs-debian
 DEBIAN_STAMP := $(DEBIAN_ROOT)/.fetched
@@ -652,6 +652,11 @@ $(INITRAMFS): $(PICKER) tools/mkinitrd.py $(DEBIAN_CONFIGURED) tools/merge-accou
 	@# Linux: the module index (packages are unpacked without their install
 	@# scripts), busybox init as /sbin/init (and /init for the in-memory mode),
 	@# the kernel and Syluxium's initrd for the image and the installer.
+	@# The loading screen's logo (before the initrd takes its copy of the theme).
+	@cp limine-splash.png $(ROOTFS)/usr/share/plymouth/themes/syluxium/logo.png
+	@python3 -c "import struct; from PIL import Image; im = Image.open('limine-splash.png').convert('RGB'); \
+	  r, g, b = im.split(); open('$(ROOTFS)/usr/share/plymouth/themes/syluxium/logo.bgra', 'wb').write( \
+	  struct.pack('<II', *im.size) + Image.merge('RGBA', (b, g, r, Image.new('L', im.size, 255))).tobytes())"
 	@kver=$$(ls $(ROOTFS)/usr/lib/modules | head -1); [ -n "$$kver" ] || { echo "no kernel modules in the root file system"; exit 1; }; \
 	 depmod -b $(ROOTFS) $$kver && \
 	 cp $(ROOTFS)/boot/vmlinuz-$$kver $(VMLINUZ) && \

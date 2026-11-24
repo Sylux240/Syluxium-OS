@@ -13,14 +13,15 @@ import shutil
 import subprocess
 import sys
 
-LIB_DIRS = ["usr/lib/x86_64-linux-gnu", "usr/lib64", "lib64", "usr/lib", "lib/x86_64-linux-gnu"]
+LIB_DIRS = ["usr/lib/x86_64-linux-gnu", "usr/lib64", "lib64", "usr/lib", "lib/x86_64-linux-gnu",
+            "usr/lib/x86_64-linux-gnu/systemd", "usr/lib/x86_64-linux-gnu/plymouth"]
 
 # Module directories (under lib/modules/<ver>/kernel) whose drivers can sit
 # between the firmware and the system partition.
 MODULE_DIRS = [
     "drivers/ata", "drivers/nvme", "drivers/scsi", "drivers/block", "drivers/virtio",
     "drivers/usb/host", "drivers/usb/storage", "drivers/usb/core", "drivers/usb/common",
-    "drivers/mmc", "drivers/hid", "drivers/input/keyboard", "drivers/md",
+    "drivers/mmc", "drivers/hid", "drivers/input/keyboard", "drivers/md", "drivers/cdrom",
     "fs/ext4", "fs/jbd2", "fs/mbcache.ko.xz", "fs/fat", "fs/nls",
     "lib", "crypto", "arch/x86/crypto",
 ]
@@ -45,6 +46,17 @@ for w in $(cat /proc/cmdline); do
     case "$w" in root=*) root=${w#root=} ;; esac
 done
 [ -n "$root" ] || root=LABEL=SYLUXLIVE
+# /run (udev's database, Plymouth) moves along into the real system.
+mkdir -p /run
+mount -t tmpfs -o mode=755,nosuid,nodev run /run
+# udev: drivers for the devices that are there, and displays for Plymouth.
+export PATH=/bin:/usr/bin:/usr/sbin
+/usr/lib/systemd/systemd-udevd --daemon --resolve-names=never 2>/dev/null
+udevadm trigger --type=subsystems --action=add 2>/dev/null
+udevadm trigger --type=devices --action=add 2>/dev/null
+# (The loading screen starts in the real system, once the GPU driver is there:
+# Plymouth draws on GPU displays only, and those drivers aren't in here.)
+splash=
 for m in $(cat /etc/early-modules); do modprobe -q "$m" 2>/dev/null; done
 coldplug() { # drivers for whatever has appeared (USB sticks show up late)
     cat $(find /sys/devices -name modalias 2>/dev/null) 2>/dev/null | sort -u | xargs modprobe -q -a 2>/dev/null
@@ -71,7 +83,12 @@ if ! mount -o rw "$dev" /newroot; then
     sh
     exec /init
 fi
+udevadm control --exit 2>/dev/null # the real system starts its own
 mount --move /dev /newroot/dev
+mkdir -p /newroot/run
+mount --move /run /newroot/run
+# Plymouth carries on in the real system.
+[ -n "$splash" ] && /usr/bin/plymouth update-root-fs --new-root-dir=/newroot
 umount /sys /proc
 exec switch_root /newroot /sbin/init
 """
@@ -169,6 +186,17 @@ def main():
             shutil.copy2(s, t)
             count += 1
     subprocess.run(["depmod", "-b", stage, kver], check=True)
+    # udev: finds the devices (storage drivers load for what's there) and
+    # tells Plymouth about the displays (without it, Plymouth sees none and
+    # falls back to text).
+    copy_with_libs(rootfs, stage, "usr/bin/udevadm", seen)
+    os.makedirs(os.path.join(stage, "usr/lib/systemd"), exist_ok=True)
+    os.symlink("../../bin/udevadm", os.path.join(stage, "usr/lib/systemd/systemd-udevd"))
+    shutil.copytree(os.path.join(rootfs, "usr/lib/udev/rules.d"), os.path.join(stage, "usr/lib/udev/rules.d"))
+    for helper in ("ata_id", "scsi_id", "cdrom_id"):
+        h = os.path.join("usr/lib/udev", helper)
+        if os.path.exists(os.path.join(rootfs, h)):
+            copy_with_libs(rootfs, stage, h, seen)
     with open(os.path.join(stage, "etc", "early-modules"), "w") as f:
         f.write("\n".join(EARLY_MODULES) + "\n")
     with open(os.path.join(stage, "init"), "w") as f:

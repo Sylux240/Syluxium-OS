@@ -263,11 +263,11 @@ term_background: ff000000
 interface_branding: Syluxium
 interface_help_hidden: yes
 CONF
-    entry "Syluxium" "desktop quiet loglevel=3"
+    entry "Syluxium" "desktop quiet splash loglevel=3"
     entry "Syluxium (safe mode: no GPU drivers)" "desktop nomodeset"
     entry "Syluxium (text console)" ""
     entry "Syluxium (Recovery)" "recovery"
-    entry "Syluxium (Wayland desktop preview)" "desktop shell"
+    entry "Syluxium (Wayland desktop preview)" "desktop shell quiet splash"
 } > "$TARGET/boot/efi/boot/limine/limine.conf"
 # BIOS boot: only on a whole disk of our own (it rewrites the boot code).
 [ "$MODE" != erase ] || "$BOOT/limine" bios-install "$DISK" > /dev/null

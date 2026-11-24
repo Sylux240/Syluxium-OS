@@ -1,0 +1,24 @@
+#!/bin/sh
+# Syluxium's shutdown screen (Plymouth, the loading screen's theme):
+#   shutdown-screen start poweroff|reboot   show it (once the desktop is gone)
+#   shutdown-screen say TEXT                the current step, under the title
+#   shutdown-screen pid                     plymouthd's pid (spared when programs are stopped)
+case "$1" in
+    start)
+        [ -x /usr/sbin/plymouthd ] || exit 0
+        plymouth --ping 2>/dev/null && plymouth quit 2>/dev/null
+        mode=shutdown
+        [ "$2" = reboot ] && mode=reboot
+        mkdir -p /run/plymouth
+        plymouthd --mode="$mode" --attach-to-session --pid-file=/run/plymouth/pid 2>/dev/null &&
+            plymouth show-splash 2>/dev/null
+        ;;
+    say)
+        shift
+        plymouth --ping 2>/dev/null && plymouth display-message --text="$*" 2>/dev/null
+        ;;
+    pid)
+        cat /run/plymouth/pid 2>/dev/null
+        ;;
+esac
+exit 0

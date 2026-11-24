@@ -72,7 +72,7 @@ ReserveServers=
 # used only if it is free. If all VTs in this list are used up, the next free
 # one greater than the last one in this list will be allocated.
 # Default is ""
-ServerVTs=
+ServerVTs=1
 # TTYs (without /dev/) to monitor for activity while in console mode.
 # Default is ""
 ConsoleTTYs=

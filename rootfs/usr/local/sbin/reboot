@@ -1,26 +1,3 @@
 #!/bin/sh
-# reboot: ask every program to quit (they may save their work), wait a
-# moment, then let the kernel flush the disks and reboot.
-[ "$(id -u)" = 0 ] || { echo "reboot: must be run as root (try: sudo reboot)" >&2; exit 1; }
-# Whoever started us (the login screen, a shell) goes away with everyone
-# else: don't let its hangup or TERM stop us before the disks are flushed.
-trap '' HUP INT TERM
-# Each step goes into milestones.txt on the stick: a shutdown that hangs
-# shows how far it got (the kernel logs its own steps after this).
-mark() { syluxium-diag mark "reboot: $*" 2>/dev/null; syluxium-diag logs 2>/dev/null; sync; }
-mark "asked by $(cat /proc/$PPID/comm 2>/dev/null) (pid $PPID)"
-sync
-mark "disks synced, asking programs to quit (TERM)"
-kill -TERM -1 2>/dev/null
-sleep 2
-mark "stopping what's left (KILL)"
-kill -KILL -1 2>/dev/null
-sync
-mark "handing over to init / the kernel"
-# Linux with busybox init: init runs the shutdown (rc.shutdown: the kernel
-# log onto the stick, file systems unmounted) and then the reboot; elsewhere
-# (Syluxium's own kernel flushed and unmounted by itself) straight away.
-if [ "$(cat /proc/1/comm 2>/dev/null)" = init ] && [ "$(readlink -f /proc/1/exe 2>/dev/null)" = /usr/bin/busybox ]; then
-    exec busybox reboot
-fi
-exec busybox reboot -f
+# reboot: see /usr/lib/syluxium/leave (programs asked to quit, the shutdown screen, init finishes).
+exec /usr/lib/syluxium/leave reboot

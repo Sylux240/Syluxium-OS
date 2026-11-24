@@ -1,0 +1,83 @@
+# Syluxium's loading and shutdown screens (Plymouth script theme): the logo
+# on the dusk background, a thin bar under it and the current step.
+#   start-up:  the bar fills as the boot goes; "Press Esc to see boot details"
+#   shutdown / restart: "Shutting down" or "Restarting", a light gliding
+#   back and forth along the bar (a shutdown has no known length)
+Window.SetBackgroundTopColor(0.043, 0.059, 0.149);
+Window.SetBackgroundBottomColor(0.043, 0.059, 0.149);
+w = Window.GetWidth(); h = Window.GetHeight();
+mode = Plymouth.GetMode();
+leaving = (mode == "shutdown" || mode == "reboot");
+
+logo.image = Image("logo.png");
+logo.sprite = Sprite(logo.image);
+logo.x = Window.GetX() + w / 2 - logo.image.GetWidth() / 2;
+logo.y = Window.GetY() + h / 2 - logo.image.GetHeight() / 2 - 40;
+logo.sprite.SetPosition(logo.x, logo.y, 1);
+
+bar.track = Sprite(Image("bar-track.png"));
+bar.x = Window.GetX() + w / 2 - 140;
+bar.y = logo.y + logo.image.GetHeight() + 10;
+bar.track.SetPosition(bar.x, bar.y, 2);
+bar.fill_image = Image("bar-fill.png");
+bar.fill = Sprite();
+bar.fill.SetPosition(bar.x, bar.y, 3);
+
+# ---- start-up: the bar fills ----
+fun progress_callback(duration, progress) {
+    if (leaving) return;
+    width = Math.Int(280 * progress);
+    if (width < 1) width = 1;
+    bar.fill.SetImage(bar.fill_image.Scale(width, 4));
+}
+Plymouth.SetBootProgressFunction(progress_callback);
+
+# ---- shutdown / restart: a light glides along the bar ----
+glide.image = bar.fill_image.Scale(70, 4);
+glide.sprite = Sprite();
+glide.t = 0;
+if (leaving) {
+    glide.sprite.SetImage(glide.image);
+    title.text = "Shutting down";
+    if (mode == "reboot") title.text = "Restarting";
+    title.image = Image.Text(title.text, 0.86, 0.90, 0.97);
+    title.sprite = Sprite(title.image);
+    title.sprite.SetPosition(Window.GetX() + w / 2 - title.image.GetWidth() / 2, bar.y + 18, 4);
+}
+fun refresh_callback() {
+    if (!leaving) return;
+    glide.t = glide.t + 1;
+    # 0..1..0 every 100 frames (about 2 s), eased at the ends
+    p = (glide.t % 100) / 50;
+    if (p > 1) p = 2 - p;
+    p = p * p * (3 - 2 * p);
+    glide.sprite.SetPosition(bar.x + Math.Int(p * (280 - 70)), bar.y, 3);
+}
+Plymouth.SetRefreshFunction(refresh_callback);
+
+# ---- the current step, under the bar (start-up) or under the title ----
+status.sprite = Sprite();
+fun message_callback(text) {
+    if (leaving) {
+        status.image = Image.Text(text, 0.55, 0.6, 0.72);
+        status.sprite.SetImage(status.image);
+        status.sprite.SetPosition(Window.GetX() + w / 2 - status.image.GetWidth() / 2, bar.y + 44, 4);
+    } else {
+        status.image = Image.Text(text, 0.72, 0.76, 0.86);
+        status.sprite.SetImage(status.image);
+        status.sprite.SetPosition(Window.GetX() + w / 2 - status.image.GetWidth() / 2, bar.y + 18, 4);
+    }
+}
+Plymouth.SetDisplayMessageFunction(message_callback);
+
+if (!leaving) {
+    hint.image = Image.Text("Press Esc to see boot details", 0.55, 0.6, 0.72);
+    hint.sprite = Sprite(hint.image);
+    hint.sprite.SetPosition(Window.GetX() + w / 2 - hint.image.GetWidth() / 2, Window.GetY() + h - 50, 4);
+}
+
+# Password prompts (encrypted disks) and questions: shown under the bar.
+fun password_callback(prompt, bullets) {
+    message_callback(prompt + "  " + bullets);
+}
+Plymouth.SetDisplayPasswordFunction(password_callback);

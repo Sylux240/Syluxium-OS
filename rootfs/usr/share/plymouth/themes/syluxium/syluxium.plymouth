@@ -1,0 +1,8 @@
+[Plymouth Theme]
+Name=Syluxium
+Description=Syluxium's loading screen: the logo, a progress bar and the boot step
+ModuleName=script
+
+[script]
+ImageDir=/usr/share/plymouth/themes/syluxium
+ScriptFile=/usr/share/plymouth/themes/syluxium/syluxium.script

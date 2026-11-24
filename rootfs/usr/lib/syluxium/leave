@@ -1,0 +1,41 @@
+#!/bin/sh
+# Power off, restart or halt (poweroff, reboot and halt run this):
+#   leave poweroff|reboot|halt
+# Programs are asked to quit (they may save their work), the shutdown screen
+# takes over as soon as the desktop is gone, the rest is stopped, and init
+# finishes (rc.shutdown: kernel log onto the stick, file systems unmounted).
+what=${1:-poweroff}
+[ "$(id -u)" = 0 ] || { echo "$what: must be run as root (try: sudo $what)" >&2; exit 1; }
+# Whoever started us (the login screen, a shell) goes away with everyone
+# else: don't let its hangup or TERM stop us before the disks are flushed.
+trap '' HUP INT TERM
+mark() { syluxium-diag mark "$what: $*" 2>/dev/null; }
+mark "asked by $(cat /proc/$PPID/comm 2>/dev/null) (pid $PPID)"
+# The session's logs onto the stick once (at most 10 s: a slow stick mustn't hold up the shutdown).
+timeout 10 syluxium-diag logs > /dev/null 2>&1
+mark "asking programs to quit (TERM)"
+kill -TERM -1 2>/dev/null
+# The desktop gone (X or Wayfire holds the display), the shutdown screen comes up.
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+    pidof Xorg X wayfire > /dev/null 2>&1 || break
+    sleep 0.2
+done
+/usr/lib/syluxium/shutdown-screen start "$what"
+/usr/lib/syluxium/shutdown-screen say "Closing programs"
+sleep 0.5
+mark "stopping what's left (KILL)"
+spare=$(/usr/lib/syluxium/shutdown-screen pid)
+if [ -n "$spare" ]; then
+    killall5 -9 -o "$spare" 2>/dev/null
+else
+    kill -KILL -1 2>/dev/null
+fi
+/usr/lib/syluxium/shutdown-screen say "Saving your files"
+sync
+mark "handing over to init / the kernel"
+# Linux with busybox init: init runs the shutdown, then powers off; elsewhere
+# (Syluxium's own kernel flushed and unmounted by itself) straight away.
+if [ "$(cat /proc/1/comm 2>/dev/null)" = init ] && [ "$(readlink -f /proc/1/exe 2>/dev/null)" = /usr/bin/busybox ]; then
+    exec busybox "$what"
+fi
+exec busybox "$what" -f

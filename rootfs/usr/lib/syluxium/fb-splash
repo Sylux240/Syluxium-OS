@@ -1,0 +1,65 @@
+#!/usr/bin/python3
+"""Paint Syluxium's logo on the dusk background straight onto the console
+frame buffer (/dev/fb0), so the screen keeps the loading screen's look while
+X starts (it takes over the picture: Xorg -background none) until the login
+screen draws. Plymouth hands over to this (its own "retain" mode kept X from
+starting). The logo comes ready for 32-bit frame buffers, made at build time:
+/usr/share/plymouth/themes/syluxium/logo.bgra (width and height as two 4-byte
+little-endian numbers, then BGRA rows; its background is the dusk colour)."""
+import fcntl
+import mmap
+import os
+import struct
+import sys
+
+BG = bytes((38, 15, 11, 255))  # dusk (11, 15, 38) as BGRA
+LOGO = "/usr/share/plymouth/themes/syluxium/logo.bgra"
+
+
+def read(path, default=""):
+    try:
+        with open(path) as f:
+            return f.read().strip()
+    except OSError:
+        return default
+
+
+def main():
+    sysfs = "/sys/class/graphics/fb0"
+    w, h = (int(v) for v in read(f"{sysfs}/virtual_size").split(","))
+    if read(f"{sysfs}/bits_per_pixel", "32") != "32":
+        return 1  # (only the common 32-bit frame buffers)
+    stride = int(read(f"{sysfs}/stride", "0") or 0) or w * 4
+    with open(LOGO, "rb") as f:
+        lw, lh = struct.unpack("<II", f.read(8))
+        logo = f.read()
+    frame = bytearray((BG * w).ljust(stride, b"\0") * h)
+    x0, y0 = max(0, w // 2 - lw // 2), max(0, h // 2 - lh // 2 - 40)
+    cw, ch = min(lw, w - x0), min(lh, h - y0)
+    for y in range(ch):
+        off = (y0 + y) * stride + x0 * 4
+        frame[off:off + cw * 4] = logo[y * lw * 4:y * lw * 4 + cw * 4]
+    # The text console stops drawing on the screen (graphics mode, as
+    # Plymouth and X set it), or it clears the picture again. X takes the
+    # console over from here and gives it back in text mode when it ends.
+    try:
+        tty = os.open("/dev/tty1", os.O_RDWR | os.O_NOCTTY)
+        fcntl.ioctl(tty, 0x4B3A, 1)  # KDSETMODE, KD_GRAPHICS
+        os.close(tty)
+    except OSError:
+        pass
+    fd = os.open("/dev/fb0", os.O_RDWR)
+    try:
+        m = mmap.mmap(fd, len(frame))
+        m[:] = frame
+        m.close()
+    finally:
+        os.close(fd)
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except Exception:
+        sys.exit(1)

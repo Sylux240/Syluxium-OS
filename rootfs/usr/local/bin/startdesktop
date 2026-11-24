@@ -103,6 +103,22 @@ if [ -x /usr/sbin/avahi-daemon ]; then
     [ -x /usr/sbin/cups-browsed ] && ! pidof cups-browsed > /dev/null && \
         cups-browsed > /var/log/cups-browsed.log 2>&1 &
 fi
+# The loading screen hands the display over: Plymouth quits, fb-splash paints
+# its picture again, and X starts on the same console (vt1, tdmrc), so
+# the picture stays until the login screen draws over it. (A deactivated
+# Plymouth still holding the console made X wait forever.)
+if plymouth --ping 2>/dev/null; then
+    plymouth display-message --text="Starting the desktop" 2>/dev/null
+    plymouth quit 2>/dev/null
+    for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+        pidof plymouthd > /dev/null 2>&1 || break
+        sleep 0.2
+    done
+    # The same picture again on the console frame buffer: X starts with
+    # -background none, so it stays until the login screen draws.
+    printf '\033[?25l' > /dev/tty1 2>/dev/null   # (no blinking cursor on it)
+    /usr/lib/syluxium/fb-splash 2>/dev/null
+fi
 # Boot option "shell": the new Syluxium shell (Wayland, preview) instead of
 # the login screen and the X11 desktop.
 if grep -qw shell /proc/cmdline; then

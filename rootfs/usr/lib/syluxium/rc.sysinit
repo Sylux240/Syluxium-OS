@@ -2,8 +2,12 @@
 # Syluxium start-up on the Linux kernel (run once by init, before the
 # console shell): what Syluxium's own kernel did itself.
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-# Each step's start goes into the kernel log (timestamps show slow steps).
-step() { echo "syluxium-init: $*" > /dev/kmsg 2>/dev/null; }
+# Each step's start goes into the kernel log (timestamps show slow steps)
+# and, with the loading screen on, under its progress bar.
+step() {
+    echo "syluxium-init: $*" > /dev/kmsg 2>/dev/null
+    [ -n "$2" ] && plymouth --ping 2>/dev/null && plymouth display-message --text="$2" 2>/dev/null
+}
 
 # ---- file systems ----
 grep -qs " /proc " /proc/mounts || mount -t proc proc /proc
@@ -18,7 +22,8 @@ ln -sf /proc/self/fd/2 /dev/stderr
 ln -sf /proc/kcore /dev/core 2>/dev/null
 mount -t devpts -o gid=5,mode=620,ptmxmode=666 devpts /dev/pts
 mount -t tmpfs -o mode=1777,nosuid,nodev shm /dev/shm
-mount -t tmpfs -o mode=755,nosuid,nodev run /run
+# (/run may already be there: the initrd's loading screen brought it along)
+grep -qs " /run " /proc/mounts || mount -t tmpfs -o mode=755,nosuid,nodev run /run
 mkdir -p /run/lock /run/user /run/syluxium
 mount -t tmpfs -o mode=1777,nosuid,nodev tmp /tmp
 mount -t cgroup2 cgroup2 /sys/fs/cgroup 2>/dev/null # containers (Android)
@@ -40,7 +45,7 @@ kmod static-nodes --format=tmpfiles 2>/dev/null | while read -r type path mode _
     mknod -m "$mode" "$path" "${type%%!*}" "${dev%%:*}" "${dev##*:}" 2>/dev/null
 done
 
-step "starting udev"
+step "starting udev" "Finding your hardware"
 # ---- hardware: udev loads the drivers for what's there ----
 udevd=/usr/lib/systemd/systemd-udevd
 [ -x "$udevd" ] || udevd=/lib/systemd/systemd-udevd
@@ -48,9 +53,18 @@ if [ -x "$udevd" ]; then
     "$udevd" --daemon
     udevadm trigger --action=add --type=subsystems
     udevadm trigger --action=add --type=devices
+    # The loading screen: Plymouth shows it as soon as the GPU driver udev is
+    # loading brings up a display (a second or two on most machines).
+    if grep -qw splash /proc/cmdline && [ -x /usr/sbin/plymouthd ] && ! plymouth --ping 2>/dev/null; then
+        mkdir -p /run/plymouth
+        plymouthd --mode=boot --attach-to-session --pid-file=/run/plymouth/pid && plymouth show-splash
+        echo "syluxium-init: loading screen: plymouthd $(cat /run/plymouth/pid 2>/dev/null), ping $(plymouth --ping 2>/dev/null && echo ok)" > /dev/kmsg
+    else
+        echo "syluxium-init: loading screen not started ($(grep -ow splash /proc/cmdline), $(ls /usr/sbin/plymouthd 2>&1), $(plymouth --ping 2>/dev/null && echo running))" > /dev/kmsg
+    fi
     udevadm settle --timeout=30
 fi
-step "udev settled; loading /etc/modules"
+step "udev settled; loading /etc/modules" "Loading drivers"
 # Modules no hardware asks for (Debian's /etc/modules): Android's loop images
 # and binder devices, and more listed there.
 grep -v '^\s*#' /etc/modules 2>/dev/null | while read -r m args; do
@@ -59,7 +73,7 @@ done
 
 # ---- the stick: this boot's log folder (as Syluxium's own kernel kept it) ----
 # SYLUXLOGS gets a folder per boot, "NN-<computer>"; /boot/logs points to it.
-step "stick log folder"
+step "stick log folder" "Preparing the system"
 # (udev already read every partition's label: no new scan of all disks, which
 # empty card readers can slow down for many seconds)
 logs=$(readlink -f /dev/disk/by-label/SYLUXLOGS 2>/dev/null)
@@ -129,7 +143,7 @@ if [ -b "$esp" ]; then
     mount -t vfat -o rw,noatime "$esp" /boot/efi 2>/dev/null
 fi
 
-step "network"
+step "network" "Starting the network"
 # ---- network: every adapter's settings (DHCP unless set otherwise) ----
 [ -e /etc/resolv.conf ] || ln -sf /run/resolv.conf /etc/resolv.conf
 : > /run/resolv.conf
@@ -138,5 +152,12 @@ syluxium-netconfig apply > /var/log/syluxium-netconfig.log 2>&1 &
 # ---- clock zone, random seed, user runtime dirs ----
 [ -e /etc/localtime ] || ln -sf /usr/share/zoneinfo/UTC /etc/localtime
 chmod 1777 /tmp
-step "start-up done"
+# The loading screen stays until the desktop draws (startdesktop closes it);
+# a text console boot closes it now.
+if grep -qw desktop /proc/cmdline; then
+    step "start-up done" "Starting the desktop"
+else
+    step "start-up done"
+    plymouth quit 2>/dev/null
+fi
 exit 0
