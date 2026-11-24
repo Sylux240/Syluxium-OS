@@ -220,13 +220,6 @@ print(" ".join(sorted(l[i].decode() for i in range(n.value))) if l else "no disp
         for n in /dev/dri/renderD*; do
             [ -e "$n" ] || continue
             echo "-- $n"
-            # amdgpu's video engine (VCN) froze a machine (RX 6700 XT) at its
-            # first use: only with the boot option "vaapi".
-            drv=$(basename "$(readlink "/sys/class/drm/${n##*/}/device/driver" 2>/dev/null)" 2>/dev/null)
-            if [ "$drv" = amdgpu ] && ! grep -qw vaapi /proc/cmdline; then
-                echo "skipped: amdgpu video decode (VCN) is off until it is fixed (boot option vaapi runs it)"
-                continue
-            fi
             # The kernel log reaches the stick only every 20 s: while vainfo
             # runs, stream it there (synced), so a machine that freezes in
             # the video engine still leaves its last kernel lines.

@@ -12,7 +12,7 @@ export XDG_MENU_PREFIX=xfce-
 # their own WAYLAND_DISPLAY (syluxium-x11-0) and toolkit choices.
 unset WAYLAND_DISPLAY WAYLAND_SOCKET
 export XDG_SESSION_TYPE=x11 GDK_BACKEND=x11
-# AMD video engine off until fixed (syluxium-display-config): decode in software.
+# Boot option novaapi (syluxium-display-config): no hardware video decoding.
 [ -e /run/syluxium/vaapi-off ] && export LIBVA_DRIVER_NAME=syluxium-off VDPAU_DRIVER=syluxium-off
 # Input method (Chinese, Japanese, Korean, compose): fcitx5, started from
 # autostart (syluxium-input-method); X11 programs reach it through these.
