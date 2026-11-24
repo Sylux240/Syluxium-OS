@@ -2,6 +2,7 @@
 # Chooses the X display driver for this machine, at every boot (the same
 # disk moves between computers):
 #   a GPU driver (i915, amdgpu, radeon, nouveau) -> modesetting + glamor (OpenGL acceleration)
+#   NVIDIA's driver (syluxium-gpu-select)        -> nvidia (its own X driver and OpenGL)
 #   virtio-gpu with virgl (QEMU 3D)               -> modesetting + glamor (on the host GPU)
 #   another kernel display driver (simpledrm: safe mode, 2D virtio-gpu) -> modesetting, no acceleration
 #   no kernel display driver                     -> fbdev (/dev/fb0)
@@ -83,7 +84,24 @@ mkdir -p /run/syluxium && echo "$card" > /run/syluxium/display-card
 # in software).
 rm -f /run/syluxium/vaapi-off
 grep -qw novaapi /proc/cmdline && touch /run/syluxium/vaapi-off
-if [ -n "$card" ] && ! grep -qw xfbdev /proc/cmdline; then
+if case "$driver" in nvidia*) true ;; *) false ;; esac && ! grep -qw xfbdev /proc/cmdline; then
+    # NVIDIA's own driver (syluxium-gpu-select loaded it): its X driver, with
+    # its OpenGL; it finds its card by PCI address.
+    {
+        echo "# Written at boot by syluxium-display-config: NVIDIA driver ($card)."
+        if [ "$ncards" -gt 1 ]; then
+            echo "Section \"ServerFlags\""
+            echo "    Option \"AutoAddGPU\" \"false\""
+            echo "EndSection"
+        fi
+        echo "Section \"Device\""
+        echo "    Identifier \"Display\""
+        echo "    Driver     \"nvidia\""
+        [ -n "$busid" ] && echo "    BusID      \"$busid\""
+        echo "EndSection"
+    } > "$out"
+    choice="nvidia on $card ($busid)"
+elif [ -n "$card" ] && ! grep -qw xfbdev /proc/cmdline; then
     {
         echo "# Written at boot by syluxium-display-config: kernel display driver ${driver:-?} ($card)."
         if [ "$ncards" -gt 1 ]; then
@@ -135,6 +153,10 @@ if mkdir -p /boot/logs 2>/dev/null; then
         [ -n "$info" ] && echo "drm: $info"
         echo "cards (the one with a monitor connected drives the desktop):$cardlist"
         echo "cmdline: $(cat /proc/cmdline)"
+        # NVIDIA cards: which driver start-up chose, and what NVIDIA's driver sees.
+        [ -s /run/syluxium/gpu-select.txt ] && sed 's/^/gpu-select: /' /run/syluxium/gpu-select.txt
+        [ -e /sys/module/nvidia ] && command -v nvidia-smi > /dev/null && \
+            timeout 10 nvidia-smi --query-gpu=name,pci.bus_id,driver_version,memory.total,pcie.link.gen.current,pcie.link.width.current --format=csv 2>&1 | sed 's/^/nvidia-smi: /'
         for d in /sys/bus/pci/devices/*; do
             [ -r "$d/class" ] || continue
             case "$(cat "$d/class")" in

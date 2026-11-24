@@ -155,6 +155,20 @@ DEBIAN_PKGS  += fonts-wqy-microhei
 # and udev to load them for the hardware it finds. systemd itself stays out:
 # busybox init runs Syluxium's start-up (rootfs/etc/inittab).
 DEBIAN_PKGS  += linux-image-amd64 kmod udev systemd-standalone-sysusers firmware-linux-free xserver-xorg-input-libinput util-linux plymouth plymouth-label
+# NVIDIA's driver (Debian's non-free nvidia 550: GeForce GTX 750 / 900 series
+# and newer, up to RTX 40): its userspace here (OpenGL, Vulkan, VDPAU/VA-API
+# video, NVENC, CUDA, nvidia-smi and nvidia-settings), its kernel modules
+# built for Syluxium's kernel by tools/nvidia-modules.sh (Debian's DKMS
+# build, in Docker) into deps/nvidia/<kernel version>. At start-up
+# syluxium-gpu-select loads it for the cards it supports (nvidia-detect's
+# list), nouveau for the others.
+DEBIAN_NONFREE_REPO := http://deb.debian.org/debian|$(DEBIAN_SUITE)|non-free
+NVIDIA_PKGS  := nvidia-driver-libs nvidia-vulkan-icd xserver-xorg-video-nvidia nvidia-vdpau-driver nvidia-vaapi-driver \
+                nvidia-smi nvidia-settings nvidia-kernel-support nvidia-detect libcuda1 libnvidia-encode1
+DEBIAN_PKGS  += $(NVIDIA_PKGS)
+# (an either-or dependency otherwise brings the Tesla 535 branch's libraries
+# and alternative along, which could take over from the 550 driver)
+NVIDIA_EXCLUDE := nvidia-tesla-535-alternative,libglx-nvidia-tesla-535-0,libnvidia-tesla-535-eglcore,libnvidia-tesla-535-glcore,libnvidia-tesla-535-glvkspirv
 XFCE_APPS_EXCLUDE := udisks2
 DEBIAN_ROOT  := $(BUILD)/rootfs-debian
 DEBIAN_STAMP := $(DEBIAN_ROOT)/.fetched
@@ -172,7 +186,7 @@ DEBIAN_I386_PKGS  := hello busybox bash
 # kept: Debian's SDL 2 links it, and without it no SDL 2 program, game or
 # emulator starts; ~3 MB with libsndfile.)
 WINE_EXCLUDE := libavcodec61,libavformat61,libavutil59,libgstreamer-plugins-base1.0-0,libgstreamer1.0-0,libgphoto2-6t64,libgphoto2-port12t64,libpcap0.8t64,libcapi20-3t64,ocl-icd-libopencl1
-DEBIAN_EXCLUDE := cpp,cpp-14,cpp-14-x86-64-linux-gnu,cpp-x86-64-linux-gnu,man-db,groff-base,systemd,initramfs-tools,xbase-clients,systemd-sysv,libpam-systemd,dbus-user-session,$(WINE_EXCLUDE),$(XFCE_APPS_EXCLUDE)
+DEBIAN_EXCLUDE := cpp,cpp-14,cpp-14-x86-64-linux-gnu,cpp-x86-64-linux-gnu,man-db,groff-base,systemd,initramfs-tools,xbase-clients,systemd-sysv,libpam-systemd,dbus-user-session,$(WINE_EXCLUDE),$(XFCE_APPS_EXCLUDE),$(NVIDIA_EXCLUDE)
 DEBIAN_I386_EXCLUDE := base-files,debianutils,gawk,libmpfr6,libgmp10,libsigsegv2,readline-common,libreadline8t64
 DEBIAN_I386_PROGS := hello busybox bash
 DEBIAN_I386_ROOT  := $(BUILD)/rootfs-debian-i386
@@ -523,7 +537,7 @@ $(TESTS_DIR)/winbox32.exe: $(TESTS_DIR)/winhello32.exe
 
 $(DEBIAN_STAMP): tools/debian-fetch.py Makefile
 	@echo "  DEB   $(DEBIAN_PKGS) (+ dependencies, Debian $(DEBIAN_SUITE))"
-	@python3 tools/waydroid-index.py deps/debian $(DEBIAN_SUITE) && python3 tools/debian-fetch.py --suite $(DEBIAN_SUITE) --out $(DEBIAN_ROOT) --cache deps/debian --dpkg-db --exclude $(DEBIAN_EXCLUDE) --repo "$(TRINITY_REPO)" --repo "$(DEBIAN_CONTRIB_REPO)" --repo "$(WAYDROID_REPO)" $(DEBIAN_PKGS) $(TRINITY_PKGS)
+	@python3 tools/waydroid-index.py deps/debian $(DEBIAN_SUITE) && python3 tools/debian-fetch.py --suite $(DEBIAN_SUITE) --out $(DEBIAN_ROOT) --cache deps/debian --dpkg-db --exclude $(DEBIAN_EXCLUDE) --repo "$(TRINITY_REPO)" --repo "$(DEBIAN_CONTRIB_REPO)" --repo "$(DEBIAN_NONFREE_REPO)" --repo "$(WAYDROID_REPO)" $(DEBIAN_PKGS) $(TRINITY_PKGS)
 	@touch $@
 
 # Debian's install scripts, run once per package set (fake root, no sudo).
@@ -539,6 +553,7 @@ FIRMWARE_PKGS  := firmware-mediatek firmware-realtek firmware-misc-nonfree firmw
 # Linux kernel: its drivers ask for much more (laptop audio DSPs, older Wi-Fi,
 # CPU microcode): every file of these packages goes into the system.
 FIRMWARE_PKGS  += firmware-intel-sound firmware-sof-signed firmware-libertas amd64-microcode intel-microcode
+FIRMWARE_PKGS  += firmware-nvidia-gsp
 FIRMWARE_FILES = mediatek/mt7601u.bin rtlwifi/rtl8188eufw.bin rtlwifi/rtl8723bu_nic.bin rtl_bt/rtl8723b_fw.bin \
                   $(I915_FIRMWARE)
 # i915: display microcontroller (DMC) firmware for Skylake..Alder Lake, GuC/HuC
@@ -662,6 +677,11 @@ $(INITRAMFS): $(PICKER) tools/mkinitrd.py $(DEBIAN_CONFIGURED) tools/merge-accou
 	  r, g, b = im.split(); open('$(ROOTFS)/usr/share/plymouth/themes/syluxium/logo.bgra', 'wb').write( \
 	  struct.pack('<II', *im.size) + Image.merge('RGBA', (b, g, r, Image.new('L', im.size, 255))).tobytes())"
 	@kver=$$(ls $(ROOTFS)/usr/lib/modules | head -1); [ -n "$$kver" ] || { echo "no kernel modules in the root file system"; exit 1; }; \
+	 { [ -d deps/nvidia/$$kver ] || tools/nvidia-modules.sh $$kver deps/nvidia/$$kver || \
+	   echo "  warning: no NVIDIA modules for $$kver (tools/nvidia-modules.sh needs Docker); nouveau only"; } && \
+	 rm -rf $(ROOTFS)/usr/lib/modules/$$kver/updates/nvidia && \
+	 if [ -d deps/nvidia/$$kver ]; then mkdir -p $(ROOTFS)/usr/lib/modules/$$kver/updates/nvidia && \
+	   cp deps/nvidia/$$kver/*.ko* $(ROOTFS)/usr/lib/modules/$$kver/updates/nvidia/; fi && \
 	 depmod -b $(ROOTFS) $$kver && \
 	 cp $(ROOTFS)/boot/vmlinuz-$$kver $(VMLINUZ) && \
 	 python3 tools/mkinitrd.py $(ROOTFS) $$kver $(INITRD)

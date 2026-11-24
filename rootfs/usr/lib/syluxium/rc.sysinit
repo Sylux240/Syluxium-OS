@@ -58,6 +58,8 @@ if [ -x "$udevd" ]; then
     "$udevd" --daemon
     udevadm trigger --action=add --type=subsystems
     udevadm trigger --action=add --type=devices
+    # NVIDIA cards: the NVIDIA driver or nouveau (udev loads neither by itself).
+    /usr/local/sbin/syluxium-gpu-select
     # The loading screen: Plymouth shows it as soon as the GPU driver udev is
     # loading brings up a display (a second or two on most machines).
     if grep -qw splash /proc/cmdline && [ -x /usr/sbin/plymouthd ] && ! plymouth --ping 2>/dev/null; then

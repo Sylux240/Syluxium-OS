@@ -1,0 +1,50 @@
+#!/bin/sh
+# Picks the driver for NVIDIA graphics cards at start-up (rc.sysinit, right
+# after udev starts; the same disk moves between computers):
+#   a card NVIDIA's driver supports (Debian's nvidia 550: GeForce GTX 750 /
+#   900 series and newer, up to RTX 40; nvidia-detect's list) -> nvidia
+#   any other NVIDIA card (older, or newer than the driver)  -> nouveau
+# udev loads neither by itself (/etc/modprobe.d/syluxium-gpu.conf): both
+# claim every NVIDIA card. With two NVIDIA cards and only one supported, the
+# NVIDIA driver drives the one it supports and nouveau stays out (the two
+# don't share a machine well).
+# Boot options: "nonvidia" -> nouveau for every NVIDIA card; "nomodeset"
+# (safe mode) -> neither.
+# What was chosen: /run/syluxium/gpu-select.txt (and the kernel log).
+ids=/usr/share/nvidia/nvidia.ids
+out=/run/syluxium/gpu-select.txt
+mkdir -p /run/syluxium
+log() { echo "$*" >> "$out"; echo "syluxium-gpu-select: $*" > /dev/kmsg 2>/dev/null; }
+: > "$out"
+grep -qw nomodeset /proc/cmdline && { log "nomodeset: no GPU drivers"; exit 0; }
+have_nvidia=
+ls /usr/lib/modules/"$(uname -r)"/updates/nvidia/nvidia-current.ko* > /dev/null 2>&1 && [ -r "$ids" ] && have_nvidia=1
+supported= unsupported=
+for d in /sys/bus/pci/devices/*; do
+    [ "$(cat "$d/vendor" 2>/dev/null)" = 0x10de ] || continue
+    case "$(cat "$d/class" 2>/dev/null)" in 0x03*) ;; *) continue ;; esac
+    id=$(sed 's/^0x//' "$d/device" | tr a-f A-F)
+    if [ -n "$have_nvidia" ] && grep -qx "10DE$id" "$ids"; then
+        supported="$supported ${d##*/}:$id"
+    else
+        unsupported="$unsupported ${d##*/}:$id"
+    fi
+done
+[ -n "$supported$unsupported" ] || exit 0
+if [ -n "$supported" ] && ! grep -qw nonvidia /proc/cmdline; then
+    log "nvidia for$supported${unsupported:+ (not supported by it:$unsupported)}"
+    # (Debian's install rules map nvidia-drm to nvidia-current-drm; options
+    # modeset=1 fbdev=1 from syluxium-gpu.conf: the loading screen, Wayland)
+    if modprobe nvidia-drm 2>> "$out" || modprobe nvidia-current-drm 2>> "$out"; then
+        # The device files the NVIDIA libraries open (/dev/nvidia0, nvidiactl, ...).
+        n=0
+        for _ in $supported; do nvidia-modprobe -c "$n" 2>/dev/null; n=$((n + 1)); done
+        nvidia-modprobe -m 2>/dev/null
+        nvidia-modprobe -u -c 0 2>/dev/null
+        log "nvidia loaded: $(cat /sys/module/nvidia/version 2>/dev/null)"
+        exit 0
+    fi
+    log "the NVIDIA driver didn't load: nouveau instead"
+fi
+log "nouveau for$supported$unsupported"
+modprobe nouveau 2>> "$out"
