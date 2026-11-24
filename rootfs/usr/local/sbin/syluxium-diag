@@ -154,6 +154,22 @@ gpu_report() {
         LIBGL_DEBUG=verbose EGL_LOG_LEVEL=debug MESA_DEBUG=1 timeout 30 eglinfo -B -p $p 2>&1 | mesa_filter | head -60
         echo "-- exit $?"
     done
+    # Mesa's default device can be another card (the GTX 1650 beside an RX
+    # 6700 XT): OpenGL on each AMD card explicitly (DRI_PRIME picks it).
+    for r in /sys/class/drm/renderD*; do
+        [ "$(basename "$(readlink "$r/device/driver" 2>/dev/null)" 2>/dev/null)" = amdgpu ] || continue
+        tag=$(basename "$(readlink -f "$r/device")" | tr ':.' '__')
+        kmark "starting eglinfo on the AMD card (DRI_PRIME=pci-$tag, surfaceless)"
+        echo "-- eglinfo -B -p surfaceless, DRI_PRIME=pci-$tag (radeonsi on ${r##*/})"
+        DRI_PRIME=pci-$tag LIBGL_DEBUG=verbose EGL_LOG_LEVEL=debug MESA_DEBUG=1 timeout 30 eglinfo -B -p surfaceless 2>&1 | mesa_filter | head -40
+        echo "-- exit $?"
+        # (fallback: radeonsi forced; devices it can't drive are skipped)
+        kmark "starting eglinfo with radeonsi forced (surfaceless)"
+        echo "-- eglinfo -B -p surfaceless, MESA_LOADER_DRIVER_OVERRIDE=radeonsi"
+        MESA_LOADER_DRIVER_OVERRIDE=radeonsi LIBGL_DEBUG=verbose MESA_DEBUG=1 timeout 30 eglinfo -B -p surfaceless 2>&1 | mesa_filter | head -40
+        echo "-- exit $?"
+        break # one AMD card is enough
+    done
     if [ -n "$DISPLAY" ]; then
         echo; echo "== In the X session ($DISPLAY)"
         kmark "starting glxinfo -B"
@@ -179,6 +195,10 @@ print(" ".join(sorted(l[i].decode() for i in range(n.value))) if l else "no disp
         echo "vulkaninfo not installed"
     fi
     ls /usr/share/vulkan/icd.d 2>&1
+    echo; echo "== Firmware files the kernel asked for"
+    dmesg 2>/dev/null | grep -i -E "firmware|\.bin" | grep -i -E "amdgpu|nouveau|nvidia|i915|radeon|direct firmware|failed to load|loading" | tail -60
+    # Video decode last: amdgpu's video engine (VCN) still froze an RX 6700 XT
+    # machine (boot option vaapi), and nothing after it would be reported.
     echo; echo "== Video decode (vainfo)"
     if command -v vainfo > /dev/null; then
         for n in /dev/dri/renderD*; do
@@ -214,8 +234,6 @@ print(" ".join(sorted(l[i].decode() for i in range(n.value))) if l else "no disp
     else
         echo "vainfo not installed"
     fi
-    echo; echo "== Firmware files the kernel asked for"
-    dmesg 2>/dev/null | grep -i -E "firmware|\.bin" | grep -i -E "amdgpu|nouveau|nvidia|i915|radeon|direct firmware|failed to load|loading" | tail -60
     echo "== end at $(up) s"
 }
 
