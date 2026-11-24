@@ -219,6 +219,26 @@ static void amdgpu_trace_args(unsigned int cmd, unsigned long arg, char *out, si
 	case 0x49: /* WAIT_CS: handle, timeout, ip, instance, ring, ctx */
 		snprintf(out, len, " wait_cs seq %llu ip %u", a[0], (u32)a[2]);
 		break;
+	case 0x45: { /* INFO: return_pointer, return_size, query, then the query's own fields */
+		/* Printed before the call: some queries touch the hardware (register
+		 * reads, sensors through the SMU); radeonsi's and vainfo's start
+		 * froze an RX 6700 XT after ten of these. */
+		static const char *const q[] = {
+			[0x00] = "accel_working", [0x01] = "crtc_from_id", [0x02] = "hw_ip_info", [0x03] = "hw_ip_count",
+			[0x05] = "timestamp", [0x0e] = "fw_version", [0x0f] = "num_bytes_moved", [0x10] = "vram_usage",
+			[0x11] = "gtt_usage", [0x13] = "gds_config", [0x14] = "vram_gtt", [0x15] = "read_mmr_reg",
+			[0x16] = "dev_info", [0x17] = "vis_vram_usage", [0x18] = "num_evictions", [0x19] = "memory",
+			[0x1a] = "vce_clock_table", [0x1b] = "vbios", [0x1c] = "num_handles", [0x1d] = "sensor",
+			[0x1e] = "num_vram_cpu_page_faults", [0x1f] = "vram_lost_counter", [0x20] = "ras_enabled_features",
+			[0x21] = "video_caps", [0x22] = "max_ibs", [0x23] = "gpuvm_fault", [0x24] = "uq_fw_areas"};
+		u32 query = (u32)(a[1] >> 32);
+		const char *name = query < ARRAY_SIZE(q) && q[query] ? q[query] : "?";
+
+		snprintf(out, len, " info %s (%#x) args %#x %#x %#x", name, query, (u32)a[2], (u32)(a[2] >> 32),
+			 (u32)a[3]);
+		*announce = true;
+		break;
+	}
 	}
 }
 
@@ -276,7 +296,8 @@ long lkpi_file_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 				amdgpu_trace_args(cmd, arg, pre, sizeof(pre), &announce);
 			if (announce && announced < 2000) {
 				announced++;
-				pr_info("drmtrace: %s[%d] amdgpu submitting:%s\n", current->comm, current->pid, pre);
+				pr_info("drmtrace: %s[%d] amdgpu %s:%s\n", current->comm, current->pid,
+					_IOC_NR(cmd) == 0x45 ? "asking" : "submitting", pre);
 			}
 		}
 	}
