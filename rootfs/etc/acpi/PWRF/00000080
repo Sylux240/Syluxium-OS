@@ -1,0 +1,4 @@
+#!/bin/sh
+# The power button (busybox acpid's PWRF event): an orderly shutdown with the
+# shutdown screen, as Syluxium's own kernel did it.
+exec /usr/lib/syluxium/leave poweroff

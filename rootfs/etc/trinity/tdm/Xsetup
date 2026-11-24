@@ -4,4 +4,7 @@
 # takes over from here.
 # (Syluxium's own kernel's splash device; not on Linux)
 [ -c /dev/splash ] && echo done > /dev/splash 2>/dev/null
+# The loading screen's dusk colour until the login screen draws (X itself
+# starts black where the GPU can't keep the console's picture).
+xsetroot -solid '#0b0f26' 2>/dev/null
 exit 0

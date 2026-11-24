@@ -21,3 +21,10 @@ say "Finishing"
 umount -a -r -t vfat,ext4,ext3,ext2,exfat,ntfs3 2>/dev/null
 mount -o remount,ro / 2>/dev/null
 sync
+# init stops every process after this (the shutdown screen's too): the same
+# picture goes onto the console frame buffer, with the text console kept off
+# it, so the logo stays until the power goes (not the old console text).
+if plymouth --ping 2>/dev/null; then
+    plymouth quit --retain-splash 2>/dev/null
+    /usr/lib/syluxium/fb-splash 2>/dev/null
+fi

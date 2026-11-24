@@ -11,8 +11,6 @@ what=${1:-poweroff}
 trap '' HUP INT TERM
 mark() { syluxium-diag mark "$what: $*" 2>/dev/null; }
 mark "asked by $(cat /proc/$PPID/comm 2>/dev/null) (pid $PPID)"
-# The session's logs onto the stick once (at most 10 s: a slow stick mustn't hold up the shutdown).
-timeout 10 syluxium-diag logs > /dev/null 2>&1
 mark "asking programs to quit (TERM)"
 kill -TERM -1 2>/dev/null
 # The desktop gone (X or Wayfire holds the display), the shutdown screen comes up.
@@ -21,8 +19,12 @@ for _ in 1 2 3 4 5 6 7 8 9 10; do
     sleep 0.2
 done
 /usr/lib/syluxium/shutdown-screen start "$what"
+/usr/lib/syluxium/shutdown-screen say "Saving the logs"
+# The session's logs onto the stick once (at most 10 s: a slow stick mustn't
+# hold up the shutdown), with the shutdown screen already up.
+timeout 10 syluxium-diag logs > /dev/null 2>&1
 /usr/lib/syluxium/shutdown-screen say "Closing programs"
-sleep 0.5
+sleep 0.3
 mark "stopping what's left (KILL)"
 spare=$(/usr/lib/syluxium/shutdown-screen pid)
 if [ -n "$spare" ]; then

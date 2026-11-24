@@ -33,6 +33,11 @@ mount -o remount,rw / 2>/dev/null
 [ -e /etc/mtab ] || ln -s /proc/mounts /etc/mtab
 mkdir -p /mnt /media /boot
 
+# Alt+SysRq+W/T (what a hung machine is doing) as on Syluxium's own kernel,
+# and the kernel log readable by the system apps (Computer Management's
+# events, the GPU report) without being root.
+echo 1 > /proc/sys/kernel/sysrq 2>/dev/null
+echo 0 > /proc/sys/kernel/dmesg_restrict 2>/dev/null
 hostname -F /etc/hostname 2>/dev/null || hostname syluxium
 ip link set lo up 2>/dev/null
 
@@ -70,6 +75,10 @@ step "udev settled; loading /etc/modules" "Loading drivers"
 grep -v '^\s*#' /etc/modules 2>/dev/null | while read -r m args; do
     [ -n "$m" ] && modprobe "$m" $args 2>/dev/null
 done
+# The power button shuts down in order (busybox acpid: /etc/acpi/PWRF).
+busybox acpid -l /var/log/acpid.log 2>/dev/null
+# The sound card programs play on (often not Linux's card 0: see the script).
+/usr/local/sbin/syluxium-sound-card > /dev/null 2>&1
 
 # ---- the stick: this boot's log folder (as Syluxium's own kernel kept it) ----
 # SYLUXLOGS gets a folder per boot, "NN-<computer>"; /boot/logs points to it.
