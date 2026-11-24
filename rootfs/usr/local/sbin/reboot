@@ -16,5 +16,11 @@ sleep 2
 mark "stopping what's left (KILL)"
 kill -KILL -1 2>/dev/null
 sync
-mark "handing over to the kernel"
+mark "handing over to init / the kernel"
+# Linux with busybox init: init runs the shutdown (rc.shutdown: the kernel
+# log onto the stick, file systems unmounted) and then the reboot; elsewhere
+# (Syluxium's own kernel flushed and unmounted by itself) straight away.
+if [ "$(cat /proc/1/comm 2>/dev/null)" = init ] && [ "$(readlink -f /proc/1/exe 2>/dev/null)" = /usr/bin/busybox ]; then
+    exec busybox reboot
+fi
 exec busybox reboot -f
