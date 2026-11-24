@@ -24,6 +24,7 @@ while :; do
             type=$(blkid -o value -s TYPE "$dev")
             mnt=$(awk -v d="$dev" '$1 == d {print $2}' /proc/mounts)
             case "$type" in ext2|ext3|ext4|vfat|exfat) ;; *) continue ;; esac
+            command -v "fsck.$type" > /dev/null || { echo "  $dev ($type): no checker for $type installed"; continue; }
             if [ -n "$mnt" ]; then
                 echo "  $dev ($type) is in use at $mnt: checking read-only"
                 fsck -n "$dev"
@@ -39,9 +40,16 @@ while :; do
     4)
         read -r -p "  User name: " u
         home=$(getent passwd "$u" | cut -d: -f6)
-        if [ -n "$home" ] && [ -d "$home/.trinity" ]; then
-            mv "$home/.trinity" "$home/.trinity.old-$(date +%Y%m%d-%H%M%S)"
-            echo "  $u's desktop settings were reset (the old ones are kept in $home)."
+        stamp=$(date +%Y%m%d-%H%M%S) reset=
+        # Xfce (the desktop), the Wayland shell, and Syluxium Classic (Trinity)
+        for d in .config/xfce4 .config/syluxium-shell .trinity; do
+            [ -n "$home" ] && [ -d "$home/$d" ] || continue
+            mv "$home/$d" "$home/$d.old-$stamp" && reset=1
+        done
+        # (the first-login setup runs again: wallpaper, desktop icons)
+        [ -n "$reset" ] && rm -f "$home/.config/syluxium/xfce-setup-done" 2>/dev/null
+        if [ -n "$reset" ]; then
+            echo "  $u's desktop settings were reset (the old ones are kept next to them, *.old-$stamp)."
         else
             echo "  No desktop settings found for '$u'."
         fi ;;

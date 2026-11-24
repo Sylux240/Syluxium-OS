@@ -21,12 +21,20 @@ SHA512="0144894fbbb5e8ebab6c423d9bd0f3249be94f2f468a50b8bf721a3b17f1f6e57467c79e
 FW_DIR=/usr/lib/firmware
 
 have_card() {
-    # The kernel's device list (id, bus, bus id, category, vendor:device,
-    # status, driver, ...): a Broadcom function the bcma bridge took (b43
-    # drives the wireless core behind it).
+    # A Broadcom PCI function the bcma bridge took (b43 drives the wireless
+    # core behind it), or one b43 itself drives (the older SSB cards).
     # (Not the 802.11ac BCM4352/4360: b43 has no driver for their PHY.)
-    awk -F'\t' '$5 ~ /^14e4:/ && $5 !~ /^14e4:43(a0|a2|b1)$/ && $7 == "bcma-pci-bridge" { found = 1 } END { exit !found }' \
-        /sys/kernel/syluxium/devices 2>/dev/null
+    if [ -r /sys/kernel/syluxium/devices ]; then # Syluxium's own kernel's device list
+        awk -F'\t' '$5 ~ /^14e4:/ && $5 !~ /^14e4:43(a0|a2|b1)$/ && $7 == "bcma-pci-bridge" { found = 1 } END { exit !found }' \
+            /sys/kernel/syluxium/devices 2>/dev/null
+        return
+    fi
+    # Linux: a wireless core behind the bridge (bcma, or ssb on older cards)
+    # that b43 took (brcmsmac's cards need no extra firmware).
+    for d in /sys/bus/bcma/devices/* /sys/bus/ssb/devices/*; do
+        [ "$(basename "$(readlink "$d/driver" 2>/dev/null)" 2>/dev/null)" = b43 ] && return 0
+    done
+    return 1
 }
 have_firmware() { ls "$FW_DIR"/b43/ucode*.fw >/dev/null 2>&1; }
 
@@ -82,11 +90,19 @@ if ! b43-fwcutter -w "$FW_DIR" "$WL_APSTA"; then
     say --error "Extracting the firmware failed."
     exit 1
 fi
-# The card loads its firmware when its interface comes up: take it down and up.
-for dev in /sys/class/net/wlan*; do
+# Linux's b43 gives up at start-up without its firmware (no wireless
+# interface): load it again. Then every wireless interface down and up
+# (Syluxium's own kernel loaded the firmware then).
+if [ -d /sys/module/b43 ]; then
+    modprobe -r b43 2>/dev/null
+    modprobe b43 2>/dev/null
+    sleep 3
+fi
+for dev in /sys/class/net/*/wireless; do
     [ -e "$dev" ] || continue
-    ip link set "$(basename "$dev")" down 2>/dev/null
-    ip link set "$(basename "$dev")" up 2>/dev/null
+    dev=$(basename "$(dirname "$dev")")
+    ip link set "$dev" down 2>/dev/null
+    ip link set "$dev" up 2>/dev/null
 done
 say --msgbox "The wireless firmware is installed. Wireless networks can now be chosen from the network icon."
 exit 0

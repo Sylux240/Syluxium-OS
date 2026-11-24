@@ -18,7 +18,10 @@ desktop_user() {
 
 is_removable() { # partition or disk name -> its disk is removable?
     disk=$(echo "$1" | sed 's/[0-9]*$//')
-    [ "$(cat /sys/block/$disk/removable 2>/dev/null)" = 1 ]
+    [ "$(cat /sys/block/$disk/removable 2>/dev/null)" = 1 ] && return 0
+    # Linux calls USB hard disks and SSDs fixed: anything on USB counts.
+    case "$(readlink -f /sys/block/$disk 2>/dev/null)" in */usb*) return 0 ;; esac
+    return 1
 }
 
 mounted() { grep -q "^/dev/$1 " /proc/mounts; }
@@ -29,7 +32,9 @@ try_mount() {
     info=$(blkid /dev/$dev 2>/dev/null)
     type=$(echo "$info" | sed -n 's/.* TYPE="\([^"]*\)".*/\1/p')
     label=$(echo "$info" | sed -n 's/.* LABEL="\([^"]*\)".*/\1/p')
-    case "$type" in vfat|exfat|ext2|ext3|ext4) ;; *) return ;; esac
+    case "$type" in vfat|exfat|ext2|ext3|ext4|ntfs) ;; *) return ;; esac
+    # The Syluxium stick's own system partition (in-memory boots leave it unmounted).
+    [ "$label" = SYLUXLIVE ] && return
     name=$(echo "${label:-$dev}" | tr -c 'A-Za-z0-9._-' '_' | sed 's/_*$//')
     dir=/media/$name
     [ -e "$dir" ] && dir=/media/${name}_$dev
@@ -37,6 +42,8 @@ try_mount() {
     u=$(desktop_user); g=$(id -g "$u" 2>/dev/null || echo "$u")
     case "$type" in
         vfat|exfat) mount -t "$type" -o "uid=$u,gid=$g,umask=022" "/dev/$dev" "$dir" ;;
+        # (Linux's own NTFS driver, read and write)
+        ntfs) mount -t ntfs3 -o "uid=$u,gid=$g,umask=022" "/dev/$dev" "$dir" ;;
         *) mount -t "$type" "/dev/$dev" "$dir" ;;
     esac
     if [ $? = 0 ]; then

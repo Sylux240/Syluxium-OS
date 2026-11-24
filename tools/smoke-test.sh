@@ -14,7 +14,7 @@
 # USB=1 adds an xHCI controller with a USB keyboard, mouse and the FAT32
 # stick from tools/make-test-disks.sh (as /dev/sdb).
 # $TYPE: text typed on the (PS/2) keyboard after the boot wait, then a few
-# more seconds pass before the screenshot. "\n" = Enter, "\c" = Ctrl+C, "\w" = wait 2 s, "\m" = mouse moves/clicks/scroll, "\s" = Alt+SysRq+W (thread dump), "\o" = Alt+F1 (launcher menu), "\e" = Ctrl+Esc (start menu), "\t" = Ctrl+Alt+Del (Task Manager),
+# more seconds pass before the screenshot. "\n" = Enter, "\c" = Ctrl+C, "\w" = wait 2 s, "\m" = mouse moves/clicks/scroll, "\s" = Alt+SysRq+W (blocked tasks into the kernel log), "\o" = Alt+F1 (launcher menu), "\e" = Ctrl+Esc (start menu), "\t" = Ctrl+Alt+Del (Task Manager),
 # "\{cmd}" = run a QEMU monitor command (e.g. "\{device_add usb-kbd,bus=xhci.0,id=k2}" for hot-plug tests),
 # "\[text]" = wait until the serial log shows <text> (at most MARK_WAIT seconds, default 180): a test
 # inside the system says when it's ready for keys or a screenshot ("\{screendump build/smoke/x.ppm}").
@@ -39,7 +39,9 @@ rm -f "$SOCK" "$LOG" "$PPM"
 DISK="$OUT/disk-$MODE.img"
 # Linux: kernel messages on the serial port too, and (test option
 # serialmirror) the console shell's output copied there: tests read the serial log.
-SERIALCMD="console=tty0 console=ttyS0,115200 serialmirror"
+# sysrq_always_enabled: Alt+SysRq+W ("\s" below) dumps the blocked tasks
+# (Linux allows only some SysRq keys otherwise).
+SERIALCMD="console=tty0 console=ttyS0,115200 serialmirror sysrq_always_enabled"
 # BOOTDISK=<img> boots that disk image as it is (an installed system).
 if [[ -n ${BOOTDISK:-} ]]; then
     DISK=$BOOTDISK
@@ -83,8 +85,6 @@ args=(-M q35 -m ${VM_RAM:-8G} -smp ${VM_CPUS:-8} $ACCEL
       -display none -serial "file:$LOG"
       -monitor "unix:$SOCK,server,nowait"
       -no-reboot)
-# QEMU's "edu" teaching device: the LinuxKPI test driver (kernel/linuxkpi/drivers/edu.c) binds to it.
-args+=(-device edu,dma_mask=0xffffffffffffffff)
 if [[ -n ${USB:-} ]]; then
     args+=(-device qemu-xhci,id=xhci -device usb-kbd,bus=xhci.0 -device usb-mouse,bus=xhci.0
            -drive file=build/test-disks/usb-fat.img,if=none,id=stick,format=raw

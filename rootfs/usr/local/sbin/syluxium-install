@@ -73,7 +73,7 @@ size=1MiB, type=21686148-6449-6E6F-744E-656564454649, name="BIOS boot"
 size=512MiB, type=uefi, name="EFI system"
 type=linux, name="Syluxium"
 PARTS
-    sleep 1
+    udevadm settle --timeout=10 2>/dev/null || sleep 1  # (the new partitions' device files)
     ESP=$(part 2) ROOT=$(part 3)
     FORMAT_ESP=1 ;;
 free)
@@ -95,7 +95,7 @@ free)
     fi
     if [ "$label" = gpt ]; then t=linux; else t=83; fi
     echo "start=$fstart, size=$fsize, type=$t" | sfdisk --quiet --append "$DISK"
-    sleep 1
+    udevadm settle --timeout=10 2>/dev/null || sleep 1  # (the new partitions' device files)
     # The new partitions are the highest numbers.
     n=$(sfdisk -d "$DISK" | grep -c '^/dev/')
     ROOT=$(part "$n")

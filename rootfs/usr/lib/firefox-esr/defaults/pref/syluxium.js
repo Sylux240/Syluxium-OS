@@ -9,5 +9,5 @@ pref("browser.aboutwelcome.enabled", false);
 pref("datareporting.policy.firstRunURL", "");
 pref("toolkit.telemetry.reportingpolicy.firstRun", false);
 pref("browser.startup.homepage_override.mstone", "ignore");
-// The sandbox is off until the kernel has seccomp/namespaces; don't nag about it.
+// No warning when the system limits unprivileged namespaces (the sandbox then has fewer layers).
 pref("security.sandbox.warn_unprivileged_namespaces", false);

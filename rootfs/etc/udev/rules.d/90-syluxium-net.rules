@@ -1,0 +1,6 @@
+# Wired network adapters plugged in while Syluxium runs (USB Ethernet, a
+# phone sharing its connection over USB): their settings, DHCP unless set
+# otherwise, as start-up gives the adapters present at boot. (Syluxium's own
+# kernel ran DHCP on every adapter itself.) Wi-Fi adapters: syluxium-wifi.
+ACTION=="add", SUBSYSTEM=="net", KERNEL!="lo", DEVPATH!="/devices/virtual/*", TEST!="wireless", \
+    RUN+="/usr/bin/setsid -f /bin/sh -c 'exec /usr/local/sbin/syluxium-netconfig apply $name >> /var/log/syluxium-netconfig.log 2>&1'"

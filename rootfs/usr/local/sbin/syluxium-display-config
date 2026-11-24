@@ -3,11 +3,11 @@
 # disk moves between computers):
 #   a GPU driver (i915, amdgpu, radeon, nouveau) -> modesetting + glamor (OpenGL acceleration)
 #   virtio-gpu with virgl (QEMU 3D)               -> modesetting + glamor (on the host GPU)
-#   another kernel display driver (simpledrm, 2D virtio-gpu) -> modesetting, no acceleration
+#   another kernel display driver (simpledrm: safe mode, 2D virtio-gpu) -> modesetting, no acceleration
 #   no kernel display driver                     -> fbdev (/dev/fb0)
 # Boot options: "xfbdev" forces fbdev, "noaccel" turns acceleration off,
 # "xcard=<driver>" puts the desktop on that driver's card (two GPUs),
-# "nogpu" (kernel) keeps GPU drivers from loading at all.
+# "nomodeset" (the safe-mode entry) keeps the GPU drivers from loading at all.
 out=/etc/X11/xorg.conf.d/20-display.conf
 log=/boot/logs/display.txt
 drminfo=$(command -v drminfo || echo /opt/syluxium/tests/drminfo)
