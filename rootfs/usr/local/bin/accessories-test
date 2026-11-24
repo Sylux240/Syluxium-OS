@@ -5,6 +5,9 @@
 # system: tools can copy them off the disk image afterwards).
 say() { echo "ACCTEST $*" > /dev/console; }
 mkdir -p /root/shots
+# The wired adapter (Linux names it after its slot: enp0s2 in QEMU; eth0 on Syluxium's own kernel).
+NIC=$(for n in /sys/class/net/*; do [ -e "$n/device" ] && [ ! -e "$n/wireless" ] && { basename "$n"; break; }; done)
+export NIC=${NIC:-eth0}
 LOG=/root/acctest.log; : > $LOG; chmod 666 $LOG
 shot() {
     python3 - "$1" <<'EOF' 2>/dev/console
@@ -145,16 +148,16 @@ netconn)
     place "Network Connections" 100 60
     sleep 5
     shot netconn
-    say "static: $(syluxium-netconfig static eth0 10.0.2.50/24 10.0.2.2 10.0.2.3 2>&1; echo rc=$?)"
-    say "addr: $(ip -4 -o addr show dev eth0 | awk '{print $4}') route: $(ip route | grep default) dns: $(grep nameserver /etc/resolv.conf | tr '\n' ' ')"
+    say "static: $(syluxium-netconfig static $NIC 10.0.2.50/24 10.0.2.2 10.0.2.3 2>&1; echo rc=$?)"
+    say "addr: $(ip -4 -o addr show dev $NIC | awk '{print $4}') route: $(ip route | grep default) dns: $(grep nameserver /etc/resolv.conf | tr '\n' ' ')"
     ping -c 1 -W 3 10.0.2.2 > /dev/null 2>&1 && say "ping gateway ok (static)" || say "ping gateway FAILED (static)"
     sleep 4
     shot netconn-static
-    say "disable: $(syluxium-netconfig disable eth0 2>&1; echo rc=$?) flags: $(ip link show eth0 | head -1)"
+    say "disable: $(syluxium-netconfig disable $NIC 2>&1; echo rc=$?) flags: $(ip link show $NIC | head -1)"
     sleep 4
-    say "enable: $(syluxium-netconfig enable eth0 2>&1; echo rc=$?) flags: $(ip link show eth0 | head -1)"
-    say "dhcp: $(syluxium-netconfig dhcp eth0 2>&1; echo rc=$?)"
-    say "addr: $(ip -4 -o addr show dev eth0 | awk '{print $4}') route: $(ip route | grep default) dns: $(grep nameserver /etc/resolv.conf | tr '\n' ' ') resolv: $(ls -l /etc/resolv.conf | awk '{print $NF}')"
+    say "enable: $(syluxium-netconfig enable $NIC 2>&1; echo rc=$?) flags: $(ip link show $NIC | head -1)"
+    say "dhcp: $(syluxium-netconfig dhcp $NIC 2>&1; echo rc=$?)"
+    say "addr: $(ip -4 -o addr show dev $NIC | awk '{print $4}') route: $(ip route | grep default) dns: $(grep nameserver /etc/resolv.conf | tr '\n' ' ') resolv: $(ls -l /etc/resolv.conf | awk '{print $NF}')"
     ping -c 1 -W 3 10.0.2.2 > /dev/null 2>&1 && say "ping gateway ok (dhcp)" || say "ping gateway FAILED (dhcp)"
     sleep 4
     pkill -f syluxium-netconn ;;
@@ -184,11 +187,11 @@ mdns)
     # avahi finds it, cups-browsed adds it to CUPS.
     for fam in 4 6; do
         say "multicast loop IPv$fam: $(python3 - $fam <<'EOF' 2>&1 | tail -1
-import socket, struct, sys
+import os, socket, struct, sys
 v6 = sys.argv[1] == "6"
 fam = socket.AF_INET6 if v6 else socket.AF_INET
 grp = "ff02::fb" if v6 else "224.0.0.251"
-idx = socket.if_nametoindex("eth0")
+idx = socket.if_nametoindex(os.environ["NIC"])
 r = socket.socket(fam, socket.SOCK_DGRAM)
 r.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 r.bind(("", 5354))
@@ -226,12 +229,13 @@ EOF
 )"
     done
     say "netlink creds+events: $(python3 - <<'EOF' 2>&1 | tail -1
-import socket, struct, subprocess
+import os, socket, struct, subprocess
+NIC = os.environ["NIC"]
 s = socket.socket(socket.AF_NETLINK, socket.SOCK_RAW, 0)
 s.setsockopt(socket.SOL_SOCKET, socket.SO_PASSCRED, 1)
 s.bind((0, 0x1 | 0x10 | 0x100))  # RTMGRP_LINK | IPV4_IFADDR | IPV6_IFADDR
 s.settimeout(3)
-subprocess.run(["ip", "addr", "add", "10.0.2.77/24", "dev", "eth0"])  # replaces the address (one per interface)
+subprocess.run(["ip", "addr", "add", "10.0.2.77/24", "dev", NIC])  # replaces the address (one per interface)
 try:
     data, anc, flags, addr = s.recvmsg(8192, 64)
     t = struct.unpack("@IHHII", data[:16])[1]
@@ -240,24 +244,27 @@ try:
 except Exception as e:
     print("FAILED:", e)
 finally:
-    subprocess.run(["sh", "-c", "echo restart > /proc/sys/net/ipv4/conf/eth0/syluxium_dhcp"])
+    knob = f"/proc/sys/net/ipv4/conf/{NIC}/syluxium_dhcp"  # (Syluxium's own kernel's DHCP client)
+    subprocess.run(["sh", "-c", f"echo restart > {knob}"] if os.path.exists(knob)
+                   else ["/usr/lib/syluxium/dhcp", "restart", NIC])
 EOF
 )"
     sleep 5
-    say "after dhcp restart: $(ip -4 -o addr show dev eth0 | awk '{print $4}')"
-    say "sysfs: $(cd /sys/class/net && ls | tr '\n' ' ') eth0: op=$(cat /sys/class/net/eth0/operstate) carrier=$(cat /sys/class/net/eth0/carrier) speed=$(cat /sys/class/net/eth0/speed) duplex=$(cat /sys/class/net/eth0/duplex) mac=$(cat /sys/class/net/eth0/address) mtu=$(cat /sys/class/net/eth0/mtu) flags=$(cat /sys/class/net/eth0/flags) rx=$(cat /sys/class/net/eth0/statistics/rx_bytes) dhcp=$(cat /proc/sys/net/ipv4/conf/eth0/syluxium_dhcp)"
+    say "after dhcp restart: $(ip -4 -o addr show dev $NIC | awk '{print $4}')"
+    say "sysfs: $(cd /sys/class/net && ls | tr '\n' ' ') $NIC: op=$(cat /sys/class/net/$NIC/operstate) carrier=$(cat /sys/class/net/$NIC/carrier) speed=$(cat /sys/class/net/$NIC/speed) duplex=$(cat /sys/class/net/$NIC/duplex) mac=$(cat /sys/class/net/$NIC/address) mtu=$(cat /sys/class/net/$NIC/mtu) flags=$(cat /sys/class/net/$NIC/flags) rx=$(cat /sys/class/net/$NIC/statistics/rx_bytes) dhcp=$(cat /proc/sys/net/ipv4/conf/$NIC/syluxium_dhcp 2>/dev/null || /usr/lib/syluxium/dhcp state $NIC)"
     say "ethtool: $(python3 - <<'EOF' 2>&1 | tail -1
-import array, fcntl, socket, struct
+import array, fcntl, os, socket, struct
+NIC = os.environ["NIC"].encode()
 s = socket.socket()
 cmd = bytearray(struct.pack("I", 1) + bytes(40))
 buf = array.array("B", cmd)
-ifr = struct.pack("16sP", b"eth0", buf.buffer_info()[0])
+ifr = struct.pack("16sP", NIC, buf.buffer_info()[0])
 fcntl.ioctl(s, 0x8946, ifr)
 speed = buf[12] | (buf[13] << 8) | (buf[28] << 16) | (buf[29] << 24)
 drv = array.array("B", struct.pack("I", 3) + bytes(192))
-fcntl.ioctl(s, 0x8946, struct.pack("16sP", b"eth0", drv.buffer_info()[0]))
+fcntl.ioctl(s, 0x8946, struct.pack("16sP", NIC, drv.buffer_info()[0]))
 name = bytes(drv[4:36]).split(b"\0")[0].decode()
-flags = struct.unpack("H", fcntl.ioctl(s, 0x8913, struct.pack("16s16x", b"eth0"))[16:18])[0]
+flags = struct.unpack("H", fcntl.ioctl(s, 0x8913, struct.pack("16s16x", NIC))[16:18])[0]
 print("speed", speed, "duplex", buf[14], "driver", name, "IFF_RUNNING", bool(flags & 0x40))
 EOF
 )"

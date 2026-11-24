@@ -43,7 +43,8 @@ set_resolution() {
     awk -v res="$res" '
         /^[ \t]*resolution:/ { next }
         { print }
-        /^[ \t]*path:[ \t]*boot\(\):\/boot\/syluxium\.elf/ { print "    resolution: " res }
+        # (every entry: the Linux kernel, or Syluxium's own kernel)
+        /^[ \t]*path:[ \t]*boot\(\):\/boot\/(vmlinuz|syluxium\.elf)/ { print "    resolution: " res }
     ' "$CONF" > "$CONF.new" && mv "$CONF.new" "$CONF" && sync
 }
 
@@ -251,6 +252,14 @@ while read -r line; do
     m=$(echo "$line" | sed 's/^U://; s/p.*//')
     [ -n "$m" ] && modes+=("$m")
 done < "$SYS/modes"
+# Linux's framebuffer lists only the mode it was given: offer the usual
+# ones (the boot loader takes the closest the firmware has).
+if [ ${#modes[@]} -le 1 ]; then
+    for m in 800x600 1024x768 1280x720 1280x800 1280x1024 1366x768 1440x900 1600x900 1680x1050 \
+             1920x1080 1920x1200 2560x1440 2560x1600 3840x2160; do
+        [ "$m" = "$current" ] || modes+=("$m")
+    done
+fi
 [ ${#modes[@]} -gt 0 ] || { dlg_error "The screen's resolutions could not be read."; exit 1; }
 choice=$(dlg_combo "Screen resolution (now: $current):" "$current" "${modes[@]}") || exit 0
 [ "$choice" = "$current" ] && exit 0

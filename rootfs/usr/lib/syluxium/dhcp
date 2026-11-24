@@ -6,6 +6,10 @@
 cmd=$1 iface=$2
 [ -n "$iface" ] || { echo "usage: $0 start|restart|stop|state IFACE" >&2; exit 2; }
 pidfile=/run/udhcpc.$iface.pid
+# One at a time per adapter (start-up, the desktop's start and udev's
+# hot-plug rule may all ask at once): a second "start" then finds it running.
+exec 9> "/run/udhcpc.$iface.lock"
+flock 9 2>/dev/null
 running() { [ -s "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null; }
 stop() {
     if running; then kill "$(cat "$pidfile")" 2>/dev/null; sleep 0.3; fi
@@ -16,7 +20,7 @@ start() {
     # -b: on in the background until a lease comes; -A 5: ask again every 5 s
     # without one; -R: give the address back when stopped.
     busybox udhcpc -i "$iface" -b -R -A 5 -t 4 -T 3 -p "$pidfile" -s /usr/lib/syluxium/udhcpc-script \
-        -x "hostname:$(hostname)" > /dev/null 2>&1
+        -x "hostname:$(hostname)" > /dev/null 2>&1 9>&-   # (it keeps running: not with the lock)
 }
 case "$cmd" in
     start) running || start ;;

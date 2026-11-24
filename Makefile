@@ -1,6 +1,8 @@
 # Syluxium build system
 #
-#   make            build the kernel and a bootable disk image (build/syluxium.img)
+#   make            build the bootable disk image (build/syluxium.img): Debian's
+#                   Linux kernel, the root file system, the boot picker and Limine
+#   make kernel     Syluxium's own kernel (build/syluxium.elf; experimental, not in the image)
 #   make run        boot the image in QEMU (BIOS)
 #   make run-uefi   boot the image in QEMU (UEFI, needs edk2-ovmf)
 #   make debug      boot paused with a GDB stub on :1234
@@ -109,12 +111,14 @@ TRINITY_PKGS += kcalc-trinity kcharselect-trinity kolourpaint-trinity ksnapshot-
 DEBIAN_PKGS  += xfce4-session xfwm4 xfce4-panel xfdesktop4 xfce4-settings xfconf thunar \
                 xfce4-whiskermenu-plugin volumeicon-alsa xfce4-power-manager \
                 xfce4-appfinder libxfce4ui-utils gvfs gvfs-daemons xdg-user-dirs
+# gio (the desktop's launchers are marked trusted with it: Xfce runs only
+# those) and exFAT's checker and formatter (Recovery, Disk Management).
+DEBIAN_PKGS  += libglib2.0-bin exfatprogs
 # Xfce session: applications (GTK replacements for the Trinity apps)
 # Terminal, Calculator, Paint, Character Map, Snipping Tool, text editor
 # (~28 MB); yad: GTK dialogs for our shell scripts (zenity 4 would pull GTK 4
 # and libadwaita, ~42 MB); xdg-utils: xdg-open / xdg-mime.
-# udisks2 (pulled in by GVfs) is left out: no udev, and syluxium-automount
-# mounts USB sticks.
+# udisks2 (pulled in by GVfs) is left out: syluxium-automount mounts USB sticks.
 DEBIAN_PKGS  += xfce4-terminal galculator drawing gucharmap xfce4-screenshooter mousepad yad xdg-utils
 # Task Manager's window list in the Wayland shell (Xfce's window library from Python).
 DEBIAN_PKGS  += gir1.2-libxfce4windowing-0.0

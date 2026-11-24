@@ -2,5 +2,6 @@
 # Xsetup - run as root before the login dialog appears.
 # The boot splash stayed on screen while X started; the login screen
 # takes over from here.
-echo done > /dev/splash 2>/dev/null
+# (Syluxium's own kernel's splash device; not on Linux)
+[ -c /dev/splash ] && echo done > /dev/splash 2>/dev/null
 exit 0

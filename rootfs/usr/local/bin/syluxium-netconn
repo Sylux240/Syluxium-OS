@@ -2,7 +2,7 @@
 """Network Connections: every network adapter with its status, addresses,
 MAC address and speed; IP settings (automatic through DHCP, or a static
 address) and enable/disable through syluxium-netconfig. A Firewall page
-says why there's none yet (the kernel has no packet filter)."""
+says why there's none yet (no firewall rules are set up)."""
 import fcntl
 import os
 import socket
@@ -282,10 +282,10 @@ class NetworkConnections:
         row.pack_start(Gtk.Image.new_from_icon_name("dialog-information", Gtk.IconSize.DIALOG), False, False, 0)
         row.pack_start(label("Firewall: not available yet", bold=True, size="large"), False, False, 0)
         fw.pack_start(row, False, False, 0)
-        fw.pack_start(label("Syluxium can't filter network traffic yet: the system has no packet filter, so "
-                            "there are no firewall rules to turn on here. Programs only receive connections on "
-                            "ports they open themselves.\n\nThis page will let you allow or block programs and "
-                            "ports once packet filtering is part of the system.", wrap=True), False, False, 0)
+        fw.pack_start(label("Syluxium doesn't filter network traffic yet: there are no firewall rules to turn "
+                            "on here. Programs only receive connections on ports they open themselves.\n\n"
+                            "A later version will let you allow or block programs and ports on this page.",
+                            wrap=True), False, False, 0)
         nb.append_page(fw, Gtk.Label(label="Firewall"))
 
         self.adapters = []

@@ -54,10 +54,10 @@ if ! running; then
     done
     if ! running; then
         rate=$(xset q 2>/dev/null | sed -n 's/.*auto repeat delay: *\([0-9]*\) *repeat rate: *\([0-9]*\).*/\2 \1/p')
-        # Software rendering: boot options whostsoft (the host only), nogpu,
-        # noaccel; or after the GPU path failed its start-up check (exit 3).
+        # Software rendering: boot options whostsoft (the host only), nomodeset (safe mode)
+        # or nogpu, noaccel; or after the GPU path failed its start-up check (exit 3).
         renderer=$SYLUXIUM_WAYLAND_HOST_RENDERER
-        grep -qwE 'whostsoft|nogpu|noaccel' /proc/cmdline 2>/dev/null && renderer=pixman
+        grep -qwE 'whostsoft|nomodeset|nogpu|noaccel' /proc/cmdline 2>/dev/null && renderer=pixman
         for attempt in 1 2; do
             env -u WAYLAND_DISPLAY -u WAYLAND_SOCKET SYLUXIUM_KEY_REPEAT="$rate" \
                 SYLUXIUM_WAYLAND_HOST_RENDERER="$renderer" \

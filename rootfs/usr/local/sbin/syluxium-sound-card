@@ -1,0 +1,37 @@
+#!/bin/sh
+# Picks the sound card programs play on (run as root by startdesktop): the
+# Linux kernel numbers the cards in the order their drivers start, so card 0
+# is often a graphics card's HDMI/DisplayPort output (an AMD or NVIDIA card
+# before the mainboard's audio). The first card with a built-in (analog)
+# output wins, the mainboard's before USB ones; else card 0.
+# /etc/asound.conf loads the choice from /run/syluxium/sound-card.conf.
+#   syluxium-sound-card          choose and write the file
+#   syluxium-sound-card --show   print the chosen card's number only
+best= usb=
+for c in /proc/asound/card[0-9]*; do
+    [ -d "$c" ] || continue
+    n=${c#/proc/asound/card}
+    analog=
+    for i in "$c"/pcm*p/info; do
+        [ -r "$i" ] || continue
+        name=$(sed -n 's/^name: //p' "$i")
+        case "$name" in *HDMI*|*DP*|*DisplayPort*|"") ;; *) analog=1 ;; esac
+    done
+    [ -n "$analog" ] || continue
+    if [ -e "$c/usbid" ]; then
+        [ -n "$usb" ] || usb=$n
+    else
+        best=$n
+        break
+    fi
+done
+card=${best:-${usb:-0}}
+if [ "$1" = --show ]; then
+    echo "$card"
+    exit 0
+fi
+mkdir -p /run/syluxium
+printf '# Written at boot by syluxium-sound-card: card %s (%s).\ndefaults.pcm.card %s\ndefaults.ctl.card %s\n' \
+    "$card" "$(sed -n "s/^ *$card \[[^]]*\]: //p" /proc/asound/cards 2>/dev/null | head -1)" "$card" "$card" \
+    > /run/syluxium/sound-card.conf
+echo "sound: card $card"

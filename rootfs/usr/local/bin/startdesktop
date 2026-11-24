@@ -31,9 +31,12 @@ fi
 
 # X display driver for this machine (modesetting on a DRM device, else fbdev).
 syluxium-display-config > /dev/null 2>&1
-# GPU Test entry: the GPU stack before the X server starts (gpu-boot.txt:
-# driver start, sysfs as libdrm sees it, Mesa's driver choice on its own),
-# then milestones and logs every 2 s while X comes up (xwatch.txt).
+# The sound card programs play on (not a graphics card's HDMI output).
+syluxium-sound-card > /dev/null 2>&1
+# Boot option "gpu" (added in the boot menu): the GPU stack before the X
+# server starts (gpu-boot.txt: driver start, sysfs as libdrm sees it, Mesa's
+# driver choice on its own), then milestones and logs every 2 s while X
+# comes up (xwatch.txt).
 if grep -qw gpu /proc/cmdline; then
     syluxium-diag mark "gpu: report before X (Mesa on the render node, no X yet)"
     syluxium-diag gpu boot
@@ -58,8 +61,10 @@ while IFS=: read -r name _ uid gid _ home _; do
     if [ ! -d "$home" ]; then
         mkdir -p "$home" && cp -a /etc/skel/. "$home/" 2>/dev/null
     fi
-    # The live system (root in RAM): an "Install Syluxium" icon on the desktop.
-    if [ "$(awk '$2 == "/" {print $3}' /proc/mounts)" = ramfs ]; then
+    # The live system (root in RAM: "rootfs" on Linux, ramfs on Syluxium's
+    # own kernel): an "Install Syluxium" icon on the desktop.
+    case "$(awk '$2 == "/" {print $3; exit}' /proc/mounts)" in rootfs|ramfs|tmpfs) live=1 ;; *) live= ;; esac
+    if [ -n "$live" ]; then
         mkdir -p "$home/Desktop"
         cp /usr/share/applications/syluxium-installer.desktop "$home/Desktop/Install Syluxium.desktop"
         chmod +x "$home/Desktop/Install Syluxium.desktop"

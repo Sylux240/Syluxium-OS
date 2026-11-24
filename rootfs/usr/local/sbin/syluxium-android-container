@@ -22,8 +22,9 @@ PIDFILE=/run/syluxium-android-container.pid
 
 set_up() { [ -f /var/lib/waydroid/waydroid.cfg ] && [ -f "$LXC/config" ]; }
 
-# Syluxium's kernel: the container shares the host's network (no network
-# namespaces yet), and there is no seccomp or AppArmor to load.
+# The container shares the host's network (as on Syluxium's own kernel,
+# which had no network namespaces), without seccomp or AppArmor profiles
+# (no AppArmor tools in the system).
 adapt_config() {
     local c="$LXC/config"
     [ -f "$c" ] || return 0
@@ -38,10 +39,11 @@ adapt_config() {
         echo "lxc.apparmor.profile = unconfined"
         # (our cgroup, not init's: there's no init process)
         echo "lxc.cgroup.relative = 1"
-        # No netfilter in the kernel yet: netd gets an iptables that accepts its
-        # rules (without it netd aborts, and init restarts Android's framework
-        # with it over and over). ip6tables and the -restore commands are
-        # symlinks to this one file.
+        # The host's network: netd's firewall rules must not reach the host's
+        # tables, so it gets an iptables that accepts its rules and does
+        # nothing (without one netd aborts, and init restarts Android's
+        # framework with it over and over). ip6tables and the -restore
+        # commands are symlinks to this one file.
         echo "lxc.mount.entry = /usr/lib/syluxium/android/iptables system/bin/iptables none bind,ro 0 0"
     } >> "$c"
     # Waydroid's own network setup (bridge, dnsmasq, NAT) isn't used.

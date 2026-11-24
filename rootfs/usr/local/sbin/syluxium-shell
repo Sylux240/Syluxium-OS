@@ -42,7 +42,7 @@ else
     # an 8-second measurement shortly after the desktop is up, so every
     # hardware round's logs carry the frame rate. Not in QEMU (test runs)
     # or when a test scene runs.
-    # (the firmware's name for the computer, as the kernel wrote it into this boot's log folder)
+    # (the firmware's name for the computer, as start-up wrote it into this boot's log folder)
     machine=$(sed -n 's/^Computer: //p' /boot/logs/machine.txt 2>/dev/null | tr -d '\r' | head -1)
     mkdir -p /var/lib/syluxium
     if [ -n "$machine" ] && [ "${machine#QEMU}" = "$machine" ] && \

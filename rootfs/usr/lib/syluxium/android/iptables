@@ -1,5 +1,5 @@
 #!/system/bin/sh
-# Syluxium: iptables for Android's netd while the kernel has no netfilter.
+# Syluxium: iptables for Android's netd (the container shares the host's network).
 # Bound over /system/bin/{ip,ip6}tables{,-restore} in the Android container
 # (syluxium-android-container). netd keeps iptables-restore running and
 # writes rule batches to it, each followed by a "#PING" line it waits to see
