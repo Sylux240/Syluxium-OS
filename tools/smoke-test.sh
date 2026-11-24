@@ -54,8 +54,9 @@ elif [[ -z ${KEEP_DISK:-} || ! -f $DISK ]]; then
         mcopy -o -i "$DISK@@1M" "$OUT/limine-test.conf" ::/boot/limine/limine.conf
     elif [[ -n ${KCMD:-} ]]; then
         # The text console entry with extra kernel options.
-        printf 'timeout: 0\n\n/Syluxium (test)\n    protocol: linux\n    path: boot():/boot/vmlinuz\n    module_path: boot():/boot/initrd.img\n    cmdline: %s %s\n' \
-            "${DESKTOP:+desktop }$KCMD" "$SERIALCMD" > "$OUT/limine-test.conf"
+        # (KMODULE=initramfs.cpio: the whole system in memory, as that boot entry does)
+        printf 'timeout: 0\n\n/Syluxium (test)\n    protocol: linux\n    path: boot():/boot/vmlinuz\n    module_path: boot():/boot/%s\n    cmdline: %s %s\n' \
+            "${KMODULE:-initrd.img}" "${DESKTOP:+desktop }$KCMD" "$SERIALCMD" > "$OUT/limine-test.conf"
         mcopy -o -i "$DISK@@1M" "$OUT/limine-test.conf" ::/boot/limine/limine.conf
     else
         # The image's own entries (text console unless DESKTOP=1), the serial
