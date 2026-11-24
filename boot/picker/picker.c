@@ -121,7 +121,7 @@ struct entry { char title[128]; char label[24]; int kind; EFI_HANDLE dev; CHAR16
 static struct entry ENTRIES[12];
 static int NENTRIES, DEFAULT, TIMEOUT = 5;
 /* Every entry (Limine's and other systems'), for the Esc text list; the
- * picture shows only ENTRIES: Text Console, the default and GPU Test, plus
+ * picture shows only ENTRIES: Text Console, the default and Safe Mode, plus
  * other systems found on the disks. */
 static struct entry ALL[12];
 static int NALL;
@@ -171,8 +171,8 @@ static void limine_entries(void)
 }
 
 /* The picture's entries: Text Console, the default (labelled "Default")
- * and GPU Test, in that order, then other systems; everything stays in
- * ALL for the Esc text list. */
+ * and Safe Mode (no GPU drivers), in that order, then other systems;
+ * everything stays in ALL for the Esc text list. */
 static void choose_shown(void)
 {
     int i, n = 0, def = -1;
@@ -190,7 +190,7 @@ static void choose_shown(void)
         n++;
     }
     for (i = 0; i < NALL; i++)
-        if (!ALL[i].dev && has(ALL[i].title, "GPU")) { ENTRIES[n++] = ALL[i]; break; }
+        if (!ALL[i].dev && i != DEFAULT && has(ALL[i].title, "safe mode")) { ENTRIES[n++] = ALL[i]; break; }
     for (i = 0; i < NALL && n < 12; i++)
         if (ALL[i].dev) ENTRIES[n++] = ALL[i];
     if (!n) { for (i = 0; i < NALL; i++) ENTRIES[i] = ALL[i]; n = NALL; def = DEFAULT; }
