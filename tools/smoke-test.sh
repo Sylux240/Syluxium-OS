@@ -13,6 +13,8 @@
 # Extra QEMU arguments can be passed in $QEMU_EXTRA (e.g. QEMU_EXTRA="-cpu max").
 # USB=1 adds an xHCI controller with a USB keyboard, mouse and the FAT32
 # stick from tools/make-test-disks.sh (as /dev/sdb).
+# EXTRADISK=<image> adds a plain disk (an install target); ROOTDISK=<image> boots
+# an installed system from its disk (root=LABEL=SYLUXROOT).
 # $TYPE: text typed on the (PS/2) keyboard after the boot wait, then a few
 # more seconds pass before the screenshot. "\n" = Enter, "\c" = Ctrl+C, "\w" = wait 2 s, "\m" = mouse moves/clicks/scroll, "\s" = Alt+SysRq+W (blocked tasks into the kernel log), "\o" = Alt+F1 (launcher menu), "\e" = Ctrl+Esc (start menu), "\t" = Ctrl+Alt+Del (Task Manager),
 # "\{cmd}" = run a QEMU monitor command (e.g. "\{device_add usb-kbd,bus=xhci.0,id=k2}" for hot-plug tests),
@@ -82,6 +84,7 @@ fi
 args=(-M q35 -m ${VM_RAM:-8G} -smp ${VM_CPUS:-8} $ACCEL
       -drive "file=$DISK,format=raw,if=ide"
       ${ROOTDISK:+-drive "file=$ROOTDISK,format=raw,if=ide,index=3"}
+      ${EXTRADISK:+-drive "file=$EXTRADISK,format=raw,if=ide,index=2"}
       -display none -serial "file:$LOG"
       -monitor "unix:$SOCK,server,nowait"
       -no-reboot)

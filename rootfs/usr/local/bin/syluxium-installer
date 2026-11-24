@@ -1054,6 +1054,14 @@ def screenshots(app, out):
         app.show(i)
         if app.PAGES[i] == "install":
             app.set_progress(4, 10, "Copying Syluxium (this takes a few minutes)")
+            # (and its "Show details" open, with lines as the copy writes them)
+            app.details.set_expanded(True)
+            app.details_view.get_buffer().set_text("\n".join(
+                f"'/run/syluxium-live/usr/{p}' -> '/mnt/syluxium-target/usr/{p}'" for p in (
+                    "bin/xfce4-panel", "bin/xfwm4", "lib/x86_64-linux-gnu/libgtk-3.so.0.2409.32",
+                    "lib/x86_64-linux-gnu/libxfce4ui-2.so.0.0.0", "share/icons/Dusk/index.theme",
+                    "share/backgrounds/syluxium/dusk.jpg", "local/bin/syluxium-appstore",
+                    "local/bin/syluxium-installer")))
         if app.PAGES[i] == "done":
             app.done_icon.set_from_icon_name("emblem-default", Gtk.IconSize.DIALOG)
             app.done_text.set_markup("<big><b>Syluxium is installed.</b></big>\n\nRemove the USB stick when the "
