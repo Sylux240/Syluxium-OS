@@ -77,6 +77,16 @@ manager_on_bus() {
 # anbox-binder, anbox-vndbinder, anbox-hwbinder from a binderfs instance,
 # which Waydroid prefers over /dev/binder.
 setup_binder() {
+    # Linux without binderfs (Debian's kernel): the binder module makes the
+    # three devices itself (/etc/modprobe.d/syluxium-android.conf).
+    if ! grep -qw binder /proc/filesystems; then
+        modprobe binder_linux 2>/dev/null
+        for n in anbox-binder anbox-vndbinder anbox-hwbinder; do
+            [ -e "/dev/$n" ] || { udevadm settle --timeout=5 2>/dev/null; [ -e "/dev/$n" ] || return 1; }
+            chmod 0666 "/dev/$n"
+        done
+        return 0
+    fi
     mkdir -p /dev/binderfs
     grep -q ' /dev/binderfs binder ' /proc/mounts || mount -t binder binder /dev/binderfs || return 1
     for n in anbox-binder anbox-vndbinder anbox-hwbinder; do

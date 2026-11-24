@@ -1,0 +1,27 @@
+#!/bin/sh
+# DHCP for one network adapter on the Linux kernel (Syluxium's own kernel ran
+# its DHCP client itself): busybox udhcpc, kept running in the background so
+# it renews its lease, and asks again when it has none.
+#   dhcp start|restart|stop|state IFACE
+cmd=$1 iface=$2
+[ -n "$iface" ] || { echo "usage: $0 start|restart|stop|state IFACE" >&2; exit 2; }
+pidfile=/run/udhcpc.$iface.pid
+running() { [ -s "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null; }
+stop() {
+    if running; then kill "$(cat "$pidfile")" 2>/dev/null; sleep 0.3; fi
+    rm -f "$pidfile"
+}
+start() {
+    ip link set "$iface" up 2>/dev/null
+    # -b: on in the background until a lease comes; -A 5: ask again every 5 s
+    # without one; -R: give the address back when stopped.
+    busybox udhcpc -i "$iface" -b -R -A 5 -t 4 -T 3 -p "$pidfile" -s /usr/lib/syluxium/udhcpc-script \
+        -x "hostname:$(hostname)" > /dev/null 2>&1
+}
+case "$cmd" in
+    start) running || start ;;
+    restart) stop; start ;;
+    stop) stop ;;
+    state) if running; then echo 1; else echo 0; fi ;;
+    *) echo "usage: $0 start|restart|stop|state IFACE" >&2; exit 2 ;;
+esac

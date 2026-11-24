@@ -37,22 +37,33 @@ def sysfs(name, attr, default=""):
         return default
 
 
+DHCP_HELPER = "/usr/lib/syluxium/dhcp"  # Linux kernel: busybox udhcpc per adapter
+
+
 def kernel_dhcp(name, value):
-    """Switch the kernel's DHCP client for this adapter: "0", "1" or "restart"."""
-    try:
-        with open(f"/proc/sys/net/ipv4/conf/{name}/syluxium_dhcp", "w") as f:
-            f.write(value)
-        return True
-    except OSError:
-        return False
+    """Switch DHCP for this adapter: "0", "1" or "restart". Syluxium's own
+    kernel ran the client itself; on the Linux kernel the helper runs udhcpc."""
+    knob = f"/proc/sys/net/ipv4/conf/{name}/syluxium_dhcp"
+    if os.path.exists(knob):
+        try:
+            with open(knob, "w") as f:
+                f.write(value)
+            return True
+        except OSError:
+            return False
+    action = {"0": "stop", "1": "start", "restart": "restart"}.get(value, "start")
+    return subprocess.run([DHCP_HELPER, action, name]).returncode == 0
 
 
 def dhcp_state(name):
-    try:
-        with open(f"/proc/sys/net/ipv4/conf/{name}/syluxium_dhcp") as f:
-            return f.read().strip()
-    except OSError:
-        return ""
+    knob = f"/proc/sys/net/ipv4/conf/{name}/syluxium_dhcp"
+    if os.path.exists(knob):
+        try:
+            with open(knob) as f:
+                return f.read().strip()
+        except OSError:
+            return ""
+    return subprocess.run([DHCP_HELPER, "state", name], capture_output=True, text=True).stdout.strip()
 
 
 def ifaddr(name):
@@ -201,7 +212,16 @@ def main(argv):
         return 1
     if cmd == "apply":
         rc = 0
-        for name in args or [n for n in adapters() if os.path.exists(os.path.join(CONF_DIR, n + ".conf"))]:
+        names = args
+        if not names:
+            names = [n for n in adapters() if os.path.exists(os.path.join(CONF_DIR, n + ".conf"))]
+            # Linux kernel: no DHCP of its own, so wired adapters without saved
+            # settings get it here (Wi-Fi: syluxium-wifi, once connected).
+            names += [n for n in adapters() if n not in names
+                      and not os.path.exists(f"/proc/sys/net/ipv4/conf/{n}/syluxium_dhcp")
+                      and not os.path.exists(f"/sys/class/net/{n}/wireless")
+                      and os.path.exists(f"/sys/class/net/{n}/device")]
+        for name in names:
             rc |= apply(name)
         return rc
     if cmd == "dhcp" and len(args) == 1:

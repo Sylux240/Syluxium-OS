@@ -91,6 +91,11 @@ for dev in $(blkid -t TYPE=vfat -o device 2>/dev/null); do
     umount /boot/efi
 done
 
+# ---- network: every adapter's settings (DHCP unless set otherwise) ----
+[ -e /etc/resolv.conf ] || ln -sf /run/resolv.conf /etc/resolv.conf
+: > /run/resolv.conf
+syluxium-netconfig apply > /var/log/syluxium-netconfig.log 2>&1 &
+
 # ---- clock zone, random seed, user runtime dirs ----
 [ -e /etc/localtime ] || ln -sf /usr/share/zoneinfo/UTC /etc/localtime
 chmod 1777 /tmp

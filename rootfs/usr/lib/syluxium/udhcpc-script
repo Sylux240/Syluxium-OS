@@ -1,0 +1,39 @@
+#!/bin/sh
+# udhcpc's events for one adapter: apply the lease (address, router, DNS).
+# DNS servers of every adapter end up in /run/resolv.conf, which
+# /etc/resolv.conf links to (unless Network Connections set static ones).
+dir=/run/syluxium-dns
+mkdir -p "$dir"
+dns_update() {
+    cat "$dir"/* 2>/dev/null | awk '!seen[$0]++' > /run/resolv.conf.new
+    mv -f /run/resolv.conf.new /run/resolv.conf
+}
+case "$1" in
+    deconfig)
+        ip -4 addr flush dev "$interface" 2>/dev/null
+        ip link set "$interface" up 2>/dev/null
+        rm -f "$dir/$interface"
+        dns_update
+        ;;
+    bound|renew)
+        prefix=$(ipcalc -p "$ip" "$subnet" 2>/dev/null | cut -d= -f2)
+        [ -n "$prefix" ] || prefix=$(awk -v m="$subnet" 'BEGIN { n = split(m, o, "."); c = 0
+            for (i = 1; i <= n; i++) { v = o[i] + 0; while (v) { c += v % 2; v = int(v / 2) } } print c }')
+        ip -4 addr flush dev "$interface" 2>/dev/null
+        ip addr add "$ip/$prefix" ${broadcast:+broadcast "$broadcast"} dev "$interface"
+        if [ -n "$router" ]; then
+            while ip route del default dev "$interface" 2>/dev/null; do :; done
+            metric=0
+            for r in $router; do
+                ip route add default via "$r" dev "$interface" metric "$metric" 2>/dev/null
+                metric=$((metric + 1))
+            done
+        fi
+        : > "$dir/$interface"
+        [ -n "$domain" ] && echo "search $domain" >> "$dir/$interface"
+        for s in $dns; do echo "nameserver $s" >> "$dir/$interface"; done
+        dns_update
+        echo "$(date '+%H:%M:%S') $interface: $ip/$prefix router ${router:-none} dns ${dns:-none}" >> /var/log/syluxium-dhcp.log
+        ;;
+esac
+exit 0

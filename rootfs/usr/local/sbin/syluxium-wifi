@@ -10,6 +10,8 @@ mkdir -p "$STATE"
 start() {
     ip link set "$1" up 2>/dev/null
     wpa_supplicant -B -D nl80211 -i "$1" -c "$CONF" >> /var/log/wpa_supplicant.log 2>&1
+    # Linux kernel: an address once connected (Syluxium's own kernel ran DHCP itself).
+    [ -x /usr/lib/syluxium/dhcp ] && [ ! -e /proc/sys/net/ipv4/conf/"$1"/syluxium_dhcp ] && /usr/lib/syluxium/dhcp start "$1"
     echo "$2" > "$STATE/$1.phy"
     echo "$(date '+%H:%M:%S') wpa_supplicant started on $1 ($2)"
 }
